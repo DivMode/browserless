@@ -43,6 +43,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   // CDP-aware proxy for injecting events before close
   protected cdpProxy: CDPProxy | null = null;
   protected onBeforeClose?: () => Promise<void>;
+  protected keepUntilMS = 0;
 
   constructor({
     blockAds,
@@ -75,7 +76,12 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   }
 
   public keepUntil() {
-    return 0;
+    return this.keepUntilMS;
+  }
+
+  public setKeepUntil(timeout: number) {
+    this.keepUntilMS = timeout;
+    return this.keepUntilMS;
   }
 
   /**

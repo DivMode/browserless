@@ -6,8 +6,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG TZ=America/Los_Angeles
 ARG BLESS_USER_ID=999
 ARG APP_DIR=/usr/src/app
-ARG NODE_VERSION=v24.12.0
-ARG NPM_VERSION=11.7.0
+ARG NODE_VERSION=v24.13.0
+ARG NPM_VERSION=11.8.0
 
 ENV NODE_VERSION=$NODE_VERSION
 ENV NVM_DIR=/usr/src/.nvm
@@ -23,10 +23,75 @@ ENV NODE_ENV=production
 ENV DEBUG_COLORS=true
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/bin/playwright-browsers
+ENV DBUS_SESSION_BUS_ADDRESS=autolaunch:
 
-RUN mkdir -p $APP_DIR $NVM_DIR
+RUN mkdir -p $APP_DIR $NVM_DIR && \
+  groupadd -r blessuser && useradd --uid ${BLESS_USER_ID} -r -g blessuser -G audio,video blessuser && \
+  mkdir -p /home/blessuser/Downloads && \
+  chown -R blessuser:blessuser /home/blessuser
 
 WORKDIR $APP_DIR
+
+COPY fonts/* /usr/share/fonts/truetype/
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends software-properties-common \
+  && add-apt-repository universe \
+  && echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections \
+  && add-apt-repository multiverse \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends \
+  ca-certificates \
+  curl \
+  dumb-init \
+  git \
+  gnupg \
+  libu2f-udev \
+  ssh \
+  wget \
+  xvfb \
+  dbus \
+  dbus-x11 \
+  libwebp-dev \
+  python3 python3-pip python3-setuptools \
+  # Font packages
+  fontconfig \
+  fonts-freefont-ttf \
+  fonts-gfs-neohellenic \
+  fonts-indic \
+  fonts-ipafont-gothic \
+  fonts-kacst \
+  fonts-liberation \
+  fonts-noto-cjk \
+  fonts-noto-color-emoji \
+  fonts-roboto \
+  fonts-thai-tlwg \
+  fonts-ubuntu \
+  fonts-wqy-zenhei \
+  fonts-open-sans \
+  && update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1 \
+  && update-alternatives --install /usr/bin/python python /usr/bin/python3 1 \
+  && fc-cache -f -v \
+  && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /usr/share/fonts/truetype/noto
+
+RUN curl -sL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash &&\
+  . $NVM_DIR/nvm.sh &&\
+  nvm install $NODE_VERSION &&\
+  npm install -g npm@$NPM_VERSION
+
+# FFmpeg static binaries via multi-stage copy (pinned version, no external wget)
+COPY --from=mwader/static-ffmpeg:8.0.1 /ffmpeg /usr/bin/ffmpeg
+COPY --from=mwader/static-ffmpeg:8.0.1 /ffprobe /usr/bin/ffprobe
+
+# Bun for build scripts (NOT runtime - see BUN_WEBSOCKET_BUG.md)
+RUN curl -fsSL https://bun.com/install | bash && \
+  cp /root/.bun/bin/bun /usr/local/bin/bun && \
+  chmod +x /usr/local/bin/bun && \
+  rm -rf /root/.bun
+
+COPY package.json package-lock.json ./
+
+RUN npm clean-install
 
 COPY assets assets
 COPY bin bin
@@ -35,52 +100,4 @@ COPY external external
 COPY scripts scripts
 COPY static static
 
-COPY CHANGELOG.md .
-COPY LICENSE .
-COPY NOTICE.txt .
-COPY package.json .
-COPY package-lock.json .
-COPY README.md .
-COPY tsconfig.json .
-COPY vite.config.ts .
-COPY svelte.config.js .
-
-RUN apt-get update && apt-get install -y \
-  build-essential \
-  ca-certificates \
-  curl \
-  dumb-init \
-  git \
-  gnupg \
-  libu2f-udev \
-  software-properties-common \
-  ssh \
-  unzip \
-  wget \
-  xvfb
-
-# FFmpeg static binaries via multi-stage copy (pinned version, no external wget)
-COPY --from=mwader/static-ffmpeg:8.0.1 /ffmpeg /usr/bin/ffmpeg
-COPY --from=mwader/static-ffmpeg:8.0.1 /ffprobe /usr/bin/ffprobe
-
-RUN curl -sL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash &&\
-  . $NVM_DIR/nvm.sh &&\
-  nvm install $NODE_VERSION &&\
-  npm install -g npm@$NPM_VERSION
-
-# Install Bun (used for build scripts, NOT runtime - see BUN_WEBSOCKET_BUG.md)
-# Runtime uses Node.js due to Bun's broken WebSocket upgrade handling
-RUN curl -fsSL https://bun.com/install | bash && \
-  cp /root/.bun/bin/bun /usr/local/bin/bun && \
-  chmod +x /usr/local/bin/bun
-
-RUN add-apt-repository universe && apt-get update && \
-  apt-get install -y python3 python3-pip python3-setuptools && \
-  update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1 && \
-  update-alternatives --install /usr/bin/python python /usr/bin/python3 1
-
-RUN groupadd -r blessuser && useradd --uid ${BLESS_USER_ID} -r -g blessuser -G audio,video blessuser && \
-  mkdir -p /home/blessuser/Downloads && \
-  chown -R blessuser:blessuser /home/blessuser
-
-RUN npm clean-install
+COPY CHANGELOG.md LICENSE NOTICE.txt README.md tsconfig.json vite.config.ts svelte.config.js ./

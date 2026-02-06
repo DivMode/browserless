@@ -327,9 +327,11 @@ export class BrowserLauncher {
         ? router.defaultLaunchOptions(req)
         : router.defaultLaunchOptions;
 
+    const timeout = req.parsed.searchParams.get('timeout');
     const launchOptions = {
       ...routerOptions,
       ...parsedLaunchOptions,
+      ...(timeout ? { protocolTimeout: +timeout } : {}),
     };
 
     // Handle proxy-server param
