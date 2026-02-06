@@ -38,6 +38,8 @@ RUN ./node_modules/playwright-core/cli.js install --with-deps chromium &&\
   fc-cache -f -v && \
   apt-get -qq clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /usr/share/fonts/truetype/noto
 
+COPY pages pages
+
 USER blessuser
 
 CMD ["./scripts/start.sh"]

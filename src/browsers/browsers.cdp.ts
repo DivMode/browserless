@@ -292,6 +292,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
       `Launching ${this.constructor.name} Handler`,
     );
     this.browser = (await launch(finalOptions)) as Browser;
+
     this.browser.on('targetcreated', this.onTargetCreated.bind(this));
     this.running = true;
     this.browserWSEndpoint = this.browser.wsEndpoint();

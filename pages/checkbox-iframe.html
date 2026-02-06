@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; }
+  body { width: 100%; height: 100%; cursor: pointer; }
+  .iframe-contents {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    height: 100%;
+    box-sizing: border-box;
+  }
+  #click-me-box { width: 20px; height: 20px; cursor: pointer; }
+  label { cursor: pointer; font-family: system-ui, sans-serif; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="iframe-contents">
+    <input id="click-me-box" type="checkbox"/>
+    <label for="click-me-box">Click Me</label>
+    <script type="text/javascript">
+        // Listen on document for any click, not just on checkbox
+        document.addEventListener('click', (e) => {
+            // Check the checkbox if it wasn't the target
+            const cb = document.getElementById('click-me-box');
+            if (e.target !== cb) cb.checked = !cb.checked;
+            parent.postMessage({
+                type: 'bot-check-click',
+                screenX: e.screenX,
+                screenY: e.screenY
+            }, '*');
+        });
+    </script>
+</div>
+</body>
+</html>

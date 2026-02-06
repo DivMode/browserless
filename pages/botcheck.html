@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CDP Bot Check - screenX/screenY</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      padding: 32px;
+      background: #f8f9fa;
+      color: #1a1a1a;
+    }
+    h1 { margin-bottom: 8px; font-size: 24px; }
+    .subtitle { color: #6b7280; margin-bottom: 24px; font-size: 14px; }
+    #test-click-me {
+      border: 3px solid #d1d5db;
+      border-radius: 8px;
+      padding: 20px;
+      width: 400px;
+      background: #fff;
+      transition: border-color 0.3s, background 0.3s;
+    }
+    #test-click-me.success {
+      border-color: #16a34a;
+      background: #f0fdf4;
+    }
+    #test-click-me.fail {
+      border-color: #dc2626;
+      background: #fef2f2;
+    }
+    #test-click-me iframe {
+      width: 300px;
+      height: 50px;
+      border: 1px solid #e5e7eb;
+      border-radius: 4px;
+    }
+    .result {
+      margin-top: 16px;
+      font-size: 14px;
+      color: #6b7280;
+    }
+    .result.pass { color: #16a34a; font-weight: 700; }
+    .result.fail { color: #dc2626; font-weight: 700; }
+    #debug-log {
+      margin-top: 24px;
+      padding: 16px;
+      background: #1a1a1a;
+      color: #a3e635;
+      border-radius: 8px;
+      font-family: monospace;
+      font-size: 13px;
+      white-space: pre-wrap;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>CDP Bot Check</h1>
+  <p class="subtitle">Tests if MouseEvent.screenX/screenY are realistic in cross-origin iframes (screenY &gt; 100 = pass)</p>
+
+  <div id="test-click-me"></div>
+  <div id="result" class="result">Waiting for click...</div>
+  <div id="debug-log"></div>
+
+  <script>
+    const wrapper = document.getElementById("test-click-me");
+    const resultEl = document.getElementById("result");
+    const debugLog = document.getElementById("debug-log");
+
+    function log(msg) {
+      const ts = new Date().toISOString().split('T')[1].replace('Z','');
+      debugLog.textContent += ts + ' ' + msg + '\n';
+      debugLog.scrollTop = debugLog.scrollHeight;
+    }
+
+    // Store result globally for pydoll to read
+    window.__botCheckResult = null;
+
+    // Create cross-origin iframe using sandbox (opaque origin != parent origin).
+    // This simulates the same cross-origin context as Cloudflare Turnstile.
+    const iframe = document.createElement("iframe");
+    iframe.sandbox = "allow-scripts";
+    iframe.srcdoc = `<!DOCTYPE html>
+<html><head><style>
+  body { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px; height: 100%; box-sizing: border-box; }
+  input[type=checkbox] { width: 20px; height: 20px; cursor: pointer; }
+  label { cursor: pointer; font-family: system-ui, sans-serif; font-size: 14px; }
+</style></head><body>
+<input id="cb" type="checkbox"/>
+<label for="cb">Click Me</label>
+<script>
+  document.addEventListener('click', function(e) {
+    var cb = document.getElementById('cb');
+    if (e.target !== cb) cb.checked = !cb.checked;
+    parent.postMessage({
+      type: 'bot-check-click',
+      screenX: e.screenX,
+      screenY: e.screenY
+    }, '*');
+  });
+</script></body></html>`;
+    wrapper.appendChild(iframe);
+
+    iframe.addEventListener('load', function() {
+      log('iframe loaded (sandbox cross-origin, srcdoc)');
+      const rect = iframe.getBoundingClientRect();
+      log('iframe rect: x=' + Math.round(rect.x) + ' y=' + Math.round(rect.y) + ' w=' + Math.round(rect.width) + ' h=' + Math.round(rect.height));
+    });
+
+    window.addEventListener('message', function (ev) {
+      if (!ev.data || ev.data.type !== 'bot-check-click') return;
+
+      const screenX = ev.data.screenX;
+      const screenY = ev.data.screenY;
+      const passed = screenY > 100;
+
+      log('postMessage received: screenX=' + screenX + ' screenY=' + screenY);
+      log('screenY > 100: ' + passed + (passed ? ' PASS' : ' FAIL'));
+
+      window.__botCheckResult = {
+        screenX: screenX,
+        screenY: screenY,
+        passed: passed,
+        timestamp: Date.now()
+      };
+
+      if (passed) {
+        wrapper.classList.add("success");
+        wrapper.classList.remove("fail");
+        resultEl.textContent = 'PASS - screenX=' + screenX + ', screenY=' + screenY;
+        resultEl.className = 'result pass';
+      } else {
+        wrapper.classList.add("fail");
+        wrapper.classList.remove("success");
+        resultEl.textContent = 'FAIL - screenX=' + screenX + ', screenY=' + screenY + ' (screenY <= 100 = CDP bug detected)';
+        resultEl.className = 'result fail';
+      }
+    });
+
+    log('page loaded, waiting for iframe...');
+  </script>
+</body>
+</html>

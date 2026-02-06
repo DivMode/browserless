@@ -78,6 +78,10 @@ export default class StaticGetRoute extends HTTPRoute {
     const indexFile = path.join(file, 'index.html');
     const locations = [file, indexFile];
 
+    const pagesDir = path.join(config.getStatic(), '..', 'pages');
+    const pagesFile = path.join(pagesDir, pathname);
+    locations.push(pagesFile, path.join(pagesFile, 'index.html'));
+
     if (sdkDir) {
       const sdkPath = path.join(sdkDir, pathname);
       locations.push(...[sdkPath, path.join(sdkPath, 'index.html')]);
