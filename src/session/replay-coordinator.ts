@@ -500,6 +500,54 @@ export class ReplayCoordinator {
                 }
               }, 50);
 
+              // Turnstile iframe state tracking: inject MutationObserver that watches
+              // #success, #verifying, #fail visibility changes and relays them to the
+              // main page via CDP binding → window.__turnstileWidgetState.
+              if (targetInfo.url?.includes('challenges.cloudflare.com')) {
+                const stateScript = `(function(){
+                  if (window.__turnstileStateObserved) return;
+                  window.__turnstileStateObserved = true;
+                  var states = ['success','verifying','fail','expired','timeout'];
+                  function check() {
+                    for (var i=0; i<states.length; i++) {
+                      var el = document.getElementById(states[i]);
+                      if (el && getComputedStyle(el).display !== 'none') return states[i];
+                    }
+                    return 'idle';
+                  }
+                  var last = '';
+                  var observer = new MutationObserver(function() {
+                    var current = check();
+                    if (current !== last) {
+                      last = current;
+                      try { window.__turnstileStateBinding(current); } catch(e) {}
+                    }
+                  });
+                  function start() {
+                    var content = document.getElementById('content');
+                    if (content) {
+                      observer.observe(content, { attributes: true, subtree: true, attributeFilter: ['style'] });
+                      var s = check();
+                      if (s !== last) { last = s; try { window.__turnstileStateBinding(s); } catch(e) {} }
+                    } else {
+                      setTimeout(start, 100);
+                    }
+                  }
+                  start();
+                })()`;
+
+                // Register binding on the iframe, then inject state observer
+                sendCommand('Runtime.addBinding', { name: '__turnstileStateBinding' }, cdpSessionId).catch(() => {});
+                sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+                  source: stateScript,
+                  runImmediately: true,
+                }, cdpSessionId).catch(() => {});
+                // Fallback injection for current document
+                setTimeout(() => {
+                  sendCommand('Runtime.evaluate', { expression: stateScript }, cdpSessionId).catch(() => {});
+                }, 100);
+              }
+
               // Enable CDP-level network + console capture for iframe.
               // JS-level hooks (fetch/XHR/console patching) are intentionally omitted from
               // the iframe script to avoid conflicts with Turnstile. CDP-level capture is
@@ -581,7 +629,9 @@ export class ReplayCoordinator {
                     a.count++;
                     a.last = Date.now();
                   })()`,
-                }, pageSessionId).catch(() => {});
+                }, pageSessionId).catch((e) => {
+                  this.log.debug(`CF activity update failed: ${e instanceof Error ? e.message : String(e)}`);
+                });
               }
             }
 
@@ -681,6 +731,35 @@ export class ReplayCoordinator {
                 ${isPAT ? 'a.console.pat++;' : ''}
               })()`,
             }, pageSessionId).catch(() => {});
+          }
+
+          // Handle Turnstile iframe state changes via CDP binding.
+          // Updates window.__turnstileWidgetState on the main page and injects
+          // timeline markers for each state transition (idle → verifying → success).
+          if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__turnstileStateBinding' && msg.sessionId && iframeSessions.has(msg.sessionId)) {
+            const state = msg.params?.payload || 'unknown';
+            const pgSid = iframeSessions.get(msg.sessionId)!;
+            sendCommand('Runtime.evaluate', {
+              expression: `(function(){
+                window.__turnstileWidgetState = ${JSON.stringify(state)};
+              })()`,
+            }, pgSid).catch(() => {});
+
+            // Inject timeline marker for state transition
+            sendCommand('Runtime.evaluate', {
+              expression: `(function(){
+                var r = window.__browserlessRecording;
+                if (!r || !r.events) return;
+                r.events.push({
+                  type: 5,
+                  timestamp: Date.now(),
+                  data: {
+                    tag: 'turnstile.iframe_state',
+                    payload: { state: ${JSON.stringify(state)} }
+                  }
+                });
+              })()`,
+            }, pgSid).catch(() => {});
           }
 
           // Handle target info changed (URL navigation)
