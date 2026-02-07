@@ -1,5 +1,5 @@
-ARG VERSION=latest
-FROM ghcr.io/divmode/browserless-base:$VERSION
+ARG BASE_IMAGE=ghcr.io/divmode/browserless-base:latest
+FROM ${BASE_IMAGE}
 LABEL org.opencontainers.image.source=https://github.com/browserless/browserless
 
 COPY src src/

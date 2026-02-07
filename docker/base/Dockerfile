@@ -41,6 +41,7 @@ RUN apt-get update \
   && add-apt-repository multiverse \
   && apt-get update \
   && apt-get install -y --no-install-recommends \
+  build-essential \
   ca-certificates \
   curl \
   dumb-init \
@@ -48,6 +49,7 @@ RUN apt-get update \
   gnupg \
   libu2f-udev \
   ssh \
+  unzip \
   wget \
   xvfb \
   dbus \
