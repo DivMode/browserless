@@ -523,14 +523,16 @@ export class ReplayCoordinator {
                       try { window.__turnstileStateBinding(current); } catch(e) {}
                     }
                   });
+                  var attempts = 0;
                   function start() {
-                    var content = document.getElementById('content');
-                    if (content) {
-                      observer.observe(content, { attributes: true, subtree: true, attributeFilter: ['style'] });
+                    var root = document.getElementById('content') || (attempts >= 5 ? document.body : null);
+                    if (root) {
+                      observer.observe(root, { attributes: true, subtree: true, attributeFilter: ['style'] });
                       var s = check();
                       if (s !== last) { last = s; try { window.__turnstileStateBinding(s); } catch(e) {} }
                     } else {
-                      setTimeout(start, 100);
+                      attempts++;
+                      if (attempts < 20) setTimeout(start, 100);
                     }
                   }
                   start();
@@ -623,14 +625,21 @@ export class ReplayCoordinator {
 
               // Update Turnstile activity signal for pydoll auto-solve detection
               if (url.includes('challenges.cloudflare.com') || url.includes('cdn-cgi/challenge-platform')) {
-                sendCommand('Runtime.evaluate', {
-                  expression: `(function(){
+                const updateExpr = `(function(){
                     var a = window.__turnstileCFActivity || (window.__turnstileCFActivity = {count:0,last:0});
                     a.count++;
                     a.last = Date.now();
-                  })()`,
+                  })()`;
+                sendCommand('Runtime.evaluate', {
+                  expression: updateExpr,
                 }, pageSessionId).catch((e) => {
-                  this.log.debug(`CF activity update failed: ${e instanceof Error ? e.message : String(e)}`);
+                  this.log.info(`CF activity update failed, retrying: ${e instanceof Error ? e.message : String(e)}`);
+                  // Retry after 200ms — JS context may not be ready right after navigation
+                  setTimeout(() => {
+                    sendCommand('Runtime.evaluate', {
+                      expression: updateExpr,
+                    }, pageSessionId).catch(() => {});
+                  }, 200);
                 });
               }
             }
@@ -784,7 +793,17 @@ export class ReplayCoordinator {
               }
 
               // Small delay to let the new document initialize before fallback injection
-              setTimeout(() => injectReplay(targetInfo.targetId), 200);
+              setTimeout(() => {
+                injectReplay(targetInfo.targetId);
+                // Pre-initialize CF activity tracking so iframe network handler
+                // can increment it — otherwise first Runtime.evaluate calls may
+                // race with context initialization and the counter stays at 0.
+                if (cdpSessionId) {
+                  sendCommand('Runtime.evaluate', {
+                    expression: 'window.__turnstileCFActivity = {count:0,last:0}',
+                  }, cdpSessionId).catch(() => {});
+                }
+              }, 200);
             }
           }
         } catch (e) {
