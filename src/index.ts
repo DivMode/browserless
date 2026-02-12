@@ -11,11 +11,23 @@ import { Browserless, Logger } from '@browserless.io/browserless';
     })
     .once('uncaughtException', async (err, origin) => {
       console.error('Unhandled exception at:', origin, 'error:', err);
+      // Hard deadline: if graceful shutdown hangs (e.g. browserManager waiting
+      // on broken Chrome connections), force exit so Docker can restart us.
+      const forceExit = setTimeout(() => {
+        console.error('Graceful shutdown timed out after 5s, forcing exit');
+        process.exit(1);
+      }, 5_000);
+      forceExit.unref();
       await browserless.stop();
       process.exit(1);
     })
     .once('SIGTERM', async () => {
       logger.info(`SIGTERM received, saving and closing down`);
+      const forceExit = setTimeout(() => {
+        console.error('Graceful shutdown timed out after 10s, forcing exit');
+        process.exit(1);
+      }, 10_000);
+      forceExit.unref();
       await browserless.stop();
       process.exit(0);
     })

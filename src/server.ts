@@ -326,6 +326,12 @@ export class HTTPServer extends EventEmitter {
     socket: stream.Duplex,
     head: Buffer,
   ) {
+    // Prevent uncaughtException from client disconnects during the async
+    // WebSocket setup chain (auth, limiter queue, Chrome launch). Without this,
+    // ECONNRESET on the raw TCP socket crashes the process. Downstream handlers
+    // (.once('error', ...)) still fire, and 'close' events drive cleanup.
+    socket.on('error', () => {});
+
     request.url = moveTokenToHeader(request);
 
     this.logger.trace(
