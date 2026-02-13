@@ -148,6 +148,7 @@ export enum HTTPManagementRoutes {
   pressure = '/pressure?(/)',
   replays = '/replays?(/)',
   replayData = '/replays/+([0-9a-zA-Z-_])?(/)',
+  replayMetadata = '/replays/+([0-9a-zA-Z-_])/metadata?(/)',
   replay = '/replay/+([0-9a-zA-Z-_])?(/)',
   video = '/video/+([0-9a-zA-Z-_])?(/)',
   videoStatus = '/video/+([0-9a-zA-Z-_])/status?(/)',

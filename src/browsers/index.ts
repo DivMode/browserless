@@ -365,6 +365,15 @@ export class BrowserManager {
       browser.setOnBeforeClose(async () => {
         await this.closeForBrowser(browser, true);
       });
+
+      // Enable synchronous stop-before-close for per-tab recordings.
+      // Client sends Browserless.stopTabRecording CDP command, CDPProxy intercepts,
+      // and this callback flushes events + writes recording + returns metadata.
+      browser.setOnStopTabRecording(async (targetId: string) => {
+        const sessionId = browser.wsEndpoint()?.split('/').pop() || '';
+        if (!sessionId) return null;
+        return this.replay.stopTabRecording(sessionId, targetId);
+      });
     }
 
     return browser;

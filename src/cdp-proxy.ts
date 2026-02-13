@@ -18,6 +18,21 @@ export interface ReplayCompleteParams {
 }
 
 /**
+ * Per-tab replay metadata sent via CDP event when a tab is destroyed.
+ * Allows clients to associate recordings with specific domains/tabs.
+ */
+export interface TabReplayCompleteParams {
+  sessionId: string;
+  targetId: string;
+  duration: number;
+  eventCount: number;
+  frameCount: number;
+  encodingStatus: string;
+  replayUrl: string;
+  videoUrl?: string;
+}
+
+/**
  * Interface for browsers that support replay event injection.
  *
  * Implemented by ChromiumCDP to enable replay metadata delivery
@@ -25,7 +40,9 @@ export interface ReplayCompleteParams {
  */
 export interface ReplayCapableBrowser {
   setOnBeforeClose(callback: () => Promise<void>): void;
+  setOnStopTabRecording(callback: (targetId: string) => Promise<object | null>): void;
   sendReplayComplete(metadata: ReplayCompleteParams): Promise<boolean>;
+  sendTabReplayComplete(metadata: TabReplayCompleteParams): Promise<boolean>;
 }
 
 /**
@@ -37,8 +54,12 @@ export function isReplayCapable(browser: unknown): browser is ReplayCapableBrows
     browser !== null &&
     'setOnBeforeClose' in browser &&
     typeof (browser as Record<string, unknown>).setOnBeforeClose === 'function' &&
+    'setOnStopTabRecording' in browser &&
+    typeof (browser as Record<string, unknown>).setOnStopTabRecording === 'function' &&
     'sendReplayComplete' in browser &&
-    typeof (browser as Record<string, unknown>).sendReplayComplete === 'function'
+    typeof (browser as Record<string, unknown>).sendReplayComplete === 'function' &&
+    'sendTabReplayComplete' in browser &&
+    typeof (browser as Record<string, unknown>).sendTabReplayComplete === 'function'
   );
 }
 
@@ -78,6 +99,7 @@ export class CDPProxy {
     private browserWsEndpoint: string,
     private onClose?: () => void,
     private onBeforeClose?: () => Promise<void>,
+    private onStopTabRecording?: (targetId: string) => Promise<object | null>,
   ) {}
 
   /**
@@ -117,6 +139,12 @@ export class CDPProxy {
           // Set up bidirectional proxying
           this.setupProxy();
 
+          // Emit session info to client so they can construct deterministic replay URLs
+          const sessionId = this.browserWsEndpoint.split('/').pop() || '';
+          if (sessionId) {
+            this.emitClientEvent('Browserless.sessionInfo', { sessionId }).catch(() => {});
+          }
+
           clientWs.on('error', (err) => {
             this.log.warn(`Client WebSocket error: ${err.message}`);
             this.handleClose();
@@ -147,6 +175,24 @@ export class CDPProxy {
         try {
           const raw = typeof data === 'string' ? data : data.toString();
           const msg = JSON.parse(raw);
+
+          // Intercept Browserless.getSessionInfo — respond with session ID directly
+          if (msg?.method === 'Browserless.getSessionInfo' && typeof msg?.id === 'number') {
+            const sessionId = this.browserWsEndpoint.split('/').pop() || '';
+            void this.sendClientResponse(msg.id, { sessionId });
+            return;
+          }
+
+          // Intercept Browserless.stopTabRecording — stop recording and return metadata synchronously
+          if (msg?.method === 'Browserless.stopTabRecording' && typeof msg?.id === 'number') {
+            const { targetId } = msg.params || {};
+            if (targetId && this.onStopTabRecording) {
+              void this.handleStopTabRecording(msg.id, targetId);
+            } else {
+              void this.sendClientResponse(msg.id, {});
+            }
+            return;
+          }
 
           // Intercept Browser.close to emit replayComplete before socket closes
           if (msg?.method === 'Browser.close' && this.onBeforeClose && !this.closeRequested) {
@@ -213,6 +259,16 @@ export class CDPProxy {
     }
   }
 
+  private async handleStopTabRecording(msgId: number, targetId: string): Promise<void> {
+    try {
+      const metadata = await this.onStopTabRecording!(targetId);
+      void this.sendClientResponse(msgId, metadata || {});
+    } catch (e) {
+      this.log.warn(`stopTabRecording failed: ${e instanceof Error ? e.message : String(e)}`);
+      void this.sendClientResponse(msgId, {});
+    }
+  }
+
   private async sendClientResponse(id: number, result: object = {}): Promise<void> {
     if (this.clientWs?.readyState !== WebSocket.OPEN) return;
     const message = JSON.stringify({ id, result });
@@ -266,12 +322,24 @@ export class CDPProxy {
     this.log.info(`Sent replay complete event: ${metadata.id}`);
   }
 
+  async sendTabReplayComplete(metadata: TabReplayCompleteParams): Promise<void> {
+    await this.emitClientEvent('Browserless.tabReplayComplete', metadata);
+    this.log.info(`Sent tab replay complete event: targetId=${metadata.targetId}`);
+  }
+
   /**
    * Close both WebSocket connections.
    */
   private handleClose(): void {
     if (this.isClosing) return;
     this.isClosing = true;
+
+    const clientState = this.clientWs?.readyState;
+    const browserState = this.browserWs?.readyState;
+    this.log.info(
+      `CDPProxy closing: clientWs=${clientState === WebSocket.OPEN ? 'OPEN' : clientState} ` +
+      `browserWs=${browserState === WebSocket.OPEN ? 'OPEN' : browserState}`
+    );
 
     // Close client WebSocket
     if (this.clientWs?.readyState === WebSocket.OPEN) {

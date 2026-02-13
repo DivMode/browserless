@@ -742,6 +742,7 @@ export const BrowserlessManagementRoutes = {
   ReplayDataDeleteRoute: 'ReplayDataDeleteRoute',
   ReplayDataGetRoute: 'ReplayDataGetRoute',
   ReplayGetRoute: 'ReplayGetRoute',
+  ReplayMetadataGetRoute: 'ReplayMetadataGetRoute',
   VideoGetRoute: 'VideoGetRoute',
   VideoStatusGetRoute: 'VideoStatusGetRoute',
   VideoHlsGetRoute: 'VideoHlsGetRoute',

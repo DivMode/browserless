@@ -102,13 +102,20 @@ export class ReplayStore implements IReplayStore {
       try {
         db.exec(`ALTER TABLE replays ADD COLUMN encodingStatus TEXT NOT NULL DEFAULT 'none'`);
       } catch { /* column already exists */ }
+      // Per-tab recording columns
+      try {
+        db.exec(`ALTER TABLE replays ADD COLUMN parentSessionId TEXT`);
+      } catch { /* column already exists */ }
+      try {
+        db.exec(`ALTER TABLE replays ADD COLUMN targetId TEXT`);
+      } catch { /* column already exists */ }
 
       this.state = {
         db,
         stmtInsert: db.prepare(`
           INSERT OR REPLACE INTO replays
-          (id, trackingId, startedAt, endedAt, duration, eventCount, browserType, routePath, userAgent, frameCount, videoPath, encodingStatus)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, trackingId, startedAt, endedAt, duration, eventCount, browserType, routePath, userAgent, frameCount, videoPath, encodingStatus, parentSessionId, targetId)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `),
         stmtSelectAll: db.prepare(
           `SELECT * FROM replays ORDER BY startedAt DESC`
@@ -170,7 +177,9 @@ export class ReplayStore implements IReplayStore {
         metadata.userAgent ?? null,
         metadata.frameCount,
         metadata.videoPath ?? null,
-        metadata.encodingStatus
+        metadata.encodingStatus,
+        metadata.parentSessionId ?? null,
+        metadata.targetId ?? null,
       );
       return ok(undefined);
     } catch (error) {

@@ -74,7 +74,7 @@ export class SessionLifecycleManager {
     }
 
     this.log.debug(
-      `${session.numbConnected} Client(s) are currently connected, Keep-until: ${keepUntil}, force: ${force}`,
+      `close() check: session=${session.id} numbConnected=${session.numbConnected} keepUntil=${keepUntil} keepOpen=${keepOpen} force=${force}`,
     );
 
     if (!force && hasKeepUntil) {
@@ -97,7 +97,7 @@ export class SessionLifecycleManager {
     let replayMetadata: ReplayCompleteParams | null = null;
 
     if (!keepOpen) {
-      this.log.debug(`Closing browser session`);
+      this.log.info(`KILLING browser session ${session.id}: numbConnected=${connected} keepUntil=${keepUntil} force=${force}`);
 
       // Stop replay and save if replay was enabled
       // Uses ReplayCoordinator to ensure screencast frames are counted
@@ -166,8 +166,8 @@ export class SessionLifecycleManager {
   async complete(browser: BrowserInstance): Promise<void> {
     const session = this.registry.get(browser);
     if (!session) {
-      this.log.debug(
-        `Couldn't locate session for browser, proceeding with close`,
+      this.log.info(
+        `complete() called but no session found (already closed?)`,
       );
       return browser.close();
     }
@@ -179,6 +179,10 @@ export class SessionLifecycleManager {
     }
 
     --session.numbConnected;
+
+    this.log.debug(
+      `complete(): session ${id} numbConnected=${session.numbConnected}`,
+    );
 
     // CRITICAL: Must await close() to ensure session is removed from registry
     // before returning. This method is called when a WebSocket client disconnects.

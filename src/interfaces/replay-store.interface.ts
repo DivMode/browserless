@@ -33,6 +33,10 @@ export interface ReplayMetadata {
   userAgent?: string;
   videoPath?: string;
   encodingStatus: 'none' | 'deferred' | 'pending' | 'encoding' | 'completed' | 'failed';
+  /** For tab replays: the parent session ID this tab belongs to */
+  parentSessionId?: string;
+  /** For tab replays: the CDP targetId of the tab */
+  targetId?: string;
 }
 
 /**

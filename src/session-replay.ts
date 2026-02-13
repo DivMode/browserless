@@ -51,6 +51,10 @@ export interface SessionReplayState {
   finalCollectors: Array<() => Promise<void>>;
   /** Cleanup functions to call after replay stops (e.g., disconnect puppeteer) */
   cleanupFns: Array<() => Promise<void>>;
+  /** Per-tab events, keyed by targetId */
+  tabEvents: Map<string, ReplayEvent[]>;
+  /** Per-tab metadata (start time, tracking info) */
+  tabMetadata: Map<string, { startedAt: number; trackingId?: string }>;
 }
 
 /**
@@ -683,6 +687,8 @@ export class SessionReplay extends EventEmitter {
       sessionId,
       startedAt: Date.now(),
       trackingId,
+      tabEvents: new Map(),
+      tabMetadata: new Map(),
     });
     this.log.debug(`Started replay for session ${sessionId}`);
   }
@@ -705,6 +711,96 @@ export class SessionReplay extends EventEmitter {
     for (const event of events) {
       this.addEvent(sessionId, event);
     }
+  }
+
+  /**
+   * Add events for a specific tab (targetId).
+   * Stores in both the merged events array (for session-level replay)
+   * and the per-tab events map (for per-tab replay files).
+   */
+  public addTabEvents(sessionId: string, targetId: string, events: ReplayEvent[]): void {
+    const state = this.replays.get(sessionId);
+    if (!state?.isReplaying) return;
+
+    // Initialize tab tracking on first event
+    if (!state.tabEvents.has(targetId)) {
+      state.tabEvents.set(targetId, []);
+      state.tabMetadata.set(targetId, { startedAt: Date.now() });
+    }
+
+    const tabEventList = state.tabEvents.get(targetId)!;
+
+    for (const event of events) {
+      // Add to merged session events
+      this.addEvent(sessionId, event);
+      // Add to per-tab events
+      tabEventList.push(event);
+    }
+  }
+
+  /**
+   * Finalize a tab's recording into a separate replay file.
+   * Called when a tab is destroyed (Target.targetDestroyed).
+   * Returns StopReplayResult with per-tab metadata.
+   */
+  public async stopTabReplay(
+    sessionId: string,
+    targetId: string,
+    metadata?: Partial<ReplayMetadata>,
+  ): Promise<StopReplayResult | null> {
+    const state = this.replays.get(sessionId);
+    if (!state) return null;
+
+    const tabEventList = state.tabEvents.get(targetId);
+    const tabMeta = state.tabMetadata.get(targetId);
+    if (!tabEventList || !tabMeta) return null;
+
+    const endedAt = Date.now();
+    const tabReplayId = `${sessionId}--tab-${targetId}`;
+
+    const replayMetadata: ReplayMetadata = {
+      browserType: metadata?.browserType || 'unknown',
+      duration: endedAt - tabMeta.startedAt,
+      endedAt,
+      eventCount: tabEventList.length,
+      frameCount: 0,
+      id: tabReplayId,
+      routePath: metadata?.routePath || 'unknown',
+      startedAt: tabMeta.startedAt,
+      trackingId: state.trackingId,
+      encodingStatus: 'none',
+      parentSessionId: sessionId,
+      targetId,
+    };
+
+    const replay: Replay = {
+      events: tabEventList,
+      metadata: replayMetadata,
+    };
+
+    const filepath = path.join(this.replaysDir, `${tabReplayId}.json`);
+
+    try {
+      await writeFile(filepath, JSON.stringify(replay), 'utf-8');
+
+      if (this.store) {
+        const result = this.store.insert(replayMetadata);
+        if (!result.ok) {
+          this.log.warn(`Failed to save tab replay metadata: ${result.error.message}`);
+        }
+      }
+
+      this.log.info(`Saved tab replay ${tabReplayId} with ${tabEventList.length} events`);
+    } catch (err) {
+      this.log.error(`Failed to save tab replay ${tabReplayId}: ${err}`);
+      return null;
+    }
+
+    // Clean up tab state (events stay in merged session array)
+    state.tabEvents.delete(targetId);
+    state.tabMetadata.delete(targetId);
+
+    return { filepath, metadata: replayMetadata };
   }
 
   /**
@@ -852,6 +948,17 @@ export class SessionReplay extends EventEmitter {
     } catch {
       return null;
     }
+  }
+
+  public async getReplayMetadata(id: string): Promise<ReplayMetadata | null> {
+    // Fast path: SQLite lookup
+    if (this.store) {
+      const result = this.store.findById(id);
+      if (result.ok) return result.value;
+    }
+    // Fallback: read JSON file, extract metadata only
+    const replay = await this.getReplay(id);
+    return replay?.metadata ?? null;
   }
 
   public async deleteReplay(id: string): Promise<boolean> {

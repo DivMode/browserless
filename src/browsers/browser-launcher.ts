@@ -22,6 +22,7 @@ import {
   convertIfBase64,
   generateDataDir,
   getFinalPathSegment,
+  isReplayCapable,
   noop,
   parseBooleanParam,
   parseStringParam,
@@ -223,7 +224,16 @@ export class BrowserLauncher {
     // Start replay if enabled (non-blocking)
     if (session.replay && this.replayCoordinator) {
       this.replayCoordinator.startReplay(sessionId, trackingId);
-      this.replayCoordinator.setupReplayForAllTabs(browser, sessionId, { video: !!session.video }).catch((e) => {
+      this.replayCoordinator.setupReplayForAllTabs(browser, sessionId, {
+        video: !!session.video,
+        onTabReplayComplete: (metadata) => {
+          if (isReplayCapable(browser)) {
+            browser.sendTabReplayComplete(metadata).catch((e) => {
+              this.log.warn(`Failed to send tab replay event: ${e instanceof Error ? e.message : String(e)}`);
+            });
+          }
+        },
+      }).catch((e) => {
         this.log.warn(`Replay setup failed for session ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
       });
     }
@@ -288,6 +298,7 @@ export class BrowserLauncher {
       if (found) {
         const session = this.registry.get(found.browser)!;
         ++session.numbConnected;
+        this.log.debug(`Page connection: session ${session.id} numbConnected=${session.numbConnected} pageId=${id}`);
         return found.browser;
       }
 

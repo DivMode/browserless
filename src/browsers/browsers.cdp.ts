@@ -21,7 +21,7 @@ import path from 'path';
 import playwright from 'playwright-core';
 import puppeteerStealth from 'puppeteer-extra';
 
-import { CDPProxy, ReplayCapableBrowser, ReplayCompleteParams } from '../cdp-proxy.js';
+import { CDPProxy, ReplayCapableBrowser, ReplayCompleteParams, TabReplayCompleteParams } from '../cdp-proxy.js';
 
 puppeteerStealth.use(StealthPlugin());
 
@@ -43,6 +43,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   // CDP-aware proxy for injecting events before close
   protected cdpProxy: CDPProxy | null = null;
   protected onBeforeClose?: () => Promise<void>;
+  protected onStopTabRecording?: (targetId: string) => Promise<object | null>;
   protected keepUntilMS = 0;
 
   constructor({
@@ -73,6 +74,10 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
 
   public setOnBeforeClose(handler: () => Promise<void>): void {
     this.onBeforeClose = handler;
+  }
+
+  public setOnStopTabRecording(handler: (targetId: string) => Promise<object | null>): void {
+    this.onStopTabRecording = handler;
   }
 
   public keepUntil() {
@@ -369,7 +374,8 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
         },
         (error) => {
           this.logger.error(
-            `Error proxying session to ${this.constructor.name}: ${error}`,
+            `Error proxying PAGE session to ${this.constructor.name}: ${error}. ` +
+            `This will close the entire browser!`,
           );
           this.close();
           return reject(error);
@@ -395,6 +401,9 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
 
     return new Promise(async (resolve, reject) => {
       const close = once(() => {
+        this.logger.debug(
+          `proxyWebSocket close triggered: browser=${!!this.browser} cdpProxy=${!!this.cdpProxy}`,
+        );
         this.browser?.off('close', close);
         this.browser?.process()?.off('close', close);
         socket.off('close', close);
@@ -419,6 +428,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
           this.browserWSEndpoint!,
           close,
           this.onBeforeClose,
+          this.onStopTabRecording,
         );
 
         await this.cdpProxy.connect();
@@ -449,6 +459,18 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
       return true;
     } else {
       this.logger.warn('Cannot send replay complete: no CDPProxy available');
+      return false;
+    }
+  }
+
+  public async sendTabReplayComplete(
+    metadata: TabReplayCompleteParams,
+  ): Promise<boolean> {
+    if (this.cdpProxy) {
+      await this.cdpProxy.sendTabReplayComplete(metadata);
+      return true;
+    } else {
+      this.logger.warn('Cannot send tab replay complete: no CDPProxy available');
       return false;
     }
   }
