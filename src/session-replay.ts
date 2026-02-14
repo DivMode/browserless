@@ -43,6 +43,9 @@ export interface StopReplayResult {
 export interface SessionReplayState {
   events: ReplayEvent[];
   isReplaying: boolean;
+  /** Merged session events exceeded maxReplaySize — stop adding to merged array
+   *  but keep per-tab tracking alive for stopTabRecording/video metadata. */
+  sessionOverflow: boolean;
   sessionId: string;
   startedAt: number;
   trackingId?: string;
@@ -668,6 +671,7 @@ export class SessionReplay extends EventEmitter {
       events: [],
       finalCollectors: [],
       isReplaying: true,
+      sessionOverflow: false,
       sessionId,
       startedAt: Date.now(),
       trackingId,
@@ -681,10 +685,15 @@ export class SessionReplay extends EventEmitter {
     const state = this.replays.get(sessionId);
     if (!state?.isReplaying) return;
 
+    // Stop adding to merged session events when max size exceeded,
+    // but do NOT call stopReplay — per-tab tracking must stay alive
+    // for stopTabRecording/video metadata on long-lived sessions.
+    if (state.sessionOverflow) return;
+
     const currentSize = JSON.stringify(state.events).length;
     if (currentSize > this.maxReplaySize) {
-      this.log.warn(`Replay ${sessionId} exceeded max size, stopping`);
-      this.stopReplay(sessionId);
+      this.log.warn(`Replay ${sessionId} exceeded max size, stopping merged event capture`);
+      state.sessionOverflow = true;
       return;
     }
 

@@ -89,10 +89,18 @@ export class ReplayCoordinator {
     sessionId: string,
     options?: { video?: boolean; onTabReplayComplete?: (metadata: TabReplayCompleteParams) => void },
   ): Promise<void> {
-    if (!this.sessionReplay) return;
+    if (!this.sessionReplay) {
+      this.log.warn(`[DIAG] setupReplayForAllTabs: sessionReplay is undefined, returning early`);
+      return;
+    }
 
     const wsEndpoint = browser.wsEndpoint();
-    if (!wsEndpoint) return;
+    if (!wsEndpoint) {
+      this.log.warn(`[DIAG] setupReplayForAllTabs: wsEndpoint is null/undefined, returning early`);
+      return;
+    }
+
+    this.log.warn(`[DIAG] setupReplayForAllTabs: starting for session ${sessionId}, wsEndpoint=${wsEndpoint.substring(0, 50)}...`);
 
     const WebSocket = (await import('ws')).default;
     const script = getReplayScript(sessionId);
@@ -280,7 +288,13 @@ export class ReplayCoordinator {
         }
 
         const tabResult = await this.sessionReplay?.stopTabReplay(sessionId, targetId, undefined, tabFrameCount);
-        if (!tabResult) return null;
+        if (!tabResult) {
+          this.log.warn(
+            `finalizeTab: stopTabReplay returned null for target ${targetId}, session ${sessionId}. ` +
+            `isReplaying=${this.sessionReplay?.isReplaying(sessionId)}, frameCount=${tabFrameCount}`
+          );
+          return null;
+        }
 
         const tabReplayId = tabResult.metadata.id;
         return {
@@ -825,6 +839,8 @@ export class ReplayCoordinator {
         }
         return finalizeTab(targetId);
       });
+
+      this.log.warn(`[DIAG] tabStopHandlers registered for session ${sessionId}. Total handlers: ${this.tabStopHandlers.size}`);
 
     } catch (e) {
       this.log.warn(`Failed to setup replay: ${e instanceof Error ? e.message : String(e)}`);
