@@ -90,17 +90,15 @@ export class ReplayCoordinator {
     options?: { video?: boolean; onTabReplayComplete?: (metadata: TabReplayCompleteParams) => void },
   ): Promise<void> {
     if (!this.sessionReplay) {
-      this.log.warn(`[DIAG] setupReplayForAllTabs: sessionReplay is undefined, returning early`);
+      this.log.debug(`setupReplayForAllTabs: sessionReplay is undefined, returning early`);
       return;
     }
 
     const wsEndpoint = browser.wsEndpoint();
     if (!wsEndpoint) {
-      this.log.warn(`[DIAG] setupReplayForAllTabs: wsEndpoint is null/undefined, returning early`);
+      this.log.debug(`setupReplayForAllTabs: wsEndpoint is null/undefined, returning early`);
       return;
     }
-
-    this.log.warn(`[DIAG] setupReplayForAllTabs: starting for session ${sessionId}, wsEndpoint=${wsEndpoint.substring(0, 50)}...`);
 
     const WebSocket = (await import('ws')).default;
     const script = getReplayScript(sessionId);
@@ -123,6 +121,7 @@ export class ReplayCoordinator {
       const trackedTargets = new Set<string>(); // targets we're collecting events from
       const injectedTargets = new Set<string>(); // targets we've injected rrweb into
       const zeroEventCounts = new Map<string, number>(); // targetId -> consecutive zero-event polls for self-healing
+      const finalizedResults = new Map<string, StopTabRecordingResult>(); // cached results from targetDestroyed
       let closed = false;
 
       // Helper to send CDP command and wait for response.
@@ -269,6 +268,11 @@ export class ReplayCoordinator {
        * Shared by Target.targetDestroyed handler and stopTabRecording CDP command.
        */
       const finalizeTab = async (targetId: string): Promise<StopTabRecordingResult | null> => {
+        // Prevent double-finalization: if already finalized, return cached result
+        if (finalizedResults.has(targetId)) {
+          return finalizedResults.get(targetId)!;
+        }
+
         await collectEvents(targetId);
         trackedTargets.delete(targetId);
 
@@ -297,7 +301,7 @@ export class ReplayCoordinator {
         }
 
         const tabReplayId = tabResult.metadata.id;
-        return {
+        const result: StopTabRecordingResult = {
           replayId: tabReplayId,
           duration: tabResult.metadata.duration,
           eventCount: tabResult.metadata.eventCount,
@@ -306,6 +310,10 @@ export class ReplayCoordinator {
           encodingStatus: tabResult.metadata.encodingStatus ?? 'none',
           videoUrl: tabFrameCount > 0 ? `${this.baseUrl}/video/${tabReplayId}` : '',
         };
+
+        // Cache result so stopTabRecording can return it even after targetDestroyed
+        finalizedResults.set(targetId, result);
+        return result;
       };
 
       /**
@@ -511,11 +519,15 @@ export class ReplayCoordinator {
           // Handle auto-attached targets — target is PAUSED before any JS runs
           if (msg.method === 'Target.attachedToTarget') {
             const { sessionId: cdpSessionId, targetInfo, waitingForDebugger } = msg.params;
-
             if (targetInfo.type === 'page') {
               this.log.debug(`Target attached (paused=${waitingForDebugger}): ${targetInfo.targetId}`);
               trackedTargets.add(targetInfo.targetId);
               targetSessions.set(targetInfo.targetId, cdpSessionId);
+
+              // Eagerly initialize tab event tracking so stopTabReplay works
+              // even if no rrweb events have been collected yet (short-lived tabs,
+              // rrweb injection delay, etc.)
+              this.sessionReplay?.addTabEvents(sessionId, targetInfo.targetId, []);
 
               // Inject rrweb BEFORE page JS runs (target is paused)
               try {
@@ -831,16 +843,21 @@ export class ReplayCoordinator {
       // eliminating the race condition between tab.close() and metadata availability.
       this.tabStopHandlers.set(sessionId, async (targetId: string) => {
         if (!trackedTargets.has(targetId)) {
+          // Target already finalized by targetDestroyed — return cached result
+          const cached = finalizedResults.get(targetId);
+          if (cached) {
+            this.log.info(`stopTabRecording: returning cached result for target ${targetId} (already finalized by targetDestroyed)`);
+            finalizedResults.delete(targetId);
+            return cached;
+          }
           this.log.warn(
-            `stopTabRecording: targetId ${targetId} not in trackedTargets. ` +
+            `stopTabRecording: targetId ${targetId} not in trackedTargets and no cached result. ` +
             `Tracked: [${[...trackedTargets].join(', ')}], session: ${sessionId}`
           );
           return null;
         }
         return finalizeTab(targetId);
       });
-
-      this.log.warn(`[DIAG] tabStopHandlers registered for session ${sessionId}. Total handlers: ${this.tabStopHandlers.size}`);
 
     } catch (e) {
       this.log.warn(`Failed to setup replay: ${e instanceof Error ? e.message : String(e)}`);

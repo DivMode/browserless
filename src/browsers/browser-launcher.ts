@@ -223,7 +223,6 @@ export class BrowserLauncher {
 
     // Start replay if enabled — must await so tab stop handler is registered
     // before browser is returned (otherwise stopTabRecording races with setup)
-    this.log.warn(`[DIAG] session.replay=${session.replay}, replayCoordinator=${!!this.replayCoordinator}, sessionId=${sessionId}`);
     if (session.replay && this.replayCoordinator) {
       this.replayCoordinator.startReplay(sessionId, trackingId);
       try {
