@@ -4,12 +4,9 @@ import {
   SessionReplay,
   StopReplayResult,
   TabReplayCompleteParams,
-  getCDPClient,
   getReplayScript,
   getIframeReplayScript,
 } from '@browserless.io/browserless';
-import { Page } from 'puppeteer-core';
-import type { CDPSession } from 'playwright-core';
 import path from 'path';
 
 import { ScreencastCapture } from './screencast-capture.js';
@@ -60,215 +57,6 @@ export class ReplayCoordinator {
    */
   isEnabled(): boolean {
     return this.sessionReplay?.isEnabled() ?? false;
-  }
-
-  /**
-   * Set up RRWeb replay capture for a page using raw CDP commands.
-   * Works with ALL clients: puppeteer, playwright, raw CDP, pydoll, etc.
-   *
-   * Key insight from Puppeteer issues:
-   * - Page.enable MUST be called before Page.addScriptToEvaluateOnNewDocument
-   * - sessionattached event catches new tabs/iframes/popups
-   * @see https://github.com/puppeteer/puppeteer/issues/10094
-   * @see https://github.com/puppeteer/puppeteer/issues/12706
-   */
-  async setupPageReplay(page: Page, sessionId: string): Promise<void> {
-    if (!this.sessionReplay) return;
-
-    // Get raw CDP client - works regardless of how page was created
-    const cdp = getCDPClient(page);
-    if (!cdp) {
-      this.log.warn(`No CDP client available for page, skipping replay`);
-      return;
-    }
-
-    // Get the replay script early so it's available in collectEvents closure
-    const script = getReplayScript(sessionId);
-
-    const collectEvents = async () => {
-      try {
-        if (page.isClosed()) return;
-
-        // First, check if rrweb is loaded and actively recording
-        // This handles cases where:
-        // 1. addScriptToEvaluateOnNewDocument didn't fire
-        // 2. rrweb loaded but failed to start recording
-        const checkResult = await cdp.send('Runtime.evaluate', {
-          expression: `JSON.stringify({
-            hasRecording: !!window.__browserlessRecording,
-            hasRrweb: !!window.rrweb,
-            isRecording: typeof window.__browserlessStopRecording === 'function',
-            url: window.location.href
-          })`,
-          returnByValue: true,
-        }).catch(() => null);
-
-        let needsInjection = false;
-        if (checkResult?.result?.value) {
-          try {
-            const status = JSON.parse(checkResult.result.value);
-            // Inject if we're on a real page AND (recording not set up OR rrweb not actually recording)
-            if (status.url && !status.url.startsWith('about:') && !status.isRecording) {
-              needsInjection = true;
-              this.log.debug(`Replay not active on ${status.url} (hasRecording=${status.hasRecording}, hasRrweb=${status.hasRrweb}, isRecording=${status.isRecording}), injecting...`);
-            }
-          } catch {
-            // ignore
-          }
-        }
-
-        // Inject rrweb if needed (self-healing for when addScriptToEvaluateOnNewDocument doesn't work)
-        if (needsInjection) {
-          // Clear any partial state first so the script reinitializes fully
-          await cdp.send('Runtime.evaluate', {
-            expression: `delete window.__browserlessRecording; delete window.__browserlessStopRecording;`,
-            returnByValue: true,
-          }).catch(() => {});
-
-          await cdp.send('Runtime.evaluate', {
-            expression: script,
-            returnByValue: true,
-          }).catch((e) => {
-            this.log.warn(`Failed to inject rrweb: ${e instanceof Error ? e.message : String(e)}`);
-          });
-        }
-
-        // Now collect events
-        const result = await cdp.send('Runtime.evaluate', {
-          expression: `(function() {
-            const recording = window.__browserlessRecording;
-            const debug = {
-              hasRecording: !!recording,
-              hasRrweb: !!window.rrweb,
-              url: window.location.href,
-              eventCount: recording?.events?.length || 0
-            };
-            if (!recording?.events?.length) return JSON.stringify({ events: [], debug });
-            const collected = [...recording.events];
-            recording.events = [];
-            return JSON.stringify({ events: collected, debug });
-          })()`,
-          returnByValue: true,
-        }).catch((e) => {
-          this.log.warn(`collectEvents CDP error: ${e instanceof Error ? e.message : String(e)}`);
-          return null;
-        });
-
-        if (result?.result?.value) {
-          try {
-            const parsed = JSON.parse(result.result.value);
-            const { events, debug } = parsed;
-
-            // Log debug info periodically (every 10 polls or when events found)
-            if (events?.length || Math.random() < 0.1) {
-              this.log.debug(`collectEvents: url=${debug?.url}, hasRecording=${debug?.hasRecording}, hasRrweb=${debug?.hasRrweb}, eventCount=${events?.length || 0}`);
-            }
-
-            if (events?.length) {
-              this.sessionReplay?.addEvents(sessionId, events);
-            }
-          } catch {
-            // JSON parse error, ignore
-          }
-        }
-      } catch {
-        // Page closed or navigating
-      }
-    };
-
-    try {
-      // 1. Enable Page domain FIRST (REQUIRED by CDP protocol!)
-      // Without this, addScriptToEvaluateOnNewDocument may silently fail
-      await cdp.send('Page.enable');
-
-      // 2. Inject for ALL future navigations via raw CDP
-      await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
-        source: script,
-        runImmediately: true,
-      });
-
-      // 3. Handle new tabs/iframes/popups via sessionattached event
-      // This catches contexts created after the initial page
-      // Note: Using EventEmitter pattern since CDPSession extends it
-      const emitter = cdp as unknown as NodeJS.EventEmitter;
-      emitter.on('sessionattached', async (attachedSession: CDPSession) => {
-        try {
-          await attachedSession.send('Page.enable');
-          await attachedSession.send('Page.addScriptToEvaluateOnNewDocument', {
-            source: script,
-            runImmediately: true,
-          });
-          this.log.debug(`rrweb injection: attached session for ${sessionId}`);
-        } catch (e) {
-          this.log.warn(`rrweb session attach failed: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      });
-
-      // 4. Inject immediately on current page via raw CDP Runtime.evaluate
-      let initStatus = 'success';
-      try {
-        await cdp.send('Runtime.evaluate', {
-          expression: script,
-          returnByValue: true,
-        });
-      } catch (e) {
-        initStatus = `error: ${e instanceof Error ? e.message : String(e)}`;
-      }
-
-      this.log.debug(`rrweb injection: ${initStatus}`);
-
-      // 5. FIX: Collect events BEFORE navigation starts (prevents event loss)
-      // Page.frameStartedLoading fires when navigation begins, BEFORE old document unloads
-      emitter.on('Page.frameStartedLoading', async () => {
-        try {
-          await collectEvents();
-          this.log.debug(`Collected events before navigation for session ${sessionId}`);
-        } catch {
-          // Page might be in weird state during navigation
-        }
-      });
-
-      // 6. FIX: Re-inject immediately after navigation completes
-      // This handles CDP session isolation - addScriptToEvaluateOnNewDocument may not fire
-      // for navigations triggered by other CDP sessions (like pydoll)
-      const injectAfterNavigation = async (source: string) => {
-        // Small delay to let the page initialize
-        await new Promise((r) => setTimeout(r, 50));
-        try {
-          if (page.isClosed()) return;
-          await cdp.send('Runtime.evaluate', {
-            expression: script,
-            returnByValue: true,
-          });
-          this.log.debug(`Re-injected rrweb (${source}) for session ${sessionId}`);
-        } catch {
-          // Page might not be ready yet, self-healing will catch it
-        }
-      };
-
-      // Listen for multiple navigation events for redundancy
-      emitter.on('Page.frameNavigated', () => injectAfterNavigation('frameNavigated'));
-      emitter.on('Page.loadEventFired', () => injectAfterNavigation('loadEventFired'));
-      emitter.on('Page.domContentEventFired', () => injectAfterNavigation('domContentEventFired'));
-
-      // 7. FIX: Collect events more frequently (200ms instead of 1000ms)
-      // Reduces maximum event loss window from 1 second to 200ms
-      const intervalId = setInterval(collectEvents, 200);
-
-      // 8. Register final collector so we don't lose events on session close
-      // This is called by stopRecording BEFORE setting isRecording=false
-      this.sessionReplay?.registerFinalCollector(sessionId, collectEvents);
-
-      page.once('close', async () => {
-        clearInterval(intervalId);
-        // Note: collectEvents here might be redundant now, but kept for safety
-        await collectEvents();
-      });
-
-      this.log.debug(`Replay enabled for session ${sessionId}`);
-    } catch (err) {
-      this.log.warn(`Failed to set up replay capture: ${err}`);
-    }
   }
 
   /**
@@ -326,6 +114,7 @@ export class ReplayCoordinator {
       const pendingCommands = new Map<number, { resolve: Function; reject: Function }>();
       const trackedTargets = new Set<string>(); // targets we're collecting events from
       const injectedTargets = new Set<string>(); // targets we've injected rrweb into
+      const zeroEventCounts = new Map<string, number>(); // targetId -> consecutive zero-event polls for self-healing
       let closed = false;
 
       // Helper to send CDP command and wait for response.
@@ -389,7 +178,10 @@ export class ReplayCoordinator {
         }
       };
 
-      // Helper to collect events from a target (for main frame polling)
+      // Helper to collect events from a target (for main frame polling).
+      // Includes self-healing: if rrweb produces no events for ~5 seconds on a real page,
+      // re-inject via Runtime.evaluate (which runs AFTER DOMContentLoaded, so rrweb sees
+      // readyState "interactive"/"complete" and calls init() immediately).
       const collectEvents = async (targetId: string) => {
         if (closed) return;
         const cdpSessionId = targetSessions.get(targetId);
@@ -411,10 +203,275 @@ export class ReplayCoordinator {
             const { events } = JSON.parse(result.result.value);
             if (events?.length) {
               this.sessionReplay?.addTabEvents(sessionId, targetId, events);
+              // Only reset counter if not in post-healing state (negative means already healed)
+              if ((zeroEventCounts.get(targetId) || 0) >= 0) {
+                zeroEventCounts.set(targetId, 0);
+              }
+            } else {
+              // Track consecutive empty polls for self-healing
+              const count = (zeroEventCounts.get(targetId) || 0) + 1;
+              zeroEventCounts.set(targetId, count);
+
+              // After ~5 seconds of no events (10 polls × 500ms), check if rrweb needs re-injection
+              if (count === 10) {
+                const check = await sendCommand('Runtime.evaluate', {
+                  expression: `JSON.stringify({
+                    hasRecording: !!window.__browserlessRecording,
+                    hasRrweb: !!window.rrweb,
+                    isRecording: typeof window.__browserlessStopRecording === 'function',
+                    url: window.location.href,
+                    readyState: document.readyState
+                  })`,
+                  returnByValue: true,
+                }, cdpSessionId).catch(() => null);
+
+                if (check?.result?.value) {
+                  const status = JSON.parse(check.result.value);
+                  if (status.url && !status.url.startsWith('about:') && !status.isRecording) {
+                    // rrweb is NOT actively recording — re-inject
+                    this.log.warn(`Self-healing: rrweb not recording on ${status.url} ` +
+                      `(hasRrweb=${status.hasRrweb}, isRecording=${status.isRecording}, ` +
+                      `readyState=${status.readyState}), re-injecting`);
+
+                    // Clear partial state and re-inject
+                    await sendCommand('Runtime.evaluate', {
+                      expression: 'delete window.__browserlessRecording; delete window.__browserlessStopRecording;',
+                      returnByValue: true,
+                    }, cdpSessionId).catch(() => {});
+
+                    await sendCommand('Runtime.evaluate', {
+                      expression: script,
+                      returnByValue: true,
+                    }, cdpSessionId).catch(() => {});
+                  }
+
+                  // Prevent repeated checks — set to large negative regardless of whether we re-injected
+                  zeroEventCounts.set(targetId, -1000);
+                }
+              }
             }
           }
         } catch {
           // Target may be closed
+        }
+      };
+
+      /**
+       * Finalize a tab's recording: flush events, stop screencast, write replay file.
+       * Shared by Target.targetDestroyed handler and stopTabRecording CDP command.
+       */
+      const finalizeTab = async (targetId: string): Promise<StopTabRecordingResult | null> => {
+        await collectEvents(targetId);
+        trackedTargets.delete(targetId);
+
+        // Stop screencast for this target and get per-tab frame count
+        const cdpSid = targetSessions.get(targetId);
+        let tabFrameCount = 0;
+        if (cdpSid && options?.video) {
+          tabFrameCount = await this.screencastCapture.stopTargetCapture(sessionId, cdpSid);
+
+          // Move frames to tab replay directory for independent encoding
+          const replaysDir = this.sessionReplay?.getReplaysDir();
+          if (replaysDir && tabFrameCount > 0) {
+            const tabReplayId = `${sessionId}--tab-${targetId}`;
+            const tabReplayDir = path.join(replaysDir, tabReplayId);
+            await this.screencastCapture.moveTargetFrames(sessionId, cdpSid, tabReplayDir);
+          }
+        }
+
+        const tabResult = await this.sessionReplay?.stopTabReplay(sessionId, targetId, undefined, tabFrameCount);
+        if (!tabResult) return null;
+
+        const tabReplayId = tabResult.metadata.id;
+        return {
+          replayId: tabReplayId,
+          duration: tabResult.metadata.duration,
+          eventCount: tabResult.metadata.eventCount,
+          replayUrl: `${this.baseUrl}/replay/${tabReplayId}`,
+          frameCount: tabFrameCount,
+          encodingStatus: tabResult.metadata.encodingStatus ?? 'none',
+          videoUrl: tabFrameCount > 0 ? `${this.baseUrl}/video/${tabReplayId}` : '',
+        };
+      };
+
+      /**
+       * Convert iframe CDP network/console/binding events into rrweb recording events.
+       * Injects events into the parent page's rrweb recording so they appear in the
+       * player's Network and Console tabs alongside main-frame activity.
+       */
+      const handleIframeCDPEvent = (msg: any) => {
+        const pageSessionId = iframeSessions.get(msg.sessionId)!;
+
+        // Network.requestWillBeSent → rrweb network.request event + CF activity tracking
+        if (msg.method === 'Network.requestWillBeSent') {
+          const req = msg.params?.request;
+          const url: string = req?.url || '';
+          const requestId: string = msg.params?.requestId || '';
+          const method: string = req?.method || 'GET';
+          sendCommand('Runtime.evaluate', {
+            expression: `(function(){
+              var r = window.__browserlessRecording;
+              if (!r || !r.events) return;
+              r.events.push({
+                type: 5,
+                timestamp: Date.now(),
+                data: {
+                  tag: 'network.request',
+                  payload: {
+                    id: 'iframe-' + ${JSON.stringify(requestId)},
+                    url: ${JSON.stringify(url)},
+                    method: ${JSON.stringify(method)},
+                    type: 'iframe',
+                    timestamp: Date.now(),
+                    headers: null,
+                    body: null
+                  }
+                }
+              });
+            })()`,
+          }, pageSessionId).catch(() => {});
+
+          // Update Turnstile activity signal for pydoll auto-solve detection
+          if (url.includes('challenges.cloudflare.com') || url.includes('cdn-cgi/challenge-platform')) {
+            const updateExpr = `(function(){
+                var a = window.__turnstileCFActivity || (window.__turnstileCFActivity = {count:0,last:0});
+                a.count++;
+                a.last = Date.now();
+              })()`;
+            sendCommand('Runtime.evaluate', {
+              expression: updateExpr,
+            }, pageSessionId).catch((e) => {
+              this.log.info(`CF activity update failed, retrying: ${e instanceof Error ? e.message : String(e)}`);
+              // Retry after 200ms — JS context may not be ready right after navigation
+              setTimeout(() => {
+                sendCommand('Runtime.evaluate', {
+                  expression: updateExpr,
+                }, pageSessionId).catch(() => {});
+              }, 200);
+            });
+          }
+        }
+
+        // Network.responseReceived → rrweb network.response event + PAT tracking
+        if (msg.method === 'Network.responseReceived') {
+          const resp = msg.params?.response;
+          const requestId: string = msg.params?.requestId || '';
+          const respUrl: string = resp?.url || '';
+          const statusText: string = resp?.statusText || '';
+          const mimeType: string = resp?.mimeType || '';
+          sendCommand('Runtime.evaluate', {
+            expression: `(function(){
+              var r = window.__browserlessRecording;
+              if (!r || !r.events) return;
+              r.events.push({
+                type: 5,
+                timestamp: Date.now(),
+                data: {
+                  tag: 'network.response',
+                  payload: {
+                    id: 'iframe-' + ${JSON.stringify(requestId)},
+                    url: ${JSON.stringify(respUrl)},
+                    method: '',
+                    status: ${resp?.status || 0},
+                    statusText: ${JSON.stringify(statusText)},
+                    duration: 0,
+                    type: 'iframe',
+                    headers: null,
+                    body: null,
+                    contentType: ${JSON.stringify(mimeType || null)}
+                  }
+                }
+              });
+            })()`,
+          }, pageSessionId).catch(() => {});
+
+          // Track PAT outcome for pydoll activity signal
+          if (respUrl.includes('/pat/')) {
+            const patStatus = resp?.status || 0;
+            const patSuccess = patStatus >= 200 && patStatus < 300;
+            sendCommand('Runtime.evaluate', {
+              expression: `(function(){
+                var a = window.__turnstileCFActivity || (window.__turnstileCFActivity = {count:0,last:0});
+                if (!a.pat) a.pat = {attempts:0, successes:0};
+                a.pat.attempts++;
+                ${patSuccess ? 'a.pat.successes++;' : ''}
+              })()`,
+            }, pageSessionId).catch(() => {});
+          }
+        }
+
+        // Runtime.consoleAPICalled → rrweb console plugin event + console categorization
+        if (msg.method === 'Runtime.consoleAPICalled') {
+          const level: string = msg.params?.type || 'log';
+          // Extract console arguments as strings
+          const args: string[] = (msg.params?.args || [])
+            .map((a: { value?: string; description?: string; type?: string }) =>
+              a.value ?? a.description ?? String(a.type))
+            .slice(0, 5);
+          const trace: string[] = (msg.params?.stackTrace?.callFrames || [])
+            .slice(0, 3)
+            .map((f: { functionName?: string; url?: string; lineNumber?: number }) =>
+              `${f.functionName || '(anonymous)'}@${f.url || ''}:${f.lineNumber ?? 0}`);
+
+          sendCommand('Runtime.evaluate', {
+            expression: `(function(){
+              var r = window.__browserlessRecording;
+              if (!r || !r.events) return;
+              r.events.push({
+                type: 6,
+                timestamp: Date.now(),
+                data: {
+                  plugin: 'rrweb/console@1',
+                  payload: {
+                    level: ${JSON.stringify(level)},
+                    payload: ${JSON.stringify(args)},
+                    trace: ${JSON.stringify(trace)},
+                    source: 'iframe'
+                  }
+                }
+              });
+            })()`,
+          }, pageSessionId).catch(() => {});
+
+          // Categorize console messages for pydoll activity signal
+          const firstArg: string = args[0] || '';
+          const isAntiDebug = firstArg.includes('%c') || level === 'startGroupCollapsed' || level === 'endGroup' || level === 'count';
+          const isPAT = firstArg.toLowerCase().includes('private access token');
+          sendCommand('Runtime.evaluate', {
+            expression: `(function(){
+              var a = window.__turnstileCFActivity || (window.__turnstileCFActivity = {count:0,last:0});
+              if (!a.console) a.console = {total:0, antiDebug:0, pat:0};
+              a.console.total++;
+              ${isAntiDebug ? 'a.console.antiDebug++;' : ''}
+              ${isPAT ? 'a.console.pat++;' : ''}
+            })()`,
+          }, pageSessionId).catch(() => {});
+        }
+
+        // Runtime.bindingCalled (turnstile state) → state relay + timeline marker
+        if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__turnstileStateBinding') {
+          const state = msg.params?.payload || 'unknown';
+          sendCommand('Runtime.evaluate', {
+            expression: `(function(){
+              window.__turnstileWidgetState = ${JSON.stringify(state)};
+            })()`,
+          }, pageSessionId).catch(() => {});
+
+          // Inject timeline marker for state transition
+          sendCommand('Runtime.evaluate', {
+            expression: `(function(){
+              var r = window.__browserlessRecording;
+              if (!r || !r.events) return;
+              r.events.push({
+                type: 5,
+                timestamp: Date.now(),
+                data: {
+                  tag: 'turnstile.iframe_state',
+                  payload: { state: ${JSON.stringify(state)} }
+                }
+              });
+            })()`,
+          }, pageSessionId).catch(() => {});
         }
       };
 
@@ -591,42 +648,20 @@ export class ReplayCoordinator {
           if (msg.method === 'Target.targetDestroyed') {
             const { targetId } = msg.params;
 
-            // Collect final events before removing tracking
             if (trackedTargets.has(targetId)) {
-              await collectEvents(targetId);
-              trackedTargets.delete(targetId);
-
-              // Stop screencast for this target and get per-tab frame count
-              const cdpSid = targetSessions.get(targetId);
-              let tabFrameCount = 0;
-              if (cdpSid && options?.video) {
-                tabFrameCount = await this.screencastCapture.stopTargetCapture(sessionId, cdpSid);
-
-                // Move frames to tab replay directory for independent encoding
-                const replaysDir = this.sessionReplay?.getReplaysDir();
-                if (replaysDir && tabFrameCount > 0) {
-                  const tabReplayId = `${sessionId}--tab-${targetId}`;
-                  const tabReplayDir = path.join(replaysDir, tabReplayId);
-                  await this.screencastCapture.moveTargetFrames(sessionId, cdpSid, tabReplayDir);
-                }
-              }
-
-              // Finalize per-tab replay file with frame count
-              const tabResult = await this.sessionReplay?.stopTabReplay(sessionId, targetId, undefined, tabFrameCount);
-              if (tabResult && options?.onTabReplayComplete) {
-                const tabReplayId = tabResult.metadata.id;
-                const tabMeta: TabReplayCompleteParams = {
-                  sessionId,
-                  targetId,
-                  duration: tabResult.metadata.duration,
-                  eventCount: tabResult.metadata.eventCount,
-                  frameCount: tabFrameCount,
-                  encodingStatus: tabResult.metadata.encodingStatus ?? 'none',
-                  replayUrl: `${this.baseUrl}/replay/${tabReplayId}`,
-                  videoUrl: tabFrameCount > 0 ? `${this.baseUrl}/video/${tabReplayId}` : undefined,
-                };
+              const result = await finalizeTab(targetId);
+              if (result && options?.onTabReplayComplete) {
                 try {
-                  options.onTabReplayComplete(tabMeta);
+                  options.onTabReplayComplete({
+                    sessionId,
+                    targetId,
+                    duration: result.duration,
+                    eventCount: result.eventCount,
+                    frameCount: result.frameCount,
+                    encodingStatus: result.encodingStatus,
+                    replayUrl: result.replayUrl,
+                    videoUrl: result.videoUrl || undefined,
+                  });
                 } catch (e) {
                   this.log.warn(`onTabReplayComplete callback failed: ${e instanceof Error ? e.message : String(e)}`);
                 }
@@ -653,185 +688,9 @@ export class ReplayCoordinator {
             ).catch(() => {});
           }
 
-          // Convert iframe CDP network events to rrweb recording events.
-          // These appear in the player's Network tab alongside main-frame requests.
+          // Convert iframe CDP events to rrweb recording events
           if (msg.sessionId && iframeSessions.has(msg.sessionId)) {
-            const pageSessionId = iframeSessions.get(msg.sessionId)!;
-
-            if (msg.method === 'Network.requestWillBeSent') {
-              const req = msg.params?.request;
-              const url: string = req?.url || '';
-              const requestId: string = msg.params?.requestId || '';
-              const method: string = req?.method || 'GET';
-              sendCommand('Runtime.evaluate', {
-                expression: `(function(){
-                  var r = window.__browserlessRecording;
-                  if (!r || !r.events) return;
-                  r.events.push({
-                    type: 5,
-                    timestamp: Date.now(),
-                    data: {
-                      tag: 'network.request',
-                      payload: {
-                        id: 'iframe-' + ${JSON.stringify(requestId)},
-                        url: ${JSON.stringify(url)},
-                        method: ${JSON.stringify(method)},
-                        type: 'iframe',
-                        timestamp: Date.now(),
-                        headers: null,
-                        body: null
-                      }
-                    }
-                  });
-                })()`,
-              }, pageSessionId).catch(() => {});
-
-              // Update Turnstile activity signal for pydoll auto-solve detection
-              if (url.includes('challenges.cloudflare.com') || url.includes('cdn-cgi/challenge-platform')) {
-                const updateExpr = `(function(){
-                    var a = window.__turnstileCFActivity || (window.__turnstileCFActivity = {count:0,last:0});
-                    a.count++;
-                    a.last = Date.now();
-                  })()`;
-                sendCommand('Runtime.evaluate', {
-                  expression: updateExpr,
-                }, pageSessionId).catch((e) => {
-                  this.log.info(`CF activity update failed, retrying: ${e instanceof Error ? e.message : String(e)}`);
-                  // Retry after 200ms — JS context may not be ready right after navigation
-                  setTimeout(() => {
-                    sendCommand('Runtime.evaluate', {
-                      expression: updateExpr,
-                    }, pageSessionId).catch(() => {});
-                  }, 200);
-                });
-              }
-            }
-
-            if (msg.method === 'Network.responseReceived') {
-              const resp = msg.params?.response;
-              const requestId: string = msg.params?.requestId || '';
-              const respUrl: string = resp?.url || '';
-              const statusText: string = resp?.statusText || '';
-              const mimeType: string = resp?.mimeType || '';
-              sendCommand('Runtime.evaluate', {
-                expression: `(function(){
-                  var r = window.__browserlessRecording;
-                  if (!r || !r.events) return;
-                  r.events.push({
-                    type: 5,
-                    timestamp: Date.now(),
-                    data: {
-                      tag: 'network.response',
-                      payload: {
-                        id: 'iframe-' + ${JSON.stringify(requestId)},
-                        url: ${JSON.stringify(respUrl)},
-                        method: '',
-                        status: ${resp?.status || 0},
-                        statusText: ${JSON.stringify(statusText)},
-                        duration: 0,
-                        type: 'iframe',
-                        headers: null,
-                        body: null,
-                        contentType: ${JSON.stringify(mimeType || null)}
-                      }
-                    }
-                  });
-                })()`,
-              }, pageSessionId).catch(() => {});
-
-              // Track PAT outcome for pydoll activity signal
-              if (respUrl.includes('/pat/')) {
-                const patStatus = resp?.status || 0;
-                const patSuccess = patStatus >= 200 && patStatus < 300;
-                sendCommand('Runtime.evaluate', {
-                  expression: `(function(){
-                    var a = window.__turnstileCFActivity || (window.__turnstileCFActivity = {count:0,last:0});
-                    if (!a.pat) a.pat = {attempts:0, successes:0};
-                    a.pat.attempts++;
-                    ${patSuccess ? 'a.pat.successes++;' : ''}
-                  })()`,
-                }, pageSessionId).catch(() => {});
-              }
-            }
-          }
-
-          // Convert iframe CDP console events to rrweb type 6 plugin events.
-          // These appear in the player's Console tab alongside main-frame logs.
-          if (msg.method === 'Runtime.consoleAPICalled' && msg.sessionId && iframeSessions.has(msg.sessionId)) {
-            const pageSessionId = iframeSessions.get(msg.sessionId)!;
-            const level: string = msg.params?.type || 'log';
-            // Extract console arguments as strings
-            const args: string[] = (msg.params?.args || [])
-              .map((a: { value?: string; description?: string; type?: string }) =>
-                a.value ?? a.description ?? String(a.type))
-              .slice(0, 5);
-            const trace: string[] = (msg.params?.stackTrace?.callFrames || [])
-              .slice(0, 3)
-              .map((f: { functionName?: string; url?: string; lineNumber?: number }) =>
-                `${f.functionName || '(anonymous)'}@${f.url || ''}:${f.lineNumber ?? 0}`);
-
-            sendCommand('Runtime.evaluate', {
-              expression: `(function(){
-                var r = window.__browserlessRecording;
-                if (!r || !r.events) return;
-                r.events.push({
-                  type: 6,
-                  timestamp: Date.now(),
-                  data: {
-                    plugin: 'rrweb/console@1',
-                    payload: {
-                      level: ${JSON.stringify(level)},
-                      payload: ${JSON.stringify(args)},
-                      trace: ${JSON.stringify(trace)},
-                      source: 'iframe'
-                    }
-                  }
-                });
-              })()`,
-            }, pageSessionId).catch(() => {});
-
-            // Categorize console messages for pydoll activity signal
-            const firstArg: string = args[0] || '';
-            const isAntiDebug = firstArg.includes('%c') || level === 'startGroupCollapsed' || level === 'endGroup' || level === 'count';
-            const isPAT = firstArg.toLowerCase().includes('private access token');
-            sendCommand('Runtime.evaluate', {
-              expression: `(function(){
-                var a = window.__turnstileCFActivity || (window.__turnstileCFActivity = {count:0,last:0});
-                if (!a.console) a.console = {total:0, antiDebug:0, pat:0};
-                a.console.total++;
-                ${isAntiDebug ? 'a.console.antiDebug++;' : ''}
-                ${isPAT ? 'a.console.pat++;' : ''}
-              })()`,
-            }, pageSessionId).catch(() => {});
-          }
-
-          // Handle Turnstile iframe state changes via CDP binding.
-          // Updates window.__turnstileWidgetState on the main page and injects
-          // timeline markers for each state transition (idle → verifying → success).
-          if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__turnstileStateBinding' && msg.sessionId && iframeSessions.has(msg.sessionId)) {
-            const state = msg.params?.payload || 'unknown';
-            const pgSid = iframeSessions.get(msg.sessionId)!;
-            sendCommand('Runtime.evaluate', {
-              expression: `(function(){
-                window.__turnstileWidgetState = ${JSON.stringify(state)};
-              })()`,
-            }, pgSid).catch(() => {});
-
-            // Inject timeline marker for state transition
-            sendCommand('Runtime.evaluate', {
-              expression: `(function(){
-                var r = window.__browserlessRecording;
-                if (!r || !r.events) return;
-                r.events.push({
-                  type: 5,
-                  timestamp: Date.now(),
-                  data: {
-                    tag: 'turnstile.iframe_state',
-                    payload: { state: ${JSON.stringify(state)} }
-                  }
-                });
-              })()`,
-            }, pgSid).catch(() => {});
+            handleIframeCDPEvent(msg);
           }
 
           // Handle target info changed (URL navigation)
@@ -842,6 +701,8 @@ export class ReplayCoordinator {
             const { targetInfo } = msg.params;
             if (targetInfo.type === 'page' && trackedTargets.has(targetInfo.targetId)) {
               injectedTargets.delete(targetInfo.targetId);
+              // Reset self-healing counter so new page gets a fresh 5-second window
+              zeroEventCounts.delete(targetInfo.targetId);
 
               // Re-establish setAutoAttach for cross-origin iframes on the new page.
               // While CDP docs say it should persist, this ensures iframes created
@@ -962,41 +823,7 @@ export class ReplayCoordinator {
           );
           return null;
         }
-
-        // Flush pending events from the browser
-        await collectEvents(targetId);
-
-        // Remove from tracking so Target.targetDestroyed won't double-stop
-        trackedTargets.delete(targetId);
-
-        // Stop screencast for this target and get per-tab frame count
-        const cdpSessionId = targetSessions.get(targetId);
-        let tabFrameCount = 0;
-        if (cdpSessionId && options?.video) {
-          tabFrameCount = await this.screencastCapture.stopTargetCapture(sessionId, cdpSessionId);
-
-          // Move frames to tab replay directory for independent encoding
-          const replaysDir = this.sessionReplay?.getReplaysDir();
-          if (replaysDir && tabFrameCount > 0) {
-            const tabReplayId = `${sessionId}--tab-${targetId}`;
-            const tabReplayDir = path.join(replaysDir, tabReplayId);
-            await this.screencastCapture.moveTargetFrames(sessionId, cdpSessionId, tabReplayDir);
-          }
-        }
-
-        const tabResult = await this.sessionReplay?.stopTabReplay(sessionId, targetId, undefined, tabFrameCount);
-        if (!tabResult) return null;
-
-        const tabReplayId = tabResult.metadata.id;
-        return {
-          replayId: tabReplayId,
-          duration: tabResult.metadata.duration,
-          eventCount: tabResult.metadata.eventCount,
-          replayUrl: `${this.baseUrl}/replay/${tabReplayId}`,
-          frameCount: tabFrameCount,
-          encodingStatus: tabResult.metadata.encodingStatus ?? 'none',
-          videoUrl: tabFrameCount > 0 ? `${this.baseUrl}/video/${tabReplayId}` : '',
-        };
+        return finalizeTab(targetId);
       });
 
     } catch (e) {
