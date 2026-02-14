@@ -27,6 +27,7 @@ import { SessionRegistry } from '../session/session-registry.js';
 import { SessionLifecycleManager } from '../session/session-lifecycle-manager.js';
 import { ReplayCoordinator } from '../session/replay-coordinator.js';
 import { BrowserLauncher } from './browser-launcher.js';
+import type { VideoManager } from '../video/video-manager.js';
 
 /**
  * BrowserManager is a facade that coordinates browser session management.
@@ -54,10 +55,11 @@ export class BrowserManager {
     protected hooks: Hooks,
     protected fileSystem: FileSystem,
     protected sessionReplay?: SessionReplay,
+    protected videoMgr?: VideoManager,
   ) {
     // Initialize extracted components
     this.registry = new SessionRegistry();
-    this.replay = new ReplayCoordinator(sessionReplay);
+    this.replay = new ReplayCoordinator(sessionReplay, videoMgr);
     this.lifecycle = new SessionLifecycleManager(
       this.registry,
       this.replay,
@@ -369,8 +371,10 @@ export class BrowserManager {
       // Enable synchronous stop-before-close for per-tab recordings.
       // Client sends Browserless.stopTabRecording CDP command, CDPProxy intercepts,
       // and this callback flushes events + writes recording + returns metadata.
+      // Use registry session ID to match the handler registered by setupReplayForAllTabs.
       browser.setOnStopTabRecording(async (targetId: string) => {
-        const sessionId = browser.wsEndpoint()?.split('/').pop() || '';
+        const session = this.registry.get(browser);
+        const sessionId = session?.id || '';
         if (!sessionId) return null;
         return this.replay.stopTabRecording(sessionId, targetId);
       });

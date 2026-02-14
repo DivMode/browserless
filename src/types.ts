@@ -18,6 +18,7 @@ import {
   WebsocketRoutes,
   contentTypes,
 } from '@browserless.io/browserless';
+import type { VideoManager } from './video/video-manager.js';
 import {
   HTTPRequest,
   Page,
@@ -95,6 +96,7 @@ type defaultLaunchOptions =
 
 abstract class Route {
   protected _sessionReplay?: SessionReplay;
+  protected _videoManager?: VideoManager;
 
   constructor(
     protected _browserManager: Browserless['browserManager'],
@@ -211,6 +213,14 @@ abstract class Route {
    * @returns SessionReplay | undefined
    */
   sessionReplay = () => this._sessionReplay;
+
+  /**
+   * Helper function that loads the video manager module for
+   * video-specific operations (encoding, frame deletion).
+   * Separate from sessionReplay — video and replay are independent concerns.
+   * @returns VideoManager | undefined
+   */
+  videoManager = () => this._videoManager;
 
   /**
    * The HTTP path that this route handles, eg '/my-route' OR an
@@ -743,6 +753,7 @@ export const BrowserlessManagementRoutes = {
   ReplayDataGetRoute: 'ReplayDataGetRoute',
   ReplayGetRoute: 'ReplayGetRoute',
   ReplayMetadataGetRoute: 'ReplayMetadataGetRoute',
+  VideoDeleteRoute: 'VideoDeleteRoute',
   VideoGetRoute: 'VideoGetRoute',
   VideoStatusGetRoute: 'VideoStatusGetRoute',
   VideoHlsGetRoute: 'VideoHlsGetRoute',

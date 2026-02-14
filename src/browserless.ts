@@ -41,6 +41,7 @@ import { userInfo } from 'os';
 
 import { ServiceContainer } from './container/container.js';
 import { createContainer, Services } from './container/bootstrap.js';
+import { VideoManager } from './video/video-manager.js';
 
 const routeSchemas = ['body', 'query'];
 
@@ -70,6 +71,7 @@ export class Browserless extends EventEmitter {
   protected monitoring: Monitoring;
   protected router: Router;
   protected sessionReplay: SessionReplay;
+  protected videoManager: VideoManager;
   protected token: Token;
   protected webhooks: WebHooks;
   protected staticSDKDir: string | null = null;
@@ -119,9 +121,13 @@ export class Browserless extends EventEmitter {
     this.monitoring = monitoring || new Monitoring(this.config);
     this.fileSystem = fileSystem || new FileSystem(this.config);
     this.sessionReplay = sessionReplay || new SessionReplay(this.config);
+    this.videoManager = new VideoManager(
+      this.sessionReplay.getReplaysDir(),
+      this.sessionReplay.getStore(),
+    );
     this.browserManager =
       browserManager ||
-      new BrowserManager(this.config, this.hooks, this.fileSystem, this.sessionReplay);
+      new BrowserManager(this.config, this.hooks, this.fileSystem, this.sessionReplay, this.videoManager);
     this.limiter =
       limiter ||
       new Limiter(
@@ -338,6 +344,7 @@ export class Browserless extends EventEmitter {
           route.fileSystem = () => this.fileSystem;
           route.staticSDKDir = () => this.staticSDKDir;
           route.sessionReplay = () => this.sessionReplay;
+          route.videoManager = () => this.videoManager;
 
           httpRoutes.push(route);
         }
@@ -387,6 +394,7 @@ export class Browserless extends EventEmitter {
           route.fileSystem = () => this.fileSystem;
           route.staticSDKDir = () => this.staticSDKDir;
           route.sessionReplay = () => this.sessionReplay;
+          route.videoManager = () => this.videoManager;
 
           wsRoutes.push(route);
         }
@@ -447,11 +455,11 @@ export class Browserless extends EventEmitter {
     await this.loadPwVersions();
     await this.sessionReplay.initialize();
 
-    // Wire VideoEncoder to the now-initialized store.
-    // VideoEncoder gets null at construction time because SessionReplay.initialize()
-    // creates the ReplayStore. Without this, all status updates are silent no-ops.
+    // Wire stores to VideoManager and VideoEncoder after SessionReplay.initialize()
+    // creates the ReplayStore. Both get null at construction time.
     const store = this.sessionReplay.getStore();
     if (store) {
+      this.videoManager.setStore(store);
       const encoder = this.browserManager.getReplayCoordinator().getVideoEncoder();
       encoder.setStore(store);
       await encoder.cleanupOrphans(this.sessionReplay.getReplaysDir());

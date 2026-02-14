@@ -40,9 +40,9 @@ export default class VideoHlsGetRoute extends HTTPRoute {
   tags = [APITags.management];
 
   async handler(req: Request, res: ServerResponse): Promise<void> {
-    const replay = this.sessionReplay();
-    if (!replay) {
-      return writeResponse(res, 503, 'Session replay is not enabled');
+    const video = this.videoManager();
+    if (!video) {
+      return writeResponse(res, 503, 'Video manager is not enabled');
     }
 
     // Parse path: /video/{id}/hls/{filename}
@@ -67,12 +67,12 @@ export default class VideoHlsGetRoute extends HTTPRoute {
       throw new NotFound('Invalid HLS filename');
     }
 
-    const replaysDir = replay.getReplaysDir();
+    const replaysDir = video.getReplaysDir();
     const filePath = path.join(replaysDir, id, filename);
 
     // If file doesn't exist yet, check if encoding is in progress and wait for it
     if (!(await exists(filePath))) {
-      const store = replay.getStore();
+      const store = video.getStore();
       let shouldWait = false;
       if (store) {
         const replayResult = store.findById(id);

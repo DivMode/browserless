@@ -17,6 +17,7 @@ import { BrowserManager } from '../browsers/index.js';
 import type { IReplayStore } from '../interfaces/replay-store.interface.js';
 import { SessionRegistry } from '../session/session-registry.js';
 import { ReplayCoordinator } from '../session/replay-coordinator.js';
+import { VideoManager } from '../video/video-manager.js';
 
 /**
  * Service names for type-safe resolution.
@@ -33,6 +34,7 @@ export const Services = {
   ReplayStore: 'replayStore',
   SessionRegistry: 'sessionRegistry',
   ReplayCoordinator: 'replayCoordinator',
+  VideoManager: 'videoManager',
   BrowserManager: 'browserManager',
   Limiter: 'limiter',
   Router: 'router',
@@ -57,6 +59,7 @@ export interface ContainerOptions {
   replayStore?: IReplayStore;
   sessionRegistry?: SessionRegistry;
   replayCoordinator?: ReplayCoordinator;
+  videoManager?: VideoManager;
   browserManager?: BrowserManager;
   limiter?: Limiter;
   router?: Router;
@@ -137,16 +140,30 @@ export function createContainer(options: ContainerOptions = {}): ServiceContaine
     options.sessionRegistry ?? new SessionRegistry()
   );
 
-  // ReplayCoordinator - depends on sessionReplay
+  // VideoManager - depends on sessionReplay (for replaysDir and store)
   container.registerSingleton(
-    Services.ReplayCoordinator,
-    (c) => options.replayCoordinator ?? new ReplayCoordinator(
-      c.resolve<SessionReplay>(Services.SessionReplay)
-    ),
+    Services.VideoManager,
+    (c) => {
+      const replay = c.resolve<SessionReplay>(Services.SessionReplay);
+      return options.videoManager ?? new VideoManager(
+        replay.getReplaysDir(),
+        replay.getStore(),
+      );
+    },
     [Services.SessionReplay]
   );
 
-  // BrowserManager - depends on config, hooks, fileSystem, sessionReplay
+  // ReplayCoordinator - depends on sessionReplay and videoManager
+  container.registerSingleton(
+    Services.ReplayCoordinator,
+    (c) => options.replayCoordinator ?? new ReplayCoordinator(
+      c.resolve<SessionReplay>(Services.SessionReplay),
+      c.resolve<VideoManager>(Services.VideoManager),
+    ),
+    [Services.SessionReplay, Services.VideoManager]
+  );
+
+  // BrowserManager - depends on config, hooks, fileSystem, sessionReplay, videoManager
   container.registerSingleton(
     Services.BrowserManager,
     (c) =>
@@ -155,9 +172,10 @@ export function createContainer(options: ContainerOptions = {}): ServiceContaine
         c.resolve<Config>(Services.Config),
         c.resolve<Hooks>(Services.Hooks),
         c.resolve<FileSystem>(Services.FileSystem),
-        c.resolve<SessionReplay>(Services.SessionReplay)
+        c.resolve<SessionReplay>(Services.SessionReplay),
+        c.resolve<VideoManager>(Services.VideoManager),
       ),
-    [Services.Config, Services.Hooks, Services.FileSystem, Services.SessionReplay]
+    [Services.Config, Services.Hooks, Services.FileSystem, Services.SessionReplay, Services.VideoManager]
   );
 
   // Limiter - depends on config, metrics, monitoring, webhooks, hooks

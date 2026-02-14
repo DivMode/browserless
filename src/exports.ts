@@ -40,3 +40,4 @@ export * from './session/replay-coordinator.js';
 export * from './browsers/browser-launcher.js';
 export * from './container/container.js';
 export * from './container/bootstrap.js';
+export * from './video/video-manager.js';

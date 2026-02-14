@@ -221,21 +221,24 @@ export class BrowserLauncher {
     // Register session
     this.registry.register(browser, session);
 
-    // Start replay if enabled (non-blocking)
+    // Start replay if enabled — must await so tab stop handler is registered
+    // before browser is returned (otherwise stopTabRecording races with setup)
     if (session.replay && this.replayCoordinator) {
       this.replayCoordinator.startReplay(sessionId, trackingId);
-      this.replayCoordinator.setupReplayForAllTabs(browser, sessionId, {
-        video: !!session.video,
-        onTabReplayComplete: (metadata) => {
-          if (isReplayCapable(browser)) {
-            browser.sendTabReplayComplete(metadata).catch((e) => {
-              this.log.warn(`Failed to send tab replay event: ${e instanceof Error ? e.message : String(e)}`);
-            });
-          }
-        },
-      }).catch((e) => {
+      try {
+        await this.replayCoordinator.setupReplayForAllTabs(browser, sessionId, {
+          video: !!session.video,
+          onTabReplayComplete: (metadata) => {
+            if (isReplayCapable(browser)) {
+              browser.sendTabReplayComplete(metadata).catch((e) => {
+                this.log.warn(`Failed to send tab replay event: ${e instanceof Error ? e.message : String(e)}`);
+              });
+            }
+          },
+        });
+      } catch (e) {
         this.log.warn(`Replay setup failed for session ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
-      });
+      }
     }
 
     return browser;

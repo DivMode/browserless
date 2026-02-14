@@ -16,7 +16,6 @@ const execAsync = promisify(exec);
 import { RRWEB_RECORD_SCRIPT, RRWEB_CONSOLE_PLUGIN_SCRIPT } from './generated/rrweb-script.js';
 import { ReplayStore } from './replay-store.js';
 import type { IReplayStore, ReplayMetadata } from './interfaces/replay-store.interface.js';
-import type { VideoEncoder } from './video/encoder.js';
 
 // Re-export ReplayMetadata for backwards compatibility
 export type { ReplayMetadata } from './interfaces/replay-store.interface.js';
@@ -509,7 +508,6 @@ export class SessionReplay extends EventEmitter {
   protected ownsStore = false; // Track if we created the store (for cleanup)
   protected maxAgeMs: number;
   private cleanupTask: ScheduledTask | null = null;
-  private videoEncoder?: VideoEncoder;
 
   constructor(
     protected config: Config,
@@ -543,20 +541,6 @@ export class SessionReplay extends EventEmitter {
    */
   public getStore(): IReplayStore | null {
     return this.store;
-  }
-
-  /**
-   * Set the video encoder reference (for on-demand encoding from routes).
-   */
-  public setVideoEncoder(encoder: VideoEncoder): void {
-    this.videoEncoder = encoder;
-  }
-
-  /**
-   * Get the video encoder (used by routes to trigger on-demand encoding).
-   */
-  public getVideoEncoder(): VideoEncoder | undefined {
-    return this.videoEncoder;
   }
 
   public async initialize(): Promise<void> {
@@ -747,6 +731,7 @@ export class SessionReplay extends EventEmitter {
     sessionId: string,
     targetId: string,
     metadata?: Partial<ReplayMetadata>,
+    frameCount?: number,
   ): Promise<StopReplayResult | null> {
     const state = this.replays.get(sessionId);
     if (!state) return null;
@@ -757,18 +742,19 @@ export class SessionReplay extends EventEmitter {
 
     const endedAt = Date.now();
     const tabReplayId = `${sessionId}--tab-${targetId}`;
+    const resolvedFrameCount = frameCount ?? 0;
 
     const replayMetadata: ReplayMetadata = {
       browserType: metadata?.browserType || 'unknown',
       duration: endedAt - tabMeta.startedAt,
       endedAt,
       eventCount: tabEventList.length,
-      frameCount: 0,
+      frameCount: resolvedFrameCount,
       id: tabReplayId,
       routePath: metadata?.routePath || 'unknown',
       startedAt: tabMeta.startedAt,
       trackingId: state.trackingId,
-      encodingStatus: 'none',
+      encodingStatus: resolvedFrameCount > 0 ? 'deferred' : 'none',
       parentSessionId: sessionId,
       targetId,
     };

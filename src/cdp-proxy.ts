@@ -261,10 +261,14 @@ export class CDPProxy {
 
   private async handleStopTabRecording(msgId: number, targetId: string): Promise<void> {
     try {
+      this.log.info(`stopTabRecording: handling targetId=${targetId}`);
       const metadata = await this.onStopTabRecording!(targetId);
+      if (!metadata) {
+        this.log.warn(`stopTabRecording: handler returned null for targetId=${targetId}`);
+      }
       void this.sendClientResponse(msgId, metadata || {});
     } catch (e) {
-      this.log.warn(`stopTabRecording failed: ${e instanceof Error ? e.message : String(e)}`);
+      this.log.warn(`stopTabRecording failed for targetId=${targetId}: ${e instanceof Error ? e.message : String(e)}`);
       void this.sendClientResponse(msgId, {});
     }
   }

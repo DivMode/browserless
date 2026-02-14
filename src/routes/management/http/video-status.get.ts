@@ -36,9 +36,9 @@ export default class VideoStatusGetRoute extends HTTPRoute {
   tags = [APITags.management];
 
   async handler(req: Request, res: ServerResponse): Promise<void> {
-    const replay = this.sessionReplay();
-    if (!replay) {
-      return jsonResponse(res, 503, { error: 'Session replay is not enabled' });
+    const video = this.videoManager();
+    if (!video) {
+      return jsonResponse(res, 503, { error: 'Video manager is not enabled' });
     }
 
     // Extract replay ID from path: /video/:id/status
@@ -52,9 +52,9 @@ export default class VideoStatusGetRoute extends HTTPRoute {
       throw new NotFound('Replay ID is required');
     }
 
-    const store = replay.getStore();
+    const store = video.getStore();
     if (!store) {
-      return jsonResponse(res, 503, { error: 'Replay store not available' });
+      return jsonResponse(res, 503, { error: 'Video store not available' });
     }
 
     const result = store.findById(id);
@@ -66,7 +66,7 @@ export default class VideoStatusGetRoute extends HTTPRoute {
     }
 
     const replayRecord = result.value!;
-    const encoder = replay.getVideoEncoder();
+    const encoder = video.getVideoEncoder();
     const progress = encoder?.getProgress(id) ?? null;
 
     const response = {

@@ -36,9 +36,9 @@ export default class VideoGetRoute extends HTTPRoute {
   tags = [APITags.management];
 
   async handler(req: Request, res: ServerResponse): Promise<void> {
-    const replay = this.sessionReplay();
-    if (!replay) {
-      return writeResponse(res, 503, 'Session replay is not enabled');
+    const video = this.videoManager();
+    if (!video) {
+      return writeResponse(res, 503, 'Video manager is not enabled');
     }
 
     // Extract replay ID from path: /video/:id
@@ -56,7 +56,7 @@ export default class VideoGetRoute extends HTTPRoute {
     const token = req.parsed.searchParams.get('token') ?? '';
 
     // Check replay metadata for encoding status
-    const store = replay.getStore();
+    const store = video.getStore();
     let encodingStatus = 'none';
     let frameCount = 0;
 
@@ -72,8 +72,8 @@ export default class VideoGetRoute extends HTTPRoute {
 
     // Trigger on-demand encoding for deferred sessions (lazy encoding)
     if (encodingStatus === 'deferred') {
-      const encoder = replay.getVideoEncoder();
-      const replaysDir = replay.getReplaysDir();
+      const encoder = video.getVideoEncoder();
+      const replaysDir = video.getReplaysDir();
       if (encoder && store) {
         store.updateEncodingStatus(id, 'pending');
         encoder.queueEncode(id, replaysDir, frameCount);

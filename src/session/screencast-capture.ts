@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'fs/promises';
+import { mkdir, readdir, rename, writeFile } from 'fs/promises';
 import path from 'path';
 
 import { Logger } from '@browserless.io/browserless';
@@ -13,7 +13,7 @@ import { Logger } from '@browserless.io/browserless';
  * - Page.startScreencast sends PNG frames when the page visually changes
  * - Static page fallback: if no frame arrives in 2 seconds, fire
  *   Page.captureScreenshot (handles Turnstile "Just a moment..." pages)
- * - Frames saved as {timestamp_ms}.png in {replaysDir}/{sessionId}/frames/
+ * - Frames saved as {timestamp_ms}.png in {replaysDir}/{sessionId}/frames/{cdpSessionId}/
  *
  * Frame acknowledgment (Page.screencastFrameAck) tells Chrome to send the
  * next frame. Without ack, Chrome stops sending frames.
@@ -25,8 +25,10 @@ interface CaptureSession {
   sessionId: string;
   framesDir: string;
   frameCount: number;
-  /** Timer for static page fallback screenshots */
-  fallbackTimer: ReturnType<typeof setTimeout> | null;
+  /** Per-target frame counts, keyed by CDP session ID */
+  targetFrameCounts: Map<string, number>;
+  /** Per-target fallback timers */
+  fallbackTimers: Map<string, ReturnType<typeof setTimeout>>;
   /** CDP session IDs we're capturing from */
   activeTargets: Set<string>;
   /** Reference to the WebSocket sendCommand for this session */
@@ -61,7 +63,8 @@ export class ScreencastCapture {
       sessionId,
       framesDir,
       frameCount: 0,
-      fallbackTimer: null,
+      targetFrameCounts: new Map(),
+      fallbackTimers: new Map(),
       activeTargets: new Set(),
       sendCommand,
       stopped: false,
@@ -85,6 +88,10 @@ export class ScreencastCapture {
     if (!session || session.stopped) return;
 
     try {
+      // Create per-target frame subdirectory
+      const targetDir = path.join(session.framesDir, cdpSessionId);
+      await mkdir(targetDir, { recursive: true });
+
       await sendCommand('Page.startScreencast', {
         format: 'png',
         maxWidth: this.maxWidth,
@@ -92,6 +99,7 @@ export class ScreencastCapture {
       }, cdpSessionId);
 
       session.activeTargets.add(cdpSessionId);
+      session.targetFrameCounts.set(cdpSessionId, 0);
       this.resetFallbackTimer(session, cdpSessionId);
 
       this.log.debug(`Screencast started on target (session ${sessionId})`);
@@ -107,7 +115,7 @@ export class ScreencastCapture {
    * a Page.screencastFrame event arrives.
    *
    * Flow:
-   * 1. Write PNG data to disk
+   * 1. Write PNG data to per-target subdirectory
    * 2. Acknowledge frame (tells Chrome to send next one)
    * 3. Reset fallback timer (page is active)
    */
@@ -120,11 +128,15 @@ export class ScreencastCapture {
     if (!session || session.stopped) return;
 
     try {
-      // Write frame to disk
+      // Write frame to per-target subdirectory
       const timestamp = Math.round(params.metadata.timestamp * 1000);
-      const framePath = path.join(session.framesDir, `${timestamp}.png`);
+      const framePath = path.join(session.framesDir, cdpSessionId, `${timestamp}.png`);
       await writeFile(framePath, Buffer.from(params.data, 'base64'));
       session.frameCount++;
+
+      // Increment per-target frame count
+      const targetCount = session.targetFrameCounts.get(cdpSessionId) ?? 0;
+      session.targetFrameCounts.set(cdpSessionId, targetCount + 1);
 
       // Acknowledge frame so Chrome sends the next one
       await session.sendCommand('Page.screencastFrameAck', {
@@ -139,18 +151,19 @@ export class ScreencastCapture {
   }
 
   /**
-   * Reset the static page fallback timer.
+   * Reset the static page fallback timer for a specific target.
    *
    * If no screencast frame arrives within fallbackIntervalMs, fire a
    * Page.captureScreenshot. This handles pages like Turnstile's
    * "Just a moment..." where nothing visually changes.
    */
   private resetFallbackTimer(session: CaptureSession, cdpSessionId: string): void {
-    if (session.fallbackTimer) {
-      clearTimeout(session.fallbackTimer);
+    const existing = session.fallbackTimers.get(cdpSessionId);
+    if (existing) {
+      clearTimeout(existing);
     }
 
-    session.fallbackTimer = setTimeout(async () => {
+    const timer = setTimeout(async () => {
       if (session.stopped) return;
 
       try {
@@ -160,9 +173,13 @@ export class ScreencastCapture {
 
         if (result?.data) {
           const timestamp = Date.now();
-          const framePath = path.join(session.framesDir, `${timestamp}.png`);
+          const framePath = path.join(session.framesDir, cdpSessionId, `${timestamp}.png`);
           await writeFile(framePath, Buffer.from(result.data, 'base64'));
           session.frameCount++;
+
+          const targetCount = session.targetFrameCounts.get(cdpSessionId) ?? 0;
+          session.targetFrameCounts.set(cdpSessionId, targetCount + 1);
+
           this.log.debug(`Fallback screenshot captured for session ${session.sessionId}`);
         }
       } catch {
@@ -170,15 +187,75 @@ export class ScreencastCapture {
       }
 
       // Schedule next fallback if still active
-      if (!session.stopped) {
+      if (!session.stopped && session.activeTargets.has(cdpSessionId)) {
         this.resetFallbackTimer(session, cdpSessionId);
       }
     }, this.fallbackIntervalMs);
+
+    session.fallbackTimers.set(cdpSessionId, timer);
+  }
+
+  /**
+   * Stop screencast capture for a single target.
+   * Returns the frame count for that target.
+   */
+  async stopTargetCapture(sessionId: string, cdpSessionId: string): Promise<number> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return 0;
+
+    // Stop screencast on this target
+    try {
+      await session.sendCommand('Page.stopScreencast', {}, cdpSessionId);
+    } catch {
+      // Target may already be closed
+    }
+
+    // Clear per-target fallback timer
+    const timer = session.fallbackTimers.get(cdpSessionId);
+    if (timer) {
+      clearTimeout(timer);
+      session.fallbackTimers.delete(cdpSessionId);
+    }
+
+    session.activeTargets.delete(cdpSessionId);
+
+    const frameCount = session.targetFrameCounts.get(cdpSessionId) ?? 0;
+    session.targetFrameCounts.delete(cdpSessionId);
+
+    this.log.info(`Screencast stopped for target ${cdpSessionId}: ${frameCount} frames`);
+    return frameCount;
+  }
+
+  /**
+   * Move a target's frames from {framesDir}/{cdpSessionId}/ to {destDir}/frames/.
+   * Used to give each tab replay its own frames directory for independent encoding.
+   */
+  async moveTargetFrames(sessionId: string, cdpSessionId: string, destDir: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    const srcDir = path.join(session.framesDir, cdpSessionId);
+    const destFramesDir = path.join(destDir, 'frames');
+
+    try {
+      await mkdir(destFramesDir, { recursive: true });
+
+      // Move individual frame files (rename is atomic within same filesystem)
+      const files = await readdir(srcDir).catch(() => [] as string[]);
+      for (const file of files) {
+        await rename(path.join(srcDir, file), path.join(destFramesDir, file));
+      }
+
+      this.log.debug(`Moved ${files.length} frames from ${cdpSessionId} to ${destDir}`);
+    } catch (e) {
+      this.log.debug(`Failed to move target frames: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   /**
    * Stop screencast capture for a session.
-   * Returns the frame count for metadata.
+   * Merges remaining target subdirectories back into {framesDir}/ for
+   * session-level encoding compatibility, then returns total frame count.
    */
   async stopCapture(sessionId: string): Promise<number> {
     const session = this.sessions.get(sessionId);
@@ -186,11 +263,11 @@ export class ScreencastCapture {
 
     session.stopped = true;
 
-    // Clear fallback timer
-    if (session.fallbackTimer) {
-      clearTimeout(session.fallbackTimer);
-      session.fallbackTimer = null;
+    // Clear all fallback timers
+    for (const [, timer] of session.fallbackTimers) {
+      clearTimeout(timer);
     }
+    session.fallbackTimers.clear();
 
     // Stop screencast on all active targets
     for (const cdpSessionId of session.activeTargets) {
@@ -198,6 +275,17 @@ export class ScreencastCapture {
         await session.sendCommand('Page.stopScreencast', {}, cdpSessionId);
       } catch {
         // Target may already be closed
+      }
+
+      // Merge remaining target subdirs back into framesDir for session-level encoding
+      const targetDir = path.join(session.framesDir, cdpSessionId);
+      try {
+        const files = await readdir(targetDir).catch(() => [] as string[]);
+        for (const file of files) {
+          await rename(path.join(targetDir, file), path.join(session.framesDir, file));
+        }
+      } catch {
+        // Target dir may not exist
       }
     }
 
@@ -215,6 +303,13 @@ export class ScreencastCapture {
     const session = this.sessions.get(sessionId);
     if (session) {
       session.activeTargets.delete(cdpSessionId);
+
+      // Clear per-target fallback timer
+      const timer = session.fallbackTimers.get(cdpSessionId);
+      if (timer) {
+        clearTimeout(timer);
+        session.fallbackTimers.delete(cdpSessionId);
+      }
     }
   }
 
