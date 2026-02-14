@@ -6,7 +6,7 @@ import {
   exists,
   isReplayCapable,
 } from '@browserless.io/browserless';
-import { deleteAsync } from 'del';
+import { rm } from 'fs/promises';
 
 import { ReplayCoordinator } from './replay-coordinator.js';
 import { SessionRegistry } from './session-registry.js';
@@ -37,7 +37,7 @@ export class SessionLifecycleManager {
   private async removeUserDataDir(userDataDir: string | null): Promise<void> {
     if (userDataDir && (await exists(userDataDir))) {
       this.log.debug(`Deleting data directory "${userDataDir}"`);
-      await deleteAsync(userDataDir, { force: true }).catch((err) => {
+      await rm(userDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 }).catch((err) => {
         this.log.error(
           `Error cleaning up user-data-dir "${err}" at ${userDataDir}`,
         );
@@ -125,18 +125,21 @@ export class SessionLifecycleManager {
           };
 
           // Send replay metadata via CDP event before browser closes
-          // WebSocket TCP ordering guarantees client receives this before close
-          if (isReplayCapable(browser)) {
+          // Only attempt if a client is still connected — if they already
+          // disconnected, cdpProxy is null and there's nobody to receive the event
+          if (isReplayCapable(browser) && connected > 0) {
             try {
               const sent = await browser.sendReplayComplete(replayMetadata);
               if (sent) {
                 this.log.info(`Injected replay complete event for ${session.id}`);
               } else {
-                this.log.warn(`Replay complete not sent for ${session.id} (no proxy)`);
+                this.log.debug(`Replay complete not sent for ${session.id} (client disconnected)`);
               }
             } catch (e) {
-              this.log.warn(`Failed to inject replay event: ${e instanceof Error ? e.message : String(e)}`);
+              this.log.debug(`Replay event send failed (client gone): ${e instanceof Error ? e.message : String(e)}`);
             }
+          } else if (isReplayCapable(browser)) {
+            this.log.debug(`Skipping replay event for ${session.id} (no connected clients)`);
           }
         }
       }
@@ -154,7 +157,9 @@ export class SessionLifecycleManager {
         cleanupActions.push(() => this.removeUserDataDir(session.userDataDir));
       }
 
-      await Promise.all(cleanupActions.map((a) => a()));
+      for (const action of cleanupActions) {
+        await action();
+      }
     }
 
     return replayMetadata;

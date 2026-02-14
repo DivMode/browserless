@@ -293,10 +293,16 @@ export class ReplayCoordinator {
 
         const tabResult = await this.sessionReplay?.stopTabReplay(sessionId, targetId, undefined, tabFrameCount);
         if (!tabResult) {
-          this.log.warn(
-            `finalizeTab: stopTabReplay returned null for target ${targetId}, session ${sessionId}. ` +
-            `isReplaying=${this.sessionReplay?.isReplaying(sessionId)}, frameCount=${tabFrameCount}`
-          );
+          if (tabFrameCount === 0) {
+            this.log.debug(
+              `finalizeTab: skipping inactive tab ${targetId}, session ${sessionId} (no frames)`
+            );
+          } else {
+            this.log.warn(
+              `finalizeTab: stopTabReplay returned null for target ${targetId}, session ${sessionId}. ` +
+              `isReplaying=${this.sessionReplay?.isReplaying(sessionId)}, frameCount=${tabFrameCount}`
+            );
+          }
           return null;
         }
 
@@ -763,6 +769,20 @@ export class ReplayCoordinator {
 
       ws.on('open', async () => {
         try {
+          // Retry wrapper for critical CDP setup commands — Chrome under load
+          // can be slow to respond, and a timeout here silently kills recording.
+          const sendWithRetry = async (method: string, params: object = {}, maxAttempts = 3) => {
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              try {
+                return await sendCommand(method, params);
+              } catch (e) {
+                if (attempt === maxAttempts) throw e;
+                this.log.debug(`CDP ${method} attempt ${attempt} failed, retrying...`);
+                await new Promise((r) => setTimeout(r, 1000 * attempt));
+              }
+            }
+          };
+
           // Use Target.setAutoAttach to pause new targets before any JS runs.
           // This guarantees rrweb's patchAttachShadow is installed before page code
           // calls attachShadow({ mode: 'closed' }).
@@ -773,14 +793,14 @@ export class ReplayCoordinator {
           //
           // waitForDebuggerOnStart=true: targets pause before JS execution, giving us a
           // window to inject rrweb via Page.addScriptToEvaluateOnNewDocument, then resume.
-          await sendCommand('Target.setAutoAttach', {
+          await sendWithRetry('Target.setAutoAttach', {
             autoAttach: true,
             waitForDebuggerOnStart: true,
             flatten: true,
           });
 
           // Also enable discovery for targetInfoChanged/targetDestroyed events
-          await sendCommand('Target.setDiscoverTargets', { discover: true });
+          await sendWithRetry('Target.setDiscoverTargets', { discover: true });
 
           // Initialize screencast capture (parallel to rrweb) — only when video=true
           if (options?.video) {
@@ -818,9 +838,10 @@ export class ReplayCoordinator {
         closed = true;
         clearInterval(pollInterval);
 
-        // Collect final events before closing
-        for (const targetId of trackedTargets) {
-          await collectEvents(targetId);
+        // Finalize all remaining tracked targets while session is still active.
+        // Prevents race where targetDestroyed fires after isReplaying=false.
+        for (const targetId of [...trackedTargets]) {
+          await finalizeTab(targetId);
         }
 
         try {

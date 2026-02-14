@@ -81,7 +81,12 @@ export class HTTPServer extends EventEmitter {
       return writeResponse(res, 408, e.message);
     }
 
-    this.logger.error(`Error handling request: ${e}\n${e.stack}`);
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('socket has been ended') || msg.includes('ECONNRESET')) {
+      this.logger.warn(`Client disconnected: ${msg}`);
+    } else {
+      this.logger.error(`Error handling request: ${e}\n${e.stack}`);
+    }
 
     return writeResponse(res, 500, e.toString());
   }

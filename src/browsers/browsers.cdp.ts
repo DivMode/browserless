@@ -373,9 +373,9 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
           target,
         },
         (error) => {
-          this.logger.error(
-            `Error proxying PAGE session to ${this.constructor.name}: ${error}. ` +
-            `This will close the entire browser!`,
+          const msg = error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Proxy disconnect for PAGE session to ${this.constructor.name}: ${msg}`,
           );
           this.close();
           return reject(error);

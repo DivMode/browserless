@@ -185,9 +185,9 @@ export class Router extends EventEmitter {
         )
       : wrapped;
     route.path = Array.isArray(route.path) ? route.path : [route.path];
-    const registeredPaths = this.httpRoutes.map((r) => r.path).flat();
-    const duplicatePaths = registeredPaths.filter((path) =>
-      route.path.includes(path),
+    const registeredRoutes = this.httpRoutes.map((r) => ({ method: r.method, paths: r.path }));
+    const duplicatePaths = route.path.filter((path) =>
+      registeredRoutes.some((r) => r.method === route.method && r.paths.includes(path)),
     );
 
     if (duplicatePaths.length) {
