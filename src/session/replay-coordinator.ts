@@ -526,7 +526,7 @@ export class ReplayCoordinator {
           if (msg.method === 'Target.attachedToTarget') {
             const { sessionId: cdpSessionId, targetInfo, waitingForDebugger } = msg.params;
             if (targetInfo.type === 'page') {
-              this.log.debug(`Target attached (paused=${waitingForDebugger}): ${targetInfo.targetId}`);
+              this.log.info(`Target attached (paused=${waitingForDebugger}): targetId=${targetInfo.targetId} url=${targetInfo.url} type=${targetInfo.type}`);
               trackedTargets.add(targetInfo.targetId);
               targetSessions.set(targetInfo.targetId, cdpSessionId);
 
@@ -561,6 +561,15 @@ export class ReplayCoordinator {
               // Resume the target — page JS starts AFTER rrweb is installed
               if (waitingForDebugger) {
                 await sendCommand('Runtime.runIfWaitingForDebugger', {}, cdpSessionId).catch(() => {});
+              } else {
+                // Target was attached via Target.attachToTarget (not setAutoAttach) —
+                // JS is already running, addScriptToEvaluateOnNewDocument won't apply
+                // until next navigation. Inject rrweb into current document immediately.
+                await sendCommand('Runtime.evaluate', {
+                  expression: script,
+                  returnByValue: true,
+                }, cdpSessionId).catch(() => {});
+              this.log.info(`Replay late-injected for already-running target ${targetInfo.targetId}`);
               }
 
               // Start screencast on this target (pixel capture alongside rrweb) — only when video=true
@@ -676,6 +685,26 @@ export class ReplayCoordinator {
             }
           }
 
+          // Handle new targets created by OTHER connections (e.g., pydoll via CDPProxy).
+          // Target.setAutoAttach only fires attachedToTarget for targets on THIS connection.
+          // Targets created by pydoll on its own WebSocket connection need explicit attachment.
+          // Target.targetCreated fires for ALL targets via setDiscoverTargets.
+          if (msg.method === 'Target.targetCreated') {
+            const { targetInfo } = msg.params;
+            if (targetInfo.type === 'page' && !trackedTargets.has(targetInfo.targetId)) {
+              this.log.info(`Discovered external target ${targetInfo.targetId} (url=${targetInfo.url}), attaching...`);
+              try {
+                await sendCommand('Target.attachToTarget', {
+                  targetId: targetInfo.targetId,
+                  flatten: true,
+                });
+                // attachedToTarget handler will fire and handle rrweb injection + tracking
+              } catch (e) {
+                this.log.warn(`Failed to attach to external target ${targetInfo.targetId}: ${e instanceof Error ? e.message : String(e)}`);
+              }
+            }
+          }
+
           // Handle target destroyed — finalize per-tab recording
           if (msg.method === 'Target.targetDestroyed') {
             const { targetId } = msg.params;
@@ -767,53 +796,69 @@ export class ReplayCoordinator {
         }
       });
 
-      ws.on('open', async () => {
-        try {
-          // Retry wrapper for critical CDP setup commands — Chrome under load
-          // can be slow to respond, and a timeout here silently kills recording.
-          const sendWithRetry = async (method: string, params: object = {}, maxAttempts = 3) => {
-            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-              try {
-                return await sendCommand(method, params);
-              } catch (e) {
-                if (attempt === maxAttempts) throw e;
-                this.log.debug(`CDP ${method} attempt ${attempt} failed, retrying...`);
-                await new Promise((r) => setTimeout(r, 1000 * attempt));
+      // CRITICAL: Await WebSocket open + setAutoAttach BEFORE returning.
+      // setupReplayForAllTabs must complete target tracking setup before the
+      // browser is returned to the client (pydoll). Otherwise, pydoll can
+      // create tabs before setAutoAttach runs, causing target ID mismatch.
+      await new Promise<void>((resolveSetup, rejectSetup) => {
+        const setupTimeout = setTimeout(() => {
+          rejectSetup(new Error('WebSocket open + setAutoAttach timed out after 10s'));
+        }, 10000);
+
+        ws.on('open', async () => {
+          try {
+            // Retry wrapper for critical CDP setup commands — Chrome under load
+            // can be slow to respond, and a timeout here silently kills recording.
+            const sendWithRetry = async (method: string, params: object = {}, maxAttempts = 3) => {
+              for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                try {
+                  return await sendCommand(method, params);
+                } catch (e) {
+                  if (attempt === maxAttempts) throw e;
+                  this.log.debug(`CDP ${method} attempt ${attempt} failed, retrying...`);
+                  await new Promise((r) => setTimeout(r, 1000 * attempt));
+                }
+              }
+            };
+
+            // Use Target.setAutoAttach to pause new targets before any JS runs.
+            // This guarantees rrweb's patchAttachShadow is installed before page code
+            // calls attachShadow({ mode: 'closed' }).
+            //
+            // flatten=true: attachedToTarget events arrive as top-level WebSocket messages
+            // with a sessionId we can use directly for commands. Required for
+            // attachedToTarget to actually fire on our connection.
+            //
+            // waitForDebuggerOnStart=true: targets pause before JS execution, giving us a
+            // window to inject rrweb via Page.addScriptToEvaluateOnNewDocument, then resume.
+            await sendWithRetry('Target.setAutoAttach', {
+              autoAttach: true,
+              waitForDebuggerOnStart: true,
+              flatten: true,
+            });
+
+            this.log.info(`Target.setAutoAttach succeeded for session ${sessionId}`);
+
+            // Also enable discovery for targetInfoChanged/targetDestroyed events
+            await sendWithRetry('Target.setDiscoverTargets', { discover: true });
+
+            // Initialize screencast capture (parallel to rrweb) — only when video=true
+            if (options?.video) {
+              const replaysDir = this.sessionReplay?.getReplaysDir();
+              if (replaysDir) {
+                await this.screencastCapture.initSession(sessionId, sendCommand, replaysDir);
               }
             }
-          };
 
-          // Use Target.setAutoAttach to pause new targets before any JS runs.
-          // This guarantees rrweb's patchAttachShadow is installed before page code
-          // calls attachShadow({ mode: 'closed' }).
-          //
-          // flatten=true: attachedToTarget events arrive as top-level WebSocket messages
-          // with a sessionId we can use directly for commands. Required for
-          // attachedToTarget to actually fire on our connection.
-          //
-          // waitForDebuggerOnStart=true: targets pause before JS execution, giving us a
-          // window to inject rrweb via Page.addScriptToEvaluateOnNewDocument, then resume.
-          await sendWithRetry('Target.setAutoAttach', {
-            autoAttach: true,
-            waitForDebuggerOnStart: true,
-            flatten: true,
-          });
-
-          // Also enable discovery for targetInfoChanged/targetDestroyed events
-          await sendWithRetry('Target.setDiscoverTargets', { discover: true });
-
-          // Initialize screencast capture (parallel to rrweb) — only when video=true
-          if (options?.video) {
-            const replaysDir = this.sessionReplay?.getReplaysDir();
-            if (replaysDir) {
-              await this.screencastCapture.initSession(sessionId, sendCommand, replaysDir);
-            }
+            this.log.debug(`Replay auto-attach enabled for session ${sessionId}`);
+            clearTimeout(setupTimeout);
+            resolveSetup();
+          } catch (e) {
+            this.log.warn(`Failed to set up replay: ${e}`);
+            clearTimeout(setupTimeout);
+            resolveSetup(); // Don't reject — recording setup failure shouldn't block the session
           }
-
-          this.log.debug(`Replay auto-attach enabled for session ${sessionId}`);
-        } catch (e) {
-          this.log.warn(`Failed to set up replay: ${e}`);
-        }
+        });
       });
 
       ws.on('close', () => {
