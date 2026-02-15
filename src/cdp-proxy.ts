@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
 import { Duplex } from 'stream';
 import { IncomingMessage } from 'http';
-import { Logger } from '@browserless.io/browserless';
+import { Config, Logger } from '@browserless.io/browserless';
 
 /**
  * Replay metadata sent via CDP event.
@@ -94,8 +94,10 @@ export class CDPProxy {
     private clientHead: Buffer,
     private clientRequest: IncomingMessage,
     private browserWsEndpoint: string,
+    private config: Config,
     private onClose?: () => void,
     private onBeforeClose?: () => Promise<void>,
+    private onEnableChallengeSolver?: (config: any) => void,
   ) {}
 
   /**
@@ -176,6 +178,32 @@ export class CDPProxy {
           if (msg?.method === 'Browserless.getSessionInfo' && typeof msg?.id === 'number') {
             const sessionId = this.browserWsEndpoint.split('/').pop() || '';
             void this.sendClientResponse(msg.id, { sessionId });
+            return;
+          }
+
+          // Gate Browserless.enableChallengeSolver behind ENABLE_CLOUDFLARE flag
+          if (msg?.method === 'Browserless.enableChallengeSolver' && typeof msg?.id === 'number') {
+            if (!this.config.getEnableCloudflare()) {
+              void this.sendClientResponse(msg.id, {
+                enabled: false,
+                error: 'Cloudflare solver is not enabled on this instance',
+              });
+              return;
+            }
+            if (this.onEnableChallengeSolver) {
+              this.onEnableChallengeSolver(msg.params || {});
+            }
+            void this.sendClientResponse(msg.id, { enabled: true });
+            return;
+          }
+
+          // Delay Page.close to flush pending screencast frames + event collection
+          if (msg?.method === 'Page.close') {
+            setTimeout(() => {
+              if (this.browserWs?.readyState === WebSocket.OPEN) {
+                this.browserWs.send(data, { binary: isBinary });
+              }
+            }, 250);
             return;
           }
 
