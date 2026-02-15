@@ -239,6 +239,12 @@ export class BrowserLauncher {
       } catch (e) {
         this.log.warn(`Replay setup failed for session ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
       }
+
+      // Wire solver to browser for CDPProxy integration
+      const solver = this.replayCoordinator?.getSolver(sessionId);
+      if (solver && browser instanceof ChromiumCDP) {
+        browser.setSolver(solver);
+      }
     }
 
     return browser;
