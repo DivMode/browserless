@@ -41,3 +41,6 @@ export * from './browsers/browser-launcher.js';
 export * from './container/container.js';
 export * from './container/bootstrap.js';
 export * from './video/video-manager.js';
+export * from './session/cloudflare-solver.js';
+export * from './shared/mouse-humanizer.js';
+export * from './shared/challenge-detector.js';
