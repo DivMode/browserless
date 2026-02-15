@@ -43,7 +43,6 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   // CDP-aware proxy for injecting events before close
   protected cdpProxy: CDPProxy | null = null;
   protected onBeforeClose?: () => Promise<void>;
-  protected onStopTabRecording?: (targetId: string) => Promise<object | null>;
   protected keepUntilMS = 0;
 
   constructor({
@@ -74,10 +73,6 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
 
   public setOnBeforeClose(handler: () => Promise<void>): void {
     this.onBeforeClose = handler;
-  }
-
-  public setOnStopTabRecording(handler: (targetId: string) => Promise<object | null>): void {
-    this.onStopTabRecording = handler;
   }
 
   public keepUntil() {
@@ -428,7 +423,6 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
           this.browserWSEndpoint!,
           close,
           this.onBeforeClose,
-          this.onStopTabRecording,
         );
 
         await this.cdpProxy.connect();

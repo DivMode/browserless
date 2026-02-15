@@ -7,7 +7,6 @@ import {
   getReplayScript,
   getIframeReplayScript,
 } from '@browserless.io/browserless';
-import path from 'path';
 
 import { ScreencastCapture } from './screencast-capture.js';
 import { VideoEncoder } from '../video/encoder.js';
@@ -26,7 +25,7 @@ import type { VideoManager } from '../video/video-manager.js';
  * via constructor and uses it for event storage.
  */
 /**
- * Metadata returned by stopTabRecording.
+ * Per-tab recording result returned by finalizeTab.
  */
 export interface StopTabRecordingResult {
   replayId: string;
@@ -43,10 +42,7 @@ export class ReplayCoordinator {
   private screencastCapture = new ScreencastCapture();
   private videoEncoder: VideoEncoder;
   private baseUrl = process.env.BROWSERLESS_BASE_URL ?? '';
-  /** Per-session handlers for stopping individual tab recordings (registered by setupReplayForAllTabs) */
-  private tabStopHandlers = new Map<string, (targetId: string) => Promise<StopTabRecordingResult | null>>();
-
-  constructor(private sessionReplay?: SessionReplay, videoMgr?: VideoManager) {
+  constructor(private sessionReplay?: SessionReplay, private videoMgr?: VideoManager) {
     this.videoEncoder = new VideoEncoder(sessionReplay?.getStore() ?? null);
     // Expose encoder to VideoManager for on-demand encoding from routes
     videoMgr?.setVideoEncoder(this.videoEncoder);
@@ -265,7 +261,7 @@ export class ReplayCoordinator {
 
       /**
        * Finalize a tab's recording: flush events, stop screencast, write replay file.
-       * Shared by Target.targetDestroyed handler and stopTabRecording CDP command.
+       * Called by Target.targetDestroyed handler when a tab is closed.
        */
       const finalizeTab = async (targetId: string): Promise<StopTabRecordingResult | null> => {
         // Prevent double-finalization: if already finalized, return cached result
@@ -280,15 +276,9 @@ export class ReplayCoordinator {
         const cdpSid = targetSessions.get(targetId);
         let tabFrameCount = 0;
         if (cdpSid && options?.video) {
+          // Frames are already at their final path (videosDir/{id}--tab-{targetId}/frames/)
+          // — no moveTargetFrames() needed.
           tabFrameCount = await this.screencastCapture.stopTargetCapture(sessionId, cdpSid);
-
-          // Move frames to tab replay directory for independent encoding
-          const replaysDir = this.sessionReplay?.getReplaysDir();
-          if (replaysDir && tabFrameCount > 0) {
-            const tabReplayId = `${sessionId}--tab-${targetId}`;
-            const tabReplayDir = path.join(replaysDir, tabReplayId);
-            await this.screencastCapture.moveTargetFrames(sessionId, cdpSid, tabReplayDir);
-          }
         }
 
         const tabResult = await this.sessionReplay?.stopTabReplay(sessionId, targetId, undefined, tabFrameCount);
@@ -317,7 +307,7 @@ export class ReplayCoordinator {
           videoUrl: tabFrameCount > 0 ? `${this.baseUrl}/video/${tabReplayId}` : '',
         };
 
-        // Cache result so stopTabRecording can return it even after targetDestroyed
+        // Cache result to prevent double-finalization
         finalizedResults.set(targetId, result);
         return result;
       };
@@ -574,7 +564,7 @@ export class ReplayCoordinator {
 
               // Start screencast on this target (pixel capture alongside rrweb) — only when video=true
               if (options?.video) {
-                this.screencastCapture.addTarget(sessionId, sendCommand, cdpSessionId).catch(() => {});
+                this.screencastCapture.addTarget(sessionId, sendCommand, cdpSessionId, targetInfo.targetId).catch(() => {});
               }
             }
 
@@ -844,9 +834,9 @@ export class ReplayCoordinator {
 
             // Initialize screencast capture (parallel to rrweb) — only when video=true
             if (options?.video) {
-              const replaysDir = this.sessionReplay?.getReplaysDir();
-              if (replaysDir) {
-                await this.screencastCapture.initSession(sessionId, sendCommand, replaysDir);
+              const videosDir = this.videoMgr?.getVideosDir();
+              if (videosDir) {
+                await this.screencastCapture.initSession(sessionId, sendCommand, videosDir);
               }
             }
 
@@ -904,47 +894,9 @@ export class ReplayCoordinator {
         }
       });
 
-      // Register tab stop handler for Browserless.stopTabRecording CDP command.
-      // Allows clients to stop a tab's recording synchronously before closing the tab,
-      // eliminating the race condition between tab.close() and metadata availability.
-      this.tabStopHandlers.set(sessionId, async (targetId: string) => {
-        if (!trackedTargets.has(targetId)) {
-          // Target already finalized by targetDestroyed — return cached result
-          const cached = finalizedResults.get(targetId);
-          if (cached) {
-            this.log.info(`stopTabRecording: returning cached result for target ${targetId} (already finalized by targetDestroyed)`);
-            finalizedResults.delete(targetId);
-            return cached;
-          }
-          this.log.warn(
-            `stopTabRecording: targetId ${targetId} not in trackedTargets and no cached result. ` +
-            `Tracked: [${[...trackedTargets].join(', ')}], session: ${sessionId}`
-          );
-          return null;
-        }
-        return finalizeTab(targetId);
-      });
-
     } catch (e) {
       this.log.warn(`Failed to setup replay: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }
-
-  /**
-   * Stop a specific tab's recording and return metadata synchronously.
-   * Called via the Browserless.stopTabRecording CDP command.
-   * Flushes pending events, writes the recording, and returns metadata.
-   */
-  async stopTabRecording(sessionId: string, targetId: string): Promise<StopTabRecordingResult | null> {
-    const handler = this.tabStopHandlers.get(sessionId);
-    if (!handler) {
-      this.log.warn(
-        `stopTabRecording: no handler for session ${sessionId}. ` +
-        `Registered sessions: [${[...this.tabStopHandlers.keys()].join(', ')}]`
-      );
-      return null;
-    }
-    return handler(targetId);
   }
 
   /**
@@ -971,9 +923,6 @@ export class ReplayCoordinator {
     }
   ): Promise<StopReplayResult | null> {
     if (!this.sessionReplay) return null;
-
-    // Clean up tab stop handler for this session
-    this.tabStopHandlers.delete(sessionId);
 
     // Stop screencast capture and get frame count
     const frameCount = await this.screencastCapture.stopCapture(sessionId);

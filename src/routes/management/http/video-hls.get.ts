@@ -67,8 +67,8 @@ export default class VideoHlsGetRoute extends HTTPRoute {
       throw new NotFound('Invalid HLS filename');
     }
 
-    const replaysDir = video.getReplaysDir();
-    const filePath = path.join(replaysDir, id, filename);
+    const videosDir = video.getVideosDir();
+    const filePath = path.join(videosDir, id, filename);
 
     // If file doesn't exist yet, check if encoding is in progress and wait for it
     if (!(await exists(filePath))) {

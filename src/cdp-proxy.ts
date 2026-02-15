@@ -40,7 +40,6 @@ export interface TabReplayCompleteParams {
  */
 export interface ReplayCapableBrowser {
   setOnBeforeClose(callback: () => Promise<void>): void;
-  setOnStopTabRecording(callback: (targetId: string) => Promise<object | null>): void;
   sendReplayComplete(metadata: ReplayCompleteParams): Promise<boolean>;
   sendTabReplayComplete(metadata: TabReplayCompleteParams): Promise<boolean>;
 }
@@ -54,8 +53,6 @@ export function isReplayCapable(browser: unknown): browser is ReplayCapableBrows
     browser !== null &&
     'setOnBeforeClose' in browser &&
     typeof (browser as Record<string, unknown>).setOnBeforeClose === 'function' &&
-    'setOnStopTabRecording' in browser &&
-    typeof (browser as Record<string, unknown>).setOnStopTabRecording === 'function' &&
     'sendReplayComplete' in browser &&
     typeof (browser as Record<string, unknown>).sendReplayComplete === 'function' &&
     'sendTabReplayComplete' in browser &&
@@ -99,7 +96,6 @@ export class CDPProxy {
     private browserWsEndpoint: string,
     private onClose?: () => void,
     private onBeforeClose?: () => Promise<void>,
-    private onStopTabRecording?: (targetId: string) => Promise<object | null>,
   ) {}
 
   /**
@@ -183,17 +179,6 @@ export class CDPProxy {
             return;
           }
 
-          // Intercept Browserless.stopTabRecording — stop recording and return metadata synchronously
-          if (msg?.method === 'Browserless.stopTabRecording' && typeof msg?.id === 'number') {
-            const { targetId } = msg.params || {};
-            if (targetId && this.onStopTabRecording) {
-              void this.handleStopTabRecording(msg.id, targetId);
-            } else {
-              void this.sendClientResponse(msg.id, {});
-            }
-            return;
-          }
-
           // Intercept Browser.close to emit replayComplete before socket closes
           if (msg?.method === 'Browser.close' && this.onBeforeClose && !this.closeRequested) {
             this.closeRequested = true;
@@ -256,20 +241,6 @@ export class CDPProxy {
 
     if (this.browserWs?.readyState === WebSocket.OPEN) {
       this.browserWs.send(data, { binary: isBinary });
-    }
-  }
-
-  private async handleStopTabRecording(msgId: number, targetId: string): Promise<void> {
-    try {
-      this.log.info(`stopTabRecording: handling targetId=${targetId}`);
-      const metadata = await this.onStopTabRecording!(targetId);
-      if (!metadata) {
-        this.log.warn(`stopTabRecording: handler returned null for targetId=${targetId}`);
-      }
-      void this.sendClientResponse(msgId, metadata || {});
-    } catch (e) {
-      this.log.warn(`stopTabRecording failed for targetId=${targetId}: ${e instanceof Error ? e.message : String(e)}`);
-      void this.sendClientResponse(msgId, {});
     }
   }
 

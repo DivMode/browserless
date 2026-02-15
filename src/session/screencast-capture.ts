@@ -1,4 +1,4 @@
-import { mkdir, readdir, rename, writeFile } from 'fs/promises';
+import { mkdir, writeFile } from 'fs/promises';
 import path from 'path';
 
 import { Logger } from '@browserless.io/browserless';
@@ -13,7 +13,7 @@ import { Logger } from '@browserless.io/browserless';
  * - Page.startScreencast sends PNG frames when the page visually changes
  * - Static page fallback: if no frame arrives in 2 seconds, fire
  *   Page.captureScreenshot (handles Turnstile "Just a moment..." pages)
- * - Frames saved as {timestamp_ms}.png in {replaysDir}/{sessionId}/frames/{cdpSessionId}/
+ * - Frames saved as {timestamp_ms}.png in {videosDir}/{sessionId}--tab-{targetId}/frames/
  *
  * Frame acknowledgment (Page.screencastFrameAck) tells Chrome to send the
  * next frame. Without ack, Chrome stops sending frames.
@@ -23,10 +23,12 @@ type SendCommand = (method: string, params: object, cdpSessionId?: string) => Pr
 
 interface CaptureSession {
   sessionId: string;
-  framesDir: string;
+  videosDir: string;
   frameCount: number;
   /** Per-target frame counts, keyed by CDP session ID */
   targetFrameCounts: Map<string, number>;
+  /** Per-target frame directories, keyed by CDP session ID → absolute path */
+  targetDirs: Map<string, string>;
   /** Per-target fallback timers */
   fallbackTimers: Map<string, ReturnType<typeof setTimeout>>;
   /** CDP session IDs we're capturing from */
@@ -49,21 +51,20 @@ export class ScreencastCapture {
    * Initialize screencast capture for a session.
    *
    * Called by ReplayCoordinator when a replay session starts.
-   * Creates the frames directory and stores the sendCommand reference.
+   * Stores videosDir and sessionId — per-target directories are
+   * created in addTarget() when we know the targetId.
    */
   async initSession(
     sessionId: string,
     sendCommand: SendCommand,
-    replaysDir: string,
+    videosDir: string,
   ): Promise<void> {
-    const framesDir = path.join(replaysDir, sessionId, 'frames');
-    await mkdir(framesDir, { recursive: true });
-
     this.sessions.set(sessionId, {
       sessionId,
-      framesDir,
+      videosDir,
       frameCount: 0,
       targetFrameCounts: new Map(),
+      targetDirs: new Map(),
       fallbackTimers: new Map(),
       activeTargets: new Set(),
       sendCommand,
@@ -76,6 +77,10 @@ export class ScreencastCapture {
   /**
    * Add a target to an existing capture session and start screencast on it.
    *
+   * Computes the final frame directory directly from targetId — no staging
+   * directory, no subsequent rename/move. This eliminates the ~13s bottleneck
+   * that occurred when moveTargetFrames() renamed ~300 PNG files.
+   *
    * Called by ReplayCoordinator when a new page target is auto-attached
    * (after rrweb injection and target resume).
    */
@@ -83,14 +88,17 @@ export class ScreencastCapture {
     sessionId: string,
     sendCommand: SendCommand,
     cdpSessionId: string,
+    targetId: string,
   ): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session || session.stopped) return;
 
     try {
-      // Create per-target frame subdirectory
-      const targetDir = path.join(session.framesDir, cdpSessionId);
+      // Write frames directly to final tab video directory (no staging/move)
+      const tabReplayId = `${sessionId}--tab-${targetId}`;
+      const targetDir = path.join(session.videosDir, tabReplayId, 'frames');
       await mkdir(targetDir, { recursive: true });
+      session.targetDirs.set(cdpSessionId, targetDir);
 
       await sendCommand('Page.startScreencast', {
         format: 'png',
@@ -115,7 +123,7 @@ export class ScreencastCapture {
    * a Page.screencastFrame event arrives.
    *
    * Flow:
-   * 1. Write PNG data to per-target subdirectory
+   * 1. Write PNG data to per-target directory (already at final path)
    * 2. Acknowledge frame (tells Chrome to send next one)
    * 3. Reset fallback timer (page is active)
    */
@@ -127,10 +135,13 @@ export class ScreencastCapture {
     const session = this.sessions.get(sessionId);
     if (!session || session.stopped) return;
 
+    const targetDir = session.targetDirs.get(cdpSessionId);
+    if (!targetDir) return;
+
     try {
-      // Write frame to per-target subdirectory
+      // Write frame to per-target directory (already at final path)
       const timestamp = Math.round(params.metadata.timestamp * 1000);
-      const framePath = path.join(session.framesDir, cdpSessionId, `${timestamp}.png`);
+      const framePath = path.join(targetDir, `${timestamp}.png`);
       await writeFile(framePath, Buffer.from(params.data, 'base64'));
       session.frameCount++;
 
@@ -166,6 +177,9 @@ export class ScreencastCapture {
     const timer = setTimeout(async () => {
       if (session.stopped) return;
 
+      const targetDir = session.targetDirs.get(cdpSessionId);
+      if (!targetDir) return;
+
       try {
         const result = await session.sendCommand('Page.captureScreenshot', {
           format: 'png',
@@ -173,7 +187,7 @@ export class ScreencastCapture {
 
         if (result?.data) {
           const timestamp = Date.now();
-          const framePath = path.join(session.framesDir, cdpSessionId, `${timestamp}.png`);
+          const framePath = path.join(targetDir, `${timestamp}.png`);
           await writeFile(framePath, Buffer.from(result.data, 'base64'));
           session.frameCount++;
 
@@ -221,41 +235,15 @@ export class ScreencastCapture {
 
     const frameCount = session.targetFrameCounts.get(cdpSessionId) ?? 0;
     session.targetFrameCounts.delete(cdpSessionId);
+    session.targetDirs.delete(cdpSessionId);
 
     this.log.info(`Screencast stopped for target ${cdpSessionId}: ${frameCount} frames`);
     return frameCount;
   }
 
   /**
-   * Move a target's frames from {framesDir}/{cdpSessionId}/ to {destDir}/frames/.
-   * Used to give each tab replay its own frames directory for independent encoding.
-   */
-  async moveTargetFrames(sessionId: string, cdpSessionId: string, destDir: string): Promise<void> {
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-
-    const srcDir = path.join(session.framesDir, cdpSessionId);
-    const destFramesDir = path.join(destDir, 'frames');
-
-    try {
-      await mkdir(destFramesDir, { recursive: true });
-
-      // Move individual frame files (rename is atomic within same filesystem)
-      const files = await readdir(srcDir).catch(() => [] as string[]);
-      for (const file of files) {
-        await rename(path.join(srcDir, file), path.join(destFramesDir, file));
-      }
-
-      this.log.debug(`Moved ${files.length} frames from ${cdpSessionId} to ${destDir}`);
-    } catch (e) {
-      this.log.debug(`Failed to move target frames: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-
-  /**
    * Stop screencast capture for a session.
-   * Merges remaining target subdirectories back into {framesDir}/ for
-   * session-level encoding compatibility, then returns total frame count.
+   * Frames are already at their final paths — just stop capture and clean up.
    */
   async stopCapture(sessionId: string): Promise<number> {
     const session = this.sessions.get(sessionId);
@@ -275,17 +263,6 @@ export class ScreencastCapture {
         await session.sendCommand('Page.stopScreencast', {}, cdpSessionId);
       } catch {
         // Target may already be closed
-      }
-
-      // Merge remaining target subdirs back into framesDir for session-level encoding
-      const targetDir = path.join(session.framesDir, cdpSessionId);
-      try {
-        const files = await readdir(targetDir).catch(() => [] as string[]);
-        for (const file of files) {
-          await rename(path.join(targetDir, file), path.join(session.framesDir, file));
-        }
-      } catch {
-        // Target dir may not exist
       }
     }
 

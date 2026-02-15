@@ -221,8 +221,8 @@ export class BrowserLauncher {
     // Register session
     this.registry.register(browser, session);
 
-    // Start replay if enabled — must await so tab stop handler is registered
-    // before browser is returned (otherwise stopTabRecording races with setup)
+    // Start replay if enabled — must await so auto-attach is registered
+    // before browser is returned (otherwise new tabs race with setup)
     if (session.replay && this.replayCoordinator) {
       this.replayCoordinator.startReplay(sessionId, trackingId);
       try {

@@ -14,19 +14,19 @@ import type { VideoEncoder } from './encoder.js';
  *
  * Separated from SessionReplay (which handles rrweb DOM recording)
  * because video (screencast PNG frames → HLS encoding) is an
- * independent concern that happens to share storage paths.
+ * independent concern with its own storage directory (videosDir).
  *
  * Responsibilities:
  * - Delete video frames (for successful scrapes where video isn't needed)
  * - Own the VideoEncoder reference (for on-demand encoding from routes)
- * - Provide store/replaysDir access for video routes
+ * - Provide store/videosDir access for video routes
  */
 export class VideoManager {
   private log = new Logger('video-manager');
   private encoder?: VideoEncoder;
 
   constructor(
-    private replaysDir: string,
+    private videosDir: string,
     private store: IReplayStore | null,
   ) {}
 
@@ -45,10 +45,10 @@ export class VideoManager {
   }
 
   /**
-   * Get the replays directory path (shared with SessionReplay).
+   * Get the videos directory path.
    */
-  getReplaysDir(): string {
-    return this.replaysDir;
+  getVideosDir(): string {
+    return this.videosDir;
   }
 
   /**
@@ -71,7 +71,7 @@ export class VideoManager {
    * but delete the screencast video to save disk space.
    */
   async deleteVideoFrames(id: string): Promise<boolean> {
-    const sessionDir = path.join(this.replaysDir, id);
+    const sessionDir = path.join(this.videosDir, id);
     let deleted = false;
 
     try {
@@ -88,9 +88,14 @@ export class VideoManager {
         deleted = true;
       }
       // Delete standalone video file
-      const videoPath = path.join(this.replaysDir, `${id}.mp4`);
+      const videoPath = path.join(this.videosDir, `${id}.mp4`);
       if (await exists(videoPath)) {
         await rm(videoPath);
+        deleted = true;
+      }
+      // Delete session directory if it exists (HLS segments live directly in it)
+      if (await exists(sessionDir)) {
+        await rm(sessionDir, { recursive: true });
         deleted = true;
       }
       // Update store: reset encoding status (no video available)

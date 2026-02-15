@@ -44,7 +44,7 @@ export interface SessionReplayState {
   events: ReplayEvent[];
   isReplaying: boolean;
   /** Merged session events exceeded maxReplaySize — stop adding to merged array
-   *  but keep per-tab tracking alive for stopTabRecording/video metadata. */
+   *  but keep per-tab tracking alive for video metadata. */
   sessionOverflow: boolean;
   sessionId: string;
   startedAt: number;
@@ -505,6 +505,7 @@ export class SessionReplay extends EventEmitter {
   protected replays: Map<string, SessionReplayState> = new Map();
   protected log = new Logger('session-replay');
   protected replaysDir: string;
+  protected videosDir: string;
   protected enabled: boolean;
   protected maxReplaySize: number;
   protected store: IReplayStore | null = null;
@@ -519,6 +520,7 @@ export class SessionReplay extends EventEmitter {
     super();
     this.enabled = process.env.ENABLE_REPLAY !== 'false';
     this.replaysDir = process.env.REPLAY_DIR || '/tmp/browserless-replays';
+    this.videosDir = process.env.VIDEO_DIR || '/tmp/browserless-videos';
     this.maxReplaySize = +(process.env.REPLAY_MAX_SIZE || '52428800');
     // Default: 7 days (604800000ms)
     this.maxAgeMs = +(process.env.REPLAY_MAX_AGE_MS || '604800000');
@@ -536,6 +538,10 @@ export class SessionReplay extends EventEmitter {
 
   public getReplaysDir(): string {
     return this.replaysDir;
+  }
+
+  public getVideosDir(): string {
+    return this.videosDir;
   }
 
   /**
@@ -562,6 +568,11 @@ export class SessionReplay extends EventEmitter {
     if (!(await exists(this.replaysDir))) {
       await mkdir(this.replaysDir, { recursive: true });
       this.log.info(`Created replays directory: ${this.replaysDir}`);
+    }
+
+    if (!(await exists(this.videosDir))) {
+      await mkdir(this.videosDir, { recursive: true });
+      this.log.info(`Created videos directory: ${this.videosDir}`);
     }
 
     // Only create store if not injected
@@ -687,7 +698,7 @@ export class SessionReplay extends EventEmitter {
 
     // Stop adding to merged session events when max size exceeded,
     // but do NOT call stopReplay — per-tab tracking must stay alive
-    // for stopTabRecording/video metadata on long-lived sessions.
+    // for video metadata on long-lived sessions.
     if (state.sessionOverflow) return;
 
     const currentSize = JSON.stringify(state.events).length;
@@ -962,16 +973,8 @@ export class SessionReplay extends EventEmitter {
 
     try {
       await rm(filepath);
-      // Remove session directory (HLS segments, frames, playlist)
-      const sessionDir = path.join(this.replaysDir, id);
-      if (await exists(sessionDir)) {
-        await rm(sessionDir, { recursive: true });
-      }
-      // Also remove standalone video file if it exists
-      const videoPath = path.join(this.replaysDir, `${id}.mp4`);
-      if (await exists(videoPath)) {
-        await rm(videoPath);
-      }
+      // Video cleanup is handled by VideoManager.deleteVideoFrames()
+      // called by the route handler — SessionReplay only owns replay data.
       // Also remove from SQLite
       if (this.store) {
         const result = this.store.delete(id);

@@ -122,7 +122,7 @@ export class Browserless extends EventEmitter {
     this.fileSystem = fileSystem || new FileSystem(this.config);
     this.sessionReplay = sessionReplay || new SessionReplay(this.config);
     this.videoManager = new VideoManager(
-      this.sessionReplay.getReplaysDir(),
+      this.sessionReplay.getVideosDir(),
       this.sessionReplay.getStore(),
     );
     this.browserManager =
@@ -462,7 +462,7 @@ export class Browserless extends EventEmitter {
       this.videoManager.setStore(store);
       const encoder = this.browserManager.getReplayCoordinator().getVideoEncoder();
       encoder.setStore(store);
-      await encoder.cleanupOrphans(this.sessionReplay.getReplaysDir());
+      await encoder.cleanupOrphans(this.sessionReplay.getVideosDir());
     }
 
     await this.server.start();

@@ -12,22 +12,26 @@ import { ok, err } from './interfaces/replay-store.interface.js';
 
 interface InitializedState {
   db: DatabaseType;
-  stmtInsert: Statement;
+  stmtInsertReplay: Statement;
+  stmtInsertVideo: Statement;
   stmtSelectAll: Statement;
   stmtSelectById: Statement;
-  stmtDelete: Statement;
+  stmtDeleteReplay: Statement;
+  stmtDeleteVideo: Statement;
   stmtUpdateEncoding: Statement;
 }
 
 /**
- * SQLite-based metadata store for session replays.
+ * SQLite-based metadata store for session replays and videos.
  *
  * Replaces O(n) file scanning with O(1) indexed queries.
  * Uses better-sqlite3 for Node.js compatibility.
  *
  * Schema:
- *   replays table with indexed trackingId and startedAt columns
- *   Events stored separately in JSON files (not in SQLite)
+ *   replays table — DOM recording metadata (events, duration, tracking)
+ *   videos table — video-specific data (frame count, encoding status, video path)
+ *   LEFT JOIN reconstructs the full ReplayMetadata interface for API compat.
+ *   Events stored separately in JSON files (not in SQLite).
  *
  * Error Handling:
  *   All methods return Result<T, ReplayStoreError> instead of throwing.
@@ -72,7 +76,9 @@ export class ReplayStore implements IReplayStore {
         db.exec(`ALTER TABLE recordings RENAME TO replays`);
       } catch { /* table already renamed or doesn't exist */ }
 
-      // Create table and indexes if they don't exist
+      // Create replays table (DOM recording metadata)
+      // Ghost columns (frameCount, encodingStatus, videoPath) may exist from
+      // older schema — they're harmless and needed for the migration below.
       db.exec(`
         CREATE TABLE IF NOT EXISTS replays (
           id TEXT PRIMARY KEY,
@@ -84,51 +90,89 @@ export class ReplayStore implements IReplayStore {
           browserType TEXT,
           routePath TEXT,
           userAgent TEXT,
-          frameCount INTEGER NOT NULL DEFAULT 0,
-          videoPath TEXT,
-          encodingStatus TEXT NOT NULL DEFAULT 'none'
+          parentSessionId TEXT,
+          targetId TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_trackingId ON replays(trackingId);
         CREATE INDEX IF NOT EXISTS idx_startedAt ON replays(startedAt DESC);
       `);
 
-      // Migrate existing tables: add video columns if missing
+      // Create videos table (video-specific data)
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS videos (
+          id TEXT PRIMARY KEY,
+          frameCount INTEGER NOT NULL DEFAULT 0,
+          encodingStatus TEXT NOT NULL DEFAULT 'none',
+          videoPath TEXT
+        );
+      `);
+
+      // Migrate: add columns if missing on old schemas (before video split).
+      // These become ghost columns after migration but are needed for the
+      // INSERT OR IGNORE migration below to work on existing DBs.
+      try { db.exec(`ALTER TABLE replays ADD COLUMN frameCount INTEGER NOT NULL DEFAULT 0`); } catch { /* exists */ }
+      try { db.exec(`ALTER TABLE replays ADD COLUMN videoPath TEXT`); } catch { /* exists */ }
+      try { db.exec(`ALTER TABLE replays ADD COLUMN encodingStatus TEXT NOT NULL DEFAULT 'none'`); } catch { /* exists */ }
+      try { db.exec(`ALTER TABLE replays ADD COLUMN parentSessionId TEXT`); } catch { /* exists */ }
+      try { db.exec(`ALTER TABLE replays ADD COLUMN targetId TEXT`); } catch { /* exists */ }
+
+      // Migrate existing video data from replays ghost columns to videos table.
+      // Safe to run multiple times — INSERT OR IGNORE skips existing rows.
       try {
-        db.exec(`ALTER TABLE replays ADD COLUMN frameCount INTEGER NOT NULL DEFAULT 0`);
-      } catch { /* column already exists */ }
-      try {
-        db.exec(`ALTER TABLE replays ADD COLUMN videoPath TEXT`);
-      } catch { /* column already exists */ }
-      try {
-        db.exec(`ALTER TABLE replays ADD COLUMN encodingStatus TEXT NOT NULL DEFAULT 'none'`);
-      } catch { /* column already exists */ }
-      // Per-tab recording columns
-      try {
-        db.exec(`ALTER TABLE replays ADD COLUMN parentSessionId TEXT`);
-      } catch { /* column already exists */ }
-      try {
-        db.exec(`ALTER TABLE replays ADD COLUMN targetId TEXT`);
-      } catch { /* column already exists */ }
+        db.exec(`
+          INSERT OR IGNORE INTO videos (id, frameCount, encodingStatus, videoPath)
+          SELECT id, frameCount, encodingStatus, videoPath
+          FROM replays
+          WHERE frameCount > 0 OR encodingStatus != 'none'
+        `);
+      } catch {
+        // Ghost columns may not exist on a completely fresh DB (table created
+        // with new schema above that omits them). That's fine — nothing to migrate.
+      }
 
       this.state = {
         db,
-        stmtInsert: db.prepare(`
+        stmtInsertReplay: db.prepare(`
           INSERT OR REPLACE INTO replays
-          (id, trackingId, startedAt, endedAt, duration, eventCount, browserType, routePath, userAgent, frameCount, videoPath, encodingStatus, parentSessionId, targetId)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, trackingId, startedAt, endedAt, duration, eventCount, browserType, routePath, userAgent, parentSessionId, targetId)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `),
-        stmtSelectAll: db.prepare(
-          `SELECT * FROM replays ORDER BY startedAt DESC`
-        ),
-        stmtSelectById: db.prepare(
-          `SELECT * FROM replays WHERE id = ?`
-        ),
-        stmtDelete: db.prepare(
-          `DELETE FROM replays WHERE id = ?`
-        ),
-        stmtUpdateEncoding: db.prepare(
-          `UPDATE replays SET encodingStatus = ?, videoPath = ? WHERE id = ?`
-        ),
+        stmtInsertVideo: db.prepare(`
+          INSERT OR REPLACE INTO videos
+          (id, frameCount, encodingStatus, videoPath)
+          VALUES (?, ?, ?, ?)
+        `),
+        stmtSelectAll: db.prepare(`
+          SELECT r.id, r.trackingId, r.startedAt, r.endedAt, r.duration, r.eventCount,
+                 r.browserType, r.routePath, r.userAgent, r.parentSessionId, r.targetId,
+                 COALESCE(v.frameCount, 0) as frameCount,
+                 COALESCE(v.encodingStatus, 'none') as encodingStatus,
+                 v.videoPath
+          FROM replays r
+          LEFT JOIN videos v ON r.id = v.id
+          ORDER BY r.startedAt DESC
+        `),
+        stmtSelectById: db.prepare(`
+          SELECT r.id, r.trackingId, r.startedAt, r.endedAt, r.duration, r.eventCount,
+                 r.browserType, r.routePath, r.userAgent, r.parentSessionId, r.targetId,
+                 COALESCE(v.frameCount, 0) as frameCount,
+                 COALESCE(v.encodingStatus, 'none') as encodingStatus,
+                 v.videoPath
+          FROM replays r
+          LEFT JOIN videos v ON r.id = v.id
+          WHERE r.id = ?
+        `),
+        stmtDeleteReplay: db.prepare(`DELETE FROM replays WHERE id = ?`),
+        stmtDeleteVideo: db.prepare(`DELETE FROM videos WHERE id = ?`),
+        stmtUpdateEncoding: db.prepare(`
+          INSERT OR REPLACE INTO videos (id, frameCount, encodingStatus, videoPath)
+          VALUES (
+            ?,
+            COALESCE((SELECT frameCount FROM videos WHERE id = ?), 0),
+            ?,
+            ?
+          )
+        `),
       };
 
       this.log.info(`Replay store initialized at ${this.dbPath}`);
@@ -154,6 +198,8 @@ export class ReplayStore implements IReplayStore {
 
   /**
    * Insert or update replay metadata.
+   * Inserts into replays table always. Inserts into videos table
+   * only if there are video frames or encoding is in progress.
    */
   insert(metadata: ReplayMetadata): Result<void, ReplayStoreError> {
     const s = this.ensureHealthy();
@@ -165,7 +211,7 @@ export class ReplayStore implements IReplayStore {
     }
 
     try {
-      s.stmtInsert.run(
+      s.stmtInsertReplay.run(
         metadata.id,
         metadata.trackingId ?? null,
         metadata.startedAt,
@@ -175,12 +221,20 @@ export class ReplayStore implements IReplayStore {
         metadata.browserType,
         metadata.routePath,
         metadata.userAgent ?? null,
-        metadata.frameCount,
-        metadata.videoPath ?? null,
-        metadata.encodingStatus,
         metadata.parentSessionId ?? null,
         metadata.targetId ?? null,
       );
+
+      // Insert into videos table if there's video data
+      if (metadata.frameCount > 0 || metadata.encodingStatus !== 'none') {
+        s.stmtInsertVideo.run(
+          metadata.id,
+          metadata.frameCount,
+          metadata.encodingStatus,
+          metadata.videoPath ?? null,
+        );
+      }
+
       return ok(undefined);
     } catch (error) {
       this.log.error(`Insert failed: ${error}`);
@@ -211,7 +265,7 @@ export class ReplayStore implements IReplayStore {
 
     const txnResult = this.transaction(() => {
       for (const m of metadata) {
-        s.stmtInsert.run(
+        s.stmtInsertReplay.run(
           m.id,
           m.trackingId ?? null,
           m.startedAt,
@@ -221,10 +275,18 @@ export class ReplayStore implements IReplayStore {
           m.browserType,
           m.routePath,
           m.userAgent ?? null,
-          m.frameCount,
-          m.videoPath ?? null,
-          m.encodingStatus
+          m.parentSessionId ?? null,
+          m.targetId ?? null,
         );
+
+        if (m.frameCount > 0 || m.encodingStatus !== 'none') {
+          s.stmtInsertVideo.run(
+            m.id,
+            m.frameCount,
+            m.encodingStatus,
+            m.videoPath ?? null,
+          );
+        }
       }
     });
 
@@ -242,6 +304,7 @@ export class ReplayStore implements IReplayStore {
   /**
    * List all replays, ordered by startedAt descending.
    * O(1) query instead of O(n) file reads.
+   * Uses LEFT JOIN to reconstruct full ReplayMetadata from both tables.
    */
   list(): Result<ReplayMetadata[], ReplayStoreError> {
     const s = this.ensureHealthy();
@@ -267,6 +330,7 @@ export class ReplayStore implements IReplayStore {
 
   /**
    * Find replay by ID.
+   * Uses LEFT JOIN to reconstruct full ReplayMetadata.
    */
   findById(id: string): Result<ReplayMetadata | null, ReplayStoreError> {
     const s = this.ensureHealthy();
@@ -291,7 +355,7 @@ export class ReplayStore implements IReplayStore {
   }
 
   /**
-   * Delete replay metadata by ID.
+   * Delete replay metadata by ID from both tables.
    */
   delete(id: string): Result<boolean, ReplayStoreError> {
     const s = this.ensureHealthy();
@@ -303,7 +367,8 @@ export class ReplayStore implements IReplayStore {
     }
 
     try {
-      const result = s.stmtDelete.run(id);
+      const result = s.stmtDeleteReplay.run(id);
+      s.stmtDeleteVideo.run(id);
       return ok(result.changes > 0);
     } catch (error) {
       this.log.error(`Delete query failed: ${error}`);
@@ -317,6 +382,8 @@ export class ReplayStore implements IReplayStore {
 
   /**
    * Update encoding status and video path for a replay.
+   * Uses INSERT OR REPLACE on the videos table to handle the case
+   * where the video row doesn't exist yet (deferred encoding).
    */
   updateEncodingStatus(
     id: string,
@@ -333,9 +400,10 @@ export class ReplayStore implements IReplayStore {
 
     try {
       const result = s.stmtUpdateEncoding.run(
+        id,
+        id,
         encodingStatus,
         videoPath ?? null,
-        id,
       );
       return ok(result.changes > 0);
     } catch (error) {

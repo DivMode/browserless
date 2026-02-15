@@ -52,6 +52,12 @@ export default class ReplayDataDeleteRoute extends HTTPRoute {
       throw new NotFound(`Replay "${id}" not found`);
     }
 
+    // Also clean up video files (now in separate videosDir)
+    const video = this.videoManager();
+    if (video) {
+      await video.deleteVideoFrames(id);
+    }
+
     return jsonResponse(res, 200, { deleted: true, id });
   }
 }

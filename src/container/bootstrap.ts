@@ -140,13 +140,13 @@ export function createContainer(options: ContainerOptions = {}): ServiceContaine
     options.sessionRegistry ?? new SessionRegistry()
   );
 
-  // VideoManager - depends on sessionReplay (for replaysDir and store)
+  // VideoManager - depends on sessionReplay (for videosDir and store)
   container.registerSingleton(
     Services.VideoManager,
     (c) => {
       const replay = c.resolve<SessionReplay>(Services.SessionReplay);
       return options.videoManager ?? new VideoManager(
-        replay.getReplaysDir(),
+        replay.getVideosDir(),
         replay.getStore(),
       );
     },

@@ -73,10 +73,10 @@ export default class VideoGetRoute extends HTTPRoute {
     // Trigger on-demand encoding for deferred sessions (lazy encoding)
     if (encodingStatus === 'deferred') {
       const encoder = video.getVideoEncoder();
-      const replaysDir = video.getReplaysDir();
+      const videosDir = video.getVideosDir();
       if (encoder && store) {
         store.updateEncodingStatus(id, 'pending');
-        encoder.queueEncode(id, replaysDir, frameCount);
+        encoder.queueEncode(id, videosDir, frameCount);
         encodingStatus = 'pending';
       }
     }

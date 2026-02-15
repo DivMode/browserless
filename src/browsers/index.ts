@@ -368,16 +368,6 @@ export class BrowserManager {
         await this.closeForBrowser(browser, true);
       });
 
-      // Enable synchronous stop-before-close for per-tab recordings.
-      // Client sends Browserless.stopTabRecording CDP command, CDPProxy intercepts,
-      // and this callback flushes events + writes recording + returns metadata.
-      // Use registry session ID to match the handler registered by setupReplayForAllTabs.
-      browser.setOnStopTabRecording(async (targetId: string) => {
-        const session = this.registry.get(browser);
-        const sessionId = session?.id || '';
-        if (!sessionId) return null;
-        return this.replay.stopTabRecording(sessionId, targetId);
-      });
     }
 
     return browser;
