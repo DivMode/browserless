@@ -64,6 +64,14 @@
     return eventPosition.toFixed(2);
   }
 
+  const defaultTagColors: Record<string, string> = {
+    'ahrefs.overview': '#3b82f6',  // blue
+    'ahrefs.backlinks': '#6366f1', // indigo
+    'ahrefs.complete': '#10b981',  // emerald
+    'ahrefs.error': '#ef4444',     // red
+    'phase.start': '#f59e0b',      // amber
+  };
+
   let customEvents: CustomEvent[];
   $: customEvents = (() => {
     if (!$filters.markers && !$filters.cloudflare) return [];
@@ -86,7 +94,7 @@
 
         const customEvent = {
           name: event.data.tag,
-          background: tags[event.data.tag] || 'rgb(249, 115, 22)',
+          background: tags[event.data.tag] || defaultTagColors[event.data.tag] || 'rgb(249, 115, 22)',
           position: `${position(start, end, event.timestamp)}%`,
         };
         customEventsArr.push(customEvent);

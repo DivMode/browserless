@@ -750,6 +750,11 @@ export class ReplayCoordinator {
             handleIframeCDPEvent(msg);
           }
 
+          // Runtime.bindingCalled (turnstile solved) → notify solver of auto-solve
+          if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__turnstileSolvedBinding') {
+            solver.onAutoSolveBinding(msg.sessionId).catch(() => {});
+          }
+
           // Handle target info changed (URL navigation)
           // addScriptToEvaluateOnNewDocument persists across navigations on the same
           // session, so rrweb auto-re-injects. This is a safety net — if the persistent

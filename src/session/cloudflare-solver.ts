@@ -7,11 +7,14 @@ import {
   TURNSTILE_CALLBACK_HOOK_JS,
   TURNSTILE_TOKEN_JS,
   TURNSTILE_STATE_OBSERVER_JS,
+  TURNSTILE_ERROR_CHECK_JS,
+  FIND_CLICK_TARGET_JS,
   detectChallengeType,
 } from '../shared/challenge-detector.js';
 import {
   simulateHumanPresence,
-  clickAtCoordinates,
+  approachCoordinates,
+  commitClick,
 } from '../shared/mouse-humanizer.js';
 
 type SendCommand = (method: string, params?: object, cdpSessionId?: string) => Promise<any>;
@@ -199,9 +202,23 @@ export class CloudflareSolver {
     this.emitProgress(active, state);
 
     if (state === 'success') {
-      // Challenge solved!
-      const duration = Date.now() - active.startTime;
+      // Wait for page to settle (JS context may be rebuilding after navigation)
+      await new Promise(r => setTimeout(r, 500));
+
+      // Verify: re-run detection to confirm challenge is actually gone
       const token = await this.getToken(active.pageCdpSessionId);
+      const stillDetected = await this.isStillChallenge(active.pageCdpSessionId);
+
+      if (stillDetected && !token) {
+        // False positive — challenge still present and no token
+        this.marker(active.pageCdpSessionId, 'cf.false_positive', { state });
+        this.emitProgress(active, 'false_positive');
+        this.log.warn(`False positive success for page ${pageTargetId}`);
+        return; // Don't resolve, keep waiting
+      }
+
+      const duration = Date.now() - active.startTime;
+      active.aborted = true; // Stop activity loop
 
       const result: SolveResult = {
         solved: true,
@@ -216,9 +233,11 @@ export class CloudflareSolver {
       this.activeChallenges.delete(pageTargetId);
       this.emitSolved(active, result);
     } else if (state === 'fail' || state === 'expired' || state === 'timeout') {
+      active.aborted = true; // Stop activity loop
       // Challenge failed — may retry
       if (active.attempt < this.config.maxAttempts) {
         active.attempt++;
+        active.aborted = false; // Reset for retry
         this.log.info(`Retrying challenge (attempt ${active.attempt})`);
         this.solveChallenge(active).catch(() => {});
       } else {
@@ -227,6 +246,44 @@ export class CloudflareSolver {
         this.emitFailed(active, state, duration);
       }
     }
+  }
+
+  /** Called when TURNSTILE_CALLBACK_HOOK_JS detects an auto-solve on any page. */
+  async onAutoSolveBinding(cdpSessionId: string): Promise<void> {
+    if (!this.enabled) return;
+
+    // Find the page this binding fired on
+    const pageTargetId = this.findPageBySession(cdpSessionId);
+    if (!pageTargetId) return;
+
+    const active = this.activeChallenges.get(pageTargetId);
+
+    if (active && !active.aborted) {
+      // Active challenge exists — resolve it as auto-solved via callback
+      await this.resolveAutoSolved(active, 'callback_binding');
+      return;
+    }
+
+    // No active challenge — standalone Turnstile (e.g., fast path page).
+    // Emit a minimal detected+solved pair so pydoll gets observability.
+    const token = await this.getToken(cdpSessionId);
+    this.emitClientEvent('Browserless.challengeDetected', {
+      type: 'widget',
+      detectionMethod: 'callback_binding',
+    }).catch(() => {});
+    this.marker(cdpSessionId, 'cf.challenge_detected', { type: 'widget' });
+
+    this.emitClientEvent('Browserless.challengeSolved', {
+      solved: true,
+      type: 'widget',
+      method: 'auto_solve',
+      token: token || undefined,
+      duration_ms: 0,
+      attempts: 0,
+      auto_resolved: true,
+      signal: 'callback_binding',
+    }).catch(() => {});
+    this.marker(cdpSessionId, 'cf.solved', { type: 'widget', method: 'auto_solve', signal: 'callback_binding' });
   }
 
   /** Clean up when session is destroyed. */
@@ -243,15 +300,31 @@ export class CloudflareSolver {
     if (this.destroyed || !this.enabled) return;
 
     try {
-      const result = await this.sendCommand('Runtime.evaluate', {
-        expression: CF_CHALLENGE_DETECTION_JS,
-        returnByValue: true,
-      }, cdpSessionId);
+      // Poll for challenge detection — CF page JS needs time to load _cf_chl_opt
+      let data: any = null;
+      for (let i = 0; i < 20; i++) {
+        if (this.destroyed || !this.enabled) return;
+        // If another call already created an active challenge for this target, bail
+        if (this.activeChallenges.has(targetId)) return;
 
-      const raw = result?.result?.value;
-      if (!raw) return;
-      const data = JSON.parse(raw);
-      if (!data.detected) return;
+        try {
+          const result = await this.sendCommand('Runtime.evaluate', {
+            expression: CF_CHALLENGE_DETECTION_JS,
+            returnByValue: true,
+          }, cdpSessionId);
+          const raw = result?.result?.value;
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed.detected) { data = parsed; break; }
+          }
+        } catch {
+          return; // Page gone or session invalid
+        }
+
+        await new Promise((r) => setTimeout(r, 500));
+      }
+
+      if (!data) return;
 
       // Check if we already have a Turnstile iframe for this page
       const hasTurnstileIframe = [...this.iframeToPage.entries()]
@@ -307,48 +380,52 @@ export class CloudflareSolver {
         await this.solveManaged(active);
         break;
     }
+
+    // Keep browser alive while waiting for iframe state change
+    if (!active.aborted && !this.destroyed) {
+      this.startActivityLoop(active);
+    }
   }
 
   private async solveWithClick(active: ActiveChallenge): Promise<void> {
     if (active.aborted) return;
     const { pageCdpSessionId } = active;
 
-    this.marker(pageCdpSessionId, 'cf.presence_start');
-
     // Phase 1: Human presence simulation (1-3s)
+    this.marker(pageCdpSessionId, 'cf.presence_start');
     const presencePos = await simulateHumanPresence(
       this.sendCommand, pageCdpSessionId, 1.0 + Math.random() * 2.5,
     );
 
     if (active.aborted) return;
-
-    // Check if auto-solved during presence
     if (await this.isSolved(pageCdpSessionId)) {
-      const duration = Date.now() - active.startTime;
-      const token = await this.getToken(pageCdpSessionId);
-      const pageTargetId = this.findPageBySession(pageCdpSessionId);
-      if (pageTargetId) this.activeChallenges.delete(pageTargetId);
-      this.emitSolved(active, {
-        solved: true, type: active.info.type, method: 'auto_solve',
-        token: token || undefined, duration_ms: duration,
-        attempts: active.attempt, auto_resolved: true,
-      });
+      await this.resolveAutoSolved(active, 'presence_phase');
       return;
     }
 
-    // Phase 2: Find Turnstile iframe coordinates
+    // Phase 2: Find Turnstile click target via 12-method cascade
     const coords = await this.findClickTarget(pageCdpSessionId);
     if (!coords || active.aborted) return;
 
-    this.marker(pageCdpSessionId, 'cf.click_attempt', {
-      x: coords.x, y: coords.y, attempt: active.attempt,
-    });
+    this.emitProgress(active, 'widget_found', { method: coords.method, x: coords.x, y: coords.y });
 
-    // Phase 3: Click (approach from presence position)
-    await clickAtCoordinates(
+    // Phase 3: Approach target (1-3s mouse movement via Bezier curves)
+    const [targetX, targetY] = await approachCoordinates(
       this.sendCommand, pageCdpSessionId,
       coords.x, coords.y, presencePos,
     );
+
+    // Gate: check abort + auto-solve before committing click
+    if (active.aborted) return;
+    if (await this.isSolved(pageCdpSessionId)) {
+      this.marker(pageCdpSessionId, 'cf.click_cancelled', { method: coords.method });
+      await this.resolveAutoSolved(active, 'click_cancelled');
+      return;
+    }
+
+    // Phase 4: Commit click (~100ms mousedown + hold + mouseup)
+    await commitClick(this.sendCommand, pageCdpSessionId, targetX, targetY);
+    this.emitProgress(active, 'clicked');
   }
 
   private async solveInvisible(active: ActiveChallenge): Promise<void> {
@@ -361,42 +438,56 @@ export class CloudflareSolver {
 
   private async solveManaged(active: ActiveChallenge): Promise<void> {
     if (active.aborted) return;
+    const { pageCdpSessionId } = active;
 
-    // Managed: passive wait 5s, then click if still unsolved
-    await simulateHumanPresence(this.sendCommand, active.pageCdpSessionId, 3.0 + Math.random() * 2.0);
+    // Phase 1: Passive wait with presence simulation (3-5s)
+    const presencePos = await simulateHumanPresence(
+      this.sendCommand, pageCdpSessionId, 3.0 + Math.random() * 2.0,
+    );
 
-    if (active.aborted || await this.isSolved(active.pageCdpSessionId)) return;
-
-    // If still unsolved, try clicking
-    const coords = await this.findClickTarget(active.pageCdpSessionId);
-    if (coords && !active.aborted) {
-      await clickAtCoordinates(this.sendCommand, active.pageCdpSessionId, coords.x, coords.y);
+    if (active.aborted) return;
+    if (await this.isSolved(pageCdpSessionId)) {
+      await this.resolveAutoSolved(active, 'managed_presence');
+      return;
     }
+
+    // Phase 2: Find click target
+    const coords = await this.findClickTarget(pageCdpSessionId);
+    if (!coords || active.aborted) return;
+
+    this.emitProgress(active, 'widget_found', { method: coords.method, x: coords.x, y: coords.y });
+
+    // Phase 3: Approach target
+    const [targetX, targetY] = await approachCoordinates(
+      this.sendCommand, pageCdpSessionId,
+      coords.x, coords.y, presencePos,
+    );
+
+    // Gate: check abort + auto-solve before committing
+    if (active.aborted) return;
+    if (await this.isSolved(pageCdpSessionId)) {
+      this.marker(pageCdpSessionId, 'cf.click_cancelled', { method: coords.method });
+      await this.resolveAutoSolved(active, 'click_cancelled');
+      return;
+    }
+
+    // Phase 4: Commit click
+    await commitClick(this.sendCommand, pageCdpSessionId, targetX, targetY);
+    this.emitProgress(active, 'clicked');
   }
 
   private async findClickTarget(
     cdpSessionId: string,
-  ): Promise<{ x: number; y: number } | null> {
+  ): Promise<{ x: number; y: number; method?: string } | null> {
     try {
       const result = await this.sendCommand('Runtime.evaluate', {
-        expression: `JSON.stringify((() => {
-          var iframes = document.querySelectorAll('iframe');
-          for (var i = 0; i < iframes.length; i++) {
-            var src = iframes[i].src || '';
-            if (src.includes('challenges.cloudflare.com') || src.includes('turnstile')) {
-              var rect = iframes[i].getBoundingClientRect();
-              if (rect.width > 0 && rect.height > 0) {
-                return { x: rect.x + 30, y: rect.y + rect.height / 2 };
-              }
-            }
-          }
-          return null;
-        })())`,
+        expression: FIND_CLICK_TARGET_JS,
         returnByValue: true,
       }, cdpSessionId);
-
       const raw = result?.result?.value;
-      return raw ? JSON.parse(raw) : null;
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed ? { x: parsed.x, y: parsed.y, method: parsed.m } : null;
     } catch {
       return null;
     }
@@ -405,13 +496,31 @@ export class CloudflareSolver {
   private async isSolved(cdpSessionId: string): Promise<boolean> {
     try {
       const result = await this.sendCommand('Runtime.evaluate', {
-        expression: 'window.__turnstileSolved === true',
+        expression: `window.__turnstileSolved === true || (function() {
+          var el = document.querySelector('[name="cf-turnstile-response"]');
+          return !!(el && el.value && el.value.length > 0);
+        })()`,
         returnByValue: true,
       }, cdpSessionId);
       return result?.result?.value === true;
     } catch {
       return false;
     }
+  }
+
+  /** Resolve an active challenge as auto-solved. Deduplicates the pattern used by solveWithClick and solveManaged. */
+  private async resolveAutoSolved(active: ActiveChallenge, signal: string): Promise<void> {
+    const duration = Date.now() - active.startTime;
+    const token = await this.getToken(active.pageCdpSessionId);
+    active.aborted = true; // Stop activity loop
+    const pageTargetId = this.findPageBySession(active.pageCdpSessionId);
+    if (pageTargetId) this.activeChallenges.delete(pageTargetId);
+    this.emitSolved(active, {
+      solved: true, type: active.info.type, method: 'auto_solve',
+      token: token || undefined, duration_ms: duration,
+      attempts: active.attempt, auto_resolved: true, signal,
+    });
+    this.marker(active.pageCdpSessionId, 'cf.auto_solved', { signal });
   }
 
   private async getToken(cdpSessionId: string): Promise<string | null> {
@@ -441,6 +550,63 @@ export class CloudflareSolver {
     return undefined;
   }
 
+  /** Background loop that keeps the browser alive after click commit. */
+  private startActivityLoop(active: ActiveChallenge): void {
+    const loop = async () => {
+      while (!active.aborted && !this.destroyed) {
+        await new Promise(r => setTimeout(r, 3000 + Math.random() * 4000));
+        if (active.aborted || this.destroyed) break;
+
+        // Poll for missed auto-solve (token in input or callback flag)
+        if (await this.isSolved(active.pageCdpSessionId)) {
+          await this.resolveAutoSolved(active, 'activity_poll');
+          return;
+        }
+
+        // Check for widget error state
+        if (await this.isWidgetError(active.pageCdpSessionId)) {
+          this.marker(active.pageCdpSessionId, 'cf.widget_error_detected');
+          this.emitProgress(active, 'widget_error');
+          break; // Let iframe observer or retry logic handle the failure
+        }
+
+        // Micro presence: short drift + occasional scroll/keypress
+        try {
+          await simulateHumanPresence(this.sendCommand, active.pageCdpSessionId, 0.5 + Math.random() * 1.0);
+        } catch { break; } // CDP session gone
+      }
+    };
+    loop().catch(() => {});
+  }
+
+  /** Check if the Turnstile widget is in an error/expired state. */
+  private async isWidgetError(cdpSessionId: string): Promise<boolean> {
+    try {
+      const result = await this.sendCommand('Runtime.evaluate', {
+        expression: TURNSTILE_ERROR_CHECK_JS,
+        returnByValue: true,
+      }, cdpSessionId);
+      return result?.result?.value != null;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Re-run challenge detection to verify a solve isn't a false positive. */
+  private async isStillChallenge(cdpSessionId: string): Promise<boolean> {
+    try {
+      const result = await this.sendCommand('Runtime.evaluate', {
+        expression: CF_CHALLENGE_DETECTION_JS,
+        returnByValue: true,
+      }, cdpSessionId);
+      const raw = result?.result?.value;
+      if (!raw) return false;
+      return JSON.parse(raw).detected === true;
+    } catch {
+      return false; // Can't reach page = probably navigated away = good
+    }
+  }
+
   // ─── Event emission helpers ───────────────────────────────
 
   private emitDetected(info: ChallengeInfo): void {
@@ -450,16 +616,18 @@ export class CloudflareSolver {
       iframeUrl: info.iframeUrl,
       cType: info.cType,
       cRay: info.cRay,
+      detectionMethod: info.detectionMethod,
     }).catch(() => {});
   }
 
-  private emitProgress(active: ActiveChallenge, state: string): void {
+  private emitProgress(active: ActiveChallenge, state: string, extra?: object): void {
     this.emitClientEvent('Browserless.challengeProgress', {
       state,
       elapsed_ms: Date.now() - active.startTime,
       attempt: active.attempt,
+      ...extra,
     }).catch(() => {});
-    this.marker(active.pageCdpSessionId, 'cf.state_change', { state });
+    this.marker(active.pageCdpSessionId, 'cf.state_change', { state, ...extra });
   }
 
   private emitSolved(active: ActiveChallenge, result: SolveResult): void {
