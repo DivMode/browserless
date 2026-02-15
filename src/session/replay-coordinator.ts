@@ -9,6 +9,8 @@ import {
 } from '@browserless.io/browserless';
 
 import { ScreencastCapture } from './screencast-capture.js';
+import { CloudflareSolver } from './cloudflare-solver.js';
+import { TURNSTILE_STATE_OBSERVER_JS } from '../shared/challenge-detector.js';
 import { VideoEncoder } from '../video/encoder.js';
 import type { VideoManager } from '../video/video-manager.js';
 
@@ -41,6 +43,7 @@ export class ReplayCoordinator {
   private log = new Logger('replay-coordinator');
   private screencastCapture = new ScreencastCapture();
   private videoEncoder: VideoEncoder;
+  private solvers = new Map<string, CloudflareSolver>();
   private baseUrl = process.env.BROWSERLESS_BASE_URL ?? '';
   constructor(private sessionReplay?: SessionReplay, private videoMgr?: VideoManager) {
     this.videoEncoder = new VideoEncoder(sessionReplay?.getStore() ?? null);
@@ -53,6 +56,11 @@ export class ReplayCoordinator {
    */
   isEnabled(): boolean {
     return this.sessionReplay?.isEnabled() ?? false;
+  }
+
+  /** Get solver for a session (used by browser-launcher to wire to CDPProxy). */
+  getSolver(sessionId: string): CloudflareSolver | undefined {
+    return this.solvers.get(sessionId);
   }
 
   /**
@@ -150,6 +158,26 @@ export class ReplayCoordinator {
 
       // Track iframe CDP sessions for network/console capture
       const iframeSessions = new Map<string, string>(); // iframe cdpSessionId -> page cdpSessionId
+
+      // Track iframe targetId -> cdpSessionId for solver navigation hooks
+      const iframeTargetSessions = new Map<string, string>();
+
+      // Create solver for this session (disabled until client enables)
+      const solver = new CloudflareSolver(sendCommand, (cdpSid, tag, payload) => {
+        const tagJson = JSON.stringify(tag);
+        const payloadJson = JSON.stringify(payload || {});
+        sendCommand('Runtime.evaluate', {
+          expression: `(function(){
+            var r = window.__browserlessRecording;
+            if (!r || !r.events) return;
+            r.events.push({
+              type: 5, timestamp: Date.now(),
+              data: { tag: ${tagJson}, payload: ${payloadJson} }
+            });
+          })()`,
+        }, cdpSid).catch(() => {});
+      });
+      this.solvers.set(sessionId, solver);
 
       /**
        * Re-inject rrweb into a target via Runtime.evaluate.
@@ -490,6 +518,9 @@ export class ReplayCoordinator {
               });
             })()`,
           }, pageSessionId).catch(() => {});
+
+          // Notify solver of Turnstile state change
+          solver.onTurnstileStateChange(state, msg.sessionId).catch(() => {});
         }
       };
 
@@ -519,6 +550,7 @@ export class ReplayCoordinator {
               this.log.info(`Target attached (paused=${waitingForDebugger}): targetId=${targetInfo.targetId} url=${targetInfo.url} type=${targetInfo.type}`);
               trackedTargets.add(targetInfo.targetId);
               targetSessions.set(targetInfo.targetId, cdpSessionId);
+              solver.onPageAttached(targetInfo.targetId, cdpSessionId, targetInfo.url).catch(() => {});
 
               // Eagerly initialize tab event tracking so stopTabReplay works
               // even if no rrweb events have been collected yet (short-lived tabs,
@@ -574,6 +606,7 @@ export class ReplayCoordinator {
             // Not tracked for polling (PostMessage handles delivery to parent).
             if (targetInfo.type === 'iframe') {
               this.log.debug(`Iframe target attached (paused=${waitingForDebugger}): ${targetInfo.targetId} url=${targetInfo.url}`);
+              iframeTargetSessions.set(targetInfo.targetId, cdpSessionId);
 
               try {
                 await sendCommand('Page.enable', {}, cdpSessionId);
@@ -611,49 +644,15 @@ export class ReplayCoordinator {
               // #success, #verifying, #fail visibility changes and relays them to the
               // main page via CDP binding → window.__turnstileWidgetState.
               if (targetInfo.url?.includes('challenges.cloudflare.com')) {
-                const stateScript = `(function(){
-                  if (window.__turnstileStateObserved) return;
-                  window.__turnstileStateObserved = true;
-                  var states = ['success','verifying','fail','expired','timeout'];
-                  function check() {
-                    for (var i=0; i<states.length; i++) {
-                      var el = document.getElementById(states[i]);
-                      if (el && getComputedStyle(el).display !== 'none') return states[i];
-                    }
-                    return 'idle';
-                  }
-                  var last = '';
-                  var observer = new MutationObserver(function() {
-                    var current = check();
-                    if (current !== last) {
-                      last = current;
-                      try { window.__turnstileStateBinding(current); } catch(e) {}
-                    }
-                  });
-                  var attempts = 0;
-                  function start() {
-                    var root = document.getElementById('content') || (attempts >= 5 ? document.body : null);
-                    if (root) {
-                      observer.observe(root, { attributes: true, subtree: true, attributeFilter: ['style'] });
-                      var s = check();
-                      if (s !== last) { last = s; try { window.__turnstileStateBinding(s); } catch(e) {} }
-                    } else {
-                      attempts++;
-                      if (attempts < 20) setTimeout(start, 100);
-                    }
-                  }
-                  start();
-                })()`;
-
                 // Register binding on the iframe, then inject state observer
                 sendCommand('Runtime.addBinding', { name: '__turnstileStateBinding' }, cdpSessionId).catch(() => {});
                 sendCommand('Page.addScriptToEvaluateOnNewDocument', {
-                  source: stateScript,
+                  source: TURNSTILE_STATE_OBSERVER_JS,
                   runImmediately: true,
                 }, cdpSessionId).catch(() => {});
                 // Fallback injection for current document
                 setTimeout(() => {
-                  sendCommand('Runtime.evaluate', { expression: stateScript }, cdpSessionId).catch(() => {});
+                  sendCommand('Runtime.evaluate', { expression: TURNSTILE_STATE_OBSERVER_JS }, cdpSessionId).catch(() => {});
                 }, 100);
               }
 
@@ -671,6 +670,13 @@ export class ReplayCoordinator {
                 }
               } catch {
                 // Non-critical — iframe recording still works via rrweb PostMessage
+              }
+
+              // Notify solver about iframe attachment
+              const parentPageEntries = [...targetSessions.values()];
+              const parentCdpSid = parentPageEntries.length > 0 ? parentPageEntries[parentPageEntries.length - 1] : undefined;
+              if (parentCdpSid) {
+                solver.onIframeAttached(targetInfo.targetId, cdpSessionId, targetInfo.url, parentCdpSid).catch(() => {});
               }
             }
           }
@@ -779,6 +785,54 @@ export class ReplayCoordinator {
                   }, cdpSessionId).catch(() => {});
                 }
               }, 200);
+
+              // Notify solver of page navigation
+              if (cdpSessionId) {
+                solver.onPageNavigated(targetInfo.targetId, cdpSessionId, targetInfo.url).catch(() => {});
+              }
+            }
+
+            // Handle iframe navigation (late-navigating CF iframes)
+            const iframeCdpSid = iframeTargetSessions.get(targetInfo.targetId);
+            if (iframeCdpSid && targetInfo.type === 'iframe') {
+              // If iframe navigated to challenges.cloudflare.com, inject state observer
+              if (targetInfo.url?.includes('challenges.cloudflare.com')) {
+                sendCommand('Runtime.addBinding', {
+                  name: '__turnstileStateBinding',
+                }, iframeCdpSid).catch(() => {});
+                sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+                  source: TURNSTILE_STATE_OBSERVER_JS,
+                  runImmediately: true,
+                }, iframeCdpSid).catch(() => {});
+                setTimeout(() => {
+                  sendCommand('Runtime.evaluate', {
+                    expression: TURNSTILE_STATE_OBSERVER_JS,
+                  }, iframeCdpSid).catch(() => {});
+                }, 100);
+
+                // Also inject iframe rrweb
+                sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+                  source: iframeScript,
+                  runImmediately: true,
+                }, iframeCdpSid).catch(() => {});
+                setTimeout(() => {
+                  sendCommand('Runtime.evaluate', {
+                    expression: iframeScript,
+                    returnByValue: true,
+                  }, iframeCdpSid).catch(() => {});
+                }, 50);
+
+                // Enable network/console capture for newly-navigated CF iframe
+                sendCommand('Network.enable', {}, iframeCdpSid).catch(() => {});
+                sendCommand('Runtime.enable', {}, iframeCdpSid).catch(() => {});
+                const pageEntries = [...targetSessions.values()];
+                if (pageEntries.length > 0) {
+                  iframeSessions.set(iframeCdpSid, pageEntries[pageEntries.length - 1]);
+                }
+              }
+
+              // Notify solver
+              solver.onIframeNavigated(targetInfo.targetId, iframeCdpSid, targetInfo.url).catch(() => {});
             }
           }
         } catch (e) {
@@ -872,6 +926,10 @@ export class ReplayCoordinator {
       this.sessionReplay?.registerCleanupFn(sessionId, async () => {
         closed = true;
         clearInterval(pollInterval);
+
+        // Clean up solver
+        solver.destroy();
+        this.solvers.delete(sessionId);
 
         // Finalize all remaining tracked targets while session is still active.
         // Prevents race where targetDestroyed fires after isReplaying=false.
