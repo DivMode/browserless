@@ -241,9 +241,9 @@ export class BrowserLauncher {
       }
 
       // Wire solver to browser for CDPProxy integration
-      const solver = this.replayCoordinator?.getSolver(sessionId);
-      if (solver && browser instanceof ChromiumCDP) {
-        browser.setSolver(solver);
+      const cloudflareSolver = this.replayCoordinator?.getCloudflareSolver(sessionId);
+      if (cloudflareSolver && browser instanceof ChromiumCDP) {
+        browser.setCloudflareSolver(cloudflareSolver);
       }
     }
 

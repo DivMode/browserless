@@ -7,8 +7,8 @@ Server-side Cloudflare challenge solver running inside Browserless. Detects Turn
 ```
 Browserless (producer)              Pydoll (consumer)
 ─────────────────────               ─────────────────
-CloudflareSolver                    cloudflare_solver.py
-  ├─ detect challenge                 ├─ CloudflareSolver wrapper
+CloudflareSolver                    cloudflare_listener.py
+  ├─ detect challenge                 ├─ CloudflareListener
   ├─ simulate presence                ├─ Waiter (accumulates events)
   ├─ find + click widget              ├─ Result (aggregated outcome)
   ├─ verify solve                     ├─ Wide events + metrics

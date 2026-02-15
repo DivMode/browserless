@@ -43,7 +43,7 @@ export class ReplayCoordinator {
   private log = new Logger('replay-coordinator');
   private screencastCapture = new ScreencastCapture();
   private videoEncoder: VideoEncoder;
-  private solvers = new Map<string, CloudflareSolver>();
+  private cloudflareSolvers = new Map<string, CloudflareSolver>();
   private baseUrl = process.env.BROWSERLESS_BASE_URL ?? '';
   constructor(private sessionReplay?: SessionReplay, private videoMgr?: VideoManager) {
     this.videoEncoder = new VideoEncoder(sessionReplay?.getStore() ?? null);
@@ -59,8 +59,8 @@ export class ReplayCoordinator {
   }
 
   /** Get solver for a session (used by browser-launcher to wire to CDPProxy). */
-  getSolver(sessionId: string): CloudflareSolver | undefined {
-    return this.solvers.get(sessionId);
+  getCloudflareSolver(sessionId: string): CloudflareSolver | undefined {
+    return this.cloudflareSolvers.get(sessionId);
   }
 
   /**
@@ -163,7 +163,7 @@ export class ReplayCoordinator {
       const iframeTargetSessions = new Map<string, string>();
 
       // Create solver for this session (disabled until client enables)
-      const solver = new CloudflareSolver(sendCommand, (cdpSid, tag, payload) => {
+      const cloudflareSolver = new CloudflareSolver(sendCommand, (cdpSid, tag, payload) => {
         const tagJson = JSON.stringify(tag);
         const payloadJson = JSON.stringify(payload || {});
         sendCommand('Runtime.evaluate', {
@@ -177,7 +177,7 @@ export class ReplayCoordinator {
           })()`,
         }, cdpSid).catch(() => {});
       });
-      this.solvers.set(sessionId, solver);
+      this.cloudflareSolvers.set(sessionId, cloudflareSolver);
 
       /**
        * Re-inject rrweb into a target via Runtime.evaluate.
@@ -520,7 +520,7 @@ export class ReplayCoordinator {
           }, pageSessionId).catch(() => {});
 
           // Notify solver of Turnstile state change
-          solver.onTurnstileStateChange(state, msg.sessionId).catch(() => {});
+          cloudflareSolver.onTurnstileStateChange(state, msg.sessionId).catch(() => {});
         }
       };
 
@@ -550,7 +550,7 @@ export class ReplayCoordinator {
               this.log.info(`Target attached (paused=${waitingForDebugger}): targetId=${targetInfo.targetId} url=${targetInfo.url} type=${targetInfo.type}`);
               trackedTargets.add(targetInfo.targetId);
               targetSessions.set(targetInfo.targetId, cdpSessionId);
-              solver.onPageAttached(targetInfo.targetId, cdpSessionId, targetInfo.url).catch(() => {});
+              cloudflareSolver.onPageAttached(targetInfo.targetId, cdpSessionId, targetInfo.url).catch(() => {});
 
               // Eagerly initialize tab event tracking so stopTabReplay works
               // even if no rrweb events have been collected yet (short-lived tabs,
@@ -676,7 +676,7 @@ export class ReplayCoordinator {
               const parentPageEntries = [...targetSessions.values()];
               const parentCdpSid = parentPageEntries.length > 0 ? parentPageEntries[parentPageEntries.length - 1] : undefined;
               if (parentCdpSid) {
-                solver.onIframeAttached(targetInfo.targetId, cdpSessionId, targetInfo.url, parentCdpSid).catch(() => {});
+                cloudflareSolver.onIframeAttached(targetInfo.targetId, cdpSessionId, targetInfo.url, parentCdpSid).catch(() => {});
               }
             }
           }
@@ -752,7 +752,7 @@ export class ReplayCoordinator {
 
           // Runtime.bindingCalled (turnstile solved) → notify solver of auto-solve
           if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__turnstileSolvedBinding') {
-            solver.onAutoSolveBinding(msg.sessionId).catch(() => {});
+            cloudflareSolver.onAutoSolveBinding(msg.sessionId).catch(() => {});
           }
 
           // Handle target info changed (URL navigation)
@@ -793,7 +793,7 @@ export class ReplayCoordinator {
 
               // Notify solver of page navigation
               if (cdpSessionId) {
-                solver.onPageNavigated(targetInfo.targetId, cdpSessionId, targetInfo.url).catch(() => {});
+                cloudflareSolver.onPageNavigated(targetInfo.targetId, cdpSessionId, targetInfo.url).catch(() => {});
               }
             }
 
@@ -837,7 +837,7 @@ export class ReplayCoordinator {
               }
 
               // Notify solver
-              solver.onIframeNavigated(targetInfo.targetId, iframeCdpSid, targetInfo.url).catch(() => {});
+              cloudflareSolver.onIframeNavigated(targetInfo.targetId, iframeCdpSid, targetInfo.url).catch(() => {});
             }
           }
         } catch (e) {
@@ -933,8 +933,8 @@ export class ReplayCoordinator {
         clearInterval(pollInterval);
 
         // Clean up solver
-        solver.destroy();
-        this.solvers.delete(sessionId);
+        cloudflareSolver.destroy();
+        this.cloudflareSolvers.delete(sessionId);
 
         // Finalize all remaining tracked targets while session is still active.
         // Prevents race where targetDestroyed fires after isReplaying=false.

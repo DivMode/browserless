@@ -45,7 +45,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   protected cdpProxy: CDPProxy | null = null;
   protected onBeforeClose?: () => Promise<void>;
   protected keepUntilMS = 0;
-  private solver?: CloudflareSolver;
+  private cloudflareSolver?: CloudflareSolver;
 
   constructor({
     blockAds,
@@ -86,8 +86,8 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
     return this.keepUntilMS;
   }
 
-  public setSolver(solver: CloudflareSolver): void {
-    this.solver = solver;
+  public setCloudflareSolver(cloudflareSolver: CloudflareSolver): void {
+    this.cloudflareSolver = cloudflareSolver;
   }
 
   /**
@@ -430,8 +430,8 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
           this.config,
           close,
           this.onBeforeClose,
-          this.solver
-            ? (config: any) => this.solver!.enable(config)
+          this.cloudflareSolver
+            ? (config: any) => this.cloudflareSolver!.enable(config)
             : undefined,
         );
 
@@ -439,8 +439,8 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
         this.logger.trace('CDPProxy connected successfully');
 
         // Wire solver to CDPProxy for event emission
-        if (this.solver && this.cdpProxy) {
-          this.solver.setEmitClientEvent(
+        if (this.cloudflareSolver && this.cdpProxy) {
+          this.cloudflareSolver.setEmitClientEvent(
             (method: string, params: object) => this.cdpProxy!.emitClientEvent(method, params),
           );
         }
