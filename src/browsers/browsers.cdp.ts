@@ -22,6 +22,7 @@ import playwright from 'playwright-core';
 import puppeteerStealth from 'puppeteer-extra';
 
 import { CDPProxy, ReplayCapableBrowser, ReplayCompleteParams, TabReplayCompleteParams } from '../cdp-proxy.js';
+import { CloudflareSolver } from '../session/cloudflare-solver.js';
 
 puppeteerStealth.use(StealthPlugin());
 
@@ -44,6 +45,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   protected cdpProxy: CDPProxy | null = null;
   protected onBeforeClose?: () => Promise<void>;
   protected keepUntilMS = 0;
+  private solver?: CloudflareSolver;
 
   constructor({
     blockAds,
@@ -82,6 +84,10 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   public setKeepUntil(timeout: number) {
     this.keepUntilMS = timeout;
     return this.keepUntilMS;
+  }
+
+  public setSolver(solver: CloudflareSolver): void {
+    this.solver = solver;
   }
 
   /**
@@ -421,12 +427,23 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
           head,
           req,
           this.browserWSEndpoint!,
+          this.config,
           close,
           this.onBeforeClose,
+          this.solver
+            ? (config: any) => this.solver!.enable(config)
+            : undefined,
         );
 
         await this.cdpProxy.connect();
         this.logger.trace('CDPProxy connected successfully');
+
+        // Wire solver to CDPProxy for event emission
+        if (this.solver && this.cdpProxy) {
+          this.solver.setEmitClientEvent(
+            (method: string, params: object) => this.cdpProxy!.emitClientEvent(method, params),
+          );
+        }
       } catch (error) {
         this.logger.error(
           `Error proxying session to ${this.constructor.name}: ${error}`,
