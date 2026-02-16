@@ -253,6 +253,81 @@ export async function simulateHumanPresence(
 }
 
 /**
+ * Tab+Space keyboard fallback for Turnstile when click target not found.
+ *
+ * FlareSolverr technique: keyboard focus naturally crosses iframe/shadow DOM
+ * boundaries invisible to mouse clicks. Injects a hidden reset button, focuses it,
+ * then TABs 1-5 times, pressing SPACE after each to activate the focused element.
+ *
+ * Returns true if token appeared after any TAB+SPACE attempt.
+ */
+export async function tabSpaceFallback(
+  sendCommand: SendCommand,
+  cdpSessionId: string,
+  maxTabs: number = 5,
+  isSolved: () => Promise<boolean>,
+): Promise<boolean> {
+  // Inject hidden button at top-left to reset focus position
+  try {
+    await sendCommand('Runtime.evaluate', {
+      expression: `(function() {
+        var btn = document.getElementById('__tabSpaceReset');
+        if (!btn) {
+          btn = document.createElement('button');
+          btn.id = '__tabSpaceReset';
+          btn.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none;z-index:-1;';
+          document.body.appendChild(btn);
+        }
+        btn.focus();
+      })()`,
+    }, cdpSessionId);
+  } catch {
+    return false; // Page gone
+  }
+
+  for (let tabCount = 1; tabCount <= maxTabs; tabCount++) {
+    // TAB key
+    await sendCommand('Input.dispatchKeyEvent', {
+      type: 'keyDown', key: 'Tab', code: 'Tab',
+      windowsVirtualKeyCode: 9,
+    }, cdpSessionId).catch(() => {});
+    await sleep(rand(30, 60));
+    await sendCommand('Input.dispatchKeyEvent', {
+      type: 'keyUp', key: 'Tab', code: 'Tab',
+    }, cdpSessionId).catch(() => {});
+
+    await sleep(rand(80, 120));
+
+    // SPACE key (activate focused element)
+    await sendCommand('Input.dispatchKeyEvent', {
+      type: 'keyDown', key: ' ', code: 'Space',
+      windowsVirtualKeyCode: 32,
+    }, cdpSessionId).catch(() => {});
+    await sleep(rand(50, 100));
+    await sendCommand('Input.dispatchKeyEvent', {
+      type: 'keyUp', key: ' ', code: 'Space',
+    }, cdpSessionId).catch(() => {});
+
+    // Wait for Turnstile to process
+    await sleep(rand(800, 1200));
+
+    // Check if solved
+    if (await isSolved()) return true;
+
+    // Re-focus reset button for next attempt
+    try {
+      await sendCommand('Runtime.evaluate', {
+        expression: `(function() { var btn = document.getElementById('__tabSpaceReset'); if (btn) btn.focus(); })()`,
+      }, cdpSessionId);
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Two-phase Bezier approach to coordinates without clicking.
  * Phase 1 (ballistic): 15-25 pts @ 350-650ms to ~20px from target
  * Phase 2 (correction): 8-15 pts @ 150-350ms with deceleration

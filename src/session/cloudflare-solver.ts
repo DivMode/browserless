@@ -17,6 +17,7 @@ import {
   simulateHumanPresence,
   approachCoordinates,
   commitClick,
+  tabSpaceFallback,
 } from '../shared/mouse-humanizer.js';
 
 type SendCommand = (method: string, params?: object, cdpSessionId?: string) => Promise<any>;
@@ -55,6 +56,8 @@ class CloudflareTracker {
   private falsePositiveCount = 0;
   private widgetErrorCount = 0;
   private iframeStates: string[] = [];
+  private widgetFindDebug: Record<string, unknown> | null = null;
+  private lastErrorType: string | null = null;
 
   constructor(info: CloudflareInfo) {
     this.detectionMethod = info.detectionMethod;
@@ -73,6 +76,7 @@ class CloudflareTracker {
         }
         if (extra?.x != null) this.widgetX = extra.x;
         if (extra?.y != null) this.widgetY = extra.y;
+        if (extra?.debug) this.widgetFindDebug = extra.debug;
         break;
       case 'clicked':
         this.clicked = true;
@@ -96,6 +100,7 @@ class CloudflareTracker {
         break;
       case 'widget_error':
         this.widgetErrorCount++;
+        if (extra?.error_type) this.lastErrorType = extra.error_type;
         break;
       case 'success':
       case 'verifying':
@@ -129,6 +134,8 @@ class CloudflareTracker {
       false_positive_count: this.falsePositiveCount,
       widget_error_count: this.widgetErrorCount,
       iframe_states: this.iframeStates,
+      widget_find_debug: this.widgetFindDebug,
+      widget_error_type: this.lastErrorType,
     };
   }
 }
@@ -673,7 +680,22 @@ export class CloudflareSolver {
     const coords = await this.findClickTarget(pageCdpSessionId);
     if (!coords || active.aborted) return;
 
-    this.emitProgress(active, 'widget_found', { method: coords.method, x: coords.x, y: coords.y });
+    this.emitProgress(active, 'widget_found', {
+      method: coords.method, x: coords.x, y: coords.y, debug: coords.debug,
+    });
+    if (coords.method === 'none') {
+      // Keyboard fallback: TAB+SPACE when click cascade finds nothing
+      this.emitProgress(active, 'tab_space_fallback', {});
+      this.marker(pageCdpSessionId, 'cf.tab_space_start', {});
+      const solved = await tabSpaceFallback(
+        this.sendCommand, pageCdpSessionId, 5,
+        () => this.isSolved(pageCdpSessionId),
+      );
+      if (solved) {
+        this.marker(pageCdpSessionId, 'cf.tab_space_solved', {});
+      }
+      return; // Activity loop continues polling either way
+    }
 
     // Phase 3: Approach target (1-3s mouse movement via Bezier curves)
     const [targetX, targetY] = await approachCoordinates(
@@ -729,7 +751,22 @@ export class CloudflareSolver {
     const coords = await this.findClickTarget(pageCdpSessionId);
     if (!coords || active.aborted) return;
 
-    this.emitProgress(active, 'widget_found', { method: coords.method, x: coords.x, y: coords.y });
+    this.emitProgress(active, 'widget_found', {
+      method: coords.method, x: coords.x, y: coords.y, debug: coords.debug,
+    });
+    if (coords.method === 'none') {
+      // Keyboard fallback: TAB+SPACE when click cascade finds nothing
+      this.emitProgress(active, 'tab_space_fallback', {});
+      this.marker(pageCdpSessionId, 'cf.tab_space_start', {});
+      const solved = await tabSpaceFallback(
+        this.sendCommand, pageCdpSessionId, 5,
+        () => this.isSolved(pageCdpSessionId),
+      );
+      if (solved) {
+        this.marker(pageCdpSessionId, 'cf.tab_space_solved', {});
+      }
+      return; // Activity loop continues polling either way
+    }
 
     // Phase 3: Approach target
     const [targetX, targetY] = await approachCoordinates(
@@ -757,7 +794,7 @@ export class CloudflareSolver {
 
   private async findClickTarget(
     cdpSessionId: string,
-  ): Promise<{ x: number; y: number; method?: string } | null> {
+  ): Promise<{ x: number; y: number; method?: string; debug?: Record<string, unknown> } | null> {
     try {
       const result = await this.sendCommand('Runtime.evaluate', {
         expression: FIND_CLICK_TARGET_JS,
@@ -766,7 +803,12 @@ export class CloudflareSolver {
       const raw = result?.result?.value;
       if (!raw) return null;
       const parsed = JSON.parse(raw);
-      return parsed ? { x: parsed.x, y: parsed.y, method: parsed.m } : null;
+      if (!parsed) return null;
+      if (parsed.m === 'none') {
+        // No target found — still emit debug info via widget_found with x=0
+        return { x: 0, y: 0, method: 'none', debug: parsed.d || undefined };
+      }
+      return { x: parsed.x, y: parsed.y, method: parsed.m, debug: parsed.d || undefined };
     } catch {
       return null;
     }
@@ -775,7 +817,11 @@ export class CloudflareSolver {
   private async isSolved(cdpSessionId: string): Promise<boolean> {
     try {
       const result = await this.sendCommand('Runtime.evaluate', {
-        expression: `window.__turnstileSolved === true || (function() {
+        expression: `(function() {
+          if (window.__turnstileSolved === true) return true;
+          if (window.__turnstileAwaitResult) return true;
+          try { if (typeof turnstile !== 'undefined' && turnstile.getResponse && turnstile.getResponse()) return true; } catch(e) {}
+          if (window.__turnstileToken) return true;
           var el = document.querySelector('[name="cf-turnstile-response"]');
           return !!(el && el.value && el.value.length > 0);
         })()`,
@@ -832,6 +878,14 @@ export class CloudflareSolver {
   /** Background loop that keeps the browser alive after click commit. */
   private startActivityLoop(active: ActiveDetection): void {
     const loop = async () => {
+      // Kick off in-page 100ms token polling (catches tokens faster than 3-7s CDP loop)
+      try {
+        await this.sendCommand('Runtime.evaluate', {
+          expression: TURNSTILE_DETECT_AND_AWAIT_JS,
+          returnByValue: true,
+        }, active.pageCdpSessionId);
+      } catch { /* page gone */ }
+
       let loopIter = 0;
       while (!active.aborted && !this.destroyed) {
         await new Promise(r => setTimeout(r, 3000 + Math.random() * 4000));
@@ -847,9 +901,14 @@ export class CloudflareSolver {
         this.emitProgress(active, 'activity_poll', { iteration: loopIter });
 
         // Check for widget error state
-        if (await this.isWidgetError(active.pageCdpSessionId)) {
-          this.marker(active.pageCdpSessionId, 'cf.widget_error_detected');
-          this.emitProgress(active, 'widget_error');
+        const widgetErr = await this.isWidgetError(active.pageCdpSessionId);
+        if (widgetErr) {
+          this.marker(active.pageCdpSessionId, 'cf.widget_error_detected', {
+            error_type: widgetErr.type, has_token: widgetErr.has_token,
+          });
+          this.emitProgress(active, 'widget_error', {
+            error_type: widgetErr.type, has_token: widgetErr.has_token,
+          });
           break; // Let iframe observer or retry logic handle the failure
         }
 
@@ -863,15 +922,18 @@ export class CloudflareSolver {
   }
 
   /** Check if the Turnstile widget is in an error/expired state. */
-  private async isWidgetError(cdpSessionId: string): Promise<boolean> {
+  private async isWidgetError(cdpSessionId: string): Promise<{ type: string; has_token: boolean } | null> {
     try {
       const result = await this.sendCommand('Runtime.evaluate', {
         expression: TURNSTILE_ERROR_CHECK_JS,
         returnByValue: true,
       }, cdpSessionId);
-      return result?.result?.value != null;
+      const raw = result?.result?.value;
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed || null;
     } catch {
-      return false;
+      return null;
     }
   }
 

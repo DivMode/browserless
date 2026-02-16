@@ -57,6 +57,8 @@ export interface CloudflareSnapshot {
   false_positive_count: number;
   widget_error_count: number;
   iframe_states: string[];
+  widget_find_debug: Record<string, unknown> | null;
+  widget_error_type: string | null;
 }
 
 /**
@@ -258,7 +260,23 @@ export const FIND_CLICK_TARGET_JS = `JSON.stringify((() => {
     void el.offsetHeight;
     return el.getBoundingClientRect();
   };
-  var hit = function(r, m) { return { x: r.x + 30, y: r.y + r.height / 2, m: m }; };
+  var debug = function() {
+    var ifs = document.querySelectorAll('iframe');
+    var ifl = [];
+    for (var k = 0; k < ifs.length && k < 10; k++) {
+      var r = ifs[k].getBoundingClientRect();
+      ifl.push({ w: Math.round(r.width), h: Math.round(r.height), src: (ifs[k].src || '').substring(0, 40) });
+    }
+    return {
+      iframes: ifl,
+      ts_els: document.querySelectorAll('[class*="cf-turnstile"], [data-sitekey], [name="cf-turnstile-response"], [id^="cf-chl-widget"]').length,
+      forms: document.querySelectorAll('form').length,
+      shadow_hosts: document.querySelectorAll('div:not(:has(*))').length,
+      is_interstitial: typeof window._cf_chl_opt !== 'undefined',
+      title: (document.title || '').substring(0, 50)
+    };
+  };
+  var hit = function(r, m) { return { x: r.x + 30, y: r.y + r.height / 2, m: m, d: debug() }; };
   var iframes = document.querySelectorAll('iframe');
   var i, rect, src, name, el, style;
 
@@ -462,7 +480,7 @@ export const FIND_CLICK_TARGET_JS = `JSON.stringify((() => {
     }
   }
 
-  return null;
+  return { x: 0, y: 0, m: 'none', d: debug() };
 })())`;
 
 /**
@@ -519,20 +537,46 @@ export const TURNSTILE_DETECT_AND_AWAIT_JS = `JSON.stringify((function() {
  * Checks container text for error indicators and turnstile.isExpired().
  * Returns error type string or null.
  */
-export const TURNSTILE_ERROR_CHECK_JS = `(function() {
+export const TURNSTILE_ERROR_CHECK_JS = `JSON.stringify((function() {
+  var hasToken = false;
+  try {
+    if (typeof turnstile !== 'undefined' && turnstile.getResponse) {
+      var t = turnstile.getResponse();
+      if (t && t.length > 0) hasToken = true;
+    }
+  } catch(e) {}
+  if (!hasToken) {
+    var inp = document.querySelector('[name="cf-turnstile-response"]');
+    if (inp && inp.value && inp.value.length > 0) hasToken = true;
+  }
+
   var containers = document.querySelectorAll(
     '[class*="cf-turnstile"], [id^="cf-chl-widget"], [data-sitekey]'
   );
   for (var i = 0; i < containers.length; i++) {
     var text = (containers[i].textContent || '').toLowerCase();
     if (text.includes('error') || text.includes('failed') || text.includes('try again'))
-      return 'error_text';
+      return { type: hasToken ? 'error_text' : 'confirmed_error', has_token: hasToken };
   }
+
+  var cfIframes = document.querySelectorAll('iframe[src*="challenges.cloudflare.com"], iframe[name^="cf-chl-widget"]');
+  for (var i = 0; i < cfIframes.length; i++) {
+    try {
+      var doc = cfIframes[i].contentDocument;
+      if (doc && doc.body) {
+        var iText = (doc.body.textContent || '').toLowerCase();
+        if (iText.includes('error') || iText.includes('failed') || iText.includes('try again'))
+          return { type: hasToken ? 'iframe_error' : 'confirmed_error', has_token: hasToken };
+      }
+    } catch(e) {}
+  }
+
   if (typeof turnstile !== 'undefined' && turnstile.isExpired) {
     try {
       var ws = document.querySelectorAll('[id^="cf-chl-widget"]');
       for (var i = 0; i < ws.length; i++) {
-        if (turnstile.isExpired(ws[i].id)) return 'expired';
+        if (turnstile.isExpired(ws[i].id))
+          return { type: 'expired', has_token: hasToken };
       }
     } catch(e) {}
   }
