@@ -185,7 +185,7 @@ export class Config extends EventEmitter {
   protected pwVersions: { [key: string]: string } = {};
   protected enableDebugger = !!parseEnvVars(true, 'ENABLE_DEBUGGER');
   protected enableReplay = !!parseEnvVars(true, 'ENABLE_REPLAY');
-  protected enableCloudflare = !!parseEnvVars(true, 'ENABLE_CLOUDFLARE');
+  protected enableCloudflareSolver = !!parseEnvVars(true, 'ENABLE_CLOUDFLARE_SOLVER');
   protected replayDir = process.env.REPLAY_DIR
     ? untildify(process.env.REPLAY_DIR)
     : path.join(tmpdir(), 'browserless-replays');
@@ -300,13 +300,13 @@ export class Config extends EventEmitter {
     return (this.enableReplay = enable);
   }
 
-  public getEnableCloudflare(): boolean {
-    return this.enableCloudflare;
+  public getEnableCloudflareSolver(): boolean {
+    return this.enableCloudflareSolver;
   }
 
-  public setEnableCloudflare(enable: boolean): boolean {
-    this.emit('enableCloudflare', enable);
-    return (this.enableCloudflare = enable);
+  public setEnableCloudflareSolver(enable: boolean): boolean {
+    this.emit('enableCloudflareSolver', enable);
+    return (this.enableCloudflareSolver = enable);
   }
 
   public setReplayDir(dir: string): string {

@@ -240,7 +240,7 @@ export class BrowserLauncher {
         this.log.warn(`Replay setup failed for session ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
       }
 
-      // Wire solver to browser for CDPProxy integration
+      // Wire monitor to browser for CDPProxy integration
       const cloudflareSolver = this.replayCoordinator?.getCloudflareSolver(sessionId);
       if (cloudflareSolver && browser instanceof ChromiumCDP) {
         browser.setCloudflareSolver(cloudflareSolver);

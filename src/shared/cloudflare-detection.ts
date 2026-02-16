@@ -1,21 +1,22 @@
 /**
- * Types and detection scripts for Cloudflare challenge solving.
+ * Types and detection scripts for Cloudflare monitoring.
  * JS constants are injected into pages via CDP Runtime.evaluate.
  */
 
-export type ChallengeType = 'interstitial' | 'embedded' | 'invisible' | 'managed' | 'block' | 'widget';
+export type CloudflareType = 'interstitial' | 'embedded' | 'invisible' | 'managed' | 'block' | 'widget';
 
-export interface ChallengeInfo {
-  type: ChallengeType;
+export interface CloudflareInfo {
+  type: CloudflareType;
   url: string;
   iframeUrl?: string;
   cType?: string;
   cRay?: string;
   detectionMethod: string;
+  pollCount?: number;
 }
 
-export interface SolverConfig {
-  /** Max attempts per challenge (default: 3) */
+export interface CloudflareConfig {
+  /** Max attempts per CF detection (default: 3) */
   maxAttempts?: number;
   /** Timeout per attempt in ms (default: 30000) */
   attemptTimeout?: number;
@@ -23,15 +24,39 @@ export interface SolverConfig {
   recordingMarkers?: boolean;
 }
 
-export interface SolveResult {
+export interface CloudflareResult {
   solved: boolean;
-  type: ChallengeType;
+  type: CloudflareType;
   method: string;
   token?: string;
   duration_ms: number;
   attempts: number;
   auto_resolved?: boolean;
   signal?: string;
+}
+
+/** Accumulated state for one CF solve phase, included in solved/failed events. */
+export interface CloudflareSnapshot {
+  detection_method: string | null;
+  cf_ctype: string | null;
+  cf_cray: string | null;
+  detection_poll_count: number;
+  widget_found: boolean;
+  widget_find_method: string | null;
+  widget_find_methods: string[];
+  widget_x: number | null;
+  widget_y: number | null;
+  clicked: boolean;
+  click_count: number;
+  click_x: number | null;
+  click_y: number | null;
+  presence_duration_ms: number;
+  presence_phases: number;
+  approach_phases: number;
+  activity_poll_count: number;
+  false_positive_count: number;
+  widget_error_count: number;
+  iframe_states: string[];
 }
 
 /**
@@ -100,12 +125,12 @@ export const TURNSTILE_CALLBACK_HOOK_JS = `(function() {
 })();`;
 
 /**
- * JS detection script for Cloudflare challenge pages.
- * Checks _cf_chl_opt, #challenge-form, title, body text.
+ * JS detection script for Cloudflare-protected pages.
+ * Checks _cf_chl_opt, #challenge-form (CF DOM element), title, body text.
  *
  * Source: pydoll-scraper/src/evasion/cloudflare.py lines 37-111
  */
-export const CF_CHALLENGE_DETECTION_JS = `JSON.stringify((() => {
+export const CF_DETECTION_JS = `JSON.stringify((() => {
     if (typeof window._cf_chl_opt !== 'undefined') {
         return {
             detected: true,
@@ -149,16 +174,16 @@ export const TURNSTILE_TOKEN_JS = `(() => {
 })()`;
 
 /**
- * Detect challenge type from CDP data + page evaluation results.
+ * Detect Cloudflare type from CDP data + page evaluation results.
  */
-export function detectChallengeType(
+export function detectCloudflareType(
   _pageUrl: string,
   detectionResult: { detected: boolean; method?: string; cType?: string },
   hasTurnstileIframe: boolean,
-): ChallengeType | null {
+): CloudflareType | null {
   if (!detectionResult.detected) return null;
 
-  // cf_chl_opt.cType maps directly to challenge types
+  // cf_chl_opt.cType maps directly to CF types
   const cType = detectionResult.cType;
   if (cType === 'managed' || cType === 'interactive') return 'managed';
 
@@ -438,6 +463,55 @@ export const FIND_CLICK_TARGET_JS = `JSON.stringify((() => {
   }
 
   return null;
+})())`;
+
+/**
+ * JS detection for standalone Turnstile widgets on pages where
+ * Runtime.addBinding doesn't work (e.g., Fetch.fulfillRequest-intercepted).
+ *
+ * Returns JSON: null (no widget) or {present, solved, tokenLength}.
+ * Three-layer token extraction: API → hidden input → window flag.
+ */
+/**
+ * Detect Turnstile widget + start in-page token polling as a side effect.
+ * Returns synchronously (never a Promise) so the CDP call is fast.
+ *
+ * On first detection: starts a 100ms in-page interval that writes the
+ * token to window.__turnstileAwaitResult when found. Subsequent calls
+ * check this variable first (fast path).
+ *
+ * Why not awaitPromise? Under 15-tab contention, if the eval blocks on
+ * a Promise and the session closes, CDP throws — the catch block fires
+ * with ZERO events emitted (no detected, no solved). By returning sync,
+ * the caller can emit cf.detected immediately, then check for the token
+ * on the next poll.
+ */
+export const TURNSTILE_DETECT_AND_AWAIT_JS = `JSON.stringify((function() {
+  if (typeof window.turnstile === 'undefined') {
+    if (!document.querySelector('.cf-turnstile, [data-sitekey], #cf-turnstile-response'))
+      return null;
+  }
+  function getToken() {
+    var t = null;
+    if (typeof turnstile !== 'undefined' && turnstile.getResponse) {
+      try { t = turnstile.getResponse() || null; } catch(e) {}
+    }
+    if (!t) { var inp = document.querySelector('input[name="cf-turnstile-response"]'); if (inp) t = inp.value || null; }
+    if (!t && window.__turnstileToken) t = window.__turnstileToken;
+    return t;
+  }
+  var token = getToken();
+  if (token) return { present: true, solved: true, tokenLength: token.length };
+  if (!window.__turnstileAwaitStarted) {
+    window.__turnstileAwaitStarted = true;
+    var iv = setInterval(function() {
+      var t = getToken();
+      if (t) { clearInterval(iv); window.__turnstileAwaitResult = { solved: true, tokenLength: t.length }; }
+    }, 100);
+    setTimeout(function() { clearInterval(iv); }, 30000);
+  }
+  if (window.__turnstileAwaitResult) return { present: true, solved: true, tokenLength: window.__turnstileAwaitResult.tokenLength };
+  return { present: true, solved: false };
 })())`;
 
 /**

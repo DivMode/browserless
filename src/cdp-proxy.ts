@@ -97,7 +97,7 @@ export class CDPProxy {
     private config: Config,
     private onClose?: () => void,
     private onBeforeClose?: () => Promise<void>,
-    private onEnableChallengeSolver?: (config: any) => void,
+    private onEnableCloudflareSolver?: (config: any) => void,
   ) {}
 
   /**
@@ -181,17 +181,17 @@ export class CDPProxy {
             return;
           }
 
-          // Gate Browserless.enableChallengeSolver behind ENABLE_CLOUDFLARE flag
-          if (msg?.method === 'Browserless.enableChallengeSolver' && typeof msg?.id === 'number') {
-            if (!this.config.getEnableCloudflare()) {
+          // Gate Browserless.enableCloudflareSolver behind ENABLE_CLOUDFLARE_SOLVER flag
+          if (msg?.method === 'Browserless.enableCloudflareSolver' && typeof msg?.id === 'number') {
+            if (!this.config.getEnableCloudflareSolver()) {
               void this.sendClientResponse(msg.id, {
                 enabled: false,
                 error: 'Cloudflare solver is not enabled on this instance',
               });
               return;
             }
-            if (this.onEnableChallengeSolver) {
-              this.onEnableChallengeSolver(msg.params || {});
+            if (this.onEnableCloudflareSolver) {
+              this.onEnableCloudflareSolver(msg.params || {});
             }
             void this.sendClientResponse(msg.id, { enabled: true });
             return;

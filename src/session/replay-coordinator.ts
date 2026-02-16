@@ -10,7 +10,7 @@ import {
 
 import { ScreencastCapture } from './screencast-capture.js';
 import { CloudflareSolver } from './cloudflare-solver.js';
-import { TURNSTILE_STATE_OBSERVER_JS } from '../shared/challenge-detector.js';
+import { TURNSTILE_STATE_OBSERVER_JS } from '../shared/cloudflare-detection.js';
 import { VideoEncoder } from '../video/encoder.js';
 import type { VideoManager } from '../video/video-manager.js';
 
