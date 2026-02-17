@@ -63,6 +63,29 @@ export class ReplayCoordinator {
     return this.cloudflareSolvers.get(sessionId);
   }
 
+  /** Route an HTTP beacon to the correct CloudflareSolver.
+   *  Supports empty sessionId by broadcasting to all solvers (fallback for
+   *  pydoll paths where getSessionInfo returned empty).
+   */
+  handleCfBeacon(sessionId: string, targetId: string, tokenLength: number): boolean {
+    if (sessionId) {
+      const solver = this.cloudflareSolvers.get(sessionId);
+      if (solver) {
+        solver.onBeaconSolved(targetId, tokenLength);
+        return true;
+      }
+      return false;
+    }
+    // No sessionId — broadcast to all solvers. The solver checks targetId
+    // against its own tracking, so only the correct one will act on it.
+    let handled = false;
+    for (const solver of this.cloudflareSolvers.values()) {
+      solver.onBeaconSolved(targetId, tokenLength);
+      handled = true;
+    }
+    return handled;
+  }
+
   /**
    * Set up replay capture for ALL tabs using RAW CDP (no puppeteer).
    *
@@ -143,13 +166,16 @@ export class ReplayCoordinator {
 
           ws.send(JSON.stringify(msg));
 
-          // Timeout after 5 seconds
+          // Timeout after 30 seconds.
+          // Under 15+ tab contention, each Runtime.evaluate takes ~8s.
+          // 5s timeout caused CloudflareSolver polls to fail silently,
+          // resulting in cf_events=0 ("?") on all domains in heavy batches.
           setTimeout(() => {
             if (pendingCommands.has(id)) {
               pendingCommands.delete(id);
               reject(new Error(`CDP command ${method} timed out`));
             }
-          }, 5000);
+          }, 30_000);
         });
       };
 

@@ -153,6 +153,7 @@ export enum HTTPManagementRoutes {
   video = '/video/+([0-9a-zA-Z-_])?(/)',
   videoStatus = '/video/+([0-9a-zA-Z-_])/status?(/)',
   videoHls = '/video/+([0-9a-zA-Z-_])/hls/**',
+  cfSolved = '/internal/cf-solved?(/)',
   sessions = '/sessions?(/)',
   static = '/',
 }

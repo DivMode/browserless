@@ -758,6 +758,7 @@ export const BrowserlessManagementRoutes = {
   VideoStatusGetRoute: 'VideoStatusGetRoute',
   VideoHlsGetRoute: 'VideoHlsGetRoute',
   ReplaysGetRoute: 'ReplaysGetRoute',
+  CfSolvedPostRoute: 'CfSolvedPostRoute',
   SessionsGetRoute: 'SessionsGetRoute',
   StaticGetRoute: 'StaticGetRoute',
 };

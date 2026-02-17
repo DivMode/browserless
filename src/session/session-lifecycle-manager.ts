@@ -99,6 +99,14 @@ export class SessionLifecycleManager {
     if (!keepOpen) {
       this.log.info(`KILLING browser session ${session.id}: numbConnected=${connected} keepUntil=${keepUntil} force=${force}`);
 
+      // Emit cf.solved for any unresolved CF detections (session-close fallback)
+      if (this.replayCoordinator) {
+        const solver = this.replayCoordinator.getCloudflareSolver(session.id);
+        if (solver) {
+          solver.emitUnresolvedDetections();
+        }
+      }
+
       // Stop replay and save if replay was enabled
       // Uses ReplayCoordinator to ensure screencast frames are counted
       if (session.replay && this.replayCoordinator) {

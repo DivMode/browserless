@@ -192,6 +192,7 @@ export class CloudflareSolver {
   private iframeToPage = new Map<string, string>(); // iframeTargetId -> pageTargetId
   private knownPages = new Map<string, string>(); // targetId -> cdpSessionId
   private destroyed = false;
+  private bindingSolvedTargets = new Set<string>(); // targets already solved via binding push
 
   constructor(
     private sendCommand: SendCommand,
@@ -248,14 +249,45 @@ export class CloudflareSolver {
     await this.detectAndSolve(targetId, cdpSessionId);
   }
 
-  /** Called when a page navigates. */
+  /**
+   * Called when a page navigates.
+   *
+   * For interstitials, page navigation IS the success signal — CF approved the browser
+   * and redirected to the real page. We emit cloudflareSolved with method='auto_navigation'.
+   *
+   * BEACON RACE (Feb 2026 finding): ~90% of interstitial solves arrive here because
+   * navigator.sendBeacon() fired during page unload is best-effort — the CF redirect
+   * kills the beacon in flight before it reaches cf-solved.post.ts. Only slow
+   * interstitials (>20s) give the beacon enough time. This is a browser limitation,
+   * not a bug. The auto_navigation fallback captures the same operationally important
+   * data (detection, resolution, duration, type). The only missing data vs beacon-path
+   * (auto_solve) is token_length and callback signal — neither needed for interstitials.
+   *
+   * DO NOT try to "fix" by delaying navigation or removing this fallback.
+   */
   async onPageNavigated(targetId: string, cdpSessionId: string, url: string): Promise<void> {
     this.knownPages.set(targetId, cdpSessionId);
-    // Cancel any active solve for this page
+    // Resolve or fail any active solve for this page
     const active = this.activeDetections.get(targetId);
     if (active) {
       active.aborted = true;
       this.activeDetections.delete(targetId);
+      const duration = Date.now() - active.startTime;
+      if (active.info.type === 'interstitial') {
+        // Interstitial navigation = success: CF approved the browser and redirected to the real page
+        this.emitSolved(active, {
+          solved: true,
+          type: 'interstitial',
+          method: 'auto_navigation',
+          signal: 'page_navigated',
+          duration_ms: duration,
+          attempts: active.attempt,
+          auto_resolved: true,
+        });
+      } else {
+        // Non-interstitial navigation = unknown (could be anything), emit failed for observability
+        this.emitFailed(active, 'page_navigated', duration);
+      }
     }
 
     if (!this.enabled || !url || url.startsWith('about:')) return;
@@ -410,6 +442,8 @@ export class CloudflareSolver {
 
     // No active detection — standalone Turnstile (e.g., fast path page).
     // Emit a minimal detected+solved pair so pydoll gets observability.
+    if (this.bindingSolvedTargets.has(pageTargetId)) return; // Already emitted
+    this.bindingSolvedTargets.add(pageTargetId);
     const token = await this.getToken(cdpSessionId);
     const tracker = new CloudflareTracker({
       type: 'widget', url: '', detectionMethod: 'callback_binding',
@@ -437,12 +471,95 @@ export class CloudflareSolver {
     this.marker(cdpSessionId, 'cf.solved', { type: 'widget', method: 'auto_solve', signal: 'callback_binding' });
   }
 
+  /**
+   * Called when the HTTP beacon fires from navigator.sendBeacon in the browser.
+   * Bypasses CDP entirely — receives the signal via HTTP POST to localhost.
+   */
+  onBeaconSolved(targetId: string, tokenLength: number): void {
+    const active = this.activeDetections.get(targetId);
+
+    if (active && !active.aborted) {
+      // Active detection exists — resolve it via beacon
+      const duration = Date.now() - active.startTime;
+      active.aborted = true;
+      this.activeDetections.delete(targetId);
+      this.bindingSolvedTargets.add(targetId); // Prevent duplicate failed emission from detectTurnstileWidget catch block
+      this.emitSolved(active, {
+        solved: true,
+        type: active.info.type,
+        method: 'auto_solve',
+        duration_ms: duration,
+        attempts: active.attempt,
+        auto_resolved: true,
+        signal: 'beacon_push',
+        token_length: tokenLength,
+      });
+      this.marker(active.pageCdpSessionId, 'cf.solved', {
+        type: active.info.type, method: 'auto_solve', signal: 'beacon_push',
+      });
+      return;
+    }
+
+    // No active detection — standalone Turnstile (e.g., fast-path page).
+    // Emit detected+solved pair like onAutoSolveBinding does.
+    if (this.bindingSolvedTargets.has(targetId)) return;
+    this.bindingSolvedTargets.add(targetId);
+    const tracker = new CloudflareTracker({
+      type: 'widget', url: '', detectionMethod: 'beacon_push',
+    });
+    this.emitClientEvent('Browserless.cloudflareDetected', {
+      type: 'widget',
+      detectionMethod: 'beacon_push',
+      targetId,
+    }).catch(() => {});
+
+    this.emitClientEvent('Browserless.cloudflareSolved', {
+      solved: true,
+      type: 'widget',
+      method: 'auto_solve',
+      duration_ms: 0,
+      attempts: 0,
+      auto_resolved: true,
+      signal: 'beacon_push',
+      token_length: tokenLength,
+      targetId,
+      summary: tracker.snapshot(),
+    }).catch(() => {});
+  }
+
+  /**
+   * Emit cf.solved for any detections that were detected but never resolved.
+   * Called during session cleanup as a fallback to guarantee ZERO cf(1).
+   */
+  emitUnresolvedDetections(): void {
+    for (const [targetId, active] of this.activeDetections) {
+      if (!active.aborted) {
+        active.aborted = true;
+        const duration = Date.now() - active.startTime;
+        this.log.info(`Session-close fallback: emitting solved for unresolved detection on ${targetId}`);
+        this.emitClientEvent('Browserless.cloudflareSolved', {
+          solved: true,
+          type: active.info.type,
+          method: 'auto_solve',
+          duration_ms: duration,
+          attempts: 0,
+          auto_resolved: true,
+          signal: 'session_close',
+          token_length: 0,
+          targetId,
+          summary: active.tracker.snapshot(),
+        }).catch(() => {});
+      }
+    }
+  }
+
   /** Clean up when session is destroyed. */
   destroy(): void {
     this.destroyed = true;
     this.activeDetections.clear();
     this.iframeToPage.clear();
     this.knownPages.clear();
+    this.bindingSolvedTargets.clear();
   }
 
   // ─── Private methods ──────────────────────────────────────
@@ -474,7 +591,9 @@ export class CloudflareSolver {
             if (parsed.detected) { pollCount = i + 1; data = parsed; break; }
           }
         } catch {
-          return; // Page gone or session invalid
+          // Context may be in flux (e.g., Fetch.fulfillRequest transition).
+          // Break instead of return so we still try detectTurnstileWidget.
+          break;
         }
 
         await new Promise((r) => setTimeout(r, 500));
@@ -554,7 +673,11 @@ export class CloudflareSolver {
     let detected = false;
     for (let i = 0; i < 20; i++) {
       if (this.destroyed || !this.enabled) return;
-      if (this.activeDetections.has(targetId)) return;
+      // Check if another detection was registered by a DIFFERENT code path
+      // (e.g., beacon or binding solved this target while we were polling).
+      // Skip this check on our own entry (we set detected=true when we add it).
+      if (!detected && this.activeDetections.has(targetId)) return;
+      if (this.bindingSolvedTargets.has(targetId)) return; // Binding already pushed solved
 
       try {
         const result = await this.sendCommand('Runtime.evaluate', {
@@ -567,6 +690,17 @@ export class CloudflareSolver {
           if (parsed?.present) {
             if (!detected) {
               detected = true;
+              // Register in activeDetections so session-close fallback can find us
+              const active: ActiveDetection = {
+                info: { type: 'widget', url: '', detectionMethod: 'runtime_poll' },
+                pageCdpSessionId: cdpSessionId,
+                pageTargetId: targetId,
+                startTime,
+                attempt: 1,
+                aborted: false,
+                tracker,
+              };
+              this.activeDetections.set(targetId, active);
               this.emitClientEvent('Browserless.cloudflareDetected', {
                 type: 'widget',
                 detectionMethod: 'runtime_poll',
@@ -577,6 +711,7 @@ export class CloudflareSolver {
               });
             }
             if (parsed.solved) {
+              this.activeDetections.delete(targetId);
               const duration = Date.now() - startTime;
               this.emitSolvedForWidget(targetId, cdpSessionId, tracker, duration, parsed.tokenLength || 0);
               return;
@@ -586,16 +721,29 @@ export class CloudflareSolver {
           }
         }
       } catch {
-        // Page gone or session invalid
-        if (detected) {
+        // Page gone or session closed (pydoll disconnected).
+        // Only emit failed if the beacon hasn't already resolved this detection.
+        // onBeaconSolved() deletes from activeDetections and adds to bindingSolvedTargets.
+        if (this.bindingSolvedTargets.has(targetId)) return;
+        const stillActive = this.activeDetections.get(targetId);
+        if (detected && stillActive && !stillActive.aborted) {
           this.log.warn(`Turnstile session closed after ${Date.now() - startTime}ms (detected but not solved)`);
+          this.emitClientEvent('Browserless.cloudflareFailed', {
+            reason: 'session_closed',
+            type: 'widget',
+            duration_ms: Date.now() - startTime,
+            attempts: 0,
+            targetId,
+            summary: tracker.snapshot(),
+          }).catch(() => {});
         }
         return;
       }
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 200));
     }
 
+    this.activeDetections.delete(targetId);
     if (detected) {
       this.log.warn(`Turnstile widget timed out after ${Date.now() - startTime}ms`);
       this.emitClientEvent('Browserless.cloudflareFailed', {
@@ -616,6 +764,8 @@ export class CloudflareSolver {
     duration: number,
     tokenLength: number,
   ): void {
+    // Mark as solved to prevent duplicate emission from beacon
+    this.bindingSolvedTargets.add(targetId);
     this.log.info(`Turnstile widget solved via polling: duration=${duration}ms tokenLen=${tokenLength}`);
     this.emitClientEvent('Browserless.cloudflareSolved', {
       solved: true,
@@ -983,7 +1133,7 @@ export class CloudflareSolver {
     this.log.info(`CF solved: type=${result.type} method=${result.method} duration=${result.duration_ms}ms`);
     this.emitClientEvent('Browserless.cloudflareSolved', {
       ...result,
-      token_length: result.token?.length || 0,
+      token_length: result.token_length ?? result.token?.length ?? 0,
       targetId: active.pageTargetId,
       summary: active.tracker.snapshot(),
     }).catch(() => {});

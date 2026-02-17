@@ -29,6 +29,7 @@ export interface CloudflareResult {
   type: CloudflareType;
   method: string;
   token?: string;
+  token_length?: number;
   duration_ms: number;
   attempts: number;
   auto_resolved?: boolean;
@@ -524,7 +525,13 @@ export const TURNSTILE_DETECT_AND_AWAIT_JS = `JSON.stringify((function() {
     window.__turnstileAwaitStarted = true;
     var iv = setInterval(function() {
       var t = getToken();
-      if (t) { clearInterval(iv); window.__turnstileAwaitResult = { solved: true, tokenLength: t.length }; }
+      if (t) {
+        clearInterval(iv);
+        window.__turnstileAwaitResult = { solved: true, tokenLength: t.length };
+        if (typeof window.__turnstileSolvedBinding === 'function') {
+          try { window.__turnstileSolvedBinding(t); } catch(e) {}
+        }
+      }
     }, 100);
     setTimeout(function() { clearInterval(iv); }, 30000);
   }
