@@ -686,21 +686,22 @@ export class ReplayCoordinator {
               // JS-level hooks (fetch/XHR/console patching) are intentionally omitted from
               // the iframe script to avoid conflicts with Turnstile. CDP-level capture is
               // invisible to page JS and achieves the same result.
+              //
+              // Parent page resolution: with flatten=true, msg.sessionId is the CDP session
+              // of the page whose setAutoAttach triggered this iframe attachment. This is the
+              // correct parent — NOT the last entry in targetSessions (which breaks with
+              // multiple concurrent tabs).
+              const parentCdpSid = msg.sessionId || [...targetSessions.values()].pop();
               try {
                 await sendCommand('Network.enable', {}, cdpSessionId);
                 await sendCommand('Runtime.enable', {}, cdpSessionId);
                 // Map iframe session -> parent page session for event injection
-                const pageEntries = [...targetSessions.values()];
-                if (pageEntries.length > 0) {
-                  iframeSessions.set(cdpSessionId, pageEntries[pageEntries.length - 1]);
+                if (parentCdpSid) {
+                  iframeSessions.set(cdpSessionId, parentCdpSid);
                 }
               } catch {
                 // Non-critical — iframe recording still works via rrweb PostMessage
               }
-
-              // Notify solver about iframe attachment
-              const parentPageEntries = [...targetSessions.values()];
-              const parentCdpSid = parentPageEntries.length > 0 ? parentPageEntries[parentPageEntries.length - 1] : undefined;
               if (parentCdpSid) {
                 cloudflareSolver.onIframeAttached(targetInfo.targetId, cdpSessionId, targetInfo.url, parentCdpSid).catch(() => {});
               }
@@ -856,9 +857,17 @@ export class ReplayCoordinator {
                 // Enable network/console capture for newly-navigated CF iframe
                 sendCommand('Network.enable', {}, iframeCdpSid).catch(() => {});
                 sendCommand('Runtime.enable', {}, iframeCdpSid).catch(() => {});
-                const pageEntries = [...targetSessions.values()];
-                if (pageEntries.length > 0) {
-                  iframeSessions.set(iframeCdpSid, pageEntries[pageEntries.length - 1]);
+                // Use existing iframe->page mapping if available, otherwise look up
+                // the parent from iframeTargetSessions -> targetSessions
+                if (!iframeSessions.has(iframeCdpSid)) {
+                  // Find parent page by reverse-mapping: iframeCdpSid was set in
+                  // iframeTargetSessions during attachedToTarget, so check which
+                  // page session owns this iframe via the existing iframeSessions map
+                  // or fall back to last page session
+                  const fallbackParent = [...targetSessions.values()].pop();
+                  if (fallbackParent) {
+                    iframeSessions.set(iframeCdpSid, fallbackParent);
+                  }
                 }
               }
 

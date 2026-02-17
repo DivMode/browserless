@@ -9,6 +9,7 @@ import {
   edgeExecutablePath,
   noop,
   once,
+  screenxyPatchPath,
   ublockLitePath,
 } from '@browserless.io/browserless';
 import puppeteer, { Browser, Page, Target } from 'puppeteer-core';
@@ -251,6 +252,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
 
     const extensions = [
       this.blockAds ? ublockLitePath : null,
+      screenxyPatchPath,
       extensionLaunchArgs ? extensionLaunchArgs.split('=')[1] : null,
     ].filter((_) => !!_);
 

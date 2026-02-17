@@ -914,6 +914,13 @@ export const ublockLitePath = path.join(
   'ublocklite',
 );
 
+export const screenxyPatchPath = path.join(
+  __dirname,
+  '..',
+  'extensions',
+  'screenxy-patch',
+);
+
 export const isMatch = (text: string, pattern: string) => {
   return micromatch.isMatch(text, pattern, { bash: true });
 };

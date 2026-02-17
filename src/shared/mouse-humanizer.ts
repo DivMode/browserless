@@ -1,104 +1,35 @@
 /**
  * Human-like mouse movement simulation via CDP.
  *
- * Ported from pydoll-scraper/src/evasion/mouse.py.
- * Pure math functions + CDP execution functions.
+ * Uses ghost-cursor (Fitts' Law + arc-length sampling) for path geometry
+ * and custom smoothstep timing for CDP event pacing.
  */
+import { path as ghostPath } from 'ghost-cursor';
 
 type Point = [number, number];
+type Vector = { x: number; y: number };
 type SendCommand = (method: string, params?: object, cdpSessionId?: string) => Promise<any>;
 
 /**
- * Calculate a point on a cubic Bezier curve.
- * Formula: (1-t)^3*p0 + 3*(1-t)^2*t*p1 + 3*(1-t)*t^2*p2 + t^3*p3
+ * Generate a human-like curved path using ghost-cursor.
+ * Applies micro-jitter to all points except the final one (exact target).
  */
-export function bezierPoint(t: number, p0: number, p1: number, p2: number, p3: number): number {
-  return (
-    (1 - t) ** 3 * p0 +
-    3 * (1 - t) ** 2 * t * p1 +
-    3 * (1 - t) * t ** 2 * p2 +
-    t ** 3 * p3
-  );
-}
-
-/**
- * Smoothstep ease-in-out: slow start, fast middle, slow end.
- * t * t * (3 - 2 * t)
- */
-export function easeInOut(t: number): number {
-  return t * t * (3 - 2 * t);
-}
-
-/**
- * Generate a curved mouse path using cubic Bezier curves.
- * Control points deviate perpendicular to the movement vector.
- * 20% chance of near-straight path for short distances (<50px).
- */
-export function generateBezierPath(
+export function generatePath(
   startX: number, startY: number,
   endX: number, endY: number,
-  numPoints: number = 30,
+  options?: { spreadOverride?: number; moveSpeed?: number },
 ): Point[] {
-  const dx = endX - startX;
-  const dy = endY - startY;
-  const distance = Math.sqrt(dx * dx + dy * dy);
+  const vectors = ghostPath(
+    { x: startX, y: startY },
+    { x: endX, y: endY },
+    options,
+  ) as Vector[];
 
-  // Perpendicular vector for curve deviation
-  const perpX = distance > 0 ? -dy / distance : 0;
-  const perpY = distance > 0 ? dx / distance : 1;
-
-  // 20% chance of near-straight path for short corrections
-  if (distance < 50 && Math.random() < 0.2) {
-    const path: Point[] = [];
-    for (let i = 0; i <= numPoints; i++) {
-      const t = i / numPoints;
-      path.push([
-        startX + dx * t + (Math.random() - 0.5),
-        startY + dy * t + (Math.random() - 0.5),
-      ]);
+  return vectors.map((v, i) => {
+    if (i < vectors.length - 1) {
+      return [v.x + (Math.random() * 2 - 1) * 0.5, v.y + (Math.random() * 2 - 1) * 0.5] as Point;
     }
-    path[path.length - 1] = [endX, endY];
-    return path;
-  }
-
-  // Asymmetric control point deviation: 15-45% of distance
-  const cp1Scale = distance * (0.15 + Math.random() * 0.30);
-  const cp2Scale = distance * (0.15 + Math.random() * 0.30);
-
-  const cp1T = 0.20 + Math.random() * 0.20;
-  const cp1Dev = (Math.random() * 2 - 1) * cp1Scale;
-  const cp1X = startX + dx * cp1T + perpX * cp1Dev;
-  const cp1Y = startY + dy * cp1T + perpY * cp1Dev;
-
-  const cp2T = 0.55 + Math.random() * 0.25;
-  const cp2Dev = (Math.random() * 2 - 1) * cp2Scale;
-  const cp2X = startX + dx * cp2T + perpX * cp2Dev;
-  const cp2Y = startY + dy * cp2T + perpY * cp2Dev;
-
-  const path: Point[] = [];
-  for (let i = 0; i <= numPoints; i++) {
-    const t = i / numPoints;
-    path.push([
-      bezierPoint(t, startX, cp1X, cp2X, endX),
-      bezierPoint(t, startY, cp1Y, cp2Y, endY),
-    ]);
-  }
-  return path;
-}
-
-/**
- * Add random micro-jitter to simulate hand tremor.
- * Last point is never jittered (preserve exact target).
- */
-export function addMicroJitter(path: Point[], jitterPx: number = 1.0): Point[] {
-  return path.map((p, i) => {
-    if (i < path.length - 1) {
-      return [
-        p[0] + (Math.random() * 2 - 1) * jitterPx,
-        p[1] + (Math.random() * 2 - 1) * jitterPx,
-      ] as Point;
-    }
-    return p;
+    return [endX, endY] as Point;
   });
 }
 
@@ -125,11 +56,13 @@ export async function executePathSegment(
   const decelThreshold = decelerateFinal ? Math.floor(path.length * 0.75) : path.length;
   const decelFactor = rand(1.8, 2.5);
 
+  const ease = (v: number) => v * v * (3 - 2 * v);
+
   for (let i = 0; i < path.length; i++) {
     if (i > 0) {
       const t = i / (path.length - 1);
       const prevT = (i - 1) / (path.length - 1);
-      let segDuration = (easeInOut(t) - easeInOut(prevT)) * totalDuration;
+      let segDuration = (ease(t) - ease(prevT)) * totalDuration;
       segDuration *= rand(0.8, 1.2); // +-20% variation
       if (decelerateFinal && i >= decelThreshold) segDuration *= decelFactor;
       await sleep(Math.max(5, segDuration * 1000));
@@ -157,16 +90,14 @@ async function executeOvershootCorrection(
   const overshootX = targetX + approachDx * overshootDist;
   const overshootY = targetY + approachDy * overshootDist;
 
-  // Move to overshoot point (3-5 quick steps)
-  let overshootPath = generateBezierPath(targetX, targetY, overshootX, overshootY, randInt(3, 5));
-  overshootPath = addMicroJitter(overshootPath, 0.5);
+  // Move to overshoot point (quick)
+  const overshootPath = generatePath(targetX, targetY, overshootX, overshootY, { moveSpeed: 3.0 });
   await executePathSegment(sendCommand, cdpSessionId, overshootPath, rand(0.05, 0.1));
 
   await sleep(rand(80, 150)); // "Oops" pause
 
-  // Correct back to target (4-6 steps with deceleration)
-  let correctionPath = generateBezierPath(overshootX, overshootY, targetX, targetY, randInt(4, 6));
-  correctionPath = addMicroJitter(correctionPath, 0.3);
+  // Correct back to target with deceleration
+  const correctionPath = generatePath(overshootX, overshootY, targetX, targetY, { moveSpeed: 3.0 });
   await executePathSegment(sendCommand, cdpSessionId, correctionPath, rand(0.08, 0.15), true);
 }
 
@@ -187,24 +118,23 @@ export async function simulateHumanPresence(
   for (let wp = 0; wp < numWaypoints; wp++) {
     const targetX = rand(100, 1400);
     const targetY = rand(100, 800);
-    const numPts = randInt(10, 20);
 
-    let path = generateBezierPath(currentX, currentY, targetX, targetY, numPts);
-    path = addMicroJitter(path, 0.8);
+    const driftPath = generatePath(currentX, currentY, targetX, targetY, { moveSpeed: 0.5 });
 
+    const ease = (v: number) => v * v * (3 - 2 * v);
     const segTotal = timePerWaypoint * rand(0.4, 0.7);
-    for (let i = 0; i < path.length; i++) {
+    for (let i = 0; i < driftPath.length; i++) {
       if (i > 0) {
-        const t = i / (path.length - 1);
-        const prevT = (i - 1) / (path.length - 1);
-        let segDur = (easeInOut(t) - easeInOut(prevT)) * segTotal;
+        const t = i / (driftPath.length - 1);
+        const prevT = (i - 1) / (driftPath.length - 1);
+        let segDur = (ease(t) - ease(prevT)) * segTotal;
         segDur *= rand(0.7, 1.3);
         await sleep(Math.max(8, segDur * 1000));
       }
       await sendCommand('Input.dispatchMouseEvent', {
         type: 'mouseMoved',
-        x: Math.round(path[i][0]),
-        y: Math.round(path[i][1]),
+        x: Math.round(driftPath[i][0]),
+        y: Math.round(driftPath[i][1]),
         button: 'none',
       }, cdpSessionId);
     }
@@ -369,8 +299,7 @@ export async function approachCoordinates(
     const midY = targetY - normDy * offsetDist + normDx * lateralOffset;
 
     // Phase 1: ballistic sweep
-    let ballisticPath = generateBezierPath(startX, startY, midX, midY, randInt(15, 25));
-    ballisticPath = addMicroJitter(ballisticPath, 1.5);
+    const ballisticPath = generatePath(startX, startY, midX, midY);
     await executePathSegment(sendCommand, cdpSessionId, ballisticPath, rand(0.35, 0.65));
 
     // Mid-path micro-pause
@@ -381,14 +310,12 @@ export async function approachCoordinates(
       await executeOvershootCorrection(sendCommand, cdpSessionId, targetX, targetY, normDx, normDy);
     } else {
       // Phase 2: correction
-      let correctionPath = generateBezierPath(midX, midY, targetX, targetY, randInt(8, 15));
-      correctionPath = addMicroJitter(correctionPath, 0.5);
+      const correctionPath = generatePath(midX, midY, targetX, targetY, { moveSpeed: 1.5 });
       await executePathSegment(sendCommand, cdpSessionId, correctionPath, rand(0.15, 0.35), true);
     }
   } else {
     // Already close — single short correction
-    let correctionPath = generateBezierPath(startX, startY, targetX, targetY, randInt(8, 15));
-    correctionPath = addMicroJitter(correctionPath, 0.5);
+    const correctionPath = generatePath(startX, startY, targetX, targetY, { moveSpeed: 1.5 });
     await executePathSegment(sendCommand, cdpSessionId, correctionPath, rand(0.15, 0.35), true);
   }
 
