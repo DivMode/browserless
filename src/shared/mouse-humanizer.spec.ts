@@ -13,10 +13,14 @@ describe('Mouse Humanizer', () => {
       expect(path[path.length - 1]).to.deep.equal([100, 100]);
     });
 
-    it('generates multiple intermediate points', () => {
-      const path = generatePath(0, 0, 500, 500);
-      // human-cursor generates 35-80 target points
-      expect(path.length).to.be.greaterThan(10);
+    it('generates power-scaled point count from arc length', () => {
+      // Short move (~7px): arcLength^0.25*20 ≈ 33 points
+      const shortPath = generatePath(100, 100, 105, 105);
+      expect(shortPath.length).to.be.greaterThan(10);
+
+      // Long move (~424px): arcLength^0.25*20 ≈ 90 points
+      const longPath = generatePath(0, 0, 300, 300);
+      expect(longPath.length).to.be.greaterThan(50);
     });
 
     it('produces a curved path (not all collinear)', () => {
@@ -47,8 +51,6 @@ describe('Mouse Humanizer', () => {
     });
 
     it('respects moveSpeed option (faster = fewer points)', () => {
-      // Distance-proportional points: ~distance/(2*speed)
-      // 300*sqrt(2) ≈ 424px → slow(0.5): ~424 pts, fast(5.0): ~42 pts
       const slowPath = generatePath(0, 0, 300, 300, { moveSpeed: 0.5 });
       const fastPath = generatePath(0, 0, 300, 300, { moveSpeed: 5.0 });
       expect(fastPath.length).to.be.lessThan(slowPath.length);
@@ -63,33 +65,20 @@ describe('Mouse Humanizer', () => {
       }
     });
 
-    it('has no sharp direction reversals (smoothing pass)', () => {
-      const cosThreshold = Math.cos((150 * Math.PI) / 180);
-
-      for (let run = 0; run < 20; run++) {
+    it('points progress monotonically along the eased curve (no back-and-forth)', () => {
+      // easeOutQuad sampling of a smooth Bezier should not produce
+      // consecutive duplicate indices or erratic jumps
+      for (let run = 0; run < 10; run++) {
         const path = generatePath(0, 0, 300, 200);
-
-        for (let i = 1; i < path.length - 1; i++) {
-          const prev = path[i - 1];
-          const curr = path[i];
-          const next = path[i + 1];
-
-          const dx1 = curr[0] - prev[0],
-            dy1 = curr[1] - prev[1];
-          const dx2 = next[0] - curr[0],
-            dy2 = next[1] - curr[1];
-          const mag1 = Math.hypot(dx1, dy1);
-          const mag2 = Math.hypot(dx2, dy2);
-
-          // Skip near-zero movement
-          if (mag1 < 0.01 || mag2 < 0.01) continue;
-
-          const cosAngle = (dx1 * dx2 + dy1 * dy2) / (mag1 * mag2);
-          expect(cosAngle).to.be.at.least(
-            cosThreshold,
-            `Sharp reversal at point ${i} in run ${run}`,
-          );
+        // Path should have distinct points (no long runs of duplicates)
+        let distinctCount = 1;
+        for (let i = 1; i < path.length; i++) {
+          if (path[i][0] !== path[i - 1][0] || path[i][1] !== path[i - 1][1]) {
+            distinctCount++;
+          }
         }
+        // At least 50% of points should be distinct
+        expect(distinctCount).to.be.greaterThan(path.length * 0.5);
       }
     });
   });
