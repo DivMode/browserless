@@ -30,6 +30,10 @@ const DEFAULT_CONFIG: Required<CloudflareConfig> = {
   recordingMarkers: true,
 };
 
+function assertNever(x: never, context: string): never {
+  throw new Error(`Unhandled ${context}: ${x}`);
+}
+
 /**
  * Accumulates state during a CF solve phase.
  * Attached to solved/failed events so clients get a pre-computed summary
@@ -440,35 +444,9 @@ export class CloudflareSolver {
       return;
     }
 
-    // No active detection — standalone Turnstile (e.g., fast path page).
-    // Emit a minimal detected+solved pair so pydoll gets observability.
-    if (this.bindingSolvedTargets.has(pageTargetId)) return; // Already emitted
-    this.bindingSolvedTargets.add(pageTargetId);
+    // No active detection — standalone Turnstile (fast-path auto-solve)
     const token = await this.getToken(cdpSessionId);
-    const tracker = new CloudflareTracker({
-      type: 'widget', url: '', detectionMethod: 'callback_binding',
-    });
-    this.emitClientEvent('Browserless.cloudflareDetected', {
-      type: 'widget',
-      detectionMethod: 'callback_binding',
-      targetId: pageTargetId,
-    }).catch(() => {});
-    this.marker(cdpSessionId, 'cf.detected', { type: 'widget' });
-
-    this.emitClientEvent('Browserless.cloudflareSolved', {
-      solved: true,
-      type: 'widget',
-      method: 'auto_solve',
-      token: token || undefined,
-      duration_ms: 0,
-      attempts: 0,
-      auto_resolved: true,
-      signal: 'callback_binding',
-      token_length: token?.length || 0,
-      targetId: pageTargetId,
-      summary: tracker.snapshot(),
-    }).catch(() => {});
-    this.marker(cdpSessionId, 'cf.solved', { type: 'widget', method: 'auto_solve', signal: 'callback_binding' });
+    this.emitStandaloneAutoSolved(pageTargetId, 'callback_binding', token?.length || 0, cdpSessionId);
   }
 
   /**
@@ -500,31 +478,9 @@ export class CloudflareSolver {
       return;
     }
 
-    // No active detection — standalone Turnstile (e.g., fast-path page).
-    // Emit detected+solved pair like onAutoSolveBinding does.
-    if (this.bindingSolvedTargets.has(targetId)) return;
-    this.bindingSolvedTargets.add(targetId);
-    const tracker = new CloudflareTracker({
-      type: 'widget', url: '', detectionMethod: 'beacon_push',
-    });
-    this.emitClientEvent('Browserless.cloudflareDetected', {
-      type: 'widget',
-      detectionMethod: 'beacon_push',
-      targetId,
-    }).catch(() => {});
-
-    this.emitClientEvent('Browserless.cloudflareSolved', {
-      solved: true,
-      type: 'widget',
-      method: 'auto_solve',
-      duration_ms: 0,
-      attempts: 0,
-      auto_resolved: true,
-      signal: 'beacon_push',
-      token_length: tokenLength,
-      targetId,
-      summary: tracker.snapshot(),
-    }).catch(() => {});
+    // No active detection — standalone fast-path
+    const cdpSessionId = this.knownPages.get(targetId);
+    this.emitStandaloneAutoSolved(targetId, 'beacon_push', tokenLength, cdpSessionId);
   }
 
   /**
@@ -537,18 +493,11 @@ export class CloudflareSolver {
         active.aborted = true;
         const duration = Date.now() - active.startTime;
         this.log.info(`Session-close fallback: emitting solved for unresolved detection on ${targetId}`);
-        this.emitClientEvent('Browserless.cloudflareSolved', {
-          solved: true,
-          type: active.info.type,
-          method: 'auto_solve',
-          duration_ms: duration,
-          attempts: 0,
-          auto_resolved: true,
-          signal: 'session_close',
-          token_length: 0,
-          targetId,
-          summary: active.tracker.snapshot(),
-        }).catch(() => {});
+        this.emitSolved(active, {
+          solved: true, type: active.info.type, method: 'auto_solve',
+          duration_ms: duration, attempts: 0, auto_resolved: true,
+          signal: 'session_close', token_length: 0,
+        });
       }
     }
   }
@@ -666,18 +615,11 @@ export class CloudflareSolver {
     if (this.activeDetections.has(targetId)) return;
 
     const startTime = Date.now();
-    const tracker = new CloudflareTracker({
-      type: 'widget', url: '', detectionMethod: 'runtime_poll',
-    });
 
-    let detected = false;
     for (let i = 0; i < 20; i++) {
       if (this.destroyed || !this.enabled) return;
-      // Check if another detection was registered by a DIFFERENT code path
-      // (e.g., beacon or binding solved this target while we were polling).
-      // Skip this check on our own entry (we set detected=true when we add it).
-      if (!detected && this.activeDetections.has(targetId)) return;
-      if (this.bindingSolvedTargets.has(targetId)) return; // Binding already pushed solved
+      if (this.activeDetections.has(targetId)) return;
+      if (this.bindingSolvedTargets.has(targetId)) return;
 
       try {
         const result = await this.sendCommand('Runtime.evaluate', {
@@ -688,101 +630,44 @@ export class CloudflareSolver {
         if (raw) {
           const parsed = JSON.parse(raw);
           if (parsed?.present) {
-            if (!detected) {
-              detected = true;
-              // Register in activeDetections so session-close fallback can find us
-              const active: ActiveDetection = {
-                info: { type: 'widget', url: '', detectionMethod: 'runtime_poll' },
-                pageCdpSessionId: cdpSessionId,
-                pageTargetId: targetId,
-                startTime,
-                attempt: 1,
-                aborted: false,
-                tracker,
-              };
-              this.activeDetections.set(targetId, active);
-              this.emitClientEvent('Browserless.cloudflareDetected', {
-                type: 'widget',
-                detectionMethod: 'runtime_poll',
-                targetId,
-              }).catch(() => {});
-              this.marker(cdpSessionId, 'cf.detected', {
-                type: 'widget', method: 'runtime_poll',
+            const info: CloudflareInfo = {
+              type: 'widget', url: '', detectionMethod: 'runtime_poll',
+            };
+            const active: ActiveDetection = {
+              info, pageCdpSessionId: cdpSessionId, pageTargetId: targetId,
+              startTime, attempt: 1, aborted: false,
+              tracker: new CloudflareTracker(info),
+            };
+
+            // Fast-path: already solved during detection poll
+            if (parsed.solved && !this.bindingSolvedTargets.has(targetId)) {
+              active.aborted = true;
+              this.bindingSolvedTargets.add(targetId);
+              this.emitDetected(active);
+              this.marker(cdpSessionId, 'cf.detected', { type: 'widget', method: 'runtime_poll' });
+              this.emitSolved(active, {
+                solved: true, type: 'widget', method: 'auto_solve',
+                duration_ms: Date.now() - startTime, attempts: 1,
+                auto_resolved: true, signal: 'runtime_poll',
+                token_length: parsed.tokenLength || 0,
               });
-            }
-            if (parsed.solved) {
-              this.activeDetections.delete(targetId);
-              const duration = Date.now() - startTime;
-              this.emitSolvedForWidget(targetId, cdpSessionId, tracker, duration, parsed.tokenLength || 0);
               return;
             }
-            // Widget found but not solved yet — side-effect polling is running
-            // in-page at 100ms. Keep polling via CDP to pick up the result.
+
+            // Widget present but not solved — route through standard pipeline
+            this.activeDetections.set(targetId, active);
+            this.emitDetected(active);
+            this.marker(cdpSessionId, 'cf.detected', { type: 'widget', method: 'runtime_poll' });
+            await this.solveDetection(active);
+            return;
           }
         }
       } catch {
-        // Page gone or session closed (pydoll disconnected).
-        // Only emit failed if the beacon hasn't already resolved this detection.
-        // onBeaconSolved() deletes from activeDetections and adds to bindingSolvedTargets.
-        if (this.bindingSolvedTargets.has(targetId)) return;
-        const stillActive = this.activeDetections.get(targetId);
-        if (detected && stillActive && !stillActive.aborted) {
-          this.log.warn(`Turnstile session closed after ${Date.now() - startTime}ms (detected but not solved)`);
-          this.emitClientEvent('Browserless.cloudflareFailed', {
-            reason: 'session_closed',
-            type: 'widget',
-            duration_ms: Date.now() - startTime,
-            attempts: 0,
-            targetId,
-            summary: tracker.snapshot(),
-          }).catch(() => {});
-        }
         return;
       }
 
       await new Promise(r => setTimeout(r, 200));
     }
-
-    this.activeDetections.delete(targetId);
-    if (detected) {
-      this.log.warn(`Turnstile widget timed out after ${Date.now() - startTime}ms`);
-      this.emitClientEvent('Browserless.cloudflareFailed', {
-        reason: 'timeout',
-        type: 'widget',
-        duration_ms: Date.now() - startTime,
-        attempts: 0,
-        targetId,
-        summary: tracker.snapshot(),
-      }).catch(() => {});
-    }
-  }
-
-  private emitSolvedForWidget(
-    targetId: string,
-    cdpSessionId: string,
-    tracker: CloudflareTracker,
-    duration: number,
-    tokenLength: number,
-  ): void {
-    // Mark as solved to prevent duplicate emission from beacon
-    this.bindingSolvedTargets.add(targetId);
-    this.log.info(`Turnstile widget solved via polling: duration=${duration}ms tokenLen=${tokenLength}`);
-    this.emitClientEvent('Browserless.cloudflareSolved', {
-      solved: true,
-      type: 'widget',
-      method: 'auto_solve',
-      duration_ms: duration,
-      attempts: 0,
-      auto_resolved: true,
-      signal: 'runtime_poll',
-      token_length: tokenLength,
-      targetId,
-      summary: tracker.snapshot(),
-    }).catch(() => {});
-    this.marker(cdpSessionId, 'cf.solved', {
-      type: 'widget', method: 'auto_solve',
-      signal: 'runtime_poll', duration_ms: duration,
-    });
   }
 
   private async solveDetection(active: ActiveDetection): Promise<void> {
@@ -793,12 +678,19 @@ export class CloudflareSolver {
       case 'embedded':
         await this.solveWithClick(active);
         break;
+      case 'widget':
+        await this.solveWidget(active);
+        break;
       case 'invisible':
         await this.solveInvisible(active);
         break;
       case 'managed':
         await this.solveManaged(active);
         break;
+      case 'block':
+        throw new Error('block type should not reach solveDetection');
+      default:
+        assertNever(active.info.type, 'CloudflareType in solveDetection');
     }
 
     // Keep browser alive while waiting for iframe state change
@@ -834,16 +726,7 @@ export class CloudflareSolver {
       method: coords.method, x: coords.x, y: coords.y, debug: coords.debug,
     });
     if (coords.method === 'none') {
-      // Keyboard fallback: TAB+SPACE when click cascade finds nothing
-      this.emitProgress(active, 'tab_space_fallback', {});
-      this.marker(pageCdpSessionId, 'cf.tab_space_start', {});
-      const solved = await tabSpaceFallback(
-        this.sendCommand, pageCdpSessionId, 5,
-        () => this.isSolved(pageCdpSessionId),
-      );
-      if (solved) {
-        this.marker(pageCdpSessionId, 'cf.tab_space_solved', {});
-      }
+      await this.tryTabSpaceFallback(active);
       return; // Activity loop continues polling either way
     }
 
@@ -869,6 +752,106 @@ export class CloudflareSolver {
     this.emitProgress(active, 'clicked', {
       x: Math.round(targetX), y: Math.round(targetY),
     });
+  }
+
+  /**
+   * Solve standalone Turnstile widgets. Skips presence simulation (too slow
+   * under 15-tab contention where each CDP call takes ~8s). Goes directly
+   * to finding and clicking the widget checkbox.
+   */
+  private async solveWidget(active: ActiveDetection): Promise<void> {
+    if (active.aborted) return;
+    const { pageCdpSessionId } = active;
+
+    // Gate: check if already solved before spending CDP calls
+    if (await this.isSolved(pageCdpSessionId)) {
+      await this.resolveAutoSolved(active, 'widget_pre_click');
+      return;
+    }
+    if (active.aborted) return;
+
+    // ── Wait for Turnstile iframe to appear ──
+    // Detection proved the widget container exists (.cf-turnstile, [data-sitekey]),
+    // but the challenges.cloudflare.com iframe may not have loaded yet.
+    // onIframeAttached() sets active.iframeCdpSessionId when it appears.
+    if (!active.iframeCdpSessionId) {
+      for (let i = 0; i < 25; i++) {  // 25 × 200ms = 5s max
+        if (active.aborted) return;
+        if (active.iframeCdpSessionId) break;
+        // Check solved every ~1s to avoid CDP contention
+        if (i % 5 === 4 && await this.isSolved(pageCdpSessionId)) {
+          await this.resolveAutoSolved(active, 'iframe_wait_solved');
+          return;
+        }
+        await new Promise(r => setTimeout(r, 200));
+      }
+      this.emitProgress(active, 'iframe_wait_complete', {
+        iframe_found: !!active.iframeCdpSessionId,
+      });
+    }
+    if (active.aborted) return;
+
+    // Find Turnstile click target — retry up to 3 times (CDP contention causes timeouts)
+    let coords: { x: number; y: number; method?: string; debug?: Record<string, unknown> } | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (active.aborted) return;
+      coords = await this.findClickTarget(pageCdpSessionId);
+      if (coords) break;
+
+      // CDP call failed (timeout/error) — emit diagnostic
+      this.emitProgress(active, 'find_target_retry', { attempt, max: 3 });
+      this.marker(pageCdpSessionId, 'cf.find_retry', { attempt });
+
+      if (active.aborted) return;
+      if (await this.isSolved(pageCdpSessionId)) {
+        await this.resolveAutoSolved(active, 'find_retry_solved');
+        return;
+      }
+      if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+    }
+    if (active.aborted) return;
+
+    // All 3 attempts returned null — report and fall through to keyboard
+    if (!coords) {
+      this.emitProgress(active, 'find_target_failed', { attempts: 3 });
+      this.marker(pageCdpSessionId, 'cf.find_failed', { attempts: 3 });
+      await this.tryTabSpaceFallback(active);
+      return;
+    }
+
+    this.emitProgress(active, 'widget_found', {
+      method: coords.method, x: coords.x, y: coords.y, debug: coords.debug,
+    });
+    if (coords.method === 'none') {
+      await this.tryTabSpaceFallback(active);
+      return;
+    }
+
+    // Gate: check abort + auto-solve before clicking
+    if (active.aborted) return;
+    if (await this.isSolved(pageCdpSessionId)) {
+      this.marker(pageCdpSessionId, 'cf.click_cancelled', { method: coords.method });
+      await this.resolveAutoSolved(active, 'click_cancelled');
+      return;
+    }
+
+    // Click directly
+    await commitClick(this.sendCommand, pageCdpSessionId, coords.x + 15, coords.y);
+    this.emitProgress(active, 'clicked', {
+      x: Math.round(coords.x + 15), y: Math.round(coords.y),
+    });
+  }
+
+  private async tryTabSpaceFallback(active: ActiveDetection): Promise<void> {
+    this.emitProgress(active, 'tab_space_fallback', {});
+    this.marker(active.pageCdpSessionId, 'cf.tab_space_start', {});
+    const solved = await tabSpaceFallback(
+      this.sendCommand, active.pageCdpSessionId, 5,
+      () => this.isSolved(active.pageCdpSessionId),
+    );
+    if (solved) {
+      this.marker(active.pageCdpSessionId, 'cf.tab_space_solved', {});
+    }
   }
 
   private async solveInvisible(active: ActiveDetection): Promise<void> {
@@ -905,16 +888,7 @@ export class CloudflareSolver {
       method: coords.method, x: coords.x, y: coords.y, debug: coords.debug,
     });
     if (coords.method === 'none') {
-      // Keyboard fallback: TAB+SPACE when click cascade finds nothing
-      this.emitProgress(active, 'tab_space_fallback', {});
-      this.marker(pageCdpSessionId, 'cf.tab_space_start', {});
-      const solved = await tabSpaceFallback(
-        this.sendCommand, pageCdpSessionId, 5,
-        () => this.isSolved(pageCdpSessionId),
-      );
-      if (solved) {
-        this.marker(pageCdpSessionId, 'cf.tab_space_solved', {});
-      }
+      await this.tryTabSpaceFallback(active);
       return; // Activity loop continues polling either way
     }
 
@@ -959,7 +933,8 @@ export class CloudflareSolver {
         return { x: 0, y: 0, method: 'none', debug: parsed.d || undefined };
       }
       return { x: parsed.x, y: parsed.y, method: parsed.m, debug: parsed.d || undefined };
-    } catch {
+    } catch (err) {
+      console.warn('[CF] findClickTarget failed:', (err as Error)?.message || err);
       return null;
     }
   }
@@ -1145,11 +1120,40 @@ export class CloudflareSolver {
   private emitFailed(active: ActiveDetection, reason: string, duration: number): void {
     this.log.warn(`CF failed: reason=${reason} duration=${duration}ms attempts=${active.attempt}`);
     this.emitClientEvent('Browserless.cloudflareFailed', {
-      reason, duration_ms: duration, attempts: active.attempt,
+      reason, type: active.info.type, duration_ms: duration, attempts: active.attempt,
       targetId: active.pageTargetId,
       summary: active.tracker.snapshot(),
     }).catch(() => {});
     this.marker(active.pageCdpSessionId, 'cf.failed', { reason, duration_ms: duration });
+  }
+
+  private emitStandaloneAutoSolved(
+    targetId: string,
+    signal: string,
+    tokenLength: number,
+    cdpSessionId?: string,
+  ): void {
+    if (this.bindingSolvedTargets.has(targetId)) return;
+    this.bindingSolvedTargets.add(targetId);
+
+    const info: CloudflareInfo = {
+      type: 'widget', url: '', detectionMethod: signal,
+    };
+    const active: ActiveDetection = {
+      info, pageCdpSessionId: cdpSessionId || '', pageTargetId: targetId,
+      startTime: Date.now(), attempt: 0, aborted: true,
+      tracker: new CloudflareTracker(info),
+    };
+
+    this.emitDetected(active);
+    if (cdpSessionId) {
+      this.marker(cdpSessionId, 'cf.detected', { type: 'widget' });
+    }
+    this.emitSolved(active, {
+      solved: true, type: 'widget', method: 'auto_solve',
+      duration_ms: 0, attempts: 0, auto_resolved: true,
+      signal, token_length: tokenLength,
+    });
   }
 
   private marker(cdpSessionId: string, tag: string, payload?: object): void {
