@@ -73,16 +73,22 @@ export function generatePath(
 ): Point[] {
   const start = { x: startX, y: startY };
   const end = { x: endX, y: endY };
+  const distance = Math.hypot(endX - startX, endY - startY);
 
   const params = generateRandomCurveParameters(start, end);
 
-  // Scale target points by moveSpeed (faster = fewer points)
+  // ~1 point per 2px of distance (matches ghost-cursor density), scaled by speed
   const speed = options?.moveSpeed ?? 1.0;
-  const targetPoints = Math.max(10, Math.round(params.targetPoints / speed));
+  const targetPoints = Math.max(10, Math.round(distance / (2 * speed)));
+
+  // Cap offset boundaries at 40% of distance to prevent exaggerated arcs on short moves
+  const maxOffset = Math.max(15, distance * 0.4);
+  const offsetBoundaryX = Math.min(params.offsetBoundaryX, maxOffset);
+  const offsetBoundaryY = Math.min(params.offsetBoundaryY, maxOffset);
 
   const curve = new HumanizeMouseTrajectory(start, end, {
-    offsetBoundaryX: params.offsetBoundaryX,
-    offsetBoundaryY: params.offsetBoundaryY,
+    offsetBoundaryX,
+    offsetBoundaryY,
     knotsCount: params.knotsCount,
     distortionMean: params.distortionMean,
     distortionStDev: params.distortionStDev,

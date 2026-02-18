@@ -47,15 +47,11 @@ describe('Mouse Humanizer', () => {
     });
 
     it('respects moveSpeed option (faster = fewer points)', () => {
-      // Collect averages over multiple runs to smooth out randomness
-      let slowTotal = 0;
-      let fastTotal = 0;
-      const runs = 10;
-      for (let i = 0; i < runs; i++) {
-        slowTotal += generatePath(0, 0, 300, 300, { moveSpeed: 0.5 }).length;
-        fastTotal += generatePath(0, 0, 300, 300, { moveSpeed: 5.0 }).length;
-      }
-      expect(fastTotal / runs).to.be.lessThan(slowTotal / runs);
+      // Distance-proportional points: ~distance/(2*speed)
+      // 300*sqrt(2) ≈ 424px → slow(0.5): ~424 pts, fast(5.0): ~42 pts
+      const slowPath = generatePath(0, 0, 300, 300, { moveSpeed: 0.5 });
+      const fastPath = generatePath(0, 0, 300, 300, { moveSpeed: 5.0 });
+      expect(fastPath.length).to.be.lessThan(slowPath.length);
     });
 
     it('last point is always exact target', () => {
