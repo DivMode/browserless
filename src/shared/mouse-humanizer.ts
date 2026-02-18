@@ -1,36 +1,98 @@
 /**
  * Human-like mouse movement simulation via CDP.
  *
- * Uses ghost-cursor (Fitts' Law + arc-length sampling) for path geometry
- * and custom smoothstep timing for CDP event pacing.
+ * Uses N-degree Bernstein polynomials (ported from humancursor) with
+ * Gaussian distortion + easing for path geometry, plus a smoothing pass
+ * to remove sharp direction reversals that hands can't physically produce.
  */
-import { path as ghostPath } from 'ghost-cursor';
+import {
+  HumanizeMouseTrajectory,
+  generateRandomCurveParameters,
+} from './human-cursor/index.js';
 
 type Point = [number, number];
-type Vector = { x: number; y: number };
 type SendCommand = (method: string, params?: object, cdpSessionId?: string) => Promise<any>;
 
 /**
- * Generate a human-like curved path using ghost-cursor.
- * Applies micro-jitter to all points except the final one (exact target).
+ * Remove points that create sharp direction reversals (> threshold angle).
+ * Humans can't instantly reverse mouse direction due to hand inertia.
+ * Runs iteratively since removing a point can expose a new sharp angle.
+ */
+function smoothPath(points: Point[]): Point[] {
+  let current = points;
+
+  for (let pass = 0; pass < 10; pass++) {
+    if (current.length < 3) return current;
+
+    const result: Point[] = [current[0]];
+    const cosThreshold = Math.cos((150 * Math.PI) / 180);
+
+    for (let i = 1; i < current.length - 1; i++) {
+      const prev = result[result.length - 1];
+      const curr = current[i];
+      const next = current[i + 1];
+
+      const dx1 = curr[0] - prev[0],
+        dy1 = curr[1] - prev[1];
+      const dx2 = next[0] - curr[0],
+        dy2 = next[1] - curr[1];
+      const mag1 = Math.hypot(dx1, dy1);
+      const mag2 = Math.hypot(dx2, dy2);
+
+      if (mag1 < 0.01 || mag2 < 0.01) {
+        result.push(curr);
+        continue;
+      }
+
+      const cosAngle = (dx1 * dx2 + dy1 * dy2) / (mag1 * mag2);
+      if (cosAngle < cosThreshold) continue;
+
+      result.push(curr);
+    }
+
+    result.push(current[current.length - 1]);
+
+    // Converged — no points removed this pass
+    if (result.length === current.length) return result;
+    current = result;
+  }
+
+  return current;
+}
+
+/**
+ * Generate a human-like curved path using Bernstein polynomials.
+ * Applies smoothing to remove sharp direction reversals.
  */
 export function generatePath(
-  startX: number, startY: number,
-  endX: number, endY: number,
-  options?: { spreadOverride?: number; moveSpeed?: number },
+  startX: number,
+  startY: number,
+  endX: number,
+  endY: number,
+  options?: { moveSpeed?: number },
 ): Point[] {
-  const vectors = ghostPath(
-    { x: startX, y: startY },
-    { x: endX, y: endY },
-    options,
-  ) as Vector[];
+  const start = { x: startX, y: startY };
+  const end = { x: endX, y: endY };
 
-  return vectors.map((v, i) => {
-    if (i < vectors.length - 1) {
-      return [v.x + (Math.random() * 2 - 1) * 0.5, v.y + (Math.random() * 2 - 1) * 0.5] as Point;
-    }
-    return [endX, endY] as Point;
+  const params = generateRandomCurveParameters(start, end);
+
+  // Scale target points by moveSpeed (faster = fewer points)
+  const speed = options?.moveSpeed ?? 1.0;
+  const targetPoints = Math.max(10, Math.round(params.targetPoints / speed));
+
+  const curve = new HumanizeMouseTrajectory(start, end, {
+    offsetBoundaryX: params.offsetBoundaryX,
+    offsetBoundaryY: params.offsetBoundaryY,
+    knotsCount: params.knotsCount,
+    distortionMean: params.distortionMean,
+    distortionStDev: params.distortionStDev,
+    distortionFrequency: params.distortionFrequency,
+    tweening: params.tween,
+    targetPoints,
   });
+
+  const rawPath: Point[] = curve.points.map((v) => [v.x, v.y]);
+  return smoothPath(rawPath);
 }
 
 // Helper: sleep with ms

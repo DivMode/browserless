@@ -62,7 +62,6 @@
     "del": "^8.0.1",
     "file-type": "^21.3.0",
     "get-port": "^7.1.0",
-    "ghost-cursor": "^1.4.2",
     "gradient-string": "^3.0.0",
     "http-proxy": "^1.18.1",
     "joi": "^18.0.2",
