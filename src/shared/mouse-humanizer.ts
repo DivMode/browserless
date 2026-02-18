@@ -1,20 +1,36 @@
 /**
  * Human-like mouse movement simulation via CDP.
  *
- * Uses N-degree Bernstein polynomials with fixed parameters matching
- * Camoufox's proven implementation: 2 knots, ±80px boundaries,
- * easeOutQuad easing, and power-scale point count from arc length.
+ * Generates gentle arcs using cubic Bezier curves with path-aligned knots.
+ * Knots are placed along the movement direction with a perpendicular offset
+ * to one side — matching how a real wrist/elbow pivot creates a smooth arc.
+ * Resampled with easeOutQuad and power-scale point count from Camoufox.
  */
-import { HumanizeMouseTrajectory } from './human-cursor/index.js';
-import { easeOutQuad } from './human-cursor/tweening.js';
+import { calculatePointsInCurve } from './human-cursor/bezier-calculator.js';
 
 type Point = [number, number];
+type Vector = { x: number; y: number };
 type SendCommand = (method: string, params?: object, cdpSessionId?: string) => Promise<any>;
 
+/** Box-Muller normal distribution */
+function randomNormal(mean: number, stdDev: number): number {
+  const u1 = Math.random();
+  const u2 = Math.random();
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2) * stdDev + mean;
+}
+
+/** easeOutQuad: fast start, gentle decel */
+function easeOutQuad(t: number): number {
+  return t * (2 - t);
+}
+
 /**
- * Generate a human-like curved path using Bernstein polynomials.
- * Matches Camoufox's MouseTrajectories.hpp: fixed boundary=80, knots=2,
- * distortion=(1,1,0.5), easeOutQuad, power-scale point count.
+ * Generate a human-like curved path.
+ *
+ * Places 2 knots at 1/3 and 2/3 along the path, offset perpendicular to
+ * the SAME side (arc, not S-curve). Arc amount is 5-20% of distance —
+ * gentle enough for any segment length. Gaussian distortion adds micro-noise.
+ * Point count uses Camoufox's power-scale formula: arcLength^0.25 * 20.
  */
 export function generatePath(
   startX: number,
@@ -23,47 +39,72 @@ export function generatePath(
   endY: number,
   options?: { moveSpeed?: number },
 ): Point[] {
-  const start = { x: startX, y: startY };
-  const end = { x: endX, y: endY };
+  const distance = Math.hypot(endX - startX, endY - startY);
+  if (distance < 1) return [[startX, startY], [endX, endY]];
 
-  // Generate raw Bezier curve with Camoufox's fixed parameters.
-  // Large targetPoints preserves all raw detail for arc-length resampling.
-  const curve = new HumanizeMouseTrajectory(start, end, {
-    offsetBoundaryX: 80,
-    offsetBoundaryY: 80,
-    knotsCount: 2,
-    distortionMean: 1,
-    distortionStDev: 1,
-    distortionFrequency: 0.5,
-    tweening: easeOutQuad,
-    targetPoints: 10000,
+  // Unit direction and perpendicular vectors
+  const ux = (endX - startX) / distance;
+  const uy = (endY - startY) / distance;
+  const px = -uy; // perpendicular
+  const py = ux;
+
+  // Gentle arc: 5-20% of distance, always to the same side
+  const arcAmount = distance * (0.05 + Math.random() * 0.15);
+  const arcSign = Math.random() < 0.5 ? 1 : -1;
+
+  // Knots at 1/3 and 2/3 along path, offset perpendicular
+  const knot1: Vector = {
+    x: startX + ux * distance / 3 + px * arcAmount * arcSign * (0.7 + Math.random() * 0.3),
+    y: startY + uy * distance / 3 + py * arcAmount * arcSign * (0.7 + Math.random() * 0.3),
+  };
+  const knot2: Vector = {
+    x: startX + ux * distance * 2 / 3 + px * arcAmount * arcSign * (0.7 + Math.random() * 0.3),
+    y: startY + uy * distance * 2 / 3 + py * arcAmount * arcSign * (0.7 + Math.random() * 0.3),
+  };
+
+  // Raw cubic Bezier (4 control points)
+  const numRaw = Math.max(50, Math.floor(distance));
+  const controlPoints: Vector[] = [
+    { x: startX, y: startY },
+    knot1,
+    knot2,
+    { x: endX, y: endY },
+  ];
+  const rawPoints = calculatePointsInCurve(numRaw, controlPoints);
+
+  // Gaussian distortion on Y (50% of interior points, stddev=1px)
+  const distorted = rawPoints.map((p, i) => {
+    if (i === 0 || i === rawPoints.length - 1) return p;
+    const delta = Math.random() < 0.5 ? randomNormal(0, 1) : 0;
+    return { x: p.x, y: p.y + delta };
   });
 
-  const raw = curve.points;
-
-  // Compute arc length of the distorted curve
+  // Arc length for power-scale point count
   let arcLength = 0;
-  for (let i = 1; i < raw.length; i++) {
-    arcLength += Math.hypot(raw[i].x - raw[i - 1].x, raw[i].y - raw[i - 1].y);
+  for (let i = 1; i < distorted.length; i++) {
+    arcLength += Math.hypot(
+      distorted[i].x - distorted[i - 1].x,
+      distorted[i].y - distorted[i - 1].y,
+    );
   }
 
-  // Camoufox power-scale: arcLength^0.25 * 20, clamped [2, 150]
+  // Camoufox formula: arcLength^0.25 * 20, clamped [2, 150], scaled by speed
   const speed = options?.moveSpeed ?? 1.0;
   const n = Math.min(
     150,
     Math.max(2, Math.round(Math.pow(arcLength, 0.25) * 20 / speed)),
   );
 
-  // Resample: pick existing raw points at easeOutQuad-distributed indices
+  // Resample with easeOutQuad — pick existing points at eased indices
   const result: Point[] = [];
   for (let i = 0; i < n; i++) {
     const t = n > 1 ? i / (n - 1) : 0;
     const easedT = easeOutQuad(t);
     const index = Math.min(
-      Math.floor(easedT * (raw.length - 1)),
-      raw.length - 1,
+      Math.floor(easedT * (distorted.length - 1)),
+      distorted.length - 1,
     );
-    result.push([raw[index].x, raw[index].y]);
+    result.push([distorted[index].x, distorted[index].y]);
   }
 
   // Force exact endpoint
