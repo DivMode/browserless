@@ -431,6 +431,77 @@ export async function commitClick(
 }
 
 /**
+ * Lightweight approach for contended sessions (~6-8 CDP calls).
+ * Single Bezier arc from a nearby random position. Skips the two-phase
+ * ballistic+correction split of approachCoordinates to minimise CDP overhead
+ * while still producing a curved, human-looking trajectory.
+ */
+export async function quickApproach(
+  sendCommand: SendCommand,
+  cdpSessionId: string,
+  targetX: number, targetY: number,
+): Promise<Point> {
+  const finalX = Math.round(targetX) + randInt(-2, 2);
+  const finalY = Math.round(targetY) + randInt(-1, 1);
+
+  // Start 50-80px away in a random direction
+  const angle = rand(0, 2 * Math.PI);
+  const dist = rand(50, 80);
+  const startX = Math.max(10, Math.min(1900, finalX + Math.cos(angle) * dist));
+  const startY = Math.max(10, Math.min(1060, finalY + Math.sin(angle) * dist));
+
+  // moveSpeed 3.0 → ~6-8 points instead of ~20
+  const path = generatePath(startX, startY, finalX, finalY, { moveSpeed: 3.0 });
+  await executePathSegment(sendCommand, cdpSessionId, path, rand(0.15, 0.35), true);
+
+  // Brief decision pause before click
+  await sleep(rand(100, 250));
+
+  return [finalX, finalY];
+}
+
+/**
+ * Post-click dwell: keeps cursor near click position with tiny micro-movements,
+ * then slowly drifts away. Prevents the suspicious "click-and-teleport" pattern
+ * that Turnstile uses as a bot signal.
+ *
+ * ~6-10 CDP calls total (2-4 micro-moves + 4-6 drift points).
+ */
+export async function postClickDwell(
+  sendCommand: SendCommand,
+  cdpSessionId: string,
+  clickX: number, clickY: number,
+): Promise<void> {
+  // Phase 1: Micro-drift near click position (300-600ms)
+  const dwellTime = rand(300, 600);
+  const microMoves = randInt(2, 4);
+  const microDelay = dwellTime / microMoves;
+
+  let curX = clickX;
+  let curY = clickY;
+  for (let i = 0; i < microMoves; i++) {
+    await sleep(microDelay);
+    curX += rand(-3, 3);
+    curY += rand(-2, 2);
+    await sendCommand('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: Math.round(curX),
+      y: Math.round(curY),
+      button: 'none',
+    }, cdpSessionId);
+  }
+
+  // Phase 2: Slow drift away (200-400ms, 30-60px)
+  const driftAngle = rand(0, 2 * Math.PI);
+  const driftDist = rand(30, 60);
+  const driftX = curX + Math.cos(driftAngle) * driftDist;
+  const driftY = curY + Math.sin(driftAngle) * driftDist;
+
+  const driftPath = generatePath(curX, curY, driftX, driftY, { moveSpeed: 3.0 });
+  await executePathSegment(sendCommand, cdpSessionId, driftPath, rand(0.2, 0.4));
+}
+
+/**
  * Full click: approach + commit.
  */
 export async function clickAtCoordinates(

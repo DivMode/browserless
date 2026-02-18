@@ -18,6 +18,8 @@ import {
   simulateHumanPresence,
   approachCoordinates,
   commitClick,
+  quickApproach,
+  postClickDwell,
   tabSpaceFallback,
 } from '../shared/mouse-humanizer.js';
 
@@ -773,12 +775,18 @@ export class CloudflareSolver {
     this.emitProgress(active, 'clicked', {
       x: Math.round(targetX), y: Math.round(targetY),
     });
+
+    // Phase 5: Post-click dwell — linger near checkbox before drifting away
+    try {
+      await postClickDwell(this.sendCommand, pageCdpSessionId, targetX, targetY);
+    } catch { /* page navigated after solve — expected */ }
   }
 
   /**
-   * Solve standalone Turnstile widgets. Skips presence simulation (too slow
-   * under 15-tab contention where each CDP call takes ~8s). Goes directly
-   * to finding and clicking the widget checkbox.
+   * Solve standalone Turnstile widgets. Skips full presence simulation (too slow
+   * under 15-tab contention where each CDP call takes ~8s) but still does a
+   * lightweight Bezier approach + post-click dwell to avoid the suspicious
+   * "teleport-click-teleport" pattern that Turnstile flags as bot behavior.
    */
   private async solveWidget(active: ActiveDetection): Promise<void> {
     if (active.aborted) return;
@@ -840,11 +848,22 @@ export class CloudflareSolver {
       return;
     }
 
-    // Click directly
-    await commitClick(this.sendCommand, pageCdpSessionId, coords.x + 15, coords.y);
+    // Lightweight approach (~6-8 CDP calls via high moveSpeed Bezier)
+    const [targetX, targetY] = await quickApproach(
+      this.sendCommand, pageCdpSessionId, coords.x + 15, coords.y,
+    );
+    if (active.aborted || Date.now() > deadline) return;
+
+    // Click
+    await commitClick(this.sendCommand, pageCdpSessionId, targetX, targetY);
     this.emitProgress(active, 'clicked', {
-      x: Math.round(coords.x + 15), y: Math.round(coords.y),
+      x: Math.round(targetX), y: Math.round(targetY),
     });
+
+    // Post-click dwell — linger near checkbox before drifting away
+    try {
+      await postClickDwell(this.sendCommand, pageCdpSessionId, targetX, targetY);
+    } catch { /* page navigated after solve — expected */ }
   }
 
   private async tryTabSpaceFallback(active: ActiveDetection, maxTabs = 5): Promise<void> {
@@ -919,6 +938,11 @@ export class CloudflareSolver {
     this.emitProgress(active, 'clicked', {
       x: Math.round(targetX), y: Math.round(targetY),
     });
+
+    // Phase 5: Post-click dwell — linger near checkbox before drifting away
+    try {
+      await postClickDwell(this.sendCommand, pageCdpSessionId, targetX, targetY);
+    } catch { /* page navigated after solve — expected */ }
   }
 
   private async findClickTarget(
