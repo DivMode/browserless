@@ -1,0 +1,199 @@
+// Turnstile widget click target finder — compiled to IIFE by scripts/bundle-cf-scripts.ts
+// Injected into pages via Runtime.evaluate to find standalone Turnstile widgets.
+// Unlike FIND_CLICK_TARGET_JS, the body-wide shadow host scan is NOT gated behind
+// _cf_chl_opt — it runs on any page with an embedded Turnstile widget.
+
+interface ClickTarget {
+  x: number;
+  y: number;
+  m: string;
+  d?: DebugInfo;
+}
+
+interface DebugInfo {
+  iframes: { w: number; h: number; src: string }[];
+  ts_els: number;
+  forms: number;
+  shadow_hosts: number;
+  title: string;
+}
+
+interface ShadowHost {
+  div: Element;
+  rect: DOMRect;
+  method: string;
+  clean: boolean;
+}
+
+function scrollAndMeasure(el: Element): DOMRect {
+  el.scrollIntoView({ block: 'center', behavior: 'instant' });
+  void (el as HTMLElement).offsetHeight;
+  return el.getBoundingClientRect();
+}
+
+function collectDebug(): DebugInfo {
+  const iframes = document.querySelectorAll('iframe');
+  const ifl: DebugInfo['iframes'] = [];
+  for (let k = 0; k < iframes.length && k < 10; k++) {
+    const r = iframes[k].getBoundingClientRect();
+    ifl.push({ w: Math.round(r.width), h: Math.round(r.height), src: (iframes[k].src || '').substring(0, 40) });
+  }
+  return {
+    iframes: ifl,
+    ts_els: document.querySelectorAll('[class*="cf-turnstile"], [data-sitekey], [name="cf-turnstile-response"], [id^="cf-chl-widget"]').length,
+    forms: document.querySelectorAll('form').length,
+    shadow_hosts: document.querySelectorAll('div:not(:has(*))').length,
+    title: (document.title || '').substring(0, 50),
+  };
+}
+
+function hit(rect: DOMRect, method: string): ClickTarget {
+  return { x: rect.x + 30, y: rect.y + rect.height / 2, m: method, d: collectDebug() };
+}
+
+function findShadowHosts(container: Element, method: string): ShadowHost[] {
+  const results: ShadowHost[] = [];
+  const divs = container.querySelectorAll('div');
+  for (let k = 0; k < divs.length; k++) {
+    const r = divs[k].getBoundingClientRect();
+    const isNormal = r.width >= 290 && r.width <= 310 && r.height >= 50 && r.height <= 80;
+    const isCompact = r.width >= 140 && r.width <= 160 && r.height >= 130 && r.height <= 150;
+    const isWide = r.width >= 250 && r.width <= 400 && r.height >= 50 && r.height <= 200;
+    if ((isNormal || isCompact || isWide) && !divs[k].querySelector('*') && r.x > 0 && r.y > 0) {
+      const s = window.getComputedStyle(divs[k]);
+      results.push({ div: divs[k], rect: r, method, clean: s.margin === '0px' && s.padding === '0px' });
+    }
+  }
+  return results;
+}
+
+function pickBest(hosts: ShadowHost[]): ClickTarget | null {
+  if (hosts.length === 0) return null;
+  const clean = hosts.filter(h => h.clean);
+  const cands = clean.length > 0 ? clean : hosts;
+  if (cands.length === 1) {
+    const r = scrollAndMeasure(cands[0].div);
+    return hit(r, cands[0].method + (clean.length > 0 ? '-clean' : ''));
+  }
+  for (let k = 0; k < cands.length; k++) {
+    const p = cands[k].div.parentElement;
+    if (p) {
+      const pr = p.getBoundingClientRect();
+      if (pr.width >= cands[k].rect.width && pr.width <= cands[k].rect.width + 50) {
+        const r = scrollAndMeasure(cands[k].div);
+        return hit(r, cands[k].method + '-parent-match');
+      }
+    }
+  }
+  const r = scrollAndMeasure(cands[cands.length - 1].div);
+  return hit(r, cands[cands.length - 1].method + '-last');
+}
+
+// ── Main entry point — called by the IIFE wrapper ────────────
+
+function findTurnstileTarget(): ClickTarget {
+  const iframes = document.querySelectorAll('iframe');
+
+  // Method 1: iframe by src (challenges.cloudflare.com or turnstile)
+  for (let i = 0; i < iframes.length; i++) {
+    const src = iframes[i].src || '';
+    if (src.includes('challenges.cloudflare.com') || src.includes('turnstile')) {
+      const rect = scrollAndMeasure(iframes[i]);
+      if (rect.width > 0 && rect.height > 0) return hit(rect, 'iframe-src');
+    }
+  }
+
+  // Method 2: iframe by name (cf-chl-widget-*)
+  for (let i = 0; i < iframes.length; i++) {
+    const name = iframes[i].name || '';
+    if (name.indexOf('cf-chl-widget') === 0) {
+      const rect = scrollAndMeasure(iframes[i]);
+      if (rect.width > 0 && rect.height > 0) return hit(rect, 'iframe-name');
+    }
+  }
+
+  // Method 3: cf-turnstile-response hidden input → walk to visible ancestor
+  const inputs = document.querySelectorAll<HTMLInputElement>('[name="cf-turnstile-response"]');
+  for (let i = 0; i < inputs.length; i++) {
+    let el: HTMLElement | null = inputs[i].parentElement;
+    for (let d = 0; d < 10 && el && el !== document.body; d++) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width >= 200 && rect.height >= 40 && rect.x >= 0 && rect.y >= 0) {
+        const measured = scrollAndMeasure(el);
+        return hit(measured, 'response-parent');
+      }
+      el = el.parentElement;
+    }
+  }
+
+  // Method 4: iframe with Turnstile dimensions (300×65)
+  for (let i = 0; i < iframes.length; i++) {
+    const rect = iframes[i].getBoundingClientRect();
+    if (rect.width > 290 && rect.width <= 310 && rect.height > 55 && rect.height <= 85 && rect.x > 0 && rect.y > 0) {
+      const measured = scrollAndMeasure(iframes[i]);
+      return hit(measured, 'iframe-dimensions');
+    }
+  }
+
+  // Method 5: .cf-turnstile-wrapper or [class*="cf-turnstile"]
+  const wrappers = document.querySelectorAll<HTMLElement>('.cf-turnstile-wrapper, [class*="cf-turnstile"]');
+  for (let i = 0; i < wrappers.length; i++) {
+    wrappers[i].style.width = '300px';
+    const rect = scrollAndMeasure(wrappers[i]);
+    if (rect.width > 50 && rect.height > 50 && rect.x > 0 && rect.y > 0)
+      return hit(rect, 'cf-turnstile-wrapper');
+  }
+
+  // Method 6: .cf-turnstile[data-sitekey] shadow host
+  const cfTs = document.querySelector<HTMLElement>('.cf-turnstile[data-sitekey]');
+  if (cfTs) {
+    cfTs.style.width = '300px';
+    const best = pickBest(findShadowHosts(cfTs, 'cf-turnstile-sitekey'));
+    if (best) return best;
+  }
+
+  // Method 7: any [data-sitekey] shadow host
+  const sitekeys = document.querySelectorAll('[data-sitekey]');
+  for (let i = 0; i < sitekeys.length; i++) {
+    const best = pickBest(findShadowHosts(sitekeys[i], 'data-sitekey'));
+    if (best) return best;
+  }
+
+  // Method 8: shadow host inside <form>
+  const formElements = document.querySelectorAll('form');
+  for (let i = 0; i < formElements.length; i++) {
+    const best = pickBest(findShadowHosts(formElements[i], 'form-shadow-host'));
+    if (best) return best;
+  }
+
+  // Method 9: cf-chl-widget shadow host (Turnstile-created wrapper with closed shadow root)
+  const widgetEls = document.querySelectorAll('[id^="cf-chl-widget"]');
+  for (let i = 0; i < widgetEls.length; i++) {
+    let rect = widgetEls[i].getBoundingClientRect();
+    if (rect.width >= 200 && rect.height >= 40 && rect.x > 0 && rect.y > 0) {
+      rect = scrollAndMeasure(widgetEls[i]);
+      return hit(rect, 'cf-chl-widget');
+    }
+  }
+
+  // Method 10: any div with open .shadowRoot and Turnstile dimensions
+  const allDivs = document.querySelectorAll('div');
+  for (let i = 0; i < allDivs.length; i++) {
+    try {
+      if (allDivs[i].shadowRoot) {
+        let rect = allDivs[i].getBoundingClientRect();
+        if (rect.width >= 250 && rect.width <= 450 && rect.height >= 40 && rect.height <= 200 && rect.x > 0 && rect.y > 0) {
+          rect = scrollAndMeasure(allDivs[i]);
+          return hit(rect, 'shadow-root-widget');
+        }
+      }
+    } catch (_) { /* cross-origin */ }
+  }
+
+  // Method 11: body-wide shadow host scan — UNGATED (the key difference from FIND_CLICK_TARGET_JS)
+  const bodyBest = pickBest(findShadowHosts(document.body, 'body-shadow-host'));
+  if (bodyBest) return bodyBest;
+
+  // No target found
+  return { x: 0, y: 0, m: 'none', d: collectDebug() };
+}

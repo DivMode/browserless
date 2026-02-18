@@ -151,10 +151,114 @@ export class ReplayCoordinator {
       const finalizedResults = new Map<string, StopTabRecordingResult>(); // cached results from targetDestroyed
       let closed = false;
 
+      // Per-page WebSocket connections for zero-contention CDP.
+      // Each page tab gets its own WS to /devtools/page/{targetId}, eliminating
+      // head-of-line blocking from 15+ tabs sharing one browser WS.
+      const pageWebSockets = new Map<string, InstanceType<typeof WebSocket>>(); // cdpSessionId → per-page WS
+      let pageWsCmdId = 100_000; // offset from browser WS cmdId to avoid collisions
+      const chromePort = new URL(wsEndpoint).port;
+
+      const openPageWebSocket = (targetId: string, cdpSessionId: string): Promise<void> => {
+        return new Promise((resolve, reject) => {
+          const pageWsUrl = `ws://127.0.0.1:${chromePort}/devtools/page/${targetId}`;
+          const pageWs = new WebSocket(pageWsUrl);
+          const pendingCmds = new Map<number, { resolve: Function; reject: Function; timer: ReturnType<typeof setTimeout> }>();
+
+          const connectTimer = setTimeout(() => reject(new Error('Per-page WS connect timeout')), 2_000);
+
+          pageWs.on('open', () => {
+            clearTimeout(connectTimer);
+            pageWebSockets.set(cdpSessionId, pageWs);
+            (pageWs as any).__pendingCmds = pendingCmds;
+
+            // Keepalive: ping every 10s, close if no pong within 5s
+            const pingInterval = setInterval(() => {
+              if (pageWs.readyState !== WebSocket.OPEN) {
+                clearInterval(pingInterval);
+                return;
+              }
+              pageWs.ping();
+              const pongTimeout = setTimeout(() => {
+                this.log.warn(`Per-page WS for ${targetId} missed pong — closing`);
+                pageWs.terminate();  // Hard close — triggers 'close' handler
+              }, 5_000);
+              pageWs.once('pong', () => clearTimeout(pongTimeout));
+            }, 10_000);
+
+            (pageWs as any).__pingInterval = pingInterval;
+
+            this.log.debug(`Per-page WS opened for target ${targetId}`);
+            resolve();
+          });
+
+          pageWs.on('message', (data: Buffer) => {
+            try {
+              const msg = JSON.parse(data.toString());
+              if (msg.id !== undefined) {
+                const pending = pendingCmds.get(msg.id);
+                if (pending) {
+                  clearTimeout(pending.timer);
+                  pendingCmds.delete(msg.id);
+                  if (msg.error) pending.reject(new Error(msg.error.message));
+                  else pending.resolve(msg.result);
+                }
+              }
+            } catch {}
+          });
+
+          pageWs.on('error', () => { /* silent — fallback to browser WS */ });
+          pageWs.on('close', () => {
+            clearInterval((pageWs as any).__pingInterval);
+            // Immediately reject all pending commands — don't wait 30s for timeout
+            for (const [, { reject, timer }] of pendingCmds) {
+              clearTimeout(timer);
+              reject(new Error('Per-page WS closed'));
+            }
+            pendingCmds.clear();
+            pageWebSockets.delete(cdpSessionId);
+          });
+        });
+      };
+
       // Helper to send CDP command and wait for response.
       // With flatten=true, target commands include sessionId directly on the message.
-      // No sendMessageToTarget wrapping needed.
-      const sendCommand = (method: string, params: object = {}, cdpSessionId?: string): Promise<any> => {
+      // Routes through per-page WS when available (zero contention), falls back to browser WS.
+      const sendCommand = (method: string, params: object = {}, cdpSessionId?: string, timeoutMs?: number, forceMainWs?: boolean): Promise<any> => {
+        const timeout = timeoutMs ?? 30_000;
+
+        // Only route Runtime.evaluate through per-page WS (stateless, no events needed).
+        // All other commands (Runtime.addBinding, Page.*, etc.) MUST go through browser-level
+        // WS because their CDP events (Runtime.bindingCalled, etc.) are only handled there.
+        // forceMainWs bypasses per-page WS for critical operations like collectEvents where
+        // losing the response means permanently losing events (atomic read-and-clear).
+        if (!forceMainWs && method === 'Runtime.evaluate' && cdpSessionId && pageWebSockets.has(cdpSessionId)) {
+          const pageWs = pageWebSockets.get(cdpSessionId)!;
+          if (pageWs.readyState === WebSocket.OPEN) {
+            return new Promise((resolve, reject) => {
+              const id = pageWsCmdId++;
+              const pendingCmds = (pageWs as any).__pendingCmds as Map<number, { resolve: Function; reject: Function; timer: ReturnType<typeof setTimeout> }>;
+              const timer = setTimeout(() => {
+                if (pendingCmds.has(id)) {
+                  pendingCmds.delete(id);
+                  reject(new Error(`CDP command ${method} timed out (per-page WS)`));
+                }
+              }, timeout);
+              pendingCmds.set(id, { resolve, reject, timer });
+              pageWs.send(JSON.stringify({ id, method, params })); // No sessionId needed — already scoped
+            });
+          } else {
+            // Dead WS — remove and attempt reconnect
+            pageWebSockets.delete(cdpSessionId);
+            const targetId = [...targetSessions.entries()]
+              .find(([, sid]) => sid === cdpSessionId)?.[0];
+            if (targetId) {
+              openPageWebSocket(targetId, cdpSessionId).catch(() => {});
+            }
+            // Fall through to browser-level WS for this command
+          }
+        }
+
+        // Fallback: browser-level WS with sessionId routing (original behavior)
         return new Promise((resolve, reject) => {
           const id = cmdId++;
           pendingCommands.set(id, { resolve, reject });
@@ -166,16 +270,12 @@ export class ReplayCoordinator {
 
           ws.send(JSON.stringify(msg));
 
-          // Timeout after 30 seconds.
-          // Under 15+ tab contention, each Runtime.evaluate takes ~8s.
-          // 5s timeout caused CloudflareSolver polls to fail silently,
-          // resulting in cf_events=0 ("?") on all domains in heavy batches.
           setTimeout(() => {
             if (pendingCommands.has(id)) {
               pendingCommands.delete(id);
               reject(new Error(`CDP command ${method} timed out`));
             }
-          }, 30_000);
+          }, timeout);
         });
       };
 
@@ -254,7 +354,7 @@ export class ReplayCoordinator {
               return JSON.stringify({ events: collected });
             })()`,
             returnByValue: true,
-          }, cdpSessionId);
+          }, cdpSessionId, undefined, true);
 
           if (result?.result?.value) {
             const { events } = JSON.parse(result.result.value);
@@ -280,7 +380,7 @@ export class ReplayCoordinator {
                     readyState: document.readyState
                   })`,
                   returnByValue: true,
-                }, cdpSessionId).catch(() => null);
+                }, cdpSessionId, undefined, true).catch(() => null);
 
                 if (check?.result?.value) {
                   const status = JSON.parse(check.result.value);
@@ -294,12 +394,12 @@ export class ReplayCoordinator {
                     await sendCommand('Runtime.evaluate', {
                       expression: 'delete window.__browserlessRecording; delete window.__browserlessStopRecording;',
                       returnByValue: true,
-                    }, cdpSessionId).catch(() => {});
+                    }, cdpSessionId, undefined, true).catch(() => {});
 
                     await sendCommand('Runtime.evaluate', {
                       expression: script,
                       returnByValue: true,
-                    }, cdpSessionId).catch(() => {});
+                    }, cdpSessionId, undefined, true).catch(() => {});
                   }
 
                   // Prevent repeated checks — set to large negative regardless of whether we re-injected
@@ -624,6 +724,13 @@ export class ReplayCoordinator {
               if (options?.video) {
                 this.screencastCapture.addTarget(sessionId, sendCommand, cdpSessionId, targetInfo.targetId).catch(() => {});
               }
+
+              // Open per-page WebSocket for zero-contention CF solving.
+              // Non-blocking: early commands (rrweb injection) already happened on browser WS.
+              // Subsequent commands (CF solver polls) will route through per-page WS once connected.
+              openPageWebSocket(targetInfo.targetId, cdpSessionId).catch((err: Error) => {
+                this.log.debug(`Per-page WS failed for ${targetInfo.targetId}: ${err.message}`);
+              });
             }
 
             // Cross-origin iframes (e.g., Cloudflare Turnstile challenges.cloudflare.com).
@@ -760,6 +867,12 @@ export class ReplayCoordinator {
             if (destroyedCdpSid) {
               this.screencastCapture.handleTargetDestroyed(sessionId, destroyedCdpSid);
               iframeSessions.delete(destroyedCdpSid);
+              // Close per-page WS for this target
+              const pageWs = pageWebSockets.get(destroyedCdpSid);
+              if (pageWs) {
+                pageWs.close();
+                pageWebSockets.delete(destroyedCdpSid);
+              }
             }
           }
 
@@ -949,14 +1062,36 @@ export class ReplayCoordinator {
         closed = true;
         pendingCommands.forEach(({ reject }) => reject(new Error('WebSocket closed')));
         pendingCommands.clear();
+        // Reject per-page pending commands, then close sockets
+        for (const pageWs of pageWebSockets.values()) {
+          const pendingCmds = (pageWs as any).__pendingCmds as Map<number, { resolve: Function; reject: Function; timer: ReturnType<typeof setTimeout> }> | undefined;
+          if (pendingCmds) {
+            for (const [, { reject, timer }] of pendingCmds) {
+              clearTimeout(timer);
+              reject(new Error('WebSocket closed'));
+            }
+            pendingCmds.clear();
+          }
+          try { pageWs.close(); } catch {}
+        }
+        pageWebSockets.clear();
       });
 
       // Poll for events periodically (fallback for main frame)
+      let healthCounter = 0;
       const pollInterval = setInterval(async () => {
         if (closed) {
           clearInterval(pollInterval);
           return;
         }
+
+        healthCounter++;
+        if (healthCounter % 60 === 0) {  // Every 30s (60 x 500ms)
+          const healthy = [...pageWebSockets.values()].filter(ws => ws.readyState === WebSocket.OPEN).length;
+          const total = pageWebSockets.size;
+          this.log.info(`[WS Health] per-page: ${healthy}/${total} open, tracked: ${trackedTargets.size}, pending: ${pendingCommands.size}`);
+        }
+
         for (const targetId of trackedTargets) {
           await collectEvents(targetId);
         }
@@ -976,6 +1111,20 @@ export class ReplayCoordinator {
         for (const targetId of [...trackedTargets]) {
           await finalizeTab(targetId);
         }
+
+        // Reject per-page pending commands, then close sockets
+        for (const pageWs of pageWebSockets.values()) {
+          const pendingCmds = (pageWs as any).__pendingCmds as Map<number, { resolve: Function; reject: Function; timer: ReturnType<typeof setTimeout> }> | undefined;
+          if (pendingCmds) {
+            for (const [, { reject, timer }] of pendingCmds) {
+              clearTimeout(timer);
+              reject(new Error('WebSocket closed'));
+            }
+            pendingCmds.clear();
+          }
+          try { pageWs.close(); } catch {}
+        }
+        pageWebSockets.clear();
 
         try {
           ws.close();

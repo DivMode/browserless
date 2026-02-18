@@ -27,10 +27,10 @@ function easeOutQuad(t: number): number {
 /**
  * Generate a human-like curved path.
  *
- * Places 2 knots at 1/3 and 2/3 along the path, offset perpendicular to
- * the SAME side (arc, not S-curve). Arc amount is 5-20% of distance —
- * gentle enough for any segment length. Gaussian distortion adds micro-noise.
- * Point count uses Camoufox's power-scale formula: arcLength^0.25 * 20.
+ * Places 2 asymmetric knots (20-35% and 60-80%) along the path, offset
+ * perpendicular to the SAME side (arc, not S-curve). Arc amount is 12-30%
+ * of distance. Gaussian distortion on both axes adds micro-noise.
+ * Point count uses Camoufox's power-scale formula: arcLength^0.25 * 8.
  */
 export function generatePath(
   startX: number,
@@ -48,22 +48,26 @@ export function generatePath(
   const px = -uy; // perpendicular
   const py = ux;
 
-  // Gentle arc: 5-20% of distance, always to the same side
-  const arcAmount = distance * (0.05 + Math.random() * 0.15);
+  // Gentle arc: 12-30% of distance, always to the same side
+  const arcAmount = distance * (0.12 + Math.random() * 0.18);
   const arcSign = Math.random() < 0.5 ? 1 : -1;
 
-  // Knots at 1/3 and 2/3 along path, offset perpendicular
+  // Randomize knot positions — not fixed 1/3, 2/3
+  const t1 = 0.2 + Math.random() * 0.15;  // 20-35% along path
+  const t2 = 0.6 + Math.random() * 0.2;   // 60-80% along path
+
+  // Front knot arcs more (0.8-1.2x), back knot flattens (0.4-0.7x)
   const knot1: Vector = {
-    x: startX + ux * distance / 3 + px * arcAmount * arcSign * (0.7 + Math.random() * 0.3),
-    y: startY + uy * distance / 3 + py * arcAmount * arcSign * (0.7 + Math.random() * 0.3),
+    x: startX + ux * distance * t1 + px * arcAmount * arcSign * (0.8 + Math.random() * 0.4),
+    y: startY + uy * distance * t1 + py * arcAmount * arcSign * (0.8 + Math.random() * 0.4),
   };
   const knot2: Vector = {
-    x: startX + ux * distance * 2 / 3 + px * arcAmount * arcSign * (0.7 + Math.random() * 0.3),
-    y: startY + uy * distance * 2 / 3 + py * arcAmount * arcSign * (0.7 + Math.random() * 0.3),
+    x: startX + ux * distance * t2 + px * arcAmount * arcSign * (0.4 + Math.random() * 0.3),
+    y: startY + uy * distance * t2 + py * arcAmount * arcSign * (0.4 + Math.random() * 0.3),
   };
 
   // Raw cubic Bezier (4 control points)
-  const numRaw = Math.max(50, Math.floor(distance));
+  const numRaw = Math.max(30, Math.min(200, Math.floor(distance * 0.5)));
   const controlPoints: Vector[] = [
     { x: startX, y: startY },
     knot1,
@@ -72,11 +76,12 @@ export function generatePath(
   ];
   const rawPoints = calculatePointsInCurve(numRaw, controlPoints);
 
-  // Gaussian distortion on Y (50% of interior points, stddev=1px)
+  // Gaussian distortion on both axes (60% of interior points, stddev=1.5px)
   const distorted = rawPoints.map((p, i) => {
     if (i === 0 || i === rawPoints.length - 1) return p;
-    const delta = Math.random() < 0.5 ? randomNormal(0, 1) : 0;
-    return { x: p.x, y: p.y + delta };
+    const dx = Math.random() < 0.6 ? randomNormal(0, 1.5) : 0;
+    const dy = Math.random() < 0.6 ? randomNormal(0, 1.5) : 0;
+    return { x: p.x + dx, y: p.y + dy };
   });
 
   // Arc length for power-scale point count
@@ -88,11 +93,11 @@ export function generatePath(
     );
   }
 
-  // Camoufox formula: arcLength^0.25 * 20, clamped [2, 150], scaled by speed
+  // Camoufox formula: arcLength^0.25 * 8, clamped [2, 60], scaled by speed
   const speed = options?.moveSpeed ?? 1.0;
   const n = Math.min(
-    150,
-    Math.max(2, Math.round(Math.pow(arcLength, 0.25) * 20 / speed)),
+    60,
+    Math.max(2, Math.round(Math.pow(arcLength, 0.25) * 8 / speed)),
   );
 
   // Resample with easeOutQuad — pick existing points at eased indices
@@ -145,7 +150,7 @@ export async function executePathSegment(
       let segDuration = (ease(t) - ease(prevT)) * totalDuration;
       segDuration *= rand(0.8, 1.2); // +-20% variation
       if (decelerateFinal && i >= decelThreshold) segDuration *= decelFactor;
-      await sleep(Math.max(5, segDuration * 1000));
+      await sleep(Math.max(18, segDuration * 1000));
     }
 
     await sendCommand('Input.dispatchMouseEvent', {
@@ -190,7 +195,7 @@ export async function simulateHumanPresence(
   cdpSessionId: string,
   duration: number = 2.0,
 ): Promise<Point> {
-  const numWaypoints = randInt(1, 3);
+  const numWaypoints = duration < 0.8 ? 1 : randInt(1, 2);
   let currentX = rand(200, 1200);
   let currentY = rand(150, 700);
   const timePerWaypoint = duration / numWaypoints;
@@ -209,7 +214,7 @@ export async function simulateHumanPresence(
         const prevT = (i - 1) / (driftPath.length - 1);
         let segDur = (ease(t) - ease(prevT)) * segTotal;
         segDur *= rand(0.7, 1.3);
-        await sleep(Math.max(8, segDur * 1000));
+        await sleep(Math.max(20, segDur * 1000));
       }
       await sendCommand('Input.dispatchMouseEvent', {
         type: 'mouseMoved',
@@ -359,7 +364,7 @@ export async function approachCoordinates(
     [startX, startY] = startFrom;
   } else {
     const angle = rand(0, 2 * Math.PI);
-    const dist = rand(150, 500);
+    const dist = rand(80, 200);
     startX = Math.max(10, Math.min(1900, targetX + Math.cos(angle) * dist));
     startY = Math.max(10, Math.min(1060, targetY + Math.sin(angle) * dist));
   }
@@ -373,14 +378,14 @@ export async function approachCoordinates(
     const normDy = dyApproach / approachDist;
 
     // Intermediate point ~15-25px from target
-    const offsetDist = rand(15, 25);
-    const lateralOffset = rand(-8, 8);
+    const offsetDist = rand(25, 45);
+    const lateralOffset = rand(-12, 12);
     const midX = targetX - normDx * offsetDist + (-normDy) * lateralOffset;
     const midY = targetY - normDy * offsetDist + normDx * lateralOffset;
 
     // Phase 1: ballistic sweep
     const ballisticPath = generatePath(startX, startY, midX, midY);
-    await executePathSegment(sendCommand, cdpSessionId, ballisticPath, rand(0.35, 0.65));
+    await executePathSegment(sendCommand, cdpSessionId, ballisticPath, rand(0.30, 0.55));
 
     // Mid-path micro-pause
     await sleep(rand(30, 100));
@@ -391,12 +396,12 @@ export async function approachCoordinates(
     } else {
       // Phase 2: correction
       const correctionPath = generatePath(midX, midY, targetX, targetY, { moveSpeed: 1.5 });
-      await executePathSegment(sendCommand, cdpSessionId, correctionPath, rand(0.15, 0.35), true);
+      await executePathSegment(sendCommand, cdpSessionId, correctionPath, rand(0.20, 0.45), true);
     }
   } else {
     // Already close — single short correction
     const correctionPath = generatePath(startX, startY, targetX, targetY, { moveSpeed: 1.5 });
-    await executePathSegment(sendCommand, cdpSessionId, correctionPath, rand(0.15, 0.35), true);
+    await executePathSegment(sendCommand, cdpSessionId, correctionPath, rand(0.20, 0.45), true);
   }
 
   // Decision pause (150-400ms)

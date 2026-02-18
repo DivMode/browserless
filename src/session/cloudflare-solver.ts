@@ -13,6 +13,7 @@ import {
   FIND_CLICK_TARGET_JS,
   detectCloudflareType,
 } from '../shared/cloudflare-detection.js';
+import { FIND_TURNSTILE_TARGET_JS } from '../generated/cf-scripts.js';
 import {
   simulateHumanPresence,
   approachCoordinates,
@@ -20,7 +21,7 @@ import {
   tabSpaceFallback,
 } from '../shared/mouse-humanizer.js';
 
-type SendCommand = (method: string, params?: object, cdpSessionId?: string) => Promise<any>;
+type SendCommand = (method: string, params?: object, cdpSessionId?: string, timeoutMs?: number) => Promise<any>;
 type EmitClientEvent = (method: string, params: object) => Promise<void>;
 type InjectMarker = (cdpSessionId: string, tag: string, payload?: object) => void;
 
@@ -154,6 +155,7 @@ interface ActiveDetection {
   attempt: number;
   aborted: boolean;
   tracker: CloudflareTracker;
+  activityLoopStarted?: boolean;
 }
 
 /**
@@ -197,6 +199,7 @@ export class CloudflareSolver {
   private knownPages = new Map<string, string>(); // targetId -> cdpSessionId
   private destroyed = false;
   private bindingSolvedTargets = new Set<string>(); // targets already solved via binding push
+  private pendingIframes = new Map<string, { iframeCdpSessionId: string; iframeTargetId: string }>();
 
   constructor(
     private sendCommand: SendCommand,
@@ -321,6 +324,9 @@ export class CloudflareSolver {
     if (active) {
       active.iframeCdpSessionId = iframeCdpSessionId;
       active.iframeTargetId = iframeTargetId;
+    } else {
+      // Iframe attached before detection created — store for late pickup
+      this.pendingIframes.set(pageTargetId, { iframeCdpSessionId, iframeTargetId });
     }
 
     // Inject state observer into Turnstile iframe
@@ -509,6 +515,7 @@ export class CloudflareSolver {
     this.iframeToPage.clear();
     this.knownPages.clear();
     this.bindingSolvedTargets.clear();
+    this.pendingIframes.clear();
   }
 
   // ─── Private methods ──────────────────────────────────────
@@ -588,6 +595,12 @@ export class CloudflareSolver {
       };
 
       this.activeDetections.set(targetId, active);
+      const pending = this.pendingIframes.get(targetId);
+      if (pending) {
+        active.iframeCdpSessionId = pending.iframeCdpSessionId;
+        active.iframeTargetId = pending.iframeTargetId;
+        this.pendingIframes.delete(targetId);
+      }
       this.emitDetected(active);
       this.marker(cdpSessionId, 'cf.detected', { type: cfType });
 
@@ -656,6 +669,12 @@ export class CloudflareSolver {
 
             // Widget present but not solved — route through standard pipeline
             this.activeDetections.set(targetId, active);
+            const pending = this.pendingIframes.get(targetId);
+            if (pending) {
+              active.iframeCdpSessionId = pending.iframeCdpSessionId;
+              active.iframeTargetId = pending.iframeTargetId;
+              this.pendingIframes.delete(targetId);
+            }
             this.emitDetected(active);
             this.marker(cdpSessionId, 'cf.detected', { type: 'widget', method: 'runtime_poll' });
             await this.solveDetection(active);
@@ -672,6 +691,13 @@ export class CloudflareSolver {
 
   private async solveDetection(active: ActiveDetection): Promise<void> {
     if (active.aborted || this.destroyed) return;
+
+    // Start activity loop BEFORE solve — runs concurrently with solve attempt.
+    // Guard ensures only one loop per detection (survives retries).
+    if (!active.activityLoopStarted) {
+      active.activityLoopStarted = true;
+      this.startActivityLoop(active);
+    }
 
     switch (active.info.type) {
       case 'interstitial':
@@ -692,21 +718,16 @@ export class CloudflareSolver {
       default:
         assertNever(active.info.type, 'CloudflareType in solveDetection');
     }
-
-    // Keep browser alive while waiting for iframe state change
-    if (!active.aborted && !this.destroyed) {
-      this.startActivityLoop(active);
-    }
   }
 
   private async solveWithClick(active: ActiveDetection): Promise<void> {
     if (active.aborted) return;
     const { pageCdpSessionId } = active;
 
-    // Phase 1: Human presence simulation (1-3s)
+    // Phase 1: Human presence simulation (0.3-1s)
     this.marker(pageCdpSessionId, 'cf.presence_start');
     const presencePos = await simulateHumanPresence(
-      this.sendCommand, pageCdpSessionId, 1.0 + Math.random() * 2.5,
+      this.sendCommand, pageCdpSessionId, 0.3 + Math.random() * 0.7,
     );
     this.emitProgress(active, 'presence_complete', {
       presence_duration_ms: Date.now() - active.startTime,
@@ -762,13 +783,14 @@ export class CloudflareSolver {
   private async solveWidget(active: ActiveDetection): Promise<void> {
     if (active.aborted) return;
     const { pageCdpSessionId } = active;
+    const deadline = Date.now() + 30_000; // 30s max for solve attempt
 
     // Gate: check if already solved before spending CDP calls
     if (await this.isSolved(pageCdpSessionId)) {
       await this.resolveAutoSolved(active, 'widget_pre_click');
       return;
     }
-    if (active.aborted) return;
+    if (active.aborted || Date.now() > deadline) return;
 
     // ── Wait for Turnstile iframe to appear ──
     // Detection proved the widget container exists (.cf-turnstile, [data-sitekey]),
@@ -776,7 +798,7 @@ export class CloudflareSolver {
     // onIframeAttached() sets active.iframeCdpSessionId when it appears.
     if (!active.iframeCdpSessionId) {
       for (let i = 0; i < 25; i++) {  // 25 × 200ms = 5s max
-        if (active.aborted) return;
+        if (active.aborted || Date.now() > deadline) return;
         if (active.iframeCdpSessionId) break;
         // Check solved every ~1s to avoid CDP contention
         if (i % 5 === 4 && await this.isSolved(pageCdpSessionId)) {
@@ -789,33 +811,16 @@ export class CloudflareSolver {
         iframe_found: !!active.iframeCdpSessionId,
       });
     }
-    if (active.aborted) return;
+    if (active.aborted || Date.now() > deadline) return;
 
-    // Find Turnstile click target — retry up to 3 times (CDP contention causes timeouts)
-    let coords: { x: number; y: number; method?: string; debug?: Record<string, unknown> } | null = null;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      if (active.aborted) return;
-      coords = await this.findClickTarget(pageCdpSessionId);
-      if (coords) break;
+    // Find Turnstile click target — uses dedicated widget finder (ungated body scan)
+    const coords = await this.findTurnstileTarget(pageCdpSessionId);
+    if (active.aborted || Date.now() > deadline) return;
 
-      // CDP call failed (timeout/error) — emit diagnostic
-      this.emitProgress(active, 'find_target_retry', { attempt, max: 3 });
-      this.marker(pageCdpSessionId, 'cf.find_retry', { attempt });
-
-      if (active.aborted) return;
-      if (await this.isSolved(pageCdpSessionId)) {
-        await this.resolveAutoSolved(active, 'find_retry_solved');
-        return;
-      }
-      if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
-    }
-    if (active.aborted) return;
-
-    // All 3 attempts returned null — report and fall through to keyboard
     if (!coords) {
-      this.emitProgress(active, 'find_target_failed', { attempts: 3 });
-      this.marker(pageCdpSessionId, 'cf.find_failed', { attempts: 3 });
-      await this.tryTabSpaceFallback(active);
+      this.emitProgress(active, 'find_target_failed', { attempts: 1 });
+      this.marker(pageCdpSessionId, 'cf.find_failed', { attempts: 1 });
+      await this.tryTabSpaceFallback(active, 2);
       return;
     }
 
@@ -823,12 +828,12 @@ export class CloudflareSolver {
       method: coords.method, x: coords.x, y: coords.y, debug: coords.debug,
     });
     if (coords.method === 'none') {
-      await this.tryTabSpaceFallback(active);
+      await this.tryTabSpaceFallback(active, 2);
       return;
     }
 
-    // Gate: check abort + auto-solve before clicking
-    if (active.aborted) return;
+    // Gate: check abort + auto-solve + deadline before clicking
+    if (active.aborted || Date.now() > deadline) return;
     if (await this.isSolved(pageCdpSessionId)) {
       this.marker(pageCdpSessionId, 'cf.click_cancelled', { method: coords.method });
       await this.resolveAutoSolved(active, 'click_cancelled');
@@ -842,11 +847,11 @@ export class CloudflareSolver {
     });
   }
 
-  private async tryTabSpaceFallback(active: ActiveDetection): Promise<void> {
+  private async tryTabSpaceFallback(active: ActiveDetection, maxTabs = 5): Promise<void> {
     this.emitProgress(active, 'tab_space_fallback', {});
     this.marker(active.pageCdpSessionId, 'cf.tab_space_start', {});
     const solved = await tabSpaceFallback(
-      this.sendCommand, active.pageCdpSessionId, 5,
+      this.sendCommand, active.pageCdpSessionId, maxTabs,
       () => this.isSolved(active.pageCdpSessionId),
     );
     if (solved) {
@@ -866,9 +871,9 @@ export class CloudflareSolver {
     if (active.aborted) return;
     const { pageCdpSessionId } = active;
 
-    // Phase 1: Passive wait with presence simulation (3-5s)
+    // Phase 1: Passive wait with presence simulation (0.5-1.5s)
     const presencePos = await simulateHumanPresence(
-      this.sendCommand, pageCdpSessionId, 3.0 + Math.random() * 2.0,
+      this.sendCommand, pageCdpSessionId, 0.5 + Math.random() * 1.0,
     );
     this.emitProgress(active, 'presence_complete', {
       presence_duration_ms: Date.now() - active.startTime,
@@ -935,6 +940,33 @@ export class CloudflareSolver {
       return { x: parsed.x, y: parsed.y, method: parsed.m, debug: parsed.d || undefined };
     } catch (err) {
       console.warn('[CF] findClickTarget failed:', (err as Error)?.message || err);
+      return null;
+    }
+  }
+
+  /**
+   * Find Turnstile widget click target using the dedicated widget finder.
+   * Unlike findClickTarget(), the body-wide shadow host scan is NOT gated
+   * behind _cf_chl_opt — it works on any page with an embedded widget.
+   */
+  private async findTurnstileTarget(
+    cdpSessionId: string,
+  ): Promise<{ x: number; y: number; method?: string; debug?: Record<string, unknown> } | null> {
+    try {
+      const result = await this.sendCommand('Runtime.evaluate', {
+        expression: FIND_TURNSTILE_TARGET_JS,
+        returnByValue: true,
+      }, cdpSessionId);
+      const raw = result?.result?.value;
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed) return null;
+      if (parsed.m === 'none') {
+        return { x: 0, y: 0, method: 'none', debug: parsed.d || undefined };
+      }
+      return { x: parsed.x, y: parsed.y, method: parsed.m, debug: parsed.d || undefined };
+    } catch (err) {
+      console.warn('[CF] findTurnstileTarget failed:', (err as Error)?.message || err);
       return null;
     }
   }
@@ -1012,9 +1044,11 @@ export class CloudflareSolver {
       } catch { /* page gone */ }
 
       let loopIter = 0;
+      const loopStart = Date.now();
       while (!active.aborted && !this.destroyed) {
         await new Promise(r => setTimeout(r, 3000 + Math.random() * 4000));
         if (active.aborted || this.destroyed) break;
+        if (Date.now() - loopStart > 90_000) break; // 90s max activity polling
         loopIter++;
 
         // Poll for missed auto-solve (token in input or callback flag)
@@ -1025,7 +1059,7 @@ export class CloudflareSolver {
 
         this.emitProgress(active, 'activity_poll', { iteration: loopIter });
 
-        // Check for widget error state
+        // Check for widget error state — log but don't break, widget may recover
         const widgetErr = await this.isWidgetError(active.pageCdpSessionId);
         if (widgetErr) {
           this.marker(active.pageCdpSessionId, 'cf.widget_error_detected', {
@@ -1034,13 +1068,12 @@ export class CloudflareSolver {
           this.emitProgress(active, 'widget_error', {
             error_type: widgetErr.type, has_token: widgetErr.has_token,
           });
-          break; // Let iframe observer or retry logic handle the failure
         }
 
         // Micro presence: short drift + occasional scroll/keypress
         try {
           await simulateHumanPresence(this.sendCommand, active.pageCdpSessionId, 0.5 + Math.random() * 1.0);
-        } catch { break; } // CDP session gone
+        } catch { /* CDP gone — skip presence, keep polling */ }
       }
     };
     loop().catch(() => {});

@@ -16,7 +16,7 @@ describe('Mouse Humanizer', () => {
       expect(shortPath.length).to.be.greaterThan(5);
 
       const longPath = generatePath(0, 0, 300, 300);
-      expect(longPath.length).to.be.greaterThan(50);
+      expect(longPath.length).to.be.greaterThan(15);
     });
 
     it('produces a gentle arc (not a straight line)', () => {
@@ -34,12 +34,12 @@ describe('Mouse Humanizer', () => {
       expect(hasCurve).to.be.true;
     });
 
-    it('arc deviation stays proportional to distance (5-20%)', () => {
-      // For a 200px horizontal move, max Y deviation should be <= 40px (20%)
+    it('arc deviation stays proportional to distance (12-30%)', () => {
+      // For a 200px horizontal move, max Y deviation should be <= 60px (30%)
       for (let i = 0; i < 20; i++) {
         const path = generatePath(0, 0, 200, 0);
         const maxDeviation = Math.max(...path.map(([, y]) => Math.abs(y)));
-        expect(maxDeviation).to.be.lessThan(50); // 25% with some noise margin
+        expect(maxDeviation).to.be.lessThan(75); // 37.5% with some noise margin
       }
     });
 
