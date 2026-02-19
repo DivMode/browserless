@@ -44,7 +44,6 @@ function assertNever(x: never, context: string): never {
  */
 class CloudflareTracker {
   private detectionMethod: string | null;
-  private cfCtype: string | null;
   private cfCray: string | null;
   private detectionPollCount: number;
   private widgetFound = false;
@@ -68,7 +67,6 @@ class CloudflareTracker {
 
   constructor(info: CloudflareInfo) {
     this.detectionMethod = info.detectionMethod;
-    this.cfCtype = info.cType || null;
     this.cfCray = info.cRay || null;
     this.detectionPollCount = info.pollCount || 0;
   }
@@ -122,7 +120,6 @@ class CloudflareTracker {
   snapshot(): CloudflareSnapshot {
     return {
       detection_method: this.detectionMethod,
-      cf_ctype: this.cfCtype,
       cf_cray: this.cfCray,
       detection_poll_count: this.detectionPollCount,
       widget_found: this.widgetFound,
@@ -646,7 +643,7 @@ export class CloudflareSolver {
           const parsed = JSON.parse(raw);
           if (parsed?.present) {
             const info: CloudflareInfo = {
-              type: 'widget', url: '', detectionMethod: 'runtime_poll',
+              type: 'turnstile', url: '', detectionMethod: 'runtime_poll',
             };
             const active: ActiveDetection = {
               info, pageCdpSessionId: cdpSessionId, pageTargetId: targetId,
@@ -659,9 +656,9 @@ export class CloudflareSolver {
               active.aborted = true;
               this.bindingSolvedTargets.add(targetId);
               this.emitDetected(active);
-              this.marker(cdpSessionId, 'cf.detected', { type: 'widget', method: 'runtime_poll' });
+              this.marker(cdpSessionId, 'cf.detected', { type: 'turnstile', method: 'runtime_poll' });
               this.emitSolved(active, {
-                solved: true, type: 'widget', method: 'auto_solve',
+                solved: true, type: 'turnstile', method: 'auto_solve',
                 duration_ms: Date.now() - startTime, attempts: 1,
                 auto_resolved: true, signal: 'runtime_poll',
                 token_length: parsed.tokenLength || 0,
@@ -678,7 +675,7 @@ export class CloudflareSolver {
               this.pendingIframes.delete(targetId);
             }
             this.emitDetected(active);
-            this.marker(cdpSessionId, 'cf.detected', { type: 'widget', method: 'runtime_poll' });
+            this.marker(cdpSessionId, 'cf.detected', { type: 'turnstile', method: 'runtime_poll' });
             await this.solveDetection(active);
             return;
           }
@@ -702,18 +699,18 @@ export class CloudflareSolver {
     }
 
     switch (active.info.type) {
-      case 'interstitial':
-      case 'embedded':
-        await this.solveWithClick(active);
-        break;
-      case 'widget':
-        await this.solveWidget(active);
-        break;
-      case 'invisible':
-        await this.solveInvisible(active);
-        break;
       case 'managed':
-        await this.solveManaged(active);
+        await this.solveByClicking(active, 0.5 + Math.random() * 1.0);
+        break;
+      case 'interstitial':
+        await this.solveByClicking(active, 0.3 + Math.random() * 0.7);
+        break;
+      case 'turnstile':
+        await this.solveTurnstile(active);
+        break;
+      case 'non_interactive':
+      case 'invisible':
+        await this.solveAutomatic(active);
         break;
       case 'block':
         throw new Error('block type should not reach solveDetection');
@@ -722,14 +719,77 @@ export class CloudflareSolver {
     }
   }
 
-  private async solveWithClick(active: ActiveDetection): Promise<void> {
+  /**
+   * Shared click pipeline — single source of truth for all click-based solves.
+   *
+   * 1. Approach (full 2-phase or lightweight single-arc)
+   * 2. Emit approach_complete
+   * 3. Gate: abort + deadline + isSolved
+   * 4. commitClick()
+   * 5. Emit clicked
+   * 6. postClickDwell() (try/catch)
+   */
+  private async performClick(
+    active: ActiveDetection,
+    x: number, y: number,
+    options: {
+      presencePos?: [number, number]; // full 2-phase approach from known cursor position
+      lightweight?: boolean;          // quick single-arc approach (~8 CDP calls)
+      deadline?: number;
+      method?: string;
+    },
+  ): Promise<void> {
+    const { pageCdpSessionId } = active;
+    const deadline = options.deadline ?? Infinity;
+
+    // Approach
+    let targetX: number, targetY: number;
+    if (options.lightweight) {
+      [targetX, targetY] = await quickApproach(
+        this.sendCommand, pageCdpSessionId, x + 15, y,
+      );
+    } else {
+      [targetX, targetY] = await approachCoordinates(
+        this.sendCommand, pageCdpSessionId,
+        x, y, options.presencePos,
+      );
+    }
+    this.emitProgress(active, 'approach_complete', {
+      target_x: Math.round(targetX), target_y: Math.round(targetY),
+    });
+
+    // Gate: check abort + deadline + auto-solve before committing click
+    if (active.aborted || Date.now() > deadline) return;
+    if (await this.isSolved(pageCdpSessionId)) {
+      this.marker(pageCdpSessionId, 'cf.click_cancelled', { method: options.method });
+      await this.resolveAutoSolved(active, 'click_cancelled');
+      return;
+    }
+
+    // Commit click (~100ms mousedown + hold + mouseup)
+    await commitClick(this.sendCommand, pageCdpSessionId, targetX, targetY);
+    this.emitProgress(active, 'clicked', {
+      x: Math.round(targetX), y: Math.round(targetY),
+    });
+
+    // Post-click dwell — linger near checkbox before drifting away
+    try {
+      await postClickDwell(this.sendCommand, pageCdpSessionId, targetX, targetY);
+    } catch { /* page navigated after solve — expected */ }
+  }
+
+  /**
+   * Click-based solve for managed and interstitial types.
+   * Presence simulation → find target → approach → click → dwell.
+   */
+  private async solveByClicking(active: ActiveDetection, presenceDuration: number): Promise<void> {
     if (active.aborted) return;
     const { pageCdpSessionId } = active;
 
-    // Phase 1: Human presence simulation (0.3-1s)
+    // Phase 1: Human presence simulation
     this.marker(pageCdpSessionId, 'cf.presence_start');
     const presencePos = await simulateHumanPresence(
-      this.sendCommand, pageCdpSessionId, 0.3 + Math.random() * 0.7,
+      this.sendCommand, pageCdpSessionId, presenceDuration,
     );
     this.emitProgress(active, 'presence_complete', {
       presence_duration_ms: Date.now() - active.startTime,
@@ -753,49 +813,27 @@ export class CloudflareSolver {
       return; // Activity loop continues polling either way
     }
 
-    // Phase 3: Approach target (1-3s mouse movement via Bezier curves)
-    const [targetX, targetY] = await approachCoordinates(
-      this.sendCommand, pageCdpSessionId,
-      coords.x, coords.y, presencePos,
-    );
-    this.emitProgress(active, 'approach_complete', {
-      target_x: Math.round(targetX), target_y: Math.round(targetY),
+    // Phase 3-5: Approach → click → dwell (via shared pipeline)
+    await this.performClick(active, coords.x, coords.y, {
+      presencePos, method: coords.method,
     });
-
-    // Gate: check abort + auto-solve before committing click
-    if (active.aborted) return;
-    if (await this.isSolved(pageCdpSessionId)) {
-      this.marker(pageCdpSessionId, 'cf.click_cancelled', { method: coords.method });
-      await this.resolveAutoSolved(active, 'click_cancelled');
-      return;
-    }
-
-    // Phase 4: Commit click (~100ms mousedown + hold + mouseup)
-    await commitClick(this.sendCommand, pageCdpSessionId, targetX, targetY);
-    this.emitProgress(active, 'clicked', {
-      x: Math.round(targetX), y: Math.round(targetY),
-    });
-
-    // Phase 5: Post-click dwell — linger near checkbox before drifting away
-    try {
-      await postClickDwell(this.sendCommand, pageCdpSessionId, targetX, targetY);
-    } catch { /* page navigated after solve — expected */ }
   }
 
   /**
-   * Solve standalone Turnstile widgets. Skips full presence simulation (too slow
-   * under 15-tab contention where each CDP call takes ~8s) but still does a
-   * lightweight Bezier approach + post-click dwell to avoid the suspicious
-   * "teleport-click-teleport" pattern that Turnstile flags as bot behavior.
+   * Solve standalone Turnstile widgets on third-party pages.
+   * Skips full presence simulation (too slow under 15-tab contention where
+   * each CDP call takes ~8s) but still does a lightweight Bezier approach +
+   * post-click dwell to avoid the suspicious "teleport-click-teleport"
+   * pattern that Turnstile flags as bot behavior.
    */
-  private async solveWidget(active: ActiveDetection): Promise<void> {
+  private async solveTurnstile(active: ActiveDetection): Promise<void> {
     if (active.aborted) return;
     const { pageCdpSessionId } = active;
     const deadline = Date.now() + 30_000; // 30s max for solve attempt
 
     // Gate: check if already solved before spending CDP calls
     if (await this.isSolved(pageCdpSessionId)) {
-      await this.resolveAutoSolved(active, 'widget_pre_click');
+      await this.resolveAutoSolved(active, 'turnstile_pre_click');
       return;
     }
     if (active.aborted || Date.now() > deadline) return;
@@ -840,30 +878,10 @@ export class CloudflareSolver {
       return;
     }
 
-    // Gate: check abort + auto-solve + deadline before clicking
-    if (active.aborted || Date.now() > deadline) return;
-    if (await this.isSolved(pageCdpSessionId)) {
-      this.marker(pageCdpSessionId, 'cf.click_cancelled', { method: coords.method });
-      await this.resolveAutoSolved(active, 'click_cancelled');
-      return;
-    }
-
-    // Lightweight approach (~6-8 CDP calls via high moveSpeed Bezier)
-    const [targetX, targetY] = await quickApproach(
-      this.sendCommand, pageCdpSessionId, coords.x + 15, coords.y,
-    );
-    if (active.aborted || Date.now() > deadline) return;
-
-    // Click
-    await commitClick(this.sendCommand, pageCdpSessionId, targetX, targetY);
-    this.emitProgress(active, 'clicked', {
-      x: Math.round(targetX), y: Math.round(targetY),
+    // Lightweight approach → click → dwell (via shared pipeline)
+    await this.performClick(active, coords.x, coords.y, {
+      lightweight: true, deadline, method: coords.method,
     });
-
-    // Post-click dwell — linger near checkbox before drifting away
-    try {
-      await postClickDwell(this.sendCommand, pageCdpSessionId, targetX, targetY);
-    } catch { /* page navigated after solve — expected */ }
   }
 
   private async tryTabSpaceFallback(active: ActiveDetection, maxTabs = 5): Promise<void> {
@@ -878,71 +896,16 @@ export class CloudflareSolver {
     }
   }
 
-  private async solveInvisible(active: ActiveDetection): Promise<void> {
+  /**
+   * Auto-solve for non_interactive and invisible types.
+   * Simulates human presence and waits for token via activity loop.
+   */
+  private async solveAutomatic(active: ActiveDetection): Promise<void> {
     if (active.aborted) return;
 
-    // Invisible Turnstile: just simulate presence and wait
-    this.marker(active.pageCdpSessionId, 'cf.presence_start', { type: 'invisible' });
+    // Non-interactive/invisible: simulate presence and wait for auto-solve
+    this.marker(active.pageCdpSessionId, 'cf.presence_start', { type: active.info.type });
     await simulateHumanPresence(this.sendCommand, active.pageCdpSessionId, 2.0 + Math.random() * 2.0);
-  }
-
-  private async solveManaged(active: ActiveDetection): Promise<void> {
-    if (active.aborted) return;
-    const { pageCdpSessionId } = active;
-
-    // Phase 1: Passive wait with presence simulation (0.5-1.5s)
-    const presencePos = await simulateHumanPresence(
-      this.sendCommand, pageCdpSessionId, 0.5 + Math.random() * 1.0,
-    );
-    this.emitProgress(active, 'presence_complete', {
-      presence_duration_ms: Date.now() - active.startTime,
-    });
-
-    if (active.aborted) return;
-    if (await this.isSolved(pageCdpSessionId)) {
-      await this.resolveAutoSolved(active, 'managed_presence');
-      return;
-    }
-
-    // Phase 2: Find click target
-    const coords = await this.findClickTarget(pageCdpSessionId);
-    if (!coords || active.aborted) return;
-
-    this.emitProgress(active, 'widget_found', {
-      method: coords.method, x: coords.x, y: coords.y, debug: coords.debug,
-    });
-    if (coords.method === 'none') {
-      await this.tryTabSpaceFallback(active);
-      return; // Activity loop continues polling either way
-    }
-
-    // Phase 3: Approach target
-    const [targetX, targetY] = await approachCoordinates(
-      this.sendCommand, pageCdpSessionId,
-      coords.x, coords.y, presencePos,
-    );
-    this.emitProgress(active, 'approach_complete', {
-      target_x: Math.round(targetX), target_y: Math.round(targetY),
-    });
-
-    // Gate: check abort + auto-solve before committing
-    if (active.aborted) return;
-    if (await this.isSolved(pageCdpSessionId)) {
-      this.marker(pageCdpSessionId, 'cf.click_cancelled', { method: coords.method });
-      await this.resolveAutoSolved(active, 'click_cancelled');
-      return;
-    }
-
-    // Phase 4: Commit click
-    await commitClick(this.sendCommand, pageCdpSessionId, targetX, targetY);
-    this.emitProgress(active, 'clicked', {
-      x: Math.round(targetX), y: Math.round(targetY),
-    });
-
-    // Phase 5: Post-click dwell — linger near checkbox before drifting away
-    try {
-      await postClickDwell(this.sendCommand, pageCdpSessionId, targetX, targetY);
-    } catch { /* page navigated after solve — expected */ }
   }
 
   private async findClickTarget(
@@ -1141,7 +1104,6 @@ export class CloudflareSolver {
       type: active.info.type,
       url: active.info.url,
       iframeUrl: active.info.iframeUrl,
-      cType: active.info.cType,
       cRay: active.info.cRay,
       detectionMethod: active.info.detectionMethod,
       pollCount: active.info.pollCount || 1,
@@ -1194,7 +1156,7 @@ export class CloudflareSolver {
     this.bindingSolvedTargets.add(targetId);
 
     const info: CloudflareInfo = {
-      type: 'widget', url: '', detectionMethod: signal,
+      type: 'turnstile', url: '', detectionMethod: signal,
     };
     const active: ActiveDetection = {
       info, pageCdpSessionId: cdpSessionId || '', pageTargetId: targetId,
@@ -1204,10 +1166,10 @@ export class CloudflareSolver {
 
     this.emitDetected(active);
     if (cdpSessionId) {
-      this.marker(cdpSessionId, 'cf.detected', { type: 'widget' });
+      this.marker(cdpSessionId, 'cf.detected', { type: 'turnstile' });
     }
     this.emitSolved(active, {
-      solved: true, type: 'widget', method: 'auto_solve',
+      solved: true, type: 'turnstile', method: 'auto_solve',
       duration_ms: 0, attempts: 0, auto_resolved: true,
       signal, token_length: tokenLength,
     });

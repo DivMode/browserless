@@ -638,7 +638,7 @@ export class ReplayCoordinator {
                 type: 5,
                 timestamp: Date.now(),
                 data: {
-                  tag: 'turnstile.iframe_state',
+                  tag: 'cf.iframe_state',
                   payload: { state: ${JSON.stringify(state)} }
                 }
               });

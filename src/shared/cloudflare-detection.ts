@@ -3,7 +3,49 @@
  * JS constants are injected into pages via CDP Runtime.evaluate.
  */
 
-export type CloudflareType = 'interstitial' | 'embedded' | 'invisible' | 'managed' | 'block' | 'widget';
+/**
+ * ═══════════════════════════════════════════════════════════════════════
+ * Cloudflare Turnstile — Official Widget Modes
+ * https://developers.cloudflare.com/turnstile/concepts/widget/
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * 1. MANAGED (recommended by CF)
+ *    Automatically chooses between showing a checkbox or auto-passing
+ *    based on visitor risk level. Only prompts interaction when CF
+ *    thinks it's necessary.
+ *
+ * 2. NON-INTERACTIVE
+ *    Displays a visible widget with a loading spinner. Runs challenges
+ *    in the browser without ever requiring the visitor to click anything.
+ *
+ * 3. INVISIBLE
+ *    Completely hidden. No widget, no spinner, no visual element.
+ *    Challenges run entirely in the background.
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * Our Internal Types
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * CloudflareType        │ Official Mode    │ Source                     │ Needs Click?
+ * ──────────────────────┼──────────────────┼────────────────────────────┼─────────────
+ * 'managed'             │ Managed          │ _cf_chl_opt.cType          │ Usually yes
+ * 'non_interactive'     │ Non-Interactive   │ _cf_chl_opt.cType          │ No (auto-solves)
+ * 'invisible'           │ Invisible         │ _cf_chl_opt.cType          │ No (auto-solves)
+ * 'interstitial'        │ (any — unknown)   │ Title/DOM/body heuristics  │ Yes (challenge page)
+ * 'turnstile'           │ (any — unknown)   │ Iframe/runtime poll        │ Try click, may auto-solve
+ * 'block'               │ N/A              │ CF error page DOM          │ Not solvable
+ *
+ * cType is available in most cases (CF interstitial pages always have _cf_chl_opt).
+ * 'turnstile' is the fallback for third-party pages where Turnstile is embedded
+ * but _cf_chl_opt is not exposed — we know a widget exists but not its mode.
+ */
+export type CloudflareType =
+  | 'managed'          // Official: Managed — may need click, may auto-pass
+  | 'non_interactive'  // Official: Non-Interactive — auto-solves, spinner visible
+  | 'invisible'        // Official: Invisible — auto-solves, nothing visible
+  | 'interstitial'     // CF challenge page (mode unknown, no cType available)
+  | 'turnstile'        // Turnstile iframe found but no cType (third-party embed, mode unknown)
+  | 'block';           // CF error page — not solvable
 
 export interface CloudflareInfo {
   type: CloudflareType;
@@ -39,7 +81,6 @@ export interface CloudflareResult {
 /** Accumulated state for one CF solve phase, included in solved/failed events. */
 export interface CloudflareSnapshot {
   detection_method: string | null;
-  cf_ctype: string | null;
   cf_cray: string | null;
   detection_poll_count: number;
   widget_found: boolean;
@@ -138,7 +179,7 @@ export const CF_DETECTION_JS = `JSON.stringify((() => {
         return {
             detected: true,
             method: 'cf_chl_opt',
-            cType: window._cf_chl_opt.cType || 'unknown',
+            cType: window._cf_chl_opt.cType || null,
             cRay: window._cf_chl_opt.cRay || null
         };
     }
@@ -177,7 +218,23 @@ export const TURNSTILE_TOKEN_JS = `(() => {
 })()`;
 
 /**
- * Detect Cloudflare type from CDP data + page evaluation results.
+ * Map detection results to CloudflareType.
+ *
+ * CF_DETECTION_JS (lines 136-164) returns one of these detection methods:
+ *
+ *   DETECTION METHOD          │ WHAT IT CHECKS                                      │ HAS cType?
+ *   ──────────────────────────┼─────────────────────────────────────────────────────┼───────────
+ *   cf_chl_opt                │ window._cf_chl_opt exists                           │ YES
+ *   challenge_element         │ #challenge-form, #challenge-stage, #challenge-running│ No
+ *   challenge_running_class   │ html.challenge-running CSS class                     │ No
+ *   title_interstitial        │ Title: "just a moment", "momento", etc.              │ No
+ *   body_text_challenge       │ Body: "verify you are human", etc.                   │ No
+ *   cf_error_page             │ .cf-error-details, #cf-error-details                 │ No
+ *   ray_id_footer             │ Footer contains "ray id" + "cloudflare"              │ No
+ *
+ * Additional sources (not from CF_DETECTION_JS):
+ *   runtime_poll              │ JS poll finds turnstile on page (set in solver)       │ No
+ *   hasTurnstileIframe        │ challenges.cloudflare.com iframe present (separate)   │ No
  */
 export function detectCloudflareType(
   _pageUrl: string,
@@ -185,24 +242,35 @@ export function detectCloudflareType(
   hasTurnstileIframe: boolean,
 ): CloudflareType | null {
   if (!detectionResult.detected) return null;
-
-  // cf_chl_opt.cType maps directly to CF types
   const cType = detectionResult.cType;
+
+  // ── _cf_chl_opt exists → use CF's own mode classification ──
   if (cType === 'managed' || cType === 'interactive') return 'managed';
+  if (cType === 'non-interactive') return 'non_interactive';
+  if (cType === 'invisible') return 'invisible';
 
-  // Interstitial: "Just a moment..." pages (detected by title)
+  // ── No _cf_chl_opt → classify by detection method ──
+
+  // CF challenge pages (full-page "Just a moment..." interstitials)
   if (detectionResult.method === 'title_interstitial') return 'interstitial';
+  if (detectionResult.method === 'body_text_challenge') return 'interstitial';
+  if (detectionResult.method === 'challenge_element') return 'interstitial';
+  if (detectionResult.method === 'challenge_running_class') return 'interstitial';
 
-  // Block page: CF error pages (1006, 1015, etc.)
+  // CF error pages (1006, 1015, etc.) — not solvable
   if (detectionResult.method === 'cf_error_page') return 'block';
 
-  // If Turnstile iframe is visible, it's embedded; otherwise invisible
-  if (hasTurnstileIframe) return 'embedded';
+  // Soft CF indicator with visible Turnstile → standalone widget
+  // Without Turnstile → interstitial (CF page without standard markers)
+  if (detectionResult.method === 'ray_id_footer') {
+    return hasTurnstileIframe ? 'turnstile' : 'interstitial';
+  }
 
-  // Challenge page without visible Turnstile → interstitial (managed or invisible)
-  if (detectionResult.method === 'body_text_challenge') return 'interstitial';
+  // Turnstile iframe on non-CF page → standalone widget (mode unknown)
+  if (hasTurnstileIframe) return 'turnstile';
 
-  return 'interstitial'; // Default fallback
+  // Fallback: detected but no specific method matched
+  return 'interstitial';
 }
 
 /**
@@ -538,6 +606,30 @@ export const TURNSTILE_DETECT_AND_AWAIT_JS = `JSON.stringify((function() {
   if (window.__turnstileAwaitResult) return { present: true, solved: true, tokenLength: window.__turnstileAwaitResult.tokenLength };
   return { present: true, solved: false };
 })())`;
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════
+ * Cloudflare Turnstile — Official Widget Error States
+ * https://developers.cloudflare.com/turnstile/concepts/widget/
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * 1. UNKNOWN ERROR         — error during challenge, widget shows error message
+ * 2. INTERACTION TIMED OUT — checkbox shown but visitor didn't click in time
+ * 3. CHALLENGE TIMED OUT   — token expired, visitor didn't submit form in time
+ * 4. UNSUPPORTED BROWSER   — outdated/unsupported browser (N/A for us — we control Chrome)
+ *
+ * Our detection:
+ *   TURNSTILE_STATE_OBSERVER_JS  │ MutationObserver on #success, #verifying, #fail, #expired, #timeout
+ *     'fail'                     │ → maps to CF "Unknown error"
+ *     'timeout'                  │ → maps to CF "Interaction timed out"
+ *     'expired'                  │ → maps to CF "Challenge timed out"
+ *
+ *   TURNSTILE_ERROR_CHECK_JS     │ Polling check (activity loop)
+ *     'confirmed_error'          │ → error/failed text in widget, no token
+ *     'error_text'               │ → error/failed text in widget, has token
+ *     'iframe_error'             │ → error/failed text in iframe content
+ *     'expired'                  │ → turnstile.isExpired() returned true
+ */
 
 /**
  * JS to detect Turnstile widget error states.

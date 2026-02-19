@@ -226,8 +226,8 @@ export const markerItems: Readable<MarkerItem[]> = derived(events, ($events) => 
 
     if (!isCustomEventData(e.data)) continue;
     if (e.data.tag.startsWith('network.')) continue;
-    // Skip turnstile markers (shown in Cloudflare tab instead)
-    if (e.data.tag.includes('turnstile')) continue;
+    // Skip CF markers (shown in Cloudflare tab instead)
+    if (e.data.tag.startsWith('cf.')) continue;
 
     const payload = isRecord(e.data.payload) ? e.data.payload : {};
 
@@ -249,9 +249,9 @@ export const cloudflareItems: Readable<InspectorItem[]> = derived(events, ($even
   const requestMap = new Map<string, NetworkItem>();
 
   for (const e of $events) {
-    // Turnstile markers (Custom events with 'turnstile' in tag)
+    // CF markers (Custom events with 'cf.' prefix)
     if (e.type === EventType.Custom && isCustomEventData(e.data)) {
-      if (e.data.tag.includes('turnstile') && !e.data.tag.startsWith('network.')) {
+      if (e.data.tag.startsWith('cf.') && !e.data.tag.startsWith('network.')) {
         const payload = isRecord(e.data.payload) ? e.data.payload : {};
         items.push({
           timestamp: e.timestamp,
@@ -322,14 +322,14 @@ export const cloudflareSummary: Readable<CloudflareSummary | null> = derived(
       (item): item is MarkerItem => item.type === 'marker'
     );
 
-    const detected = markers.find((m) => m.tag === 'turnstile.detected');
+    const detected = markers.find((m) => m.tag === 'cf.detected');
     if (!detected) return null;
 
     const terminalTags = [
-      'turnstile.solved',
-      'turnstile.auto_solved',
-      'turnstile.pre_solved',
-      'turnstile.failed',
+      'cf.solved',
+      'cf.auto_solved',
+      'cf.pre_solved',   // backwards compat with old recordings
+      'cf.failed',
     ];
     const terminal = markers.find((m) => terminalTags.includes(m.tag));
 
@@ -339,7 +339,7 @@ export const cloudflareSummary: Readable<CloudflareSummary | null> = derived(
 
     let outcome: string | null = null;
     if (terminal) {
-      outcome = terminal.tag.replace('turnstile.', '');
+      outcome = terminal.tag.replace('cf.', '');
     }
 
     const durationMs =
