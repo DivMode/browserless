@@ -8,6 +8,7 @@ import {
 } from '@browserless.io/browserless';
 import { rm } from 'fs/promises';
 
+import { sessionDuration } from '../prom-metrics.js';
 import { ReplayCoordinator } from './replay-coordinator.js';
 import { SessionRegistry } from './session-registry.js';
 
@@ -98,6 +99,10 @@ export class SessionLifecycleManager {
 
     if (!keepOpen) {
       this.log.info(`KILLING browser session ${session.id}: numbConnected=${connected} keepUntil=${keepUntil} force=${force}`);
+
+      // Record session duration for Prometheus histogram (p50/p95 trend detection)
+      const durationSec = (Date.now() - session.startedOn) / 1000;
+      sessionDuration.observe(durationSec);
 
       // Emit cf.solved for any unresolved CF detections (session-close fallback)
       if (this.replayCoordinator) {

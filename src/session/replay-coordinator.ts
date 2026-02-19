@@ -13,6 +13,7 @@ import { CloudflareSolver } from './cloudflare-solver.js';
 import { TURNSTILE_STATE_OBSERVER_JS } from '../shared/cloudflare-detection.js';
 import { VideoEncoder } from '../video/encoder.js';
 import type { VideoManager } from '../video/video-manager.js';
+import { registerSessionState, tabDuration } from '../prom-metrics.js';
 
 /**
  * ReplayCoordinator manages rrweb replay capture across browser sessions.
@@ -146,6 +147,7 @@ export class ReplayCoordinator {
       let cmdId = 1;
       const pendingCommands = new Map<number, { resolve: Function; reject: Function; timer: ReturnType<typeof setTimeout> }>();
       const trackedTargets = new Set<string>(); // targets we're collecting events from
+      const tabStartTimes = new Map<string, number>(); // targetId → Date.now() when tab was attached
       const injectedTargets = new Set<string>(); // targets we've injected rrweb into
       const zeroEventCounts = new Map<string, number>(); // targetId -> consecutive zero-event polls for self-healing
       const finalizedResults = new Map<string, StopTabRecordingResult>(); // cached results from targetDestroyed
@@ -158,6 +160,21 @@ export class ReplayCoordinator {
       let pageWsCmdId = 100_000; // offset from browser WS cmdId to avoid collisions
       const chromePort = new URL(wsEndpoint).port;
       const failedReconnects = new Set<string>(); // cdpSessionIds that failed reconnect — skip future attempts
+
+      // Register live data structures for collect-based Prometheus gauges.
+      // Gauges derive values on each scrape — no inc/dec bookkeeping needed.
+      const unregisterGauges = registerSessionState({
+        pageWebSockets,
+        trackedTargets,
+        pendingCommands,
+        getPagePendingCount: () => {
+          let count = 0;
+          for (const ws of pageWebSockets.values()) {
+            count += ((ws as any).__pendingCmds as Map<any, any>)?.size ?? 0;
+          }
+          return count;
+        },
+      });
 
       const openPageWebSocket = (targetId: string, cdpSessionId: string): Promise<void> => {
         return new Promise((resolve, reject) => {
@@ -216,6 +233,7 @@ export class ReplayCoordinator {
 
           pageWs.on('error', () => { /* silent — fallback to browser WS */ });
           pageWs.on('close', () => {
+            pageWebSockets.delete(cdpSessionId);
             clearInterval((pageWs as any).__pingInterval);
             // Immediately reject all pending commands — don't wait 30s for timeout
             for (const [, { reject, timer }] of pendingCmds) {
@@ -223,7 +241,6 @@ export class ReplayCoordinator {
               reject(new Error('Per-page WS closed'));
             }
             pendingCmds.clear();
-            pageWebSockets.delete(cdpSessionId);
           });
         });
       };
@@ -686,6 +703,7 @@ export class ReplayCoordinator {
             if (targetInfo.type === 'page') {
               this.log.info(`Target attached (paused=${waitingForDebugger}): targetId=${targetInfo.targetId} url=${targetInfo.url} type=${targetInfo.type}`);
               trackedTargets.add(targetInfo.targetId);
+              tabStartTimes.set(targetInfo.targetId, Date.now());
               targetSessions.set(targetInfo.targetId, cdpSessionId);
               cloudflareSolver.onPageAttached(targetInfo.targetId, cdpSessionId, targetInfo.url).catch(() => {});
 
@@ -851,6 +869,12 @@ export class ReplayCoordinator {
             const { targetId } = msg.params;
 
             if (trackedTargets.has(targetId)) {
+              // Record per-tab (scrape) duration and count
+              const startTime = tabStartTimes.get(targetId);
+              if (startTime) {
+                tabDuration.observe((Date.now() - startTime) / 1000);
+                tabStartTimes.delete(targetId);
+              }
               const result = await finalizeTab(targetId);
               if (result && options?.onTabReplayComplete) {
                 try {
@@ -1115,6 +1139,7 @@ export class ReplayCoordinator {
 
       // Register cleanup
       this.sessionReplay?.registerCleanupFn(sessionId, async () => {
+        unregisterGauges();
         closed = true;
         clearInterval(pollInterval);
 

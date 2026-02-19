@@ -155,6 +155,7 @@ export enum HTTPManagementRoutes {
   videoHls = '/video/+([0-9a-zA-Z-_])/hls/**',
   cfSolved = '/internal/cf-solved?(/)',
   sessions = '/sessions?(/)',
+  promMetrics = '/prom-metrics?(/)',
   static = '/',
 }
 
