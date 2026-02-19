@@ -144,7 +144,7 @@ export class ReplayCoordinator {
       });
 
       let cmdId = 1;
-      const pendingCommands = new Map<number, { resolve: Function; reject: Function }>();
+      const pendingCommands = new Map<number, { resolve: Function; reject: Function; timer: ReturnType<typeof setTimeout> }>();
       const trackedTargets = new Set<string>(); // targets we're collecting events from
       const injectedTargets = new Set<string>(); // targets we've injected rrweb into
       const zeroEventCounts = new Map<string, number>(); // targetId -> consecutive zero-event polls for self-healing
@@ -157,21 +157,29 @@ export class ReplayCoordinator {
       const pageWebSockets = new Map<string, InstanceType<typeof WebSocket>>(); // cdpSessionId → per-page WS
       let pageWsCmdId = 100_000; // offset from browser WS cmdId to avoid collisions
       const chromePort = new URL(wsEndpoint).port;
+      const failedReconnects = new Set<string>(); // cdpSessionIds that failed reconnect — skip future attempts
 
       const openPageWebSocket = (targetId: string, cdpSessionId: string): Promise<void> => {
         return new Promise((resolve, reject) => {
           const pageWsUrl = `ws://127.0.0.1:${chromePort}/devtools/page/${targetId}`;
           const pageWs = new WebSocket(pageWsUrl);
           const pendingCmds = new Map<number, { resolve: Function; reject: Function; timer: ReturnType<typeof setTimeout> }>();
+          let settled = false;
 
-          const connectTimer = setTimeout(() => reject(new Error('Per-page WS connect timeout')), 2_000);
+          const connectTimer = setTimeout(() => {
+            settled = true;
+            pageWs.terminate(); // kills the connection attempt — prevents orphan
+            reject(new Error('Per-page WS connect timeout'));
+          }, 2_000);
 
           pageWs.on('open', () => {
+            if (settled) return; // timeout already fired — don't create orphan
+            settled = true;
             clearTimeout(connectTimer);
             pageWebSockets.set(cdpSessionId, pageWs);
             (pageWs as any).__pendingCmds = pendingCmds;
 
-            // Keepalive: ping every 10s, close if no pong within 5s
+            // Keepalive: ping every 30s, close if no pong within 5s
             const pingInterval = setInterval(() => {
               if (pageWs.readyState !== WebSocket.OPEN) {
                 clearInterval(pingInterval);
@@ -183,7 +191,7 @@ export class ReplayCoordinator {
                 pageWs.terminate();  // Hard close — triggers 'close' handler
               }, 5_000);
               pageWs.once('pong', () => clearTimeout(pongTimeout));
-            }, 10_000);
+            }, 30_000);
 
             (pageWs as any).__pingInterval = pingInterval;
 
@@ -247,12 +255,14 @@ export class ReplayCoordinator {
               pageWs.send(JSON.stringify({ id, method, params })); // No sessionId needed — already scoped
             });
           } else {
-            // Dead WS — remove and attempt reconnect
+            // Dead WS — remove and attempt reconnect (once per cdpSessionId)
             pageWebSockets.delete(cdpSessionId);
-            const targetId = [...targetSessions.entries()]
-              .find(([, sid]) => sid === cdpSessionId)?.[0];
-            if (targetId) {
-              openPageWebSocket(targetId, cdpSessionId).catch(() => {});
+            if (!failedReconnects.has(cdpSessionId)) {
+              const targetId = [...targetSessions.entries()]
+                .find(([, sid]) => sid === cdpSessionId)?.[0];
+              if (targetId) {
+                openPageWebSocket(targetId, cdpSessionId).catch(() => failedReconnects.add(cdpSessionId));
+              }
             }
             // Fall through to browser-level WS for this command
           }
@@ -261,21 +271,21 @@ export class ReplayCoordinator {
         // Fallback: browser-level WS with sessionId routing (original behavior)
         return new Promise((resolve, reject) => {
           const id = cmdId++;
-          pendingCommands.set(id, { resolve, reject });
 
           const msg: any = { id, method, params };
           if (cdpSessionId) {
             msg.sessionId = cdpSessionId;
           }
 
-          ws.send(JSON.stringify(msg));
-
-          setTimeout(() => {
+          const timer = setTimeout(() => {
             if (pendingCommands.has(id)) {
               pendingCommands.delete(id);
               reject(new Error(`CDP command ${method} timed out`));
             }
           }, timeout);
+          pendingCommands.set(id, { resolve, reject, timer });
+
+          ws.send(JSON.stringify(msg));
         });
       };
 
@@ -656,12 +666,13 @@ export class ReplayCoordinator {
 
           // Handle command responses (direct responses from browser)
           if (msg.id && pendingCommands.has(msg.id)) {
-            const { resolve, reject } = pendingCommands.get(msg.id)!;
+            const cmd = pendingCommands.get(msg.id)!;
+            clearTimeout(cmd.timer);
             pendingCommands.delete(msg.id);
             if (msg.error) {
-              reject(new Error(msg.error.message));
+              cmd.reject(new Error(msg.error.message));
             } else {
-              resolve(msg.result);
+              cmd.resolve(msg.result);
             }
             return;
           }
@@ -874,6 +885,11 @@ export class ReplayCoordinator {
                 pageWebSockets.delete(destroyedCdpSid);
               }
             }
+
+            // Clean up Maps that grow monotonically without this
+            targetSessions.delete(targetId);
+            iframeTargetSessions.delete(targetId);
+            zeroEventCounts.delete(targetId);
           }
 
           // Handle screencast frames (pixel capture alongside rrweb) — only when video=true
@@ -1060,7 +1076,7 @@ export class ReplayCoordinator {
 
       ws.on('close', () => {
         closed = true;
-        pendingCommands.forEach(({ reject }) => reject(new Error('WebSocket closed')));
+        pendingCommands.forEach(({ reject, timer }) => { clearTimeout(timer); reject(new Error('WebSocket closed')); });
         pendingCommands.clear();
         // Reject per-page pending commands, then close sockets
         for (const pageWs of pageWebSockets.values()) {
@@ -1106,13 +1122,16 @@ export class ReplayCoordinator {
         cloudflareSolver.destroy();
         this.cloudflareSolvers.delete(sessionId);
 
-        // Finalize all remaining tracked targets while session is still active.
-        // Prevents race where targetDestroyed fires after isReplaying=false.
+        // Finalize tabs — each wrapped so one failure doesn't skip the rest
         for (const targetId of [...trackedTargets]) {
-          await finalizeTab(targetId);
+          try {
+            await finalizeTab(targetId);
+          } catch (e) {
+            this.log.warn(`finalizeTab failed for ${targetId}: ${e instanceof Error ? e.message : String(e)}`);
+          }
         }
 
-        // Reject per-page pending commands, then close sockets
+        // ALWAYS runs — close all per-page WSes
         for (const pageWs of pageWebSockets.values()) {
           const pendingCmds = (pageWs as any).__pendingCmds as Map<number, { resolve: Function; reject: Function; timer: ReturnType<typeof setTimeout> }> | undefined;
           if (pendingCmds) {
@@ -1125,6 +1144,18 @@ export class ReplayCoordinator {
           try { pageWs.close(); } catch {}
         }
         pageWebSockets.clear();
+
+        // Eagerly release closure references to allow GC
+        trackedTargets.clear();
+        injectedTargets.clear();
+        targetSessions.clear();
+        iframeSessions.clear();
+        iframeTargetSessions.clear();
+        zeroEventCounts.clear();
+        finalizedResults.clear();
+        failedReconnects.clear();
+        pendingCommands.forEach(({ reject, timer }) => { clearTimeout(timer); reject(new Error('Session cleanup')); });
+        pendingCommands.clear();
 
         try {
           ws.close();

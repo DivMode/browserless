@@ -326,6 +326,15 @@ export class CloudflareSolver {
     } else {
       // Iframe attached before detection created — store for late pickup
       this.pendingIframes.set(pageTargetId, { iframeCdpSessionId, iframeTargetId });
+
+      // Kick off detection: on Fetch-intercepted pages (e.g., pydoll's minimal
+      // Turnstile HTML), detectTurnstileWidget fires too early — before the
+      // external Turnstile script loads. By the time the iframe attaches,
+      // window.turnstile exists on the parent page, so detection succeeds.
+      const pageCdpSessionId = this.knownPages.get(pageTargetId);
+      if (pageCdpSessionId) {
+        this.detectTurnstileWidget(pageTargetId, pageCdpSessionId).catch(() => {});
+      }
     }
 
     // Inject state observer into Turnstile iframe
@@ -362,6 +371,13 @@ export class CloudflareSolver {
     if (active && !active.iframeCdpSessionId) {
       active.iframeCdpSessionId = iframeCdpSessionId;
       active.iframeTargetId = iframeTargetId;
+    } else if (!active) {
+      // Late-navigating iframe with no active detection — same as onIframeAttached.
+      // Kick off detection now that window.turnstile exists on the parent page.
+      const pageCdpSessionId = this.knownPages.get(pageTargetId);
+      if (pageCdpSessionId) {
+        this.detectTurnstileWidget(pageTargetId, pageCdpSessionId).catch(() => {});
+      }
     }
 
     this.sendCommand('Runtime.addBinding', {
