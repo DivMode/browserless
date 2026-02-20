@@ -54,43 +54,34 @@ With `MAX_CONCURRENT_TABS = 5`:
 
 Per-page WS is essential for scaling beyond 5 concurrent tabs.
 
-## 3. Command Routing Rules
+## 3. Command Routing Rules (Updated 2026-02-19)
 
 ```
-sendCommand(method, params, cdpSessionId, timeoutMs, forceMainWs)
+sendCommand(method, params, cdpSessionId, timeoutMs)
   |
-  |-- forceMainWs === true?
-  |     YES --> browser-level WS (bypass per-page WS entirely)
-  |
-  |-- method === 'Runtime.evaluate' AND per-page WS exists and OPEN?
-  |     YES --> per-page WS (no sessionId needed, WS is page-scoped)
-  |     NO  --> browser-level WS (with sessionId for target routing)
-  |
-  +-- All other methods --> browser-level WS (always)
+  |-- method is PAGE_WS_SAFE? (Runtime.evaluate OR Page.addScriptToEvaluateOnNewDocument)
+  |     YES --> per-page WS if exists and OPEN, else browser-level WS
+  |     NO  --> browser-level WS (always)
 ```
 
-### `forceMainWs` — Critical Operations
+`PAGE_WS_SAFE` is defined inline in `replay-session.ts`:
+```typescript
+const PAGE_WS_SAFE = method === 'Runtime.evaluate' || method === 'Page.addScriptToEvaluateOnNewDocument';
+```
 
-Some `Runtime.evaluate` calls MUST go through the browser-level WS even when a per-page WS exists:
+### Why These Two Commands?
 
-| Caller | Why forceMainWs |
-|---|---|
-| `collectEvents` (rrweb) | Atomic read-and-clear — losing the response means events are gone forever |
-| Self-healing check | Verifies rrweb injection state after collection |
-| Re-injection | Restores rrweb recording if self-healing detects it's missing |
-
-CF solver polling stays on per-page WS — it's fire-and-forget with `.catch(() => {})`, so losing one poll result is acceptable (it retries). Event collection is NOT acceptable to lose.
-
-### Why Only `Runtime.evaluate`?
-
-Per-page WebSocket connections (`/devtools/page/{targetId}`) have a critical limitation: **they only deliver responses (messages with an `id` field), not events (messages without `id`)**.
+Both `Runtime.evaluate` and `Page.addScriptToEvaluateOnNewDocument` are stateless request-response commands — they don't generate CDP events that need to be received on the browser-level WS. Per-page WS connections only deliver command responses (messages with an `id` field), not events.
 
 | Command Type | Per-Page WS | Browser WS | Why |
 |---|---|---|---|
 | `Runtime.evaluate` | Yes | Fallback | Stateless, response-only |
+| `Page.addScriptToEvaluateOnNewDocument` | Yes | Fallback | Stateless, response-only |
 | `Runtime.addBinding` | **No** | Yes | `bindingCalled` events only arrive on browser WS |
-| `Page.addScriptToEvaluateOnNewDocument` | **No** | Yes | Setup command, events on browser WS |
 | `Target.setAutoAttach` | **No** | Yes | `attachedToTarget` events on browser WS |
+| `Input.*` (mouse/keyboard) | **No** | Yes | Must go through browser WS |
+
+> **Note:** The previous `forceMainWs` parameter has been removed. The `PAGE_WS_SAFE` set is the sole routing decision. rrweb event collection now uses push-based `Runtime.addBinding('__rrwebPush')` instead of polling, so the old concern about atomic read-and-clear via `collectEvents` through per-page WS no longer applies. The 5s fallback poll still goes through per-page WS (acceptable — it's non-atomic and idempotent).
 
 ## 4. The Bug We Fixed (Turnstile Routing)
 
@@ -115,17 +106,10 @@ After ~10 minutes of successful operation (20/20 scrapes with working Turnstile)
 ### Root Cause
 Per-page WebSocket connections had **no keepalive mechanism** (no ping/pong). When Chrome experienced memory pressure or GC pauses, per-page WS connections would silently stop responding — the TCP connection appeared alive but Chrome's CDP handler was no longer processing messages.
 
-The cascade:
-1. Per-page WS stops responding (no pong detection, appears healthy)
-2. `sendCommand('Runtime.evaluate')` routes through the dead WS
-3. 30s timeout fires, but rrweb polling sends new commands every 500ms per tab
-4. With 5 tabs: 10 dead commands/sec, each waiting 30s = 300 pending timeouts
-5. New commands keep queueing → session fully saturated
-
-### Prevention (Implemented)
-1. **Ping/pong keepalive:** Per-page WS pings every 10s. If no pong within 5s, the WS is hard-terminated.
-2. **Auto-reconnect:** When `sendCommand` finds a dead per-page WS, it deletes it, triggers async reconnection, and falls back to browser-level WS for that command.
-3. **Health logging:** Every 30s, logs the count of healthy vs total per-page WS connections for monitoring.
+### Prevention (Updated 2026-02-19)
+1. **Per-page WS keepalive (non-destructive):** Ping every 30s. If no pong within 30s, the WS is terminated. Logged at debug level. A dead per-page WS is NOT fatal — `sendCommand` transparently falls back to browser-level WS. No cascade.
+2. **No main WS ping/pong:** The main browser-level WS has NO keepalive. Chrome process death fires WS `close` event naturally via TCP. SessionLifecycleManager handles zombie sessions via TTL. The previous 5s main WS ping/pong was the root cause of the replay URL disappearance bug (Chrome missed one pong under load → WS terminated → permanent replay death).
+3. **TargetRegistry atomic cleanup:** When per-page WS dies, `target.pageWebSocket = null` is set atomically. `sendCommand` checks this and falls back to browser WS. No stale references.
 4. **Session-level safeguards (pydoll):** 5-minute overall scrape timeout ensures stuck scrapes always release their semaphore slot. Consecutive CDP health failures trigger session destruction.
 
 ## 6. The 0-Event Replay Bug (collectEvents via Per-Page WS)

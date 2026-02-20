@@ -7,35 +7,58 @@ Server-side Cloudflare challenge solver running inside Browserless. Detects Turn
 ```
 Browserless (producer)              Pydoll (consumer)
 ─────────────────────               ─────────────────
-CloudflareSolver                    cloudflare_listener.py
-  ├─ detect challenge                 ├─ CloudflareListener
-  ├─ simulate presence                ├─ Waiter (accumulates events)
-  ├─ find + click widget              ├─ Result (aggregated outcome)
-  ├─ verify solve                     ├─ Wide events + metrics
-  └─ emit CDP events ──────────────>  └─ Diagnostic capture on failure
-       + recording markers
+CloudflareSolver (delegator)        cloudflare_listener.py
+  ├─ CloudflareDetector               ├─ CloudflareListener
+  │   └─ detect challenge              ├─ Waiter (accumulates events)
+  ├─ CloudflareSolveStrategies        ├─ Result (aggregated outcome)
+  │   ├─ simulate presence             ├─ Wide events + metrics
+  │   ├─ find + click widget           └─ Diagnostic capture on failure
+  │   └─ verify solve
+  ├─ CloudflareStateTracker
+  │   └─ active detections, tokens
+  └─ CloudflareEventEmitter
+      └─ emit CDP events ──────────────>
+           + recording markers
 ```
 
 **Boundary:** Browserless produces structured CDP events and recording markers. Pydoll consumes them into wide events, metrics, and diagnostics. Observability logic lives in pydoll, not browserless.
 
-## Files
+## Files (Updated 2026-02-19)
 
-| File | Purpose |
-|------|---------|
-| `src/session/cloudflare-solver.ts` | Solver class — detection, solving, event emission |
-| `src/shared/challenge-detector.ts` | JS constants injected into pages, type detection logic |
-| `src/shared/mouse-humanizer.ts` | Mouse movement, presence simulation, click execution |
+The solver was split from a monolithic 1275-line class into 4 focused modules + thin delegator:
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/session/cloudflare-solver.ts` | 94 | Thin delegator — public API unchanged, delegates to modules below |
+| `src/session/cf/cloudflare-detector.ts` | 335 | Detection lifecycle: `onPageAttached`, `onPageNavigated`, `onIframeAttached`, `detectAndSolve`, `detectTurnstileWidget` |
+| `src/session/cf/cloudflare-solve-strategies.ts` | 302 | Solve execution: `solveDetection`, `solveByClicking`, `solveTurnstile`, `performClick`, `findClickTarget` |
+| `src/session/cf/cloudflare-state-tracker.ts` | 332 | Active detection state, solved tracking, activity loops, `isSolved`, `getToken`, `resolveAutoSolved` |
+| `src/session/cf/cloudflare-event-emitter.ts` | 217 | `CloudflareTracker` + CDP event emission (`emitDetected/Progress/Solved/Failed`) + recording markers |
+| `src/shared/cloudflare-detection.ts` | — | JS constants injected into pages, type detection logic |
+| `src/shared/mouse-humanizer.ts` | — | Mouse movement, presence simulation, click execution |
+
+### Delegator Pattern
+
+`CloudflareSolver` creates all 4 sub-components in its constructor and wires the retry callback to break the circular dependency between state tracker and strategies:
+
+```typescript
+this.stateTracker.onRetryCallback = (active) => {
+  this.strategies.solveDetection(active).catch(() => {});
+};
+```
+
+All public methods are one-line delegates. `ReplaySession` and `BrowsersCDP` don't know anything changed.
 
 ## Challenge Types
 
-| Type | Detection | Solve Strategy |
-|------|-----------|----------------|
-| `interstitial` | "Just a Moment" title, body text, `_cf_chl_opt` | Presence (1-3s) + click + activity loop |
-| `embedded` | Turnstile iframe visible on page | Presence (1-3s) + click + activity loop |
-| `invisible` | No visible widget, no iframe | Presence only (2-4s) + activity loop |
-| `managed` | `cType=managed\|interactive` | Extended presence (3-5s) + click + activity loop |
-| `block` | CF error page (1006, 1015) | Not solvable, skipped |
-| `widget` | Standalone Turnstile (no CF challenge page) | Auto-solve via callback binding |
+| Type | Detection | Solve Strategy | Handler |
+|------|-----------|----------------|---------|
+| `interstitial` | "Just a Moment" title, body text, `_cf_chl_opt` | Presence (0.3-1s) + click + activity loop | `solveByClicking()` |
+| `turnstile` | Standalone Turnstile widget on third-party page | Wait for iframe + binding/evaluate target + click | `solveTurnstile()` |
+| `managed` | `cType=managed\|interactive` | Presence (0.5-1.5s) + click + activity loop | `solveByClicking()` |
+| `non_interactive` | CF non-interactive challenge | Presence only (2-4s) + activity loop | `solveAutomatic()` |
+| `invisible` | No visible widget, no iframe | Presence only (2-4s) + activity loop | `solveAutomatic()` |
+| `block` | CF error page (1006, 1015) | Not solvable, throws error | — |
 
 ## Detection Methods
 
@@ -84,49 +107,66 @@ Evaluated in order via `CF_CHALLENGE_DETECTION_JS`. First match wins.
 | `interstitial-bordered-box` | Bordered/shadowed div (280-500 x 50-120 px) |
 | `interstitial-any-iframe` | Last resort: any visible iframe (100+ x 40+ px) |
 
-## Solve Flow
+## Solve Flow (Updated 2026-02-19)
 
 ```
-detectAndSolve()
-  ├─ Poll CF_CHALLENGE_DETECTION_JS (up to 10s)
-  ├─ Classify challenge type
-  └─ solveChallenge()
-       ├─ solveWithClick()          [interstitial, embedded]
-       │    ├─ simulateHumanPresence (1-3s)
-       │    ├─ isSolved() gate      ← may exit early (auto-solve)
-       │    ├─ findClickTarget()    ← 12-method cascade
-       │    ├─ approachCoordinates() (Bezier curves, 1-3s)
-       │    ├─ isSolved() gate      ← click cancellation
-       │    └─ commitClick()        (mousedown + 80-150ms hold + mouseup)
+CloudflareDetector.detectAndSolve()
+  ├─ Poll CF_DETECTION_JS (single poll, pollCount=1)
+  ├─ Classify challenge type → ActiveDetection
+  └─ CloudflareSolveStrategies.solveDetection(active)
        │
-       ├─ solveInvisible()          [invisible]
-       │    └─ simulateHumanPresence (2-4s)
+       ├─ startActivityLoop()      ← starts BEFORE solve (runs concurrently)
        │
-       └─ solveManaged()            [managed]
-            ├─ simulateHumanPresence (3-5s)
-            ├─ isSolved() gate
-            ├─ findClickTarget()
-            ├─ approachCoordinates()
-            ├─ isSolved() gate
-            └─ commitClick()
+       ├─ solveByClicking()        [interstitial, managed]
+       │    ├─ simulateHumanPresence (0.3-1.5s)
+       │    ├─ isSolved() gate     ← may exit early (auto-solve)
+       │    ├─ findClickTarget()   ← 12-method cascade (FIND_CLICK_TARGET_JS)
+       │    ├─ performClick()      ← shared click pipeline
+       │    │    ├─ approachCoordinates() (Bezier curves)
+       │    │    ├─ isSolved() gate ← click cancellation
+       │    │    ├─ commitClick()   (mousedown + hold + mouseup)
+       │    │    └─ postClickDwell()
+       │    └─ tryTabSpaceFallback() ← if coords.method === 'none'
+       │
+       ├─ solveTurnstile()         [turnstile]
+       │    ├─ isSolved() gate
+       │    ├─ Wait for iframe (25 x 200ms)
+       │    ├─ waitForTurnstileTarget() ← binding-driven (10s timeout)
+       │    ├─ findTurnstileTarget()    ← Runtime.evaluate fallback
+       │    ├─ performClick() (lightweight)
+       │    └─ tryTabSpaceFallback() ← if no coords found
+       │
+       └─ solveAutomatic()         [non_interactive, invisible]
+            └─ simulateHumanPresence (2-4s)
 
-  └─ startActivityLoop()            [all types, if not already solved]
-       └─ Every 3-7s:
-            ├─ isSolved() poll      ← catches missed auto-solves
-            ├─ isWidgetError() poll  ← catches error/expired states
-            └─ simulateHumanPresence (0.5-1.5s micro-drift)
+CloudflareStateTracker.startActivityLoop()  [all types, concurrent]
+  └─ Every 3-7s (max 90s):
+       ├─ isSolved() poll          ← catches missed auto-solves
+       ├─ isWidgetError() poll     ← catches error/expired states
+       └─ simulateHumanPresence (0.5-1.5s micro-drift)
 ```
+
+**Retry wiring:** When `onTurnstileStateChange` detects a retry-worthy failure (`fail`, `expired`, `timeout`), the state tracker calls `onRetryCallback` which the delegator wired to `strategies.solveDetection(active)`. This breaks the circular dependency between state tracker and strategies.
 
 ## Auto-Solve Detection
 
-`isSolved()` checks two signals:
+`stateTracker.isSolved()` checks multiple signals:
 1. `window.__turnstileSolved === true` — set by callback hook wrapping `turnstile.render()`
-2. `document.querySelector('[name="cf-turnstile-response"]').value` — DOM input fallback
+2. `window.__turnstileAwaitResult` — set by detection await script
+3. `turnstile.getResponse()` — direct Turnstile API call
+4. `window.__turnstileToken` — token variable
+5. `document.querySelector('[name="cf-turnstile-response"]').value` — DOM input fallback
 
-Called at three points:
-- After initial presence simulation (before finding click target)
-- After approaching target (before committing click) — enables click cancellation
-- Every 3-7s in the activity loop (catches missed solves)
+Called at multiple points:
+- After initial presence simulation (before finding click target) — `solveByClicking`
+- After approaching target (before committing click) — click cancellation in `performClick`
+- Every 3-7s in the activity loop — catches missed solves
+- During iframe wait loop (every 5th iteration) — `solveTurnstile`
+
+**Push-based auto-solve signals** (zero CDP polling cost):
+- `__turnstileSolvedBinding` — callback binding fires on auto-solve → `stateTracker.onAutoSolveBinding()`
+- `navigator.sendBeacon('/internal/cf-solved')` — HTTP beacon fires → `stateTracker.onBeaconSolved()`
+- `__turnstileStateBinding` with state `success` → `stateTracker.onTurnstileStateChange()`
 
 ## Post-Solve Verification
 
@@ -177,9 +217,12 @@ Called every 3-7s in the activity loop. On detection, emits `cf.widget_error_det
 **`signal` values in `challengeSolved` (when `auto_resolved=true`):**
 - `presence_phase` — solved during initial presence simulation
 - `click_cancelled` — solved during approach (click not committed)
-- `managed_presence` — solved during managed challenge's extended presence
+- `turnstile_pre_click` — solved before click attempt in `solveTurnstile`
+- `iframe_wait_solved` — solved while waiting for iframe to appear
 - `activity_poll` — solved during background activity loop polling
 - `callback_binding` — `__turnstileSolvedBinding` fired (standalone widget or active challenge)
+- `beacon_push` — HTTP beacon from `navigator.sendBeacon` in-page
+- `session_close` — fallback emit for unresolved detections at session cleanup
 
 **`auto_resolved` in `challengeSolved`:**
 - `true` — solved without iframe interaction (invisible, or caught by `isSolved()` gates)
@@ -205,9 +248,12 @@ Injected into replay recordings for debugging. All prefixed with `cf.`.
 **`signal` values in `cf.auto_solved`:**
 - `presence_phase` — solved during initial presence simulation
 - `click_cancelled` — solved during approach (click not committed)
-- `managed_presence` — solved during managed challenge's extended presence
+- `turnstile_pre_click` — solved before click attempt in `solveTurnstile`
+- `iframe_wait_solved` — solved while waiting for iframe to appear
 - `activity_poll` — solved during background activity loop polling
-- `callback_binding` — `__turnstileSolvedBinding` fired (standalone widget or active challenge)
+- `callback_binding` — `__turnstileSolvedBinding` fired
+- `beacon_push` — HTTP beacon from `navigator.sendBeacon`
+- `session_close` — fallback emit at session cleanup
 
 ## Mouse Humanization
 
@@ -238,11 +284,11 @@ Passed via `Browserless.enableChallengeSolver` CDP command from client.
 
 ## Lifecycle
 
-1. Solver created **disabled** by `replay-coordinator` in `setupReplayForAllTabs()`
-2. Client sends `Browserless.enableChallengeSolver` → `enable()` activates and scans existing pages
-3. CDP events from `replay-coordinator` flow into `onPageAttached/Navigated`, `onIframeAttached/Navigated`
-4. Solver detects, solves, emits results as `Browserless.challenge*` events
-5. `destroy()` called when session ends — sets `destroyed` flag, clears all maps
+1. Solver created **disabled** by `replay-session.ts` (one per ReplaySession)
+2. Client sends `Browserless.enableChallengeSolver` → `detector.enable()` activates and scans existing pages
+3. CDP events from `replay-session` flow into `onPageAttached/Navigated`, `onIframeAttached/Navigated` (via delegator)
+4. Detector detects → strategies solve → state tracker tracks → emitter emits `Browserless.challenge*` events
+5. `destroy()` cascades to all 4 sub-components — sets `destroyed` flag, clears all maps
 
 ## Abort Flag Contract
 

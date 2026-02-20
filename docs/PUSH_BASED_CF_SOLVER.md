@@ -160,13 +160,17 @@ Multiple signals may fire for the same solve:
 | `onPageNavigated()` | Interstitial auto-navigation | 0 commands |
 | `emitUnresolvedDetections()` | Session close insurance | 0 commands |
 
-## Files
+## Files (Updated 2026-02-19)
 
 | File | Purpose |
 |------|---------|
-| `src/session/cloudflare-solver.ts` | Solver: `onDetectionBeacon()`, `onBeaconSolved()`, simplified polling |
+| `src/session/cloudflare-solver.ts` | Thin delegator — routes to CF modules below |
+| `src/session/cf/cloudflare-detector.ts` | Detection lifecycle: `onPageAttached`, `detectAndSolve` |
+| `src/session/cf/cloudflare-state-tracker.ts` | `onBeaconSolved()`, `onAutoSolveBinding()`, active detection state |
+| `src/session/cf/cloudflare-event-emitter.ts` | CDP event emission + recording markers |
+| `src/session/cf/cloudflare-solve-strategies.ts` | Solve execution (click, presence, etc.) |
 | `src/shared/cloudflare-detection.ts` | Push detection script: `getCfPushDetectionScript()` |
-| `src/session/replay-coordinator.ts` | Script injection, beacon routing, `handleCfDetectionBeacon()` |
+| `src/session/replay-session.ts` | Script injection, beacon routing, `handleCfDetectionBeacon()` |
 | `src/routes/management/http/cf-detected.post.ts` | Detection beacon HTTP endpoint |
 | `src/routes/management/http/cf-solved.post.ts` | Solve beacon HTTP endpoint (existing) |
 | `src/shared/mouse-humanizer.ts` | Mouse simulation (unchanged) |

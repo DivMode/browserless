@@ -1,8 +1,19 @@
 # CDP Event Architecture Refactor
 
-> **Status:** Proposal
-> **Date:** 2026-02-17
+> **Status:** Partially Implemented (2026-02-19 refactor)
+> **Date:** 2026-02-17 (original), 2026-02-19 (refactor deployed)
 > **Problem:** CDP events are unreliable — Cloudflare solver events not reaching clients, data not flowing, commands timing out under tab contention.
+>
+> **What's been done (2026-02-19):**
+> - Main WS ping/pong removed (root cause of replay URL disappearance)
+> - Per-page WS keepalive changed to 30s non-destructive (was 5s destructive)
+> - 9 Maps/Sets consolidated into `TargetRegistry` (atomic cleanup)
+> - CloudflareSolver split into 4 focused modules (delegator pattern)
+> - Silent `.catch(() => {})` replaced with structured logging (~45 sites)
+> - `onTabReplayComplete` now fires in cleanup path
+> - Declarative CDP message routing (Map-based, replaces 70-line if-chain)
+>
+> **Still TODO:** Phase 0 HTTP fallback, ClientEventQueue, CDPConnection class, StatePoller
 
 ---
 
@@ -49,7 +60,7 @@ When 15+ tabs share a single browser-level WebSocket, events queue behind each o
 
 **Layer 2: ReplayCoordinator ↔ Chrome (browser-level WS)** — Separate raw WebSocket to Chrome's CDP endpoint. Uses `Target.setAutoAttach` with `flatten=true` and `waitForDebuggerOnStart=true`. Handles rrweb injection, event collection, screencast, and Cloudflare solver coordination.
 
-**Layer 3: Per-page WebSockets** (new, uncommitted) — Each tab gets its own WS to `/devtools/page/{targetId}`. Eliminates head-of-line blocking from 15+ tabs sharing one browser WS. CF solver commands route through per-page WS when available.
+**Layer 3: Per-page WebSockets** (deployed 2026-02-19) — Each tab gets its own WS to `/devtools/page/{targetId}`. Eliminates head-of-line blocking from 15+ tabs sharing one browser WS. Only `PAGE_WS_SAFE` commands route through per-page WS: `Runtime.evaluate` and `Page.addScriptToEvaluateOnNewDocument`. All other commands (including `Runtime.addBinding`) go through browser-level WS where their events are properly handled.
 
 ---
 
@@ -57,7 +68,7 @@ When 15+ tabs share a single browser-level WebSocket, events queue behind each o
 
 ### Critical — Events Actively Being Dropped
 
-#### 1. CDPProxy Connection Gap
+#### 1. CDPProxy Connection Gap — STATUS: OPEN
 
 **Location:** `browsers.cdp.ts:425-456` vs `browser-launcher.ts:226-248`
 
@@ -69,42 +80,19 @@ Timeline:
                                         (emitClientEvent is no-op)
 ```
 
-#### 2. Per-Page WebSocket Events Not Routed
+#### 2. Per-Page WebSocket Events Not Routed — STATUS: FIXED (2026-02-19)
 
-**Location:** `replay-coordinator.ts:174-185` (per-page WS message handler)
+**Location:** `replay-session.ts` (`openPageWebSocket` method)
 
-The new per-page WS (`openPageWebSocket`) only handles command-response correlation. It does **not** forward CDP events to the main `ws.on('message')` handler. If Chrome delivers a `Runtime.bindingCalled` event on a page WS instead of the browser WS, it is silently dropped.
+**Fix:** Per-page WS now only routes `PAGE_WS_SAFE` commands (`Runtime.evaluate`, `Page.addScriptToEvaluateOnNewDocument`). All event-generating commands (`Runtime.addBinding`, `Target.setAutoAttach`) go through browser-level WS where their events are properly received. The per-page WS message handler still only processes command responses — but this is correct now because no events are expected on per-page WS.
 
-The current per-page WS message handler:
-```typescript
-pageWs.on('message', (raw: Buffer) => {
-  const msg = JSON.parse(raw.toString());
-  // Only resolves pending commands:
-  const pending = pendingPageCommands.get(msg.id);
-  if (pending) { pending.resolve(msg.result); }
-  // CDP events (no msg.id) are IGNORED
-});
-```
+#### 3. Iframe-to-Parent Mapping Uses `.pop()` — STATUS: FIXED (2026-02-19)
 
-#### 3. Iframe-to-Parent Mapping Uses `.pop()`
+**Fix:** `TargetRegistry` (`target-state.ts`) provides proper iframe-to-parent tracking via `addIframe(iframeCdpSessionId, pageCdpSessionId)` and `getParentCdpSession(iframeCdpSessionId)`. No `.pop()` fallback. The dangerous `[...targetSessions.values()].pop()` code is removed.
 
-**Location:** `replay-coordinator.ts:762`
+#### 4. `emitClientEvent` Silently Swallows All Errors — STATUS: FIXED (2026-02-19)
 
-With multiple concurrent tabs, the fallback `[...targetSessions.values()].pop()` picks the last-registered page session, not the correct parent. This causes:
-- CF iframe events injected into the wrong tab's recording
-- CF solver tracking the wrong page's detection
-- Incorrect `iframeSessions` mapping (iframe→wrong_page instead of iframe→correct_page)
-
-```typescript
-// DANGEROUS: picks arbitrary page with multiple tabs
-const parentCdpSid = msg.sessionId || [...targetSessions.values()].pop();
-```
-
-#### 4. `emitClientEvent` Silently Swallows All Errors
-
-**Location:** `cloudflare-solver.ts` (every `emitClientEvent` call)
-
-Every emission uses `.catch(() => {})`. When the client disconnects slightly before the solver emits, the event vanishes without even a log line. This includes critical events like `Browserless.cloudflareSolved`.
+**Fix:** ~45 silent `.catch(() => {})` replaced with structured logging across `replay-session.ts` and CF modules. Optional CDP commands use `.catch((e) => this.log.debug(...))`, important commands use `.catch((e) => this.log.warn(...))`. Failures are now visible in Loki logs.
 
 ### Moderate — Timing and Race Conditions
 
@@ -140,9 +128,9 @@ if (msg.sessionId && iframeSessions.has(msg.sessionId)) {
 
 Client disconnect triggers `handleClose()` which nulls `clientWs`. If `SessionLifecycleManager.close()` is concurrently running step 2 (emit `replayComplete`), the event is dropped because `clientWs` is already null.
 
-#### 8. Per-Page WS Recording Feedback Loop
+#### 8. Per-Page WS Recording Feedback Loop — STATUS: FIXED (2026-02-19)
 
-**Location:** `replay-session.ts:472` (collectEvents), `replay-session.ts:588-634` (handleIframeCDPEvent), `replay-coordinator.ts:121-130` (CF solver markers)
+**Location:** `replay-session.ts` (collectEvents, handleIframeCDPEvent)
 
 Three competing `Runtime.evaluate` sources flood each per-page WebSocket:
 
@@ -175,13 +163,11 @@ More events accumulate during delay → loop worsens ─┘
 - The difference (46-84) is per-page WS pending (confirmed by `prom-metrics.ts:73` summing both browser + per-page WS)
 - Pattern: "fast when fresh" (small buffers, no overlap) → "slow after minutes" (feedback loop running)
 
-**Planned fixes (tactical, pre-Phase 2):**
+**Fixes (deployed 2026-02-19):**
 
-1. **Non-overlapping `pollEvents`** — `isPolling` guard prevents concurrent collection on the same tab
-2. **Parallel `collectEvents` across tabs** — `Promise.all` instead of sequential `await` loop
-3. **Batch iframe network events server-side** — eliminate 40-60 `Runtime.evaluate` calls per tab by accumulating iframe events in Node.js and injecting them in a single batch
-4. **Cap events per `collectEvents` drain** — `splice(0, maxEvents)` instead of copy-all, preventing unbounded serialization
-5. **Diagnostic logging** — collection time, payload size, per-page WS pending count
+1. **Push-based rrweb events** — `Runtime.addBinding('__rrwebPush')` replaces `setInterval` polling. Events push from page to server as CDP events (zero pending commands). `setTimeout(5000ms)` fallback poll is non-overlapping.
+2. **Server-side iframe event construction** — `sessionReplay.addTabEvents()` directly instead of round-tripping through `Runtime.evaluate`. Eliminates 40-60 evaluate calls per tab.
+3. **Non-overlapping fallback poll** — `setTimeout` (not `setInterval`) prevents overlapping invocations when Chrome is slow.
 
 **Relationship to existing phases:**
 
@@ -826,34 +812,60 @@ Phase 3: Build poll-based solver alongside old  ──► A/B test ──► Swi
 
 ### What Was Changed
 
-#### 1. ReplaySession Extraction (uncommitted)
+#### 1. ReplaySession Extraction (deployed)
 
-Extracted replay recording logic from `replay-coordinator.ts` into a new `replay-session.ts` file. This separates the per-tab recording lifecycle (rrweb injection, event collection, screencast) from the coordinator's cross-tab orchestration. The coordinator now delegates to `ReplaySession` instances per tab.
+Extracted replay recording logic from `replay-coordinator.ts` into `replay-session.ts` (1016 lines). Separates per-tab recording lifecycle (rrweb injection, event collection, screencast) from the coordinator's cross-tab orchestration.
 
-#### 2. Per-Page WS Routing Expansion (uncommitted)
+#### 2. TargetRegistry (deployed)
 
-Extended per-page WebSocket connections to route `Page.addScriptToEvaluateOnNewDocument` calls. Previously only `Runtime.evaluate` and CF solver commands used per-page WS. This reduces contention on the shared browser WS for rrweb injection, which is critical on page navigation when multiple tabs re-inject simultaneously.
+Replaced 9 Maps/Sets (`trackedTargets`, `targetSessions`, `tabStartTimes`, `injectedTargets`, `zeroEventCounts`, `finalizedResults`, `iframeSessions`, `iframeTargetSessions`, `failedReconnects` + separate `pageWebSockets`) with unified `TargetRegistry` in `target-state.ts`. All per-target state lives in `TargetState` objects, dual-indexed by `targetId` and `cdpSessionId`. `remove(targetId)` atomically cleans everything — impossible to miss a Map.
 
-#### 3. CDP Pending Commands Prometheus Gauge (deployed)
+#### 3. CloudflareSolver Split (deployed)
 
-Added `browserless_replay_pending_commands` gauge to `prom-metrics.ts`. Sums pending commands across both the browser-level WS and all per-page WS connections (`prom-metrics.ts:73`). This metric was the key diagnostic that revealed the per-page WS flooding — browser WS showed only `pending: 4` while the gauge reported 50-88, exposing that per-page WS was where commands were actually queuing.
+Split 1275-line monolithic `cloudflare-solver.ts` into 4 focused modules + thin delegator:
 
-#### 4. WS Health Iframe Breakdown (deployed)
+| File | Lines | Responsibility |
+|------|-------|----------------|
+| `src/session/cf/cloudflare-detector.ts` | 335 | Detection lifecycle |
+| `src/session/cf/cloudflare-solve-strategies.ts` | 302 | Solve execution (click, presence, etc.) |
+| `src/session/cf/cloudflare-state-tracker.ts` | 332 | Active detection state, activity loops |
+| `src/session/cf/cloudflare-event-emitter.ts` | 217 | CDP event emission + recording markers |
+| `src/session/cloudflare-solver.ts` | 94 | Thin delegator (public API unchanged) |
 
-Extended the periodic WS Health diagnostic log to break down pending commands by source: browser WS vs per-page WS. This confirmed the per-page WS as the bottleneck, not the shared browser WS as originally suspected.
+#### 4. Main WS Ping/Pong Removed (deployed)
 
-#### 5. `compute_outcome()` Fix (deployed, catchseo)
+Removed 5-second ping/pong on browser-level WS. This was the root cause of replay URLs disappearing — Chrome missed one pong under load, WS was terminated, entire replay system died permanently. Chrome process death naturally fires WS `close` event. SessionLifecycleManager handles zombie sessions via TTL.
 
-Fixed `compute_outcome()` in pydoll-scraper's `cloudflare_listener.py` to handle `TurnstilePhaseMetrics` correctly. The function was calling attributes that didn't exist on the phase metrics dataclass, causing metric emission failures.
+#### 5. Per-Page WS Keepalive Fixed (deployed)
 
-#### 6. CDP Health Dashboard Panels + Alert Rule (deployed, catchseo)
+Changed per-page WS keepalive from 10s ping / 5s pong timeout (destructive) to 30s ping / 30s pong timeout (non-destructive). When a per-page WS dies, `sendCommand` transparently falls back to browser WS. Logged at debug level. No cascade.
 
-Added Grafana dashboard panels for `browserless_replay_pending_commands` and configured alert rule to fire when pending commands exceed threshold. This provides early warning of the feedback loop before scrape quality degrades.
+#### 6. Per-Page WS Routing Restriction (deployed)
+
+Only `PAGE_WS_SAFE` commands route through per-page WS: `Runtime.evaluate` and `Page.addScriptToEvaluateOnNewDocument`. All other commands go through browser-level WS. This prevents the bug where `Runtime.addBinding` was sent on per-page WS but `bindingCalled` events only arrive on browser WS.
+
+#### 7. Push-Based rrweb Events (deployed)
+
+Replaced `setInterval` polling of rrweb events with `Runtime.addBinding('__rrwebPush')`. Page pushes events to server as CDP events (zero pending commands). `setTimeout(5000ms)` non-overlapping fallback poll covers Fetch-intercepted pages where `addBinding` doesn't work.
+
+#### 8. Server-Side Iframe Events (deployed)
+
+`handleIframeCDPEvent` constructs rrweb events server-side via `sessionReplay.addTabEvents()` instead of round-tripping through `Runtime.evaluate`. Eliminates 40-60 evaluate calls per tab during Turnstile activity.
+
+#### 9. Declarative CDP Message Routing (deployed)
+
+Replaced 70-line `handleCDPMessage` if-chain with `Map<string, handler>` routing. `setupMessageRouting()` registers handlers for `Target.attachedToTarget`, `targetCreated`, `targetDestroyed`, `targetInfoChanged`. Binding dispatch handled by dedicated `handleBindingCalled()` method.
+
+#### 10. CDP Pending Commands Prometheus Gauge (deployed)
+
+`browserless_replay_pending_commands` gauge in `prom-metrics.ts` sums both main WS + per-page WS pending commands. Uses duck-typed `{ size: number }` interface so both `Map` and `TargetRegistry` satisfy it.
+
+#### 11. `onTabReplayComplete` Cleanup Fix (deployed)
+
+The cleanup path (`source === 'cleanup'`) now fires `onTabReplayComplete` callback for each finalized tab. Previously, tabs finalized during orderly shutdown never sent metadata to pydoll.
 
 ### Key Discovery
 
-The investigation started with the symptom "fast when fresh, slow after a couple minutes." The initial hypothesis was browser-level WS contention (15+ tabs sharing one connection). The per-page WS expansion was intended to fix this by moving tab-specific commands off the shared WS.
+The investigation started with "replay URLs stopped appearing in wide event dashboards." Initial hypothesis was CDP event unreliability. The actual root cause was much simpler: the 5-second main WS ping/pong terminated the browser-level WebSocket when Chrome missed a pong under load. This killed the entire replay system permanently for that session — no events, no recordings, no replay URLs.
 
-**What actually happened:** Pending commands dropped from 49→4 on the browser WS — confirming per-page WS routing works. But the Prometheus gauge still showed 50-88 total pending commands. The difference was per-page WS pending commands, primarily from the `collectEvents` + `handleIframeCDPEvent` feedback loop described in Failure Point #8 above.
-
-**Takeaway:** Per-page WS eliminates head-of-line blocking between tabs (each tab gets its own JS thread queue), but it doesn't reduce contention *within* a single tab. The recording system's three competing `Runtime.evaluate` sources still bottleneck on the single JS thread per page. The tactical fixes (non-overlapping polls, batched iframe events, parallel collection) address this intra-tab contention.
+**Takeaway:** Don't add keepalive mechanisms that are more destructive than the failure they're trying to detect. Chrome process death fires WS `close` event naturally. The ping/pong "optimization" was worse than doing nothing.
