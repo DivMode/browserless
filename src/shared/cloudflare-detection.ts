@@ -78,30 +78,9 @@ export interface CloudflareResult {
   signal?: string;
 }
 
-/** Accumulated state for one CF solve phase, included in solved/failed events. */
-export interface CloudflareSnapshot {
-  detection_method: string | null;
-  cf_cray: string | null;
-  detection_poll_count: number;
-  widget_found: boolean;
-  widget_find_method: string | null;
-  widget_find_methods: string[];
-  widget_x: number | null;
-  widget_y: number | null;
-  clicked: boolean;
-  click_count: number;
-  click_x: number | null;
-  click_y: number | null;
-  presence_duration_ms: number;
-  presence_phases: number;
-  approach_phases: number;
-  activity_poll_count: number;
-  false_positive_count: number;
-  widget_error_count: number;
-  iframe_states: string[];
-  widget_find_debug: Record<string, unknown> | null;
-  widget_error_type: string | null;
-}
+/** Accumulated state for one CF solve phase, included in solved/failed events.
+ *  Generated from cloudflare-snapshot.schema.json — do not edit by hand. */
+export type { CloudflareSnapshot } from './cloudflare-snapshot.generated.js';
 
 /**
  * JS hook that wraps turnstile.render() to detect auto-solves.
@@ -575,7 +554,7 @@ export const FIND_CLICK_TARGET_JS = `JSON.stringify((() => {
  */
 export const TURNSTILE_DETECT_AND_AWAIT_JS = `JSON.stringify((function() {
   if (typeof window.turnstile === 'undefined') {
-    if (!document.querySelector('.cf-turnstile, [data-sitekey], #cf-turnstile-response'))
+    if (!document.querySelector('.cf-turnstile, [data-sitekey], [name="cf-turnstile-response"], iframe[src*="challenges.cloudflare.com"]'))
       return null;
   }
   function getToken() {

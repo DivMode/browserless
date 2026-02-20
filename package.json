@@ -14,6 +14,7 @@
     "browserless": "./bin/browserless.js"
   },
   "scripts": {
+    "schema:generate": "json2ts src/shared/cloudflare-snapshot.schema.json -o src/shared/cloudflare-snapshot.generated.ts",
     "bundle:cf": "bun scripts/bundle-cf-scripts.ts",
     "bundle:rrweb": "bun scripts/bundle-rrweb.js && bun scripts/bundle-svelte-player.js",
     "build": "npm run clean && npm run bundle:rrweb && npm run bundle:cf && npm run build:ts && npm run install:adblock && npm run build:schemas && npm run build:devtools && npm run build:openapi",
@@ -109,6 +110,7 @@
     "eslint": "^9.39.2",
     "extract-zip": "^2.0.1",
     "gunzip-maybe": "^1.4.2",
+    "json-schema-to-typescript": "^15.0.4",
     "marked": "^17.0.1",
     "mocha": "^11.7.5",
     "move-file": "^4.1.0",
