@@ -326,7 +326,9 @@ export class CloudflareDetector {
           }
         }
       } catch {
-        return;
+        // Transient CDP error (context destroyed, timeout, etc.) — keep polling.
+        // Previously this was `return`, which silently abandoned detection on
+        // any single CDP failure, causing BLIND_PIPELINE (cf_events=0).
       }
 
       await new Promise(r => setTimeout(r, 200));
