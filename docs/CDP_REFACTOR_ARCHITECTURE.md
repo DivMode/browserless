@@ -13,7 +13,9 @@
 3. [Ecosystem Survey](#ecosystem-survey)
 4. [Proposed Architecture](#proposed-architecture)
 5. [Implementation Details](#implementation-details)
-6. [Implementation Priority](#implementation-priority)
+6. [Phase 0: HTTP Fallback for CF Data](#phase-0-http-fallback-for-cf-data)
+7. [Implementation Priority](#implementation-priority)
+8. [Session Log: Per-Page WS Investigation (2026-02-19)](#session-log-per-page-ws-investigation-2026-02-19)
 
 ---
 
@@ -138,13 +140,60 @@ if (msg.sessionId && iframeSessions.has(msg.sessionId)) {
 
 Client disconnect triggers `handleClose()` which nulls `clientWs`. If `SessionLifecycleManager.close()` is concurrently running step 2 (emit `replayComplete`), the event is dropped because `clientWs` is already null.
 
+#### 8. Per-Page WS Recording Feedback Loop
+
+**Location:** `replay-session.ts:472` (collectEvents), `replay-session.ts:588-634` (handleIframeCDPEvent), `replay-coordinator.ts:121-130` (CF solver markers)
+
+Three competing `Runtime.evaluate` sources flood each per-page WebSocket:
+
+| Source | Frequency | What it does |
+|--------|-----------|-------------|
+| `collectEvents` (replay-session.ts:472) | Every 500ms, **sequential** across tabs | Drains `__browserlessRecording.events` buffer |
+| `handleIframeCDPEvent` (replay-session.ts:588-634) | Every iframe `Network.requestWillBeSent` + `Network.responseReceived` (~20-60 calls per tab per CF challenge) | Pushes events into recording buffer |
+| CF solver markers (replay-coordinator.ts:121-130) | Every detection/click/presence event | Pushes custom marker events into recording buffer |
+
+**The positive feedback loop:**
+
+```
+Iframe network events push recording events → buffer grows
+                                                    ↓
+collectEvents serializes bigger buffer → takes longer
+                                                    ↓
+pollEvents has no overlap guard → concurrent polls pile up
+                                                    ↓
+Chrome pages queue Runtime.evaluate (single JS thread per page)
+                                                    ↓
+Pending commands accumulate → everything slows down
+                                                    ↓
+More events accumulate during delay → loop worsens ─┘
+```
+
+**Evidence:**
+
+- Prometheus `browserless_replay_pending_commands` spikes to **50-88** during scraping
+- WS Health log shows browser WS `pending: 4`
+- The difference (46-84) is per-page WS pending (confirmed by `prom-metrics.ts:73` summing both browser + per-page WS)
+- Pattern: "fast when fresh" (small buffers, no overlap) → "slow after minutes" (feedback loop running)
+
+**Planned fixes (tactical, pre-Phase 2):**
+
+1. **Non-overlapping `pollEvents`** — `isPolling` guard prevents concurrent collection on the same tab
+2. **Parallel `collectEvents` across tabs** — `Promise.all` instead of sequential `await` loop
+3. **Batch iframe network events server-side** — eliminate 40-60 `Runtime.evaluate` calls per tab by accumulating iframe events in Node.js and injecting them in a single batch
+4. **Cap events per `collectEvents` drain** — `splice(0, maxEvents)` instead of copy-all, preventing unbounded serialization
+5. **Diagnostic logging** — collection time, payload size, per-page WS pending count
+
+**Relationship to existing phases:**
+
+This is the Phase 2 contention issue made concrete — the abstract "15+ tabs sharing a single browser-level WebSocket" from the Root Cause section manifests specifically as this recording feedback loop on per-page WebSockets. The tactical fixes above address the immediate symptom. Phase 2/3 (`CDPConnection`, `StatePoller`) is the strategic long-term architecture that eliminates the class of problem entirely.
+
 ### Low — Already Fixed in Uncommitted Changes
 
-8. **Activity loop breaking on widget error** — Previously `break` after widget error killed the loop. Now continues polling since widgets may recover.
+9. **Activity loop breaking on widget error** — Previously `break` after widget error killed the loop. Now continues polling since widgets may recover.
 
-9. **`pendingIframes` race** — Added `pendingIframes` map to handle iframe attaching before `ActiveDetection` creation.
+10. **`pendingIframes` race** — Added `pendingIframes` map to handle iframe attaching before `ActiveDetection` creation.
 
-10. **Activity loop infinite duration** — Added 90-second max cap.
+11. **Activity loop infinite duration** — Added 90-second max cap.
 
 ---
 
@@ -206,6 +255,9 @@ await cdp.send('Target.setAutoAttach', {
 });
 // Window to register listeners before target executes
 ```
+
+**workerd — In-Process Collection, Reliable HTTP Exposure:**
+workerd achieves reliability through in-process V8 API bindings — no network boundary between the runtime and its state. Everything is accumulated at the source and exposed via a reliable channel (HTTP API). The HTTP fallback (Phase 0) applies this same principle to browserless: accumulate CF detection data in-process within the solver, expose it via a simple HTTP endpoint. CDP events remain the fast path; HTTP fetch is the authoritative final read. browser-use's "stateless state derivation" pattern (query browser for truth, don't trust event stream) is a related philosophy applied to a different layer.
 
 ---
 
@@ -650,7 +702,84 @@ class CloudflareSolverV2 {
 
 ---
 
+## Phase 0: HTTP Fallback for CF Data
+
+### Problem
+
+Even after Phase 1 fixes, CDP events can still be lost during socket shutdown races. The HTTP fallback ensures CF data is never lost — it's the authoritative source fetched after the scrape completes.
+
+### Principle
+
+**Collect everything in-process at the source. Expose via reliable HTTP API.** CDP events become the fast path; HTTP fetch is the authoritative final read. Inspired by workerd's pattern of in-process accumulation + reliable exposure.
+
+### Three Components
+
+#### 1. Browserless: Persist completed detections
+
+**File:** `src/session/cloudflare-solver.ts`
+
+- Add `completedDetections[]` array — push in `emitSolved()`, `emitFailed()`, `emitStandaloneAutoSolved()`
+- New method: `getSessionCfSummary()` returns `{ detections: [...], active: [...] }`
+- Persists after `ActiveDetection` cleanup (currently data vanishes after CDP emit)
+
+The key insight: `ActiveDetection` objects are cleaned up after emitting CDP events, and with them all the detection metadata (cType, cRay, solve timing, token). By persisting completed detections before cleanup, the data survives regardless of whether the CDP event reached the client.
+
+#### 2. Browserless: HTTP endpoint `GET /sessions/:id/cf-summary`
+
+**New file:** `src/routes/management/http/cf-summary.get.ts` (follows pattern of `cf-solved.post.ts`)
+
+- `auth = false` (internal, same Docker network)
+- Route: `browserManager.getReplayCoordinator().getCloudflareSolver(sessionId).getSessionCfSummary()`
+- Register `cfSummary` in `HTTPManagementRoutes` in `src/http.ts`
+
+This endpoint is callable at any time during or after the scrape. Since it reads from the persisted `completedDetections` array, it returns the full history of CF interactions for that session — not just the current in-flight state.
+
+#### 3. Pydoll: Always-fetch after scrape
+
+**File:** `src/cloudflare_listener.py`
+
+- Add `fetch_cf_summary()` — HTTP GET to `http://browserless:3000/sessions/{id}/cf-summary`
+- Add `merge_http_summary()` — synthesize missing events into the waiter (skip if CDP already delivered the same detection)
+- `get_metrics()` remains the single code path for all metric emission
+- Uses `aiohttp` (already a pydoll-scraper dependency)
+
+**Integration points** — insert between `await_resolution()` and `get_metrics()`:
+- `ahrefs_fast.py` ~line 869 (finally block)
+- `ahrefs_scraper.py` ~line 558 (backlinks)
+- `ahrefs_scraper.py` ~line 833 (traffic)
+
+### Design Decisions
+
+**Always-fetch, not fallback-only.** One code path, no conditional race detection. The HTTP fetch always runs; the merge step is a no-op when CDP already delivered everything. This eliminates the complexity of deciding "did CDP work?" which itself is a race condition.
+
+**Merge into existing waiter.** Reuses `get_metrics()` as the single metrics builder. The merge step only adds detections the waiter hasn't seen (matching on cRay or detection fingerprint). No duplicate metrics paths.
+
+**Uses `aiohttp`.** Already a pydoll-scraper dependency. Simple `GET` with `async with session.get(url) as resp:` pattern.
+
+### Relationship to Other Phases
+
+- **Phase 0 is orthogonal** — works regardless of CDP fixes. Can be implemented immediately.
+- **Phase 1** (event delivery fixes) reduces how often the HTTP fill-in adds data the CDP path missed.
+- **Phase 3** (poll-driven architecture) makes it mostly redundant, but defense-in-depth is still valuable — the HTTP endpoint provides an independent verification channel even when polling works perfectly.
+
+```
+Phase 0: HTTP fallback    ──► Deploy, validate (works independently)
+Phase 1: Fix CDP holes    ──► Deploy, validate (reduces Phase 0 fill-in rate)
+Phase 2: Reduce contention ──► Deploy, validate
+Phase 3: Poll-based solver ──► Phase 0 becomes verification layer
+```
+
+---
+
 ## Implementation Priority
+
+### Phase 0: HTTP Fallback (defense-in-depth)
+
+Independent of all other phases. Can be implemented immediately.
+
+| Fix | Effort | Impact | Files |
+|---|---|---|---|
+| HTTP fallback — `GET /sessions/:id/cf-summary` + pydoll always-fetch | Small-Medium | Defense-in-depth: CF data never lost regardless of CDP state | `cloudflare-solver.ts`, new `cf-summary.get.ts`, `http.ts`, pydoll `cloudflare_listener.py` |
 
 ### Phase 1: Immediate Fixes (stops events from dropping)
 
@@ -685,7 +814,46 @@ These fix the most critical failures without requiring architectural changes.
 Phase 1 and 2 can be done incrementally within the existing architecture. Phase 3 is a parallel implementation — build the new poll-based solver alongside the old one, switch over per-page once validated, then remove the old code.
 
 ```
-Phase 1: Fix holes in current architecture     ──► Deploy, validate
+Phase 0: HTTP fallback (orthogonal)             ──► Deploy, validate (immediate safety net)
+Phase 1: Fix holes in current architecture      ──► Deploy, validate
 Phase 2: Reduce CDP round-trips                 ──► Deploy, validate
 Phase 3: Build poll-based solver alongside old  ──► A/B test ──► Switch over
 ```
+
+---
+
+## Session Log: Per-Page WS Investigation (2026-02-19)
+
+### What Was Changed
+
+#### 1. ReplaySession Extraction (uncommitted)
+
+Extracted replay recording logic from `replay-coordinator.ts` into a new `replay-session.ts` file. This separates the per-tab recording lifecycle (rrweb injection, event collection, screencast) from the coordinator's cross-tab orchestration. The coordinator now delegates to `ReplaySession` instances per tab.
+
+#### 2. Per-Page WS Routing Expansion (uncommitted)
+
+Extended per-page WebSocket connections to route `Page.addScriptToEvaluateOnNewDocument` calls. Previously only `Runtime.evaluate` and CF solver commands used per-page WS. This reduces contention on the shared browser WS for rrweb injection, which is critical on page navigation when multiple tabs re-inject simultaneously.
+
+#### 3. CDP Pending Commands Prometheus Gauge (deployed)
+
+Added `browserless_replay_pending_commands` gauge to `prom-metrics.ts`. Sums pending commands across both the browser-level WS and all per-page WS connections (`prom-metrics.ts:73`). This metric was the key diagnostic that revealed the per-page WS flooding — browser WS showed only `pending: 4` while the gauge reported 50-88, exposing that per-page WS was where commands were actually queuing.
+
+#### 4. WS Health Iframe Breakdown (deployed)
+
+Extended the periodic WS Health diagnostic log to break down pending commands by source: browser WS vs per-page WS. This confirmed the per-page WS as the bottleneck, not the shared browser WS as originally suspected.
+
+#### 5. `compute_outcome()` Fix (deployed, catchseo)
+
+Fixed `compute_outcome()` in pydoll-scraper's `cloudflare_listener.py` to handle `TurnstilePhaseMetrics` correctly. The function was calling attributes that didn't exist on the phase metrics dataclass, causing metric emission failures.
+
+#### 6. CDP Health Dashboard Panels + Alert Rule (deployed, catchseo)
+
+Added Grafana dashboard panels for `browserless_replay_pending_commands` and configured alert rule to fire when pending commands exceed threshold. This provides early warning of the feedback loop before scrape quality degrades.
+
+### Key Discovery
+
+The investigation started with the symptom "fast when fresh, slow after a couple minutes." The initial hypothesis was browser-level WS contention (15+ tabs sharing one connection). The per-page WS expansion was intended to fix this by moving tab-specific commands off the shared WS.
+
+**What actually happened:** Pending commands dropped from 49→4 on the browser WS — confirming per-page WS routing works. But the Prometheus gauge still showed 50-88 total pending commands. The difference was per-page WS pending commands, primarily from the `collectEvents` + `handleIframeCDPEvent` feedback loop described in Failure Point #8 above.
+
+**Takeaway:** Per-page WS eliminates head-of-line blocking between tabs (each tab gets its own JS thread queue), but it doesn't reduce contention *within* a single tab. The recording system's three competing `Runtime.evaluate` sources still bottleneck on the single JS thread per page. The tactical fixes (non-overlapping polls, batched iframe events, parallel collection) address this intra-tab contention.
