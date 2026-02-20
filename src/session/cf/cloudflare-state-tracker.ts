@@ -1,0 +1,332 @@
+import { Logger } from '@browserless.io/browserless';
+import type { CloudflareConfig } from '../../shared/cloudflare-detection.js';
+import {
+  TURNSTILE_TOKEN_JS,
+  TURNSTILE_ERROR_CHECK_JS,
+  TURNSTILE_DETECT_AND_AWAIT_JS,
+  CF_DETECTION_JS,
+} from '../../shared/cloudflare-detection.js';
+import {
+  simulateHumanPresence,
+} from '../../shared/mouse-humanizer.js';
+import type { ActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
+
+export type SendCommand = (method: string, params?: object, cdpSessionId?: string, timeoutMs?: number) => Promise<any>;
+
+/**
+ * Tracks active CF detections, solved state, and background activity loops.
+ *
+ * Owns: activeDetections, bindingSolvedTargets, pendingIframes,
+ *       pendingTargetCoords, targetCoordResolvers, knownPages, iframeToPage
+ */
+export class CloudflareStateTracker {
+  private log = new Logger('cf-state');
+  readonly activeDetections = new Map<string, ActiveDetection>();
+  readonly iframeToPage = new Map<string, string>();
+  readonly knownPages = new Map<string, string>();
+  readonly bindingSolvedTargets = new Set<string>();
+  readonly pendingIframes = new Map<string, { iframeCdpSessionId: string; iframeTargetId: string }>();
+  readonly pendingTargetCoords = new Map<string, { x: number; y: number; method: string; debug?: Record<string, unknown> }>();
+  readonly targetCoordResolvers = new Map<string, (coords: { x: number; y: number; method: string; debug?: Record<string, unknown> }) => void>();
+  config: Required<CloudflareConfig> = { maxAttempts: 3, attemptTimeout: 30000, recordingMarkers: true };
+  destroyed = false;
+
+  constructor(
+    private sendCommand: SendCommand,
+    private events: CloudflareEventEmitter,
+  ) {}
+
+  /** Called when Turnstile iframe state changes (via __turnstileStateBinding). */
+  async onTurnstileStateChange(state: string, iframeCdpSessionId: string): Promise<void> {
+    const pageTargetId = this.findPageByIframeSession(iframeCdpSessionId);
+    if (!pageTargetId) return;
+
+    const active = this.activeDetections.get(pageTargetId);
+    if (!active || active.aborted) return;
+
+    this.log.info(`Turnstile state change: ${state} for page ${pageTargetId}`);
+    this.events.emitProgress(active, state);
+
+    if (state === 'success') {
+      await new Promise(r => setTimeout(r, 500));
+
+      const token = await this.getToken(active.pageCdpSessionId);
+      const stillDetected = await this.isStillDetected(active.pageCdpSessionId);
+
+      if (stillDetected && !token) {
+        this.events.marker(active.pageCdpSessionId, 'cf.false_positive', { state });
+        this.events.emitProgress(active, 'false_positive');
+        this.log.warn(`False positive success for page ${pageTargetId}`);
+        return;
+      }
+
+      const duration = Date.now() - active.startTime;
+      active.aborted = true;
+
+      this.activeDetections.delete(pageTargetId);
+      this.events.emitSolved(active, {
+        solved: true,
+        type: active.info.type,
+        method: token ? 'auto_solve' : 'state_change',
+        token: token || undefined,
+        duration_ms: duration,
+        attempts: active.attempt,
+        auto_resolved: !active.iframeCdpSessionId,
+      });
+    } else if (state === 'fail' || state === 'expired' || state === 'timeout') {
+      active.aborted = true;
+      if (active.attempt < this.config.maxAttempts) {
+        active.attempt++;
+        active.aborted = false;
+        this.log.info(`Retrying CF detection (attempt ${active.attempt})`);
+        // Return control to caller — solveDetection is on the strategies module
+        // The delegator will wire this callback
+        this.onRetryCallback?.(active);
+      } else {
+        const duration = Date.now() - active.startTime;
+        this.activeDetections.delete(pageTargetId);
+        this.events.emitFailed(active, state, duration);
+      }
+    }
+  }
+
+  // Callback for retry — wired by delegator to strategies.solveDetection
+  onRetryCallback: ((active: ActiveDetection) => void) | null = null;
+
+  /** Called when TURNSTILE_CALLBACK_HOOK_JS detects an auto-solve on any page. */
+  async onAutoSolveBinding(cdpSessionId: string): Promise<void> {
+    const pageTargetId = this.findPageBySession(cdpSessionId);
+    if (!pageTargetId) return;
+
+    const active = this.activeDetections.get(pageTargetId);
+
+    if (active && !active.aborted) {
+      await this.resolveAutoSolved(active, 'callback_binding');
+      return;
+    }
+
+    // No active detection — standalone Turnstile (fast-path auto-solve)
+    if (!this.bindingSolvedTargets.has(pageTargetId)) {
+      const token = await this.getToken(cdpSessionId);
+      this.events.emitStandaloneAutoSolved(pageTargetId, 'callback_binding', token?.length || 0, cdpSessionId);
+      this.bindingSolvedTargets.add(pageTargetId);
+    }
+  }
+
+  /**
+   * Called when the HTTP beacon fires from navigator.sendBeacon in the browser.
+   */
+  onBeaconSolved(targetId: string, tokenLength: number): void {
+    const active = this.activeDetections.get(targetId);
+
+    if (active && !active.aborted) {
+      const duration = Date.now() - active.startTime;
+      active.aborted = true;
+      this.activeDetections.delete(targetId);
+      this.bindingSolvedTargets.add(targetId);
+      this.events.emitSolved(active, {
+        solved: true,
+        type: active.info.type,
+        method: 'auto_solve',
+        duration_ms: duration,
+        attempts: active.attempt,
+        auto_resolved: true,
+        signal: 'beacon_push',
+        token_length: tokenLength,
+      });
+      this.events.marker(active.pageCdpSessionId, 'cf.solved', {
+        type: active.info.type, method: 'auto_solve', signal: 'beacon_push',
+      });
+      return;
+    }
+
+    // No active detection — standalone fast-path
+    if (!this.bindingSolvedTargets.has(targetId)) {
+      const cdpSessionId = this.knownPages.get(targetId);
+      this.events.emitStandaloneAutoSolved(targetId, 'beacon_push', tokenLength, cdpSessionId);
+      this.bindingSolvedTargets.add(targetId);
+    }
+  }
+
+  /** Called when __turnstileTargetBinding fires with widget coordinates. */
+  async onTurnstileTargetFound(cdpSessionId: string, payload: string): Promise<void> {
+    const pageTargetId = this.findPageBySession(cdpSessionId);
+    if (!pageTargetId) return;
+
+    const coords = JSON.parse(payload);
+    const parsed = { x: coords.x, y: coords.y, method: coords.m, debug: coords.d };
+
+    const resolver = this.targetCoordResolvers.get(pageTargetId);
+    if (resolver) {
+      this.targetCoordResolvers.delete(pageTargetId);
+      resolver(parsed);
+    } else {
+      this.pendingTargetCoords.set(pageTargetId, parsed);
+    }
+  }
+
+  /**
+   * Emit cf.solved for any detections that were detected but never resolved.
+   * Called during session cleanup as a fallback to guarantee ZERO cf(1).
+   */
+  emitUnresolvedDetections(): void {
+    for (const [targetId, active] of this.activeDetections) {
+      if (!active.aborted) {
+        active.aborted = true;
+        const duration = Date.now() - active.startTime;
+        this.log.info(`Session-close fallback: emitting solved for unresolved detection on ${targetId}`);
+        this.events.emitSolved(active, {
+          solved: true, type: active.info.type, method: 'auto_solve',
+          duration_ms: duration, attempts: 0, auto_resolved: true,
+          signal: 'session_close', token_length: 0,
+        });
+      }
+    }
+  }
+
+  /** Resolve an active detection as auto-solved. */
+  async resolveAutoSolved(active: ActiveDetection, signal: string): Promise<void> {
+    const duration = Date.now() - active.startTime;
+    const token = await this.getToken(active.pageCdpSessionId);
+    active.aborted = true;
+    const pageTargetId = this.findPageBySession(active.pageCdpSessionId);
+    if (pageTargetId) this.activeDetections.delete(pageTargetId);
+    this.events.emitSolved(active, {
+      solved: true, type: active.info.type, method: 'auto_solve',
+      token: token || undefined, duration_ms: duration,
+      attempts: active.attempt, auto_resolved: true, signal,
+    });
+    this.events.marker(active.pageCdpSessionId, 'cf.auto_solved', { signal });
+  }
+
+  async isSolved(cdpSessionId: string): Promise<boolean> {
+    try {
+      const result = await this.sendCommand('Runtime.evaluate', {
+        expression: `(function() {
+          if (window.__turnstileSolved === true) return true;
+          if (window.__turnstileAwaitResult) return true;
+          try { if (typeof turnstile !== 'undefined' && turnstile.getResponse && turnstile.getResponse()) return true; } catch(e) {}
+          if (window.__turnstileToken) return true;
+          var el = document.querySelector('[name="cf-turnstile-response"]');
+          return !!(el && el.value && el.value.length > 0);
+        })()`,
+        returnByValue: true,
+      }, cdpSessionId);
+      return result?.result?.value === true;
+    } catch {
+      return false;
+    }
+  }
+
+  async getToken(cdpSessionId: string): Promise<string | null> {
+    try {
+      const result = await this.sendCommand('Runtime.evaluate', {
+        expression: TURNSTILE_TOKEN_JS,
+        returnByValue: true,
+      }, cdpSessionId);
+      const val = result?.result?.value;
+      return typeof val === 'string' && val.length > 0 ? val : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Check if the Turnstile widget is in an error/expired state. */
+  async isWidgetError(cdpSessionId: string): Promise<{ type: string; has_token: boolean } | null> {
+    try {
+      const result = await this.sendCommand('Runtime.evaluate', {
+        expression: TURNSTILE_ERROR_CHECK_JS,
+        returnByValue: true,
+      }, cdpSessionId);
+      const raw = result?.result?.value;
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Re-run CF detection to verify a solve isn't a false positive. */
+  async isStillDetected(cdpSessionId: string): Promise<boolean> {
+    try {
+      const result = await this.sendCommand('Runtime.evaluate', {
+        expression: CF_DETECTION_JS,
+        returnByValue: true,
+      }, cdpSessionId);
+      const raw = result?.result?.value;
+      if (!raw) return false;
+      return JSON.parse(raw).detected === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Background loop that keeps the browser alive after click commit. */
+  startActivityLoop(active: ActiveDetection): void {
+    const loop = async () => {
+      try {
+        await this.sendCommand('Runtime.evaluate', {
+          expression: TURNSTILE_DETECT_AND_AWAIT_JS,
+          returnByValue: true,
+        }, active.pageCdpSessionId);
+      } catch { /* page gone */ }
+
+      let loopIter = 0;
+      const loopStart = Date.now();
+      while (!active.aborted && !this.destroyed) {
+        await new Promise(r => setTimeout(r, 3000 + Math.random() * 4000));
+        if (active.aborted || this.destroyed) break;
+        if (Date.now() - loopStart > 90_000) break;
+        loopIter++;
+
+        if (await this.isSolved(active.pageCdpSessionId)) {
+          await this.resolveAutoSolved(active, 'activity_poll');
+          return;
+        }
+
+        this.events.emitProgress(active, 'activity_poll', { iteration: loopIter });
+
+        const widgetErr = await this.isWidgetError(active.pageCdpSessionId);
+        if (widgetErr) {
+          this.events.marker(active.pageCdpSessionId, 'cf.widget_error_detected', {
+            error_type: widgetErr.type, has_token: widgetErr.has_token,
+          });
+          this.events.emitProgress(active, 'widget_error', {
+            error_type: widgetErr.type, has_token: widgetErr.has_token,
+          });
+        }
+
+        try {
+          await simulateHumanPresence(this.sendCommand, active.pageCdpSessionId, 0.5 + Math.random() * 1.0);
+        } catch { /* CDP gone — skip presence, keep polling */ }
+      }
+    };
+    loop().catch(() => {});
+  }
+
+  findPageBySession(cdpSessionId: string): string | undefined {
+    for (const [targetId, sid] of this.knownPages) {
+      if (sid === cdpSessionId) return targetId;
+    }
+    return undefined;
+  }
+
+  findPageByIframeSession(iframeCdpSessionId: string): string | undefined {
+    for (const [pageTargetId, active] of this.activeDetections) {
+      if (active.iframeCdpSessionId === iframeCdpSessionId) return pageTargetId;
+    }
+    return undefined;
+  }
+
+  destroy(): void {
+    this.destroyed = true;
+    this.activeDetections.clear();
+    this.iframeToPage.clear();
+    this.knownPages.clear();
+    this.bindingSolvedTargets.clear();
+    this.pendingIframes.clear();
+    this.pendingTargetCoords.clear();
+    this.targetCoordResolvers.clear();
+  }
+}

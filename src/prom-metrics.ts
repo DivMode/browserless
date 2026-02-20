@@ -1,12 +1,14 @@
-import { collectDefaultMetrics, Gauge, Histogram, register } from 'prom-client';
+import { collectDefaultMetrics, Counter, Gauge, Histogram, register } from 'prom-client';
 
 // Interface for session state that gauges derive from on each scrape.
 // Sessions register their live data structures; gauges read them in collect().
+// Uses duck-typed { size: number } so both Map/Set and TargetRegistry satisfy it.
 export interface SessionGaugeState {
-  pageWebSockets: Map<string, any>;
-  trackedTargets: Set<string>;
-  pendingCommands: Map<number, any>;
+  pageWebSockets: { size: number };
+  trackedTargets: { size: number };
+  pendingCommands: { size: number };
   getPagePendingCount: () => number; // sum of all per-page pendingCmds maps
+  getEstimatedBytes: () => number;   // current replay estimatedBytes for this session
 }
 
 // Active sessions whose state the gauges read on each scrape
@@ -87,6 +89,12 @@ export const tabsOpen = getOrCreateCollectGauge(
 );
 
 // Guard against double-registration (same pattern as getOrCreateCollectGauge)
+function getOrCreateCounter(name: string, help: string): Counter {
+  const existing = register.getSingleMetric(name);
+  if (existing) return existing as Counter;
+  return new Counter({ name, help });
+}
+
 function getOrCreateHistogram(name: string, help: string, buckets: number[]): Histogram {
   const existing = register.getSingleMetric(name);
   if (existing) return existing as Histogram;
@@ -107,6 +115,29 @@ export const sessionDuration = getOrCreateHistogram(
   'browserless_session_duration_seconds',
   'Duration of browser sessions from creation to close',
   [5, 10, 15, 30, 45, 60, 90, 120, 180, 300, 600],
+);
+
+// Replay event throughput — rate() gives events/sec. Flat throughput + climbing tab_duration = bottleneck.
+export const replayEventsTotal = getOrCreateCounter(
+  'browserless_replay_events_total',
+  'Total rrweb replay events captured across all sessions',
+);
+
+// Replay size — the thing that caused the O(n²) JSON.stringify bug. Shows live bytes during active scrapes.
+export const replayEstimatedBytes = getOrCreateCollectGauge(
+  'browserless_replay_estimated_bytes',
+  'Estimated bytes of in-memory replay data across all active sessions',
+  function (this: Gauge) {
+    let total = 0;
+    for (const s of activeSessions) total += s.getEstimatedBytes();
+    this.set(total);
+  },
+);
+
+// Overflow counter — fires when replay exceeds maxReplaySize and stops merged capture.
+export const replayOverflowsTotal = getOrCreateCounter(
+  'browserless_replay_overflows_total',
+  'Total replay overflow events (replay exceeded max size and stopped merged capture)',
 );
 
 export { register };
