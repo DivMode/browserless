@@ -13,7 +13,7 @@ import {
   FIND_CLICK_TARGET_JS,
   detectCloudflareType,
 } from '../shared/cloudflare-detection.js';
-import { FIND_TURNSTILE_TARGET_JS } from '../generated/cf-scripts.js';
+import { FIND_TURNSTILE_TARGET_JS, TURNSTILE_TARGET_OBSERVER_JS } from '../generated/cf-scripts.js';
 import {
   simulateHumanPresence,
   approachCoordinates,
@@ -199,6 +199,8 @@ export class CloudflareSolver {
   private destroyed = false;
   private bindingSolvedTargets = new Set<string>(); // targets already solved via binding push
   private pendingIframes = new Map<string, { iframeCdpSessionId: string; iframeTargetId: string }>();
+  private pendingTargetCoords = new Map<string, { x: number; y: number; method: string; debug?: Record<string, unknown> }>();
+  private targetCoordResolvers = new Map<string, (coords: { x: number; y: number; method: string; debug?: Record<string, unknown> }) => void>();
 
   constructor(
     private sendCommand: SendCommand,
@@ -228,6 +230,14 @@ export class CloudflareSolver {
       this.sendCommand('Runtime.addBinding', {
         name: '__turnstileSolvedBinding',
       }, cdpSessionId).catch(() => {});
+      // Register target-finding binding + observer (event-driven widget detection)
+      this.sendCommand('Runtime.addBinding', {
+        name: '__turnstileTargetBinding',
+      }, cdpSessionId).catch(() => {});
+      this.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+        source: TURNSTILE_TARGET_OBSERVER_JS,
+        runImmediately: true,
+      }, cdpSessionId).catch(() => {});
       this.detectAndSolve(targetId, cdpSessionId).catch(() => {});
     }
   }
@@ -250,6 +260,15 @@ export class CloudflareSolver {
     // Register solved binding
     this.sendCommand('Runtime.addBinding', {
       name: '__turnstileSolvedBinding',
+    }, cdpSessionId).catch(() => {});
+
+    // Register target-finding binding + observer (event-driven widget detection)
+    this.sendCommand('Runtime.addBinding', {
+      name: '__turnstileTargetBinding',
+    }, cdpSessionId).catch(() => {});
+    this.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+      source: TURNSTILE_TARGET_OBSERVER_JS,
+      runImmediately: true,
     }, cdpSessionId).catch(() => {});
 
     await this.detectAndSolve(targetId, cdpSessionId);
@@ -504,6 +523,26 @@ export class CloudflareSolver {
     this.emitStandaloneAutoSolved(targetId, 'beacon_push', tokenLength, cdpSessionId);
   }
 
+  /** Called when __turnstileTargetBinding fires with widget coordinates. */
+  async onTurnstileTargetFound(cdpSessionId: string, payload: string): Promise<void> {
+    if (!this.enabled) return;
+    const pageTargetId = this.findPageBySession(cdpSessionId);
+    if (!pageTargetId) return;
+
+    const coords = JSON.parse(payload);
+    const parsed = { x: coords.x, y: coords.y, method: coords.m, debug: coords.d };
+
+    // If solveTurnstile is waiting → resolve its promise
+    const resolver = this.targetCoordResolvers.get(pageTargetId);
+    if (resolver) {
+      this.targetCoordResolvers.delete(pageTargetId);
+      resolver(parsed);
+    } else {
+      // Store for later pickup by waitForTurnstileTarget
+      this.pendingTargetCoords.set(pageTargetId, parsed);
+    }
+  }
+
   /**
    * Emit cf.solved for any detections that were detected but never resolved.
    * Called during session cleanup as a fallback to guarantee ZERO cf(1).
@@ -531,6 +570,8 @@ export class CloudflareSolver {
     this.knownPages.clear();
     this.bindingSolvedTargets.clear();
     this.pendingIframes.clear();
+    this.pendingTargetCoords.clear();
+    this.targetCoordResolvers.clear();
   }
 
   // ─── Private methods ──────────────────────────────────────
@@ -875,9 +916,15 @@ export class CloudflareSolver {
     }
     if (active.aborted || Date.now() > deadline) return;
 
-    // Find Turnstile click target — uses dedicated widget finder (ungated body scan)
-    const coords = await this.findTurnstileTarget(pageCdpSessionId);
+    // Try binding-driven target first (10s timeout) — zero CDP cost when observer fires
+    let coords = await this.waitForTurnstileTarget(active.pageTargetId, pageCdpSessionId, 10_000);
     if (active.aborted || Date.now() > deadline) return;
+
+    // Fallback: Runtime.evaluate for Fetch-intercepted pages where bindings are dead
+    if (!coords) {
+      coords = await this.findTurnstileTarget(pageCdpSessionId);
+      if (active.aborted || Date.now() > deadline) return;
+    }
 
     if (!coords) {
       this.emitProgress(active, 'find_target_failed', { attempts: 1 });
@@ -924,6 +971,35 @@ export class CloudflareSolver {
     await simulateHumanPresence(this.sendCommand, active.pageCdpSessionId, 2.0 + Math.random() * 2.0);
   }
 
+  /**
+   * Wait for the MutationObserver-based target finder to deliver coordinates
+   * via __turnstileTargetBinding. Falls back to null on timeout (caller should
+   * then use Runtime.evaluate fallback).
+   */
+  private async waitForTurnstileTarget(
+    pageTargetId: string, _cdpSessionId: string, timeoutMs: number,
+  ): Promise<{ x: number; y: number; method: string; debug?: Record<string, unknown> } | null> {
+    // Check if binding already fired before we started waiting
+    const pending = this.pendingTargetCoords.get(pageTargetId);
+    if (pending) {
+      this.pendingTargetCoords.delete(pageTargetId);
+      return pending;
+    }
+
+    // Wait for binding callback or timeout
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.targetCoordResolvers.delete(pageTargetId);
+        resolve(null); // Timeout → caller falls back to Runtime.evaluate
+      }, timeoutMs);
+
+      this.targetCoordResolvers.set(pageTargetId, (coords) => {
+        clearTimeout(timer);
+        resolve(coords);
+      });
+    });
+  }
+
   private async findClickTarget(
     cdpSessionId: string,
   ): Promise<{ x: number; y: number; method?: string; debug?: Record<string, unknown> } | null> {
@@ -954,7 +1030,7 @@ export class CloudflareSolver {
    */
   private async findTurnstileTarget(
     cdpSessionId: string,
-  ): Promise<{ x: number; y: number; method?: string; debug?: Record<string, unknown> } | null> {
+  ): Promise<{ x: number; y: number; method: string; debug?: Record<string, unknown> } | null> {
     try {
       const result = await this.sendCommand('Runtime.evaluate', {
         expression: FIND_TURNSTILE_TARGET_JS,
