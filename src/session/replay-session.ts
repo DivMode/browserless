@@ -460,25 +460,6 @@ export class ReplaySession {
     });
   }
 
-  // ─── rrweb Injection ────────────────────────────────────────────────────
-
-  private async injectReplay(targetId: string): Promise<void> {
-    const target = this.targets.getByTarget(targetId);
-    if (!target || target.injected) return;
-
-    try {
-      target.injected = true;
-      await this.sendCommand('Runtime.evaluate', {
-        expression: this.script,
-        returnByValue: true,
-      }, target.cdpSessionId);
-      this.log.info(`Replay re-injected for target ${targetId} (session ${this.sessionId})`);
-    } catch (e) {
-      target.injected = false;
-      this.log.debug(`Re-injection failed for target ${targetId}: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-
   // ─── Event Collection ───────────────────────────────────────────────────
 
   /**
@@ -930,7 +911,10 @@ export class ReplaySession {
     if (targetInfo.type === 'page') {
       const target = this.targets.getByTarget(targetInfo.targetId);
       if (target) {
-        target.injected = false;
+        // DON'T reset target.injected — addScriptToEvaluateOnNewDocument handles re-injection
+        // on full navigations (new document context). For SPA navigations, rrweb keeps running.
+        // DON'T schedule delayed replay re-injection — it's redundant with addScriptToEvaluateOnNewDocument
+        // and wastes a CDP round-trip evaluating the full rrweb script.
         target.zeroEventCount = 0;
 
         this.sendCommand('Target.setAutoAttach', {
@@ -939,10 +923,6 @@ export class ReplaySession {
           flatten: true,
         }, target.cdpSessionId)
           .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] setAutoAttach skipped: ${e.message}`));
-
-        setTimeout(() => {
-          this.injectReplay(targetInfo.targetId);
-        }, 200);
 
         this.cloudflareSolver.onPageNavigated(targetInfo.targetId, target.cdpSessionId, targetInfo.url)
           .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] onPageNavigated skipped: ${e.message}`));
