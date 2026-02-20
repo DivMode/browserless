@@ -15,6 +15,7 @@ const execAsync = promisify(exec);
 // Bundled @rrweb/record script - no require.resolve() needed
 import { RRWEB_RECORD_SCRIPT, RRWEB_CONSOLE_PLUGIN_SCRIPT } from './generated/rrweb-script.js';
 import { ReplayStore } from './replay-store.js';
+import { replayEventsTotal, replayOverflowsTotal } from './prom-metrics.js';
 import type { IReplayStore, ReplayMetadata } from './interfaces/replay-store.interface.js';
 
 // Re-export ReplayMetadata for backwards compatibility
@@ -46,6 +47,8 @@ export interface SessionReplayState {
   /** Merged session events exceeded maxReplaySize — stop adding to merged array
    *  but keep per-tab tracking alive for video metadata. */
   sessionOverflow: boolean;
+  /** Running total of approximate JSON size (bytes) for merged events array */
+  estimatedBytes: number;
   sessionId: string;
   startedAt: number;
   trackingId?: string;
@@ -76,11 +79,18 @@ function getNetworkCaptureScript(): string {
   var MAX_BODY_SIZE = 10240; // 10KB max for request/response bodies
 
   function emitNetworkEvent(tag, payload) {
-    recording.events.push({
+    var event = {
       type: 5,
       timestamp: Date.now(),
       data: { tag: tag, payload: payload }
-    });
+    };
+    if (window.__rrwebPush) {
+      try { window.__rrwebPush(JSON.stringify([event])); } catch(e) {
+        recording.events.push(event);
+      }
+    } else {
+      recording.events.push(event);
+    }
   }
 
   // Safely truncate body content
@@ -444,7 +454,26 @@ ${RRWEB_CONSOLE_PLUGIN_SCRIPT}
     lengthThreshold: 500
   });
   window.__browserlessStopRecording = recordFn({
-    emit: function(event) { window.__browserlessRecording.events.push(event); },
+    emit: function(event) {
+      var rec = window.__browserlessRecording;
+      if (window.__rrwebPush) {
+        var buf = rec._buf || (rec._buf = []);
+        buf.push(event);
+        if (!rec._ft) {
+          rec._ft = setTimeout(function() {
+            rec._ft = null;
+            var b = rec._buf; rec._buf = [];
+            if (b.length) {
+              try { window.__rrwebPush(JSON.stringify(b)); } catch(e) {
+                for (var i = 0; i < b.length; i++) rec.events.push(b[i]);
+              }
+            }
+          }, 500);
+        }
+      } else {
+        rec.events.push(event);
+      }
+    },
     sampling: { mousemove: true, mouseInteraction: true, scroll: 150, media: 800, input: 'last', canvas: 2 },
     recordCanvas: true,
     collectFonts: true,
@@ -477,7 +506,26 @@ ${RRWEB_CONSOLE_PLUGIN_SCRIPT}
     lengthThreshold: 500
   });
   window.__browserlessStopRecording = recordFn({
-    emit: function(event) { window.__browserlessRecording.events.push(event); },
+    emit: function(event) {
+      var rec = window.__browserlessRecording;
+      if (window.__rrwebPush) {
+        var buf = rec._buf || (rec._buf = []);
+        buf.push(event);
+        if (!rec._ft) {
+          rec._ft = setTimeout(function() {
+            rec._ft = null;
+            var b = rec._buf; rec._buf = [];
+            if (b.length) {
+              try { window.__rrwebPush(JSON.stringify(b)); } catch(e) {
+                for (var i = 0; i < b.length; i++) rec.events.push(b[i]);
+              }
+            }
+          }, 500);
+        }
+      } else {
+        rec.events.push(event);
+      }
+    },
     sampling: { mousemove: true, mouseInteraction: true, scroll: 150, media: 800, input: 'last', canvas: 2 },
     recordCanvas: true,
     collectFonts: true,
@@ -679,6 +727,7 @@ export class SessionReplay extends EventEmitter {
 
     this.replays.set(sessionId, {
       cleanupFns: [],
+      estimatedBytes: 0,
       events: [],
       finalCollectors: [],
       isReplaying: true,
@@ -701,14 +750,17 @@ export class SessionReplay extends EventEmitter {
     // for video metadata on long-lived sessions.
     if (state.sessionOverflow) return;
 
-    const currentSize = JSON.stringify(state.events).length;
-    if (currentSize > this.maxReplaySize) {
-      this.log.warn(`Replay ${sessionId} exceeded max size, stopping merged event capture`);
+    // O(1) per add: only stringify the single new event, not the entire array
+    const eventSize = JSON.stringify(event).length + 1; // +1 for comma delimiter
+    if (state.estimatedBytes + eventSize > this.maxReplaySize) {
+      this.log.warn(`Replay ${sessionId} exceeded max size (~${Math.round(state.estimatedBytes / 1048576)}MB), stopping merged event capture`);
       state.sessionOverflow = true;
+      replayOverflowsTotal.inc();
       return;
     }
-
+    state.estimatedBytes += eventSize;
     state.events.push(event);
+    replayEventsTotal.inc();
   }
 
   public addEvents(sessionId: string, events: ReplayEvent[]): void {
@@ -735,10 +787,25 @@ export class SessionReplay extends EventEmitter {
     const tabEventList = state.tabEvents.get(targetId)!;
 
     for (const event of events) {
-      // Add to merged session events
-      this.addEvent(sessionId, event);
-      // Add to per-tab events
+      if (state.sessionOverflow) {
+        // Still add to per-tab (for per-tab replay files) even if merged overflowed
+        tabEventList.push(event);
+        replayEventsTotal.inc();
+        continue;
+      }
+      const eventSize = JSON.stringify(event).length + 1;
+      if (state.estimatedBytes + eventSize > this.maxReplaySize) {
+        this.log.warn(`Replay ${sessionId} exceeded max size (~${Math.round(state.estimatedBytes / 1048576)}MB), stopping merged event capture`);
+        state.sessionOverflow = true;
+        replayOverflowsTotal.inc();
+        tabEventList.push(event);
+        replayEventsTotal.inc();
+        continue;
+      }
+      state.estimatedBytes += eventSize;
+      state.events.push(event);
       tabEventList.push(event);
+      replayEventsTotal.inc();
     }
   }
 
@@ -889,9 +956,8 @@ export class SessionReplay extends EventEmitter {
       this.log.error(`Failed to save replay ${sessionId}: ${err}`);
     }
 
-    this.replays.delete(sessionId);
-
-    // Run cleanup functions after saving (e.g., disconnect puppeteer)
+    // Run cleanup functions BEFORE deleting state — cleanup may call stopTabReplay()
+    // which needs this.replays.get(sessionId) to still exist.
     for (const cleanupFn of state.cleanupFns) {
       try {
         await cleanupFn();
@@ -899,6 +965,8 @@ export class SessionReplay extends EventEmitter {
         this.log.warn(`Cleanup function failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
+
+    this.replays.delete(sessionId);
 
     return { filepath, metadata: replayMetadata };
   }
@@ -987,6 +1055,25 @@ export class SessionReplay extends EventEmitter {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Stop all active replays, saving events to disk.
+   * Used by SIGTERM handler for graceful container shutdown.
+   */
+  public async stopAllReplays(): Promise<void> {
+    const sessionIds = [...this.replays.keys()];
+    if (sessionIds.length === 0) return;
+
+    this.log.info(`Stopping ${sessionIds.length} active replay(s)...`);
+    for (const sessionId of sessionIds) {
+      try {
+        await this.stopReplay(sessionId);
+      } catch (e) {
+        this.log.warn(`stopAllReplays failed for ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    this.log.info(`Stopped all replays`);
   }
 
   public async shutdown(): Promise<void> {

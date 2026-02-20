@@ -47,6 +47,20 @@ export class ReplayCoordinator {
     this.videoEncoder = new VideoEncoder(sessionReplay?.getStore() ?? null);
     // Expose encoder to VideoManager for on-demand encoding from routes
     videoMgr?.setVideoEncoder(this.videoEncoder);
+
+    // SIGTERM handler: Docker sends SIGTERM before SIGKILL (10s grace).
+    // Save all in-flight replay sessions before exit.
+    if (sessionReplay) {
+      process.once('SIGTERM', async () => {
+        this.log.info('SIGTERM received, finalizing replay sessions...');
+        try {
+          await sessionReplay.stopAllReplays();
+        } catch (e) {
+          this.log.warn(`SIGTERM stopAllReplays failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        process.exit(0);
+      });
+    }
   }
 
   /**

@@ -10,6 +10,7 @@ import { ScreencastCapture } from './screencast-capture.js';
 import { CloudflareSolver } from './cloudflare-solver.js';
 import { TURNSTILE_STATE_OBSERVER_JS } from '../shared/cloudflare-detection.js';
 import { registerSessionState, tabDuration } from '../prom-metrics.js';
+import { TargetRegistry } from './target-state.js';
 
 import type { StopTabRecordingResult } from './replay-coordinator.js';
 
@@ -39,9 +40,6 @@ export interface ReplaySessionOptions {
  * ReplaySession encapsulates the full lifecycle of rrweb replay capture
  * for a single browser session.
  *
- * Replaces the 1100+ line closure-based implementation in ReplayCoordinator
- * with an explicit state machine and class methods.
- *
  * Lifecycle: INITIALIZING → ACTIVE → DRAINING → DESTROYED
  * All three teardown paths (ws close, cleanup, error) converge on destroy().
  */
@@ -64,18 +62,11 @@ export class ReplaySession {
   private readonly iframeScript: string;
   private readonly chromePort: string;
 
-  // CDP state tracking
-  private readonly trackedTargets = new Set<string>();
-  private readonly targetSessions = new Map<string, string>();          // targetId → cdpSessionId
-  private readonly pageWebSockets: Map<string, InstanceType<any>>;     // cdpSessionId → per-page WS
+  // Unified target state (replaces 9 Maps/Sets)
+  private readonly targets = new TargetRegistry();
+
+  // CDP command tracking (not target-specific)
   private readonly pendingCommands = new Map<number, { resolve: Function; reject: Function; timer: ReturnType<typeof setTimeout>; cdpSessionId?: string }>();
-  private readonly tabStartTimes = new Map<string, number>();
-  private readonly injectedTargets = new Set<string>();
-  private readonly zeroEventCounts = new Map<string, number>();
-  private readonly finalizedResults = new Map<string, StopTabRecordingResult>();
-  private readonly iframeSessions = new Map<string, string>();         // iframe cdpSessionId → page cdpSessionId
-  private readonly iframeTargetSessions = new Map<string, string>();   // iframe targetId → cdpSessionId
-  private readonly failedReconnects = new Set<string>();
 
   // Command ID counters
   private cmdId = 1;
@@ -83,13 +74,15 @@ export class ReplaySession {
 
   // Timers (for cleanup)
   private pollInterval: ReturnType<typeof setInterval> | null = null;
-  private wsPingInterval: ReturnType<typeof setInterval> | null = null;
   private healthCounter = 0;
 
   // WebSocket (set during initialize)
   private ws: InstanceType<any> | null = null;
   private WebSocket: any = null;
   private unregisterGauges: (() => void) | null = null;
+
+  // Declarative CDP message routing
+  private readonly messageHandlers = new Map<string, (msg: any) => Promise<void> | void>();
 
   constructor(options: ReplaySessionOptions) {
     this.sessionId = options.sessionId;
@@ -104,7 +97,7 @@ export class ReplaySession {
     this.script = getReplayScript(options.sessionId);
     this.iframeScript = getIframeReplayScript();
     this.chromePort = new URL(options.wsEndpoint).port;
-    this.pageWebSockets = new Map();
+    this.setupMessageRouting();
   }
 
   // ─── Lifecycle ──────────────────────────────────────────────────────────
@@ -123,18 +116,17 @@ export class ReplaySession {
       this.log.debug(`Replay WebSocket error: ${err.message}`);
     });
 
-    // Register live data structures for Prometheus gauges
+    // Register live data structures for Prometheus gauges.
+    // pageWebSockets.size → WS count (via getter), trackedTargets.size → target count
+    const targets = this.targets;
+    const sessionReplay = this.sessionReplay;
+    const sessionId = this.sessionId;
     this.unregisterGauges = registerSessionState({
-      pageWebSockets: this.pageWebSockets,
-      trackedTargets: this.trackedTargets,
+      pageWebSockets: { get size() { return targets.pageWsCount; } },
+      trackedTargets: targets,
       pendingCommands: this.pendingCommands,
-      getPagePendingCount: () => {
-        let count = 0;
-        for (const ws of this.pageWebSockets.values()) {
-          count += ((ws as any).__pendingCmds as Map<any, any>)?.size ?? 0;
-        }
-        return count;
-      },
+      getPagePendingCount: () => targets.getPagePendingCount(),
+      getEstimatedBytes: () => sessionReplay.getReplayState(sessionId)?.estimatedBytes ?? 0,
     });
 
     // Wire up WS message handler
@@ -189,22 +181,11 @@ export class ReplaySession {
       });
     });
 
-    // Start keepalive ping
-    this.wsPingInterval = setInterval(() => {
-      if (this.state === 'DESTROYED' || ws.readyState !== this.WebSocket.OPEN) {
-        if (this.wsPingInterval) clearInterval(this.wsPingInterval);
-        return;
-      }
-      ws.ping();
-      const pongTimeout = setTimeout(() => {
-        this.log.warn(`Main replay WS for ${this.sessionId} missed pong — terminating`);
-        ws.terminate();
-      }, 5_000);
-      ws.once('pong', () => clearTimeout(pongTimeout));
-    }, 30_000);
+    // No main WS ping/pong — Chrome process death fires WS 'close' event.
+    // SessionLifecycleManager handles zombie sessions via TTL.
 
-    // Start event polling
-    this.pollInterval = setInterval(() => this.pollEvents(), 500);
+    // Start fallback event polling (primary delivery is via __rrwebPush binding)
+    this.scheduleFallbackPoll();
 
     this.state = 'ACTIVE';
   }
@@ -223,8 +204,7 @@ export class ReplaySession {
     this.state = 'DRAINING';
 
     // Stop timers first
-    if (this.pollInterval) clearInterval(this.pollInterval);
-    if (this.wsPingInterval) clearInterval(this.wsPingInterval);
+    if (this.pollInterval) clearTimeout(this.pollInterval);
 
     // Unregister Prometheus gauges
     this.unregisterGauges?.();
@@ -232,14 +212,48 @@ export class ReplaySession {
     // Clean up solver
     this.cloudflareSolver.destroy();
 
-    // If source is 'cleanup', finalize tabs (orderly shutdown)
-    if (source === 'cleanup') {
-      for (const targetId of [...this.trackedTargets]) {
-        try {
-          await this.finalizeTab(targetId);
-        } catch (e) {
-          this.log.warn(`finalizeTab failed for ${targetId}: ${e instanceof Error ? e.message : String(e)}`);
+    // Finalize all tabs and fire callbacks for ALL destroy sources.
+    // 'cleanup': orderly shutdown — collectEvents + stopTabReplay (full finalization).
+    // 'ws_close'/'error': Chrome is gone — skip collectEvents, but save in-memory
+    //   events via stopTabReplay directly. The replay file will be valid (possibly truncated).
+    for (const target of [...this.targets]) {
+      try {
+        let result: StopTabRecordingResult | null = null;
+        if (source === 'cleanup') {
+          result = await this.finalizeTab(target.targetId);
+        } else {
+          // WS close / error: Chrome is gone, but we CAN save in-memory events
+          const tabResult = await this.sessionReplay.stopTabReplay(
+            this.sessionId, target.targetId
+          );
+          if (tabResult) {
+            const tabReplayId = tabResult.metadata.id;
+            result = {
+              replayId: tabReplayId,
+              duration: tabResult.metadata.duration,
+              eventCount: tabResult.metadata.eventCount,
+              replayUrl: `${this.baseUrl}/replay/${tabReplayId}`,
+              frameCount: 0,
+              encodingStatus: 'none',
+              videoUrl: '',
+            };
+          }
         }
+        if (this.onTabReplayComplete) {
+          const tabReplayId = `${this.sessionId}--tab-${target.targetId}`;
+          this.onTabReplayComplete({
+            sessionId: this.sessionId,
+            targetId: target.targetId,
+            duration: result?.duration ?? (Date.now() - target.startTime),
+            eventCount: result?.eventCount ?? 0,
+            frameCount: result?.frameCount ?? 0,
+            encodingStatus: result?.encodingStatus ?? 'none',
+            replayUrl: result?.replayUrl ?? `${this.baseUrl}/replay/${tabReplayId}`,
+            videoUrl: result?.videoUrl || undefined,
+          });
+        }
+      } catch (e) {
+        this.log.warn(`destroy finalize failed for ${target.targetId}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
 
@@ -251,28 +265,21 @@ export class ReplaySession {
     this.pendingCommands.clear();
 
     // Close per-page WebSockets + reject their pending commands
-    for (const pageWs of this.pageWebSockets.values()) {
-      const pendingCmds = (pageWs as any).__pendingCmds as Map<number, { resolve: Function; reject: Function; timer: ReturnType<typeof setTimeout> }> | undefined;
-      if (pendingCmds) {
-        for (const [, { reject, timer }] of pendingCmds) {
-          clearTimeout(timer);
-          reject(new Error('Session destroyed'));
+    for (const target of this.targets) {
+      if (target.pageWebSocket) {
+        const pendingCmds = (target.pageWebSocket as any).__pendingCmds as Map<number, { resolve: Function; reject: Function; timer: ReturnType<typeof setTimeout> }> | undefined;
+        if (pendingCmds) {
+          for (const [, { reject, timer }] of pendingCmds) {
+            clearTimeout(timer);
+            reject(new Error('Session destroyed'));
+          }
+          pendingCmds.clear();
         }
-        pendingCmds.clear();
       }
-      try { pageWs.close(); } catch {}
     }
-    this.pageWebSockets.clear();
 
-    // Eagerly release closure references for GC
-    this.trackedTargets.clear();
-    this.injectedTargets.clear();
-    this.targetSessions.clear();
-    this.iframeSessions.clear();
-    this.iframeTargetSessions.clear();
-    this.zeroEventCounts.clear();
-    this.finalizedResults.clear();
-    this.failedReconnects.clear();
+    // Clear all target state (closes all per-page WSs)
+    this.targets.clear();
 
     // Close main WS (no-op if already closed via ws_close)
     try { this.ws?.close(); } catch {}
@@ -286,8 +293,23 @@ export class ReplaySession {
    * Called by registerFinalCollector before replay stop.
    */
   async collectAllEvents(): Promise<void> {
-    for (const targetId of this.trackedTargets) {
-      await this.collectEvents(targetId);
+    for (const target of this.targets) {
+      // Flush in-page push buffer before collecting remaining events
+      try {
+        await this.sendCommand('Runtime.evaluate', {
+          expression: `(function() {
+            var rec = window.__browserlessRecording;
+            if (!rec) return;
+            if (rec._ft) { clearTimeout(rec._ft); rec._ft = null; }
+            if (rec._buf?.length) {
+              for (var i = 0; i < rec._buf.length; i++) rec.events.push(rec._buf[i]);
+              rec._buf = [];
+            }
+          })()`,
+          returnByValue: true,
+        }, target.cdpSessionId);
+      } catch {}
+      await this.collectEvents(target.targetId);
     }
   }
 
@@ -308,37 +330,33 @@ export class ReplaySession {
     const WebSocket = this.WebSocket;
 
     // Route stateless commands through per-page WS (zero contention on main WS).
-    // - Runtime.evaluate: stateless, no events needed
-    // - Page.addScriptToEvaluateOnNewDocument: "set and forget" — registers script, no follow-up events
-    // All other commands (Runtime.addBinding, Page.enable, etc.) MUST go through browser-level
-    // WS because their CDP events (Runtime.bindingCalled, etc.) are only handled there.
     const PAGE_WS_SAFE = method === 'Runtime.evaluate' || method === 'Page.addScriptToEvaluateOnNewDocument';
-    if (PAGE_WS_SAFE && cdpSessionId && this.pageWebSockets.has(cdpSessionId)) {
-      const pageWs = this.pageWebSockets.get(cdpSessionId)!;
-      if (pageWs.readyState === WebSocket.OPEN) {
-        return new Promise((resolve, reject) => {
-          const id = this.pageWsCmdId++;
-          const pendingCmds = (pageWs as any).__pendingCmds as Map<number, { resolve: Function; reject: Function; timer: ReturnType<typeof setTimeout> }>;
-          const timer = setTimeout(() => {
-            if (pendingCmds.has(id)) {
-              pendingCmds.delete(id);
-              reject(new Error(`CDP command ${method} timed out (per-page WS)`));
-            }
-          }, timeout);
-          pendingCmds.set(id, { resolve, reject, timer });
-          pageWs.send(JSON.stringify({ id, method, params }));
-        });
-      } else {
-        // Dead WS — remove and attempt reconnect (once per cdpSessionId)
-        this.pageWebSockets.delete(cdpSessionId);
-        if (!this.failedReconnects.has(cdpSessionId)) {
-          const targetId = [...this.targetSessions.entries()]
-            .find(([, sid]) => sid === cdpSessionId)?.[0];
-          if (targetId) {
-            this.openPageWebSocket(targetId, cdpSessionId).catch(() => this.failedReconnects.add(cdpSessionId));
+    if (PAGE_WS_SAFE && cdpSessionId) {
+      const target = this.targets.getByCdpSession(cdpSessionId);
+      if (target?.pageWebSocket) {
+        const pageWs = target.pageWebSocket;
+        if (pageWs.readyState === WebSocket.OPEN) {
+          return new Promise((resolve, reject) => {
+            const id = this.pageWsCmdId++;
+            const pendingCmds = (pageWs as any).__pendingCmds as Map<number, { resolve: Function; reject: Function; timer: ReturnType<typeof setTimeout> }>;
+            const timer = setTimeout(() => {
+              if (pendingCmds.has(id)) {
+                pendingCmds.delete(id);
+                reject(new Error(`CDP command ${method} timed out (per-page WS)`));
+              }
+            }, timeout);
+            pendingCmds.set(id, { resolve, reject, timer });
+            pageWs.send(JSON.stringify({ id, method, params }));
+          });
+        } else {
+          // Dead WS — remove and attempt reconnect (once per target)
+          target.pageWebSocket = null;
+          if (!target.failedReconnect) {
+            this.openPageWebSocket(target.targetId, cdpSessionId)
+              .catch(() => { target.failedReconnect = true; });
           }
+          // Fall through to browser-level WS
         }
-        // Fall through to browser-level WS
       }
     }
 
@@ -364,7 +382,7 @@ export class ReplaySession {
 
   // ─── Per-page WebSocket ─────────────────────────────────────────────────
 
-  private openPageWebSocket(targetId: string, cdpSessionId: string): Promise<void> {
+  private openPageWebSocket(targetId: string, _cdpSessionId: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const WebSocket = this.WebSocket;
       const pageWsUrl = `ws://127.0.0.1:${this.chromePort}/devtools/page/${targetId}`;
@@ -382,10 +400,15 @@ export class ReplaySession {
         if (settled) return;
         settled = true;
         clearTimeout(connectTimer);
-        this.pageWebSockets.set(cdpSessionId, pageWs);
+
+        const target = this.targets.getByTarget(targetId);
+        if (target) {
+          target.pageWebSocket = pageWs;
+        }
         (pageWs as any).__pendingCmds = pendingCmds;
 
-        // Keepalive: ping every 30s, close if no pong within 5s
+        // Keepalive: ping every 30s, close if no pong within 30s.
+        // A dead per-page WS is NOT fatal — sendCommand falls back to browser WS.
         const pingInterval = setInterval(() => {
           if (pageWs.readyState !== WebSocket.OPEN) {
             clearInterval(pingInterval);
@@ -393,9 +416,10 @@ export class ReplaySession {
           }
           pageWs.ping();
           const pongTimeout = setTimeout(() => {
-            this.log.warn(`Per-page WS for ${targetId} missed pong — closing`);
+            this.log.debug(`Per-page WS for ${targetId} missed pong — closing (fallback to browser WS)`);
             pageWs.terminate();
-          }, 5_000);
+            // No cascade — sendCommand will route through browser WS automatically
+          }, 30_000);
           pageWs.once('pong', () => clearTimeout(pongTimeout));
         }, 30_000);
 
@@ -422,7 +446,10 @@ export class ReplaySession {
 
       pageWs.on('error', () => { /* silent — fallback to browser WS */ });
       pageWs.on('close', () => {
-        this.pageWebSockets.delete(cdpSessionId);
+        const target = this.targets.getByTarget(targetId);
+        if (target && target.pageWebSocket === pageWs) {
+          target.pageWebSocket = null;
+        }
         clearInterval((pageWs as any).__pingInterval);
         for (const [, { reject, timer }] of pendingCmds) {
           clearTimeout(timer);
@@ -436,23 +463,18 @@ export class ReplaySession {
   // ─── rrweb Injection ────────────────────────────────────────────────────
 
   private async injectReplay(targetId: string): Promise<void> {
-    if (this.injectedTargets.has(targetId)) return;
-
-    const cdpSessionId = this.targetSessions.get(targetId);
-    if (!cdpSessionId) {
-      this.log.debug(`No session for target ${targetId}, skipping re-injection`);
-      return;
-    }
+    const target = this.targets.getByTarget(targetId);
+    if (!target || target.injected) return;
 
     try {
-      this.injectedTargets.add(targetId);
+      target.injected = true;
       await this.sendCommand('Runtime.evaluate', {
         expression: this.script,
         returnByValue: true,
-      }, cdpSessionId);
+      }, target.cdpSessionId);
       this.log.info(`Replay re-injected for target ${targetId} (session ${this.sessionId})`);
     } catch (e) {
-      this.injectedTargets.delete(targetId);
+      target.injected = false;
       this.log.debug(`Re-injection failed for target ${targetId}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
@@ -465,8 +487,8 @@ export class ReplaySession {
    */
   private async collectEvents(targetId: string): Promise<void> {
     if (this.state === 'DESTROYED') return;
-    const cdpSessionId = this.targetSessions.get(targetId);
-    if (!cdpSessionId) return;
+    const target = this.targets.getByTarget(targetId);
+    if (!target) return;
 
     try {
       const result = await this.sendCommand('Runtime.evaluate', {
@@ -478,21 +500,20 @@ export class ReplaySession {
           return JSON.stringify({ events: collected });
         })()`,
         returnByValue: true,
-      }, cdpSessionId);
+      }, target.cdpSessionId);
 
       if (result?.result?.value) {
         const { events } = JSON.parse(result.result.value);
         if (events?.length) {
           this.sessionReplay.addTabEvents(this.sessionId, targetId, events);
-          if ((this.zeroEventCounts.get(targetId) || 0) >= 0) {
-            this.zeroEventCounts.set(targetId, 0);
+          if (target.zeroEventCount >= 0) {
+            target.zeroEventCount = 0;
           }
         } else {
-          const count = (this.zeroEventCounts.get(targetId) || 0) + 1;
-          this.zeroEventCounts.set(targetId, count);
+          target.zeroEventCount++;
 
-          // After ~5 seconds of no events (10 polls × 500ms), check if rrweb needs re-injection
-          if (count === 10) {
+          // After ~10 seconds of no events (2 polls × 5000ms), check if rrweb needs re-injection
+          if (target.zeroEventCount === 2) {
             const check = await this.sendCommand('Runtime.evaluate', {
               expression: `JSON.stringify({
                 hasRecording: !!window.__browserlessRecording,
@@ -502,7 +523,7 @@ export class ReplaySession {
                 readyState: document.readyState
               })`,
               returnByValue: true,
-            }, cdpSessionId).catch(() => null);
+            }, target.cdpSessionId).catch(() => null);
 
             if (check?.result?.value) {
               const status = JSON.parse(check.result.value);
@@ -514,15 +535,15 @@ export class ReplaySession {
                 await this.sendCommand('Runtime.evaluate', {
                   expression: 'delete window.__browserlessRecording; delete window.__browserlessStopRecording;',
                   returnByValue: true,
-                }, cdpSessionId).catch(() => {});
+                }, target.cdpSessionId).catch((e: Error) => this.log.debug(`[${targetId}] cleanup eval skipped: ${e.message}`));
 
                 await this.sendCommand('Runtime.evaluate', {
                   expression: this.script,
                   returnByValue: true,
-                }, cdpSessionId).catch(() => {});
+                }, target.cdpSessionId).catch((e: Error) => this.log.debug(`[${targetId}] re-injection eval skipped: ${e.message}`));
               }
 
-              this.zeroEventCounts.set(targetId, -1000);
+              target.zeroEventCount = -1000;
             }
           }
         }
@@ -535,16 +556,17 @@ export class ReplaySession {
   // ─── Tab Finalization ───────────────────────────────────────────────────
 
   private async finalizeTab(targetId: string): Promise<StopTabRecordingResult | null> {
+    const target = this.targets.getByTarget(targetId);
+
     // Prevent double-finalization
-    if (this.finalizedResults.has(targetId)) {
-      return this.finalizedResults.get(targetId)!;
+    if (target?.finalizedResult) {
+      return target.finalizedResult;
     }
 
     await this.collectEvents(targetId);
-    this.trackedTargets.delete(targetId);
 
     // Stop screencast for this target and get per-tab frame count
-    const cdpSid = this.targetSessions.get(targetId);
+    const cdpSid = target?.cdpSessionId;
     let tabFrameCount = 0;
     if (cdpSid && this.video) {
       tabFrameCount = await this.screencastCapture.stopTargetCapture(this.sessionId, cdpSid);
@@ -576,113 +598,56 @@ export class ReplaySession {
       videoUrl: tabFrameCount > 0 ? `${this.baseUrl}/video/${tabReplayId}` : '',
     };
 
-    this.finalizedResults.set(targetId, result);
+    if (target) {
+      target.finalizedResult = result;
+    }
     return result;
   }
 
   // ─── Iframe CDP Event Handling ──────────────────────────────────────────
 
   private handleIframeCDPEvent(msg: any): void {
-    const pageSessionId = this.iframeSessions.get(msg.sessionId)!;
+    const pageSessionId = this.targets.getParentCdpSession(msg.sessionId);
+    if (!pageSessionId) return;
+    const parentTargetId = this.targets.findTargetIdByCdpSession(pageSessionId);
+    if (!parentTargetId) return;
 
-    // Network.requestWillBeSent → rrweb network.request event + CF activity tracking
+    // Network.requestWillBeSent → server-side rrweb network.request event
     if (msg.method === 'Network.requestWillBeSent') {
       const req = msg.params?.request;
-      const url: string = req?.url || '';
-      const requestId: string = msg.params?.requestId || '';
-      const method: string = req?.method || 'GET';
-      this.sendCommand('Runtime.evaluate', {
-        expression: `(function(){
-          var r = window.__browserlessRecording;
-          if (!r || !r.events) return;
-          r.events.push({
-            type: 5,
-            timestamp: Date.now(),
-            data: {
-              tag: 'network.request',
-              payload: {
-                id: 'iframe-' + ${JSON.stringify(requestId)},
-                url: ${JSON.stringify(url)},
-                method: ${JSON.stringify(method)},
-                type: 'iframe',
-                timestamp: Date.now(),
-                headers: null,
-                body: null
-              }
-            }
-          });
-        })()`,
-      }, pageSessionId).catch(() => {});
-
-      // Update Turnstile activity signal
-      if (url.includes('challenges.cloudflare.com') || url.includes('cdn-cgi/challenge-platform')) {
-        const updateExpr = `(function(){
-            var a = window.__turnstileCFActivity || (window.__turnstileCFActivity = {count:0,last:0});
-            a.count++;
-            a.last = Date.now();
-          })()`;
-        this.sendCommand('Runtime.evaluate', {
-          expression: updateExpr,
-        }, pageSessionId).catch((e) => {
-          this.log.info(`CF activity update failed, retrying: ${e instanceof Error ? e.message : String(e)}`);
-          setTimeout(() => {
-            this.sendCommand('Runtime.evaluate', {
-              expression: updateExpr,
-            }, pageSessionId).catch(() => {});
-          }, 200);
-        });
-      }
+      this.sessionReplay.addTabEvents(this.sessionId, parentTargetId, [{
+        type: 5, timestamp: Date.now(),
+        data: {
+          tag: 'network.request',
+          payload: {
+            id: `iframe-${msg.params?.requestId || ''}`,
+            url: req?.url || '', method: req?.method || 'GET',
+            type: 'iframe', timestamp: Date.now(),
+            headers: null, body: null,
+          },
+        },
+      }]);
     }
 
-    // Network.responseReceived → rrweb network.response event + PAT tracking
+    // Network.responseReceived → server-side rrweb network.response event
     if (msg.method === 'Network.responseReceived') {
       const resp = msg.params?.response;
-      const requestId: string = msg.params?.requestId || '';
-      const respUrl: string = resp?.url || '';
-      const statusText: string = resp?.statusText || '';
-      const mimeType: string = resp?.mimeType || '';
-      this.sendCommand('Runtime.evaluate', {
-        expression: `(function(){
-          var r = window.__browserlessRecording;
-          if (!r || !r.events) return;
-          r.events.push({
-            type: 5,
-            timestamp: Date.now(),
-            data: {
-              tag: 'network.response',
-              payload: {
-                id: 'iframe-' + ${JSON.stringify(requestId)},
-                url: ${JSON.stringify(respUrl)},
-                method: '',
-                status: ${resp?.status || 0},
-                statusText: ${JSON.stringify(statusText)},
-                duration: 0,
-                type: 'iframe',
-                headers: null,
-                body: null,
-                contentType: ${JSON.stringify(mimeType || null)}
-              }
-            }
-          });
-        })()`,
-      }, pageSessionId).catch(() => {});
-
-      // Track PAT outcome for pydoll activity signal
-      if (respUrl.includes('/pat/')) {
-        const patStatus = resp?.status || 0;
-        const patSuccess = patStatus >= 200 && patStatus < 300;
-        this.sendCommand('Runtime.evaluate', {
-          expression: `(function(){
-            var a = window.__turnstileCFActivity || (window.__turnstileCFActivity = {count:0,last:0});
-            if (!a.pat) a.pat = {attempts:0, successes:0};
-            a.pat.attempts++;
-            ${patSuccess ? 'a.pat.successes++;' : ''}
-          })()`,
-        }, pageSessionId).catch(() => {});
-      }
+      this.sessionReplay.addTabEvents(this.sessionId, parentTargetId, [{
+        type: 5, timestamp: Date.now(),
+        data: {
+          tag: 'network.response',
+          payload: {
+            id: `iframe-${msg.params?.requestId || ''}`,
+            url: resp?.url || '', method: '', status: resp?.status || 0,
+            statusText: resp?.statusText || '', duration: 0,
+            type: 'iframe', headers: null, body: null,
+            contentType: resp?.mimeType || null,
+          },
+        },
+      }]);
     }
 
-    // Runtime.consoleAPICalled → rrweb console plugin event
+    // Runtime.consoleAPICalled → server-side rrweb console plugin event
     if (msg.method === 'Runtime.consoleAPICalled') {
       const level: string = msg.params?.type || 'log';
       const args: string[] = (msg.params?.args || [])
@@ -694,129 +659,91 @@ export class ReplaySession {
         .map((f: { functionName?: string; url?: string; lineNumber?: number }) =>
           `${f.functionName || '(anonymous)'}@${f.url || ''}:${f.lineNumber ?? 0}`);
 
-      this.sendCommand('Runtime.evaluate', {
-        expression: `(function(){
-          var r = window.__browserlessRecording;
-          if (!r || !r.events) return;
-          r.events.push({
-            type: 6,
-            timestamp: Date.now(),
-            data: {
-              plugin: 'rrweb/console@1',
-              payload: {
-                level: ${JSON.stringify(level)},
-                payload: ${JSON.stringify(args)},
-                trace: ${JSON.stringify(trace)},
-                source: 'iframe'
-              }
-            }
-          });
-        })()`,
-      }, pageSessionId).catch(() => {});
-
-      // Categorize console messages for pydoll activity signal
-      const firstArg: string = args[0] || '';
-      const isAntiDebug = firstArg.includes('%c') || level === 'startGroupCollapsed' || level === 'endGroup' || level === 'count';
-      const isPAT = firstArg.toLowerCase().includes('private access token');
-      this.sendCommand('Runtime.evaluate', {
-        expression: `(function(){
-          var a = window.__turnstileCFActivity || (window.__turnstileCFActivity = {count:0,last:0});
-          if (!a.console) a.console = {total:0, antiDebug:0, pat:0};
-          a.console.total++;
-          ${isAntiDebug ? 'a.console.antiDebug++;' : ''}
-          ${isPAT ? 'a.console.pat++;' : ''}
-        })()`,
-      }, pageSessionId).catch(() => {});
+      this.sessionReplay.addTabEvents(this.sessionId, parentTargetId, [{
+        type: 6, timestamp: Date.now(),
+        data: {
+          plugin: 'rrweb/console@1',
+          payload: { level, payload: args, trace, source: 'iframe' },
+        },
+      }]);
     }
 
-    // Runtime.bindingCalled (turnstile state) → state relay + timeline marker
+    // Runtime.bindingCalled (turnstile state) → server-side timeline marker + notify solver
     if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__turnstileStateBinding') {
       const state = msg.params?.payload || 'unknown';
-      this.sendCommand('Runtime.evaluate', {
-        expression: `(function(){
-          window.__turnstileWidgetState = ${JSON.stringify(state)};
-        })()`,
-      }, pageSessionId).catch(() => {});
-
-      this.sendCommand('Runtime.evaluate', {
-        expression: `(function(){
-          var r = window.__browserlessRecording;
-          if (!r || !r.events) return;
-          r.events.push({
-            type: 5,
-            timestamp: Date.now(),
-            data: {
-              tag: 'cf.iframe_state',
-              payload: { state: ${JSON.stringify(state)} }
-            }
-          });
-        })()`,
-      }, pageSessionId).catch(() => {});
-
-      this.cloudflareSolver.onTurnstileStateChange(state, msg.sessionId).catch(() => {});
+      this.sessionReplay.addTabEvents(this.sessionId, parentTargetId, [{
+        type: 5, timestamp: Date.now(),
+        data: { tag: 'cf.iframe_state', payload: { state } },
+      }]);
+      this.cloudflareSolver.onTurnstileStateChange(state, msg.sessionId)
+        .catch((e: Error) => this.log.debug(`onTurnstileStateChange failed: ${e.message}`));
     }
   }
 
-  // ─── CDP Message Handler ────────────────────────────────────────────────
+  // ─── CDP Message Routing ───────────────────────────────────────────────
+
+  private setupMessageRouting(): void {
+    this.messageHandlers.set('Target.attachedToTarget', (msg) => this.handleAttachedToTarget(msg));
+    this.messageHandlers.set('Target.targetCreated', (msg) => this.handleTargetCreated(msg));
+    this.messageHandlers.set('Target.targetDestroyed', (msg) => this.handleTargetDestroyed(msg));
+    this.messageHandlers.set('Target.targetInfoChanged', (msg) => this.handleTargetInfoChanged(msg));
+  }
 
   private async handleCDPMessage(data: Buffer): Promise<void> {
     try {
       const msg = JSON.parse(data.toString());
 
-      // Handle command responses
-      if (msg.id && this.pendingCommands.has(msg.id)) {
-        const cmd = this.pendingCommands.get(msg.id)!;
-        clearTimeout(cmd.timer);
-        this.pendingCommands.delete(msg.id);
-        if (msg.error) {
-          cmd.reject(new Error(msg.error.message));
-        } else {
-          cmd.resolve(msg.result);
+      // Command responses
+      if (msg.id !== undefined) {
+        const cmd = this.pendingCommands.get(msg.id);
+        if (cmd) {
+          clearTimeout(cmd.timer);
+          this.pendingCommands.delete(msg.id);
+          msg.error ? cmd.reject(new Error(msg.error.message)) : cmd.resolve(msg.result);
         }
         return;
       }
 
-      if (msg.method === 'Target.attachedToTarget') {
-        await this.handleAttachedToTarget(msg);
-      }
-
-      if (msg.method === 'Target.targetCreated') {
-        await this.handleTargetCreated(msg);
-      }
-
-      if (msg.method === 'Target.targetDestroyed') {
-        await this.handleTargetDestroyed(msg);
-      }
-
-      // Handle screencast frames — only when video=true
-      if (this.video && msg.method === 'Page.screencastFrame' && msg.sessionId) {
-        this.screencastCapture.handleFrame(
-          this.sessionId,
-          msg.sessionId,
-          msg.params,
-        ).catch(() => {});
-      }
-
-      // Convert iframe CDP events to rrweb recording events
-      if (msg.sessionId && this.iframeSessions.has(msg.sessionId)) {
+      // Iframe CDP events → rrweb recording events
+      if (msg.sessionId && this.targets.isIframe(msg.sessionId)) {
         this.handleIframeCDPEvent(msg);
       }
 
-      // Runtime.bindingCalled (turnstile solved) → notify solver
-      if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__turnstileSolvedBinding') {
-        this.cloudflareSolver.onAutoSolveBinding(msg.sessionId).catch(() => {});
+      // Screencast frames
+      if (this.video && msg.method === 'Page.screencastFrame' && msg.sessionId) {
+        this.screencastCapture.handleFrame(this.sessionId, msg.sessionId, msg.params)
+          .catch((e: Error) => this.log.debug(`Screencast frame failed: ${e.message}`));
       }
 
-      // Runtime.bindingCalled (turnstile target found) → notify solver of widget coordinates
-      if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__turnstileTargetBinding') {
-        this.cloudflareSolver.onTurnstileTargetFound(msg.sessionId, msg.params?.payload).catch(() => {});
+      // Binding calls (rrweb push, turnstile solved, turnstile target)
+      if (msg.method === 'Runtime.bindingCalled') {
+        this.handleBindingCalled(msg);
       }
 
-      if (msg.method === 'Target.targetInfoChanged') {
-        await this.handleTargetInfoChanged(msg);
-      }
+      // Routed CDP events
+      const handler = this.messageHandlers.get(msg.method);
+      if (handler) await handler(msg);
     } catch (e) {
       this.log.debug(`Error processing CDP message: ${e}`);
+    }
+  }
+
+  private handleBindingCalled(msg: any): void {
+    const name = msg.params?.name;
+    if (name === '__rrwebPush') {
+      try {
+        const events = JSON.parse(msg.params.payload);
+        const targetId = this.targets.findTargetIdByCdpSession(msg.sessionId);
+        if (targetId && events?.length) {
+          this.sessionReplay.addTabEvents(this.sessionId, targetId, events);
+        }
+      } catch {}
+    } else if (name === '__turnstileSolvedBinding') {
+      this.cloudflareSolver.onAutoSolveBinding(msg.sessionId)
+        .catch((e: Error) => this.log.debug(`onAutoSolveBinding failed: ${e.message}`));
+    } else if (name === '__turnstileTargetBinding') {
+      this.cloudflareSolver.onTurnstileTargetFound(msg.sessionId, msg.params?.payload)
+        .catch((e: Error) => this.log.debug(`onTurnstileTargetFound failed: ${e.message}`));
     }
   }
 
@@ -827,22 +754,23 @@ export class ReplaySession {
 
     if (targetInfo.type === 'page') {
       this.log.info(`Target attached (paused=${waitingForDebugger}): targetId=${targetInfo.targetId} url=${targetInfo.url} type=${targetInfo.type}`);
-      this.trackedTargets.add(targetInfo.targetId);
-      this.tabStartTimes.set(targetInfo.targetId, Date.now());
-      this.targetSessions.set(targetInfo.targetId, cdpSessionId);
-      this.cloudflareSolver.onPageAttached(targetInfo.targetId, cdpSessionId, targetInfo.url).catch(() => {});
+      const target = this.targets.add(targetInfo.targetId, cdpSessionId);
+      this.cloudflareSolver.onPageAttached(targetInfo.targetId, cdpSessionId, targetInfo.url)
+        .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] onPageAttached skipped: ${e.message}`));
 
       // Eagerly initialize tab event tracking
       this.sessionReplay.addTabEvents(this.sessionId, targetInfo.targetId, []);
 
       // Inject rrweb BEFORE page JS runs (target is paused)
       try {
+        // Register push binding so page can send events without polling
+        await this.sendCommand('Runtime.addBinding', { name: '__rrwebPush' }, cdpSessionId);
         await this.sendCommand('Page.enable', {}, cdpSessionId);
         await this.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
           source: this.script,
           runImmediately: true,
         }, cdpSessionId);
-        this.injectedTargets.add(targetInfo.targetId);
+        target.injected = true;
         this.log.info(`Replay pre-injected for target ${targetInfo.targetId} (session ${this.sessionId})`);
 
         await this.sendCommand('Target.setAutoAttach', {
@@ -856,18 +784,21 @@ export class ReplaySession {
 
       // Resume the target
       if (waitingForDebugger) {
-        await this.sendCommand('Runtime.runIfWaitingForDebugger', {}, cdpSessionId).catch(() => {});
+        await this.sendCommand('Runtime.runIfWaitingForDebugger', {}, cdpSessionId)
+          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] runIfWaitingForDebugger skipped: ${e.message}`));
       } else {
         await this.sendCommand('Runtime.evaluate', {
           expression: this.script,
           returnByValue: true,
-        }, cdpSessionId).catch(() => {});
+        }, cdpSessionId)
+          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] late-inject eval skipped: ${e.message}`));
         this.log.info(`Replay late-injected for already-running target ${targetInfo.targetId}`);
       }
 
       // Start screencast — only when video=true
       if (this.video) {
-        this.screencastCapture.addTarget(this.sessionId, this.sendCommand.bind(this) as any, cdpSessionId, targetInfo.targetId).catch(() => {});
+        this.screencastCapture.addTarget(this.sessionId, this.sendCommand.bind(this) as any, cdpSessionId, targetInfo.targetId)
+          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] screencast addTarget skipped: ${e.message}`));
       }
 
       // Open per-page WebSocket for zero-contention
@@ -879,7 +810,7 @@ export class ReplaySession {
     // Cross-origin iframes (e.g., Cloudflare Turnstile)
     if (targetInfo.type === 'iframe') {
       this.log.debug(`Iframe target attached (paused=${waitingForDebugger}): ${targetInfo.targetId} url=${targetInfo.url}`);
-      this.iframeTargetSessions.set(targetInfo.targetId, cdpSessionId);
+      this.targets.addIframeTarget(targetInfo.targetId, cdpSessionId);
 
       try {
         await this.sendCommand('Page.enable', {}, cdpSessionId);
@@ -893,7 +824,8 @@ export class ReplaySession {
       }
 
       if (waitingForDebugger) {
-        await this.sendCommand('Runtime.runIfWaitingForDebugger', {}, cdpSessionId).catch(() => {});
+        await this.sendCommand('Runtime.runIfWaitingForDebugger', {}, cdpSessionId)
+          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] iframe runIfWaitingForDebugger skipped: ${e.message}`));
       }
 
       // Fallback: Runtime.evaluate for iframe rrweb
@@ -910,36 +842,40 @@ export class ReplaySession {
 
       // Turnstile iframe state tracking
       if (targetInfo.url?.includes('challenges.cloudflare.com')) {
-        this.sendCommand('Runtime.addBinding', { name: '__turnstileStateBinding' }, cdpSessionId).catch(() => {});
+        this.sendCommand('Runtime.addBinding', { name: '__turnstileStateBinding' }, cdpSessionId)
+          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] turnstile binding skipped: ${e.message}`));
         this.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
           source: TURNSTILE_STATE_OBSERVER_JS,
           runImmediately: true,
-        }, cdpSessionId).catch(() => {});
+        }, cdpSessionId)
+          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] turnstile observer inject skipped: ${e.message}`));
         setTimeout(() => {
-          this.sendCommand('Runtime.evaluate', { expression: TURNSTILE_STATE_OBSERVER_JS }, cdpSessionId).catch(() => {});
+          this.sendCommand('Runtime.evaluate', { expression: TURNSTILE_STATE_OBSERVER_JS }, cdpSessionId)
+            .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] turnstile observer eval skipped: ${e.message}`));
         }, 100);
       }
 
       // Enable CDP-level network + console capture for iframe
-      const parentCdpSid = msg.sessionId || [...this.targetSessions.values()].pop();
+      const parentCdpSid = msg.sessionId || this.getLastPageCdpSession();
       try {
         await this.sendCommand('Network.enable', {}, cdpSessionId);
         await this.sendCommand('Runtime.enable', {}, cdpSessionId);
         if (parentCdpSid) {
-          this.iframeSessions.set(cdpSessionId, parentCdpSid);
+          this.targets.addIframe(cdpSessionId, parentCdpSid);
         }
       } catch {
         // Non-critical
       }
       if (parentCdpSid) {
-        this.cloudflareSolver.onIframeAttached(targetInfo.targetId, cdpSessionId, targetInfo.url, parentCdpSid).catch(() => {});
+        this.cloudflareSolver.onIframeAttached(targetInfo.targetId, cdpSessionId, targetInfo.url, parentCdpSid)
+          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] onIframeAttached skipped: ${e.message}`));
       }
     }
   }
 
   private async handleTargetCreated(msg: any): Promise<void> {
     const { targetInfo } = msg.params;
-    if (targetInfo.type === 'page' && !this.trackedTargets.has(targetInfo.targetId)) {
+    if (targetInfo.type === 'page' && !this.targets.has(targetInfo.targetId)) {
       this.log.info(`Discovered external target ${targetInfo.targetId} (url=${targetInfo.url}), attaching...`);
       try {
         await this.sendCommand('Target.attachToTarget', {
@@ -955,144 +891,154 @@ export class ReplaySession {
   private async handleTargetDestroyed(msg: any): Promise<void> {
     const { targetId } = msg.params;
 
-    if (this.trackedTargets.has(targetId)) {
-      const startTime = this.tabStartTimes.get(targetId);
-      if (startTime) {
-        tabDuration.observe((Date.now() - startTime) / 1000);
-        this.tabStartTimes.delete(targetId);
-      }
+    const target = this.targets.getByTarget(targetId);
+    if (target) {
+      tabDuration.observe((Date.now() - target.startTime) / 1000);
       const result = await this.finalizeTab(targetId);
-      if (result && this.onTabReplayComplete) {
+      // Always fire callback — even when result is null (no events / stopTabReplay failed).
+      // Without this, pydoll's ReplayListener.wait() hangs for the full timeout.
+      if (this.onTabReplayComplete) {
+        const tabReplayId = `${this.sessionId}--tab-${targetId}`;
         try {
           this.onTabReplayComplete({
             sessionId: this.sessionId,
             targetId,
-            duration: result.duration,
-            eventCount: result.eventCount,
-            frameCount: result.frameCount,
-            encodingStatus: result.encodingStatus,
-            replayUrl: result.replayUrl,
-            videoUrl: result.videoUrl || undefined,
+            duration: result?.duration ?? (Date.now() - target.startTime),
+            eventCount: result?.eventCount ?? 0,
+            frameCount: result?.frameCount ?? 0,
+            encodingStatus: result?.encodingStatus ?? 'none',
+            replayUrl: result?.replayUrl ?? `${this.baseUrl}/replay/${tabReplayId}`,
+            videoUrl: result?.videoUrl || undefined,
           });
         } catch (e) {
           this.log.warn(`onTabReplayComplete callback failed: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
-    } else {
-      this.trackedTargets.delete(targetId);
+
+      // Clean up screencast
+      this.screencastCapture.handleTargetDestroyed(this.sessionId, target.cdpSessionId);
     }
 
-    this.injectedTargets.delete(targetId);
-    const destroyedCdpSid = this.targetSessions.get(targetId);
-    if (destroyedCdpSid) {
-      this.screencastCapture.handleTargetDestroyed(this.sessionId, destroyedCdpSid);
-      this.iframeSessions.delete(destroyedCdpSid);
-      const pageWs = this.pageWebSockets.get(destroyedCdpSid);
-      if (pageWs) {
-        pageWs.close();
-        this.pageWebSockets.delete(destroyedCdpSid);
-      }
-    }
-
-    this.targetSessions.delete(targetId);
-    this.iframeTargetSessions.delete(targetId);
-    this.zeroEventCounts.delete(targetId);
+    // Atomic cleanup — removes from all indices, closes per-page WS, cleans iframe refs
+    this.targets.remove(targetId);
+    this.targets.removeIframeTarget(targetId);
   }
 
   private async handleTargetInfoChanged(msg: any): Promise<void> {
     const { targetInfo } = msg.params;
 
-    if (targetInfo.type === 'page' && this.trackedTargets.has(targetInfo.targetId)) {
-      this.injectedTargets.delete(targetInfo.targetId);
-      this.zeroEventCounts.delete(targetInfo.targetId);
+    if (targetInfo.type === 'page') {
+      const target = this.targets.getByTarget(targetInfo.targetId);
+      if (target) {
+        target.injected = false;
+        target.zeroEventCount = 0;
 
-      const cdpSessionId = this.targetSessions.get(targetInfo.targetId);
-      if (cdpSessionId) {
         this.sendCommand('Target.setAutoAttach', {
           autoAttach: true,
           waitForDebuggerOnStart: true,
           flatten: true,
-        }, cdpSessionId).catch(() => {});
-      }
+        }, target.cdpSessionId)
+          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] setAutoAttach skipped: ${e.message}`));
 
-      setTimeout(() => {
-        this.injectReplay(targetInfo.targetId);
-        if (cdpSessionId) {
-          this.sendCommand('Runtime.evaluate', {
-            expression: 'window.__turnstileCFActivity = {count:0,last:0}',
-          }, cdpSessionId).catch(() => {});
-        }
-      }, 200);
+        setTimeout(() => {
+          this.injectReplay(targetInfo.targetId);
+        }, 200);
 
-      if (cdpSessionId) {
-        this.cloudflareSolver.onPageNavigated(targetInfo.targetId, cdpSessionId, targetInfo.url).catch(() => {});
+        this.cloudflareSolver.onPageNavigated(targetInfo.targetId, target.cdpSessionId, targetInfo.url)
+          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] onPageNavigated skipped: ${e.message}`));
       }
     }
 
     // Handle iframe navigation
-    const iframeCdpSid = this.iframeTargetSessions.get(targetInfo.targetId);
+    const iframeCdpSid = this.targets.getIframeCdpSession(targetInfo.targetId);
     if (iframeCdpSid && targetInfo.type === 'iframe') {
       if (targetInfo.url?.includes('challenges.cloudflare.com')) {
         this.sendCommand('Runtime.addBinding', {
           name: '__turnstileStateBinding',
-        }, iframeCdpSid).catch(() => {});
+        }, iframeCdpSid)
+          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] turnstile binding skipped: ${e.message}`));
         this.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
           source: TURNSTILE_STATE_OBSERVER_JS,
           runImmediately: true,
-        }, iframeCdpSid).catch(() => {});
+        }, iframeCdpSid)
+          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] turnstile observer inject skipped: ${e.message}`));
         setTimeout(() => {
           this.sendCommand('Runtime.evaluate', {
             expression: TURNSTILE_STATE_OBSERVER_JS,
-          }, iframeCdpSid).catch(() => {});
+          }, iframeCdpSid)
+            .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] turnstile observer eval skipped: ${e.message}`));
         }, 100);
 
         this.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
           source: this.iframeScript,
           runImmediately: true,
-        }, iframeCdpSid).catch(() => {});
+        }, iframeCdpSid)
+          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] iframe script inject skipped: ${e.message}`));
         setTimeout(() => {
           this.sendCommand('Runtime.evaluate', {
             expression: this.iframeScript,
             returnByValue: true,
-          }, iframeCdpSid).catch(() => {});
+          }, iframeCdpSid)
+            .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] iframe script eval skipped: ${e.message}`));
         }, 50);
 
-        this.sendCommand('Network.enable', {}, iframeCdpSid).catch(() => {});
-        this.sendCommand('Runtime.enable', {}, iframeCdpSid).catch(() => {});
-        if (!this.iframeSessions.has(iframeCdpSid)) {
-          const fallbackParent = [...this.targetSessions.values()].pop();
+        this.sendCommand('Network.enable', {}, iframeCdpSid)
+          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] Network.enable skipped: ${e.message}`));
+        this.sendCommand('Runtime.enable', {}, iframeCdpSid)
+          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] Runtime.enable skipped: ${e.message}`));
+        if (!this.targets.isIframe(iframeCdpSid)) {
+          const fallbackParent = this.getLastPageCdpSession();
           if (fallbackParent) {
-            this.iframeSessions.set(iframeCdpSid, fallbackParent);
+            this.targets.addIframe(iframeCdpSid, fallbackParent);
           }
         }
       }
 
-      this.cloudflareSolver.onIframeNavigated(targetInfo.targetId, iframeCdpSid, targetInfo.url).catch(() => {});
+      this.cloudflareSolver.onIframeNavigated(targetInfo.targetId, iframeCdpSid, targetInfo.url)
+        .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] onIframeNavigated skipped: ${e.message}`));
     }
+  }
+
+  // ─── Helpers ────────────────────────────────────────────────────────────
+
+  /** Get the last known page cdpSessionId (fallback for parent detection). */
+  private getLastPageCdpSession(): string | undefined {
+    let last: string | undefined;
+    for (const target of this.targets) {
+      last = target.cdpSessionId;
+    }
+    return last;
   }
 
   // ─── Polling ────────────────────────────────────────────────────────────
 
+  private scheduleFallbackPoll(): void {
+    if (this.state === 'DESTROYED') return;
+    this.pollInterval = setTimeout(async () => {
+      await this.pollEvents();
+      if (this.state !== 'DESTROYED') this.scheduleFallbackPoll();
+    }, 5000);
+  }
+
   private async pollEvents(): Promise<void> {
     if (this.state === 'DESTROYED') {
-      if (this.pollInterval) clearInterval(this.pollInterval);
+      if (this.pollInterval) clearTimeout(this.pollInterval);
       return;
     }
 
     this.healthCounter++;
-    if (this.healthCounter % 60 === 0) { // Every 30s (60 × 500ms)
-      const WebSocket = this.WebSocket;
-      const healthy = [...this.pageWebSockets.values()].filter(ws => ws.readyState === WebSocket.OPEN).length;
-      const total = this.pageWebSockets.size;
+    if (this.healthCounter % 6 === 0) { // Every 30s (6 × 5000ms)
+      const healthy = this.targets.openPageWsCount;
+      const total = this.targets.pageWsCount;
       let iframePending = 0;
       for (const cmd of this.pendingCommands.values()) {
-        if (cmd.cdpSessionId && !this.pageWebSockets.has(cmd.cdpSessionId)) iframePending++;
+        if (cmd.cdpSessionId && !this.targets.getByCdpSession(cmd.cdpSessionId)?.pageWebSocket) iframePending++;
       }
-      this.log.info(`[WS Health] per-page: ${healthy}/${total} open, tracked: ${this.trackedTargets.size}, pending: ${this.pendingCommands.size} (iframe: ${iframePending})`);
+      this.log.info(`[WS Health] per-page: ${healthy}/${total} open, tracked: ${this.targets.size}, pending: ${this.pendingCommands.size} (iframe: ${iframePending})`);
     }
 
-    for (const targetId of this.trackedTargets) {
-      await this.collectEvents(targetId);
+    for (const target of this.targets) {
+      await this.collectEvents(target.targetId);
     }
   }
 }
