@@ -921,6 +921,13 @@ export const screenxyPatchPath = path.join(
   'screenxy-patch',
 );
 
+export const replayExtensionPath = path.join(
+  __dirname,
+  '..',
+  'extensions',
+  'replay',
+);
+
 export const isMatch = (text: string, pattern: string) => {
   return micromatch.isMatch(text, pattern, { bash: true });
 };

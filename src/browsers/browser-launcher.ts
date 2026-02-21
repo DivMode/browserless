@@ -164,9 +164,11 @@ export class BrowserLauncher {
     this.handleDeprecatedOptions(launchOptions);
 
     // Create browser instance
+    const enableReplay = replay && !!this.replayCoordinator?.isEnabled();
     const browser = new Browser({
       blockAds,
       config: this.config,
+      enableReplay,
       logger,
       userDataDir,
     });
@@ -244,6 +246,12 @@ export class BrowserLauncher {
       const cloudflareSolver = this.replayCoordinator?.getCloudflareSolver(sessionId);
       if (cloudflareSolver && browser instanceof ChromiumCDP) {
         browser.setCloudflareSolver(cloudflareSolver);
+      }
+
+      // Wire replay marker callback for Browserless.addReplayMarker CDP command
+      const markerCallback = this.replayCoordinator?.getReplayMarkerCallback(sessionId);
+      if (markerCallback && browser instanceof ChromiumCDP) {
+        browser.setReplayMarkerCallback(markerCallback);
       }
     }
 

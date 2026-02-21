@@ -77,7 +77,10 @@ export default class ReplayGetRoute extends HTTPRoute {
     const js = RRWEB_PLAYER_JS;
 
     // Full replay data for Svelte app
-    const replayData = JSON.stringify({ events, metadata });
+    // Escape </script> sequences inside JSON to prevent premature script tag closure.
+    // The HTML parser terminates <script> blocks on any </script> it encounters,
+    // even inside JS string literals. rrweb DOM snapshots capture literal page scripts.
+    const replayData = JSON.stringify({ events, metadata }).replaceAll('</script>', '<\\/script>');
 
     // Svelte player HTML - the bundled Svelte app handles all UI rendering
     return `<!DOCTYPE html>

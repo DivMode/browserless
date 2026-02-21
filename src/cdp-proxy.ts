@@ -98,6 +98,7 @@ export class CDPProxy {
     private onClose?: () => void,
     private onBeforeClose?: () => Promise<void>,
     private onEnableCloudflareSolver?: (config: any) => void,
+    private onAddReplayMarker?: (targetId: string, tag: string, payload?: object) => void,
   ) {}
 
   /**
@@ -194,6 +195,22 @@ export class CDPProxy {
               this.onEnableCloudflareSolver(msg.params || {});
             }
             void this.sendClientResponse(msg.id, { enabled: true });
+            return;
+          }
+
+          // Intercept Browserless.addReplayMarker — inject custom marker into replay
+          if (msg?.method === 'Browserless.addReplayMarker' && typeof msg?.id === 'number') {
+            if (this.onAddReplayMarker) {
+              const { targetId, tag, payload } = msg.params || {};
+              if (!tag) {
+                void this.sendClientResponse(msg.id, { error: 'tag is required' });
+                return;
+              }
+              this.onAddReplayMarker(targetId || '', tag, payload);
+              void this.sendClientResponse(msg.id, { success: true });
+            } else {
+              void this.sendClientResponse(msg.id, { error: 'Replay not enabled' });
+            }
             return;
           }
 

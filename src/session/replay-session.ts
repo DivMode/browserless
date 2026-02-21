@@ -2,8 +2,6 @@ import {
   Logger,
   SessionReplay,
   TabReplayCompleteParams,
-  getReplayScript,
-  getIframeReplayScript,
 } from '@browserless.io/browserless';
 
 import { ScreencastCapture } from './screencast-capture.js';
@@ -58,8 +56,6 @@ export class ReplaySession {
   private readonly video: boolean;
   private readonly videosDir?: string;
   private readonly onTabReplayComplete?: (metadata: TabReplayCompleteParams) => void;
-  private readonly script: string;
-  private readonly iframeScript: string;
   private readonly chromePort: string;
 
   // Unified target state (replaces 9 Maps/Sets)
@@ -71,10 +67,6 @@ export class ReplaySession {
   // Command ID counters
   private cmdId = 1;
   private pageWsCmdId = 100_000;
-
-  // Timers (for cleanup)
-  private pollInterval: ReturnType<typeof setInterval> | null = null;
-  private healthCounter = 0;
 
   // WebSocket (set during initialize)
   private ws: InstanceType<any> | null = null;
@@ -94,8 +86,6 @@ export class ReplaySession {
     this.video = options.video ?? false;
     this.videosDir = options.videosDir;
     this.onTabReplayComplete = options.onTabReplayComplete;
-    this.script = getReplayScript(options.sessionId);
-    this.iframeScript = getIframeReplayScript();
     this.chromePort = new URL(options.wsEndpoint).port;
     this.setupMessageRouting();
   }
@@ -184,8 +174,8 @@ export class ReplaySession {
     // No main WS ping/pong — Chrome process death fires WS 'close' event.
     // SessionLifecycleManager handles zombie sessions via TTL.
 
-    // Start fallback event polling (primary delivery is via __rrwebPush binding)
-    this.scheduleFallbackPoll();
+    // Extension handles rrweb injection — no polling needed.
+    // Events arrive via Runtime.addBinding('__rrwebPush') push delivery.
 
     this.state = 'ACTIVE';
   }
@@ -202,9 +192,6 @@ export class ReplaySession {
 
   private async _doDestroy(source: string): Promise<void> {
     this.state = 'DRAINING';
-
-    // Stop timers first
-    if (this.pollInterval) clearTimeout(this.pollInterval);
 
     // Unregister Prometheus gauges
     this.unregisterGauges?.();
@@ -463,8 +450,9 @@ export class ReplaySession {
   // ─── Event Collection ───────────────────────────────────────────────────
 
   /**
-   * Collect events from a target. Includes self-healing: if rrweb produces
-   * no events for ~5 seconds on a real page, re-inject via Runtime.evaluate.
+   * Drain any buffered events from the page's in-memory array.
+   * With extension-based injection, events primarily arrive via __rrwebPush binding.
+   * This is only called during finalization to collect any stragglers.
    */
   private async collectEvents(targetId: string): Promise<void> {
     if (this.state === 'DESTROYED') return;
@@ -487,46 +475,6 @@ export class ReplaySession {
         const { events } = JSON.parse(result.result.value);
         if (events?.length) {
           this.sessionReplay.addTabEvents(this.sessionId, targetId, events);
-          if (target.zeroEventCount >= 0) {
-            target.zeroEventCount = 0;
-          }
-        } else {
-          target.zeroEventCount++;
-
-          // After ~10 seconds of no events (2 polls × 5000ms), check if rrweb needs re-injection
-          if (target.zeroEventCount === 2) {
-            const check = await this.sendCommand('Runtime.evaluate', {
-              expression: `JSON.stringify({
-                hasRecording: !!window.__browserlessRecording,
-                hasRrweb: !!window.rrweb,
-                isRecording: typeof window.__browserlessStopRecording === 'function',
-                url: window.location.href,
-                readyState: document.readyState
-              })`,
-              returnByValue: true,
-            }, target.cdpSessionId).catch(() => null);
-
-            if (check?.result?.value) {
-              const status = JSON.parse(check.result.value);
-              if (status.url && !status.url.startsWith('about:') && !status.isRecording) {
-                this.log.warn(`Self-healing: rrweb not recording on ${status.url} ` +
-                  `(hasRrweb=${status.hasRrweb}, isRecording=${status.isRecording}, ` +
-                  `readyState=${status.readyState}), re-injecting`);
-
-                await this.sendCommand('Runtime.evaluate', {
-                  expression: 'delete window.__browserlessRecording; delete window.__browserlessStopRecording;',
-                  returnByValue: true,
-                }, target.cdpSessionId).catch((e: Error) => this.log.debug(`[${targetId}] cleanup eval skipped: ${e.message}`));
-
-                await this.sendCommand('Runtime.evaluate', {
-                  expression: this.script,
-                  returnByValue: true,
-                }, target.cdpSessionId).catch((e: Error) => this.log.debug(`[${targetId}] re-injection eval skipped: ${e.message}`));
-              }
-
-              target.zeroEventCount = -1000;
-            }
-          }
         }
       }
     } catch {
@@ -701,6 +649,18 @@ export class ReplaySession {
         this.handleBindingCalled(msg);
       }
 
+      // Console API calls from page targets — log [browserless-ext] prefixed messages for diagnostics
+      if (msg.method === 'Runtime.consoleAPICalled' && msg.sessionId && !this.targets.isIframe(msg.sessionId)) {
+        const args: string[] = (msg.params?.args || [])
+          .map((a: { value?: string; description?: string; type?: string }) =>
+            a.value ?? a.description ?? String(a.type))
+          .slice(0, 10);
+        const text = args.join(' ');
+        if (text.includes('[browserless-ext]') || text.includes('[rrweb-diag]')) {
+          this.log.info(`[page-console] ${text}`);
+        }
+      }
+
       // Routed CDP events
       const handler = this.messageHandlers.get(msg.method);
       if (handler) await handler(msg);
@@ -742,17 +702,21 @@ export class ReplaySession {
       // Eagerly initialize tab event tracking
       this.sessionReplay.addTabEvents(this.sessionId, targetInfo.targetId, []);
 
-      // Inject rrweb BEFORE page JS runs (target is paused)
+      // Extension handles rrweb injection via content_scripts (document_start, world: MAIN).
+      // We only need: push binding, session ID, auto-attach for iframes, and resume.
       try {
-        // Register push binding so page can send events without polling
+        // Register push binding so extension can send events without polling
         await this.sendCommand('Runtime.addBinding', { name: '__rrwebPush' }, cdpSessionId);
         await this.sendCommand('Page.enable', {}, cdpSessionId);
-        await this.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
-          source: this.script,
-          runImmediately: true,
-        }, cdpSessionId);
+        // Enable Runtime domain to receive consoleAPICalled events for diagnostics
+        await this.sendCommand('Runtime.enable', {}, cdpSessionId);
+
+        // Set session ID — extension creates __browserlessRecording with empty sessionId
+        await this.sendCommand('Runtime.evaluate', {
+          expression: `if(window.__browserlessRecording && typeof window.__browserlessRecording === 'object') window.__browserlessRecording.sessionId = '${this.sessionId}';`,
+          returnByValue: true,
+        }, cdpSessionId).catch(() => {});
         target.injected = true;
-        this.log.info(`Replay pre-injected for target ${targetInfo.targetId} (session ${this.sessionId})`);
 
         await this.sendCommand('Target.setAutoAttach', {
           autoAttach: true,
@@ -760,21 +724,40 @@ export class ReplaySession {
           flatten: true,
         }, cdpSessionId);
       } catch (e) {
-        this.log.debug(`Early injection failed for ${targetInfo.targetId}: ${e instanceof Error ? e.message : String(e)}`);
+        this.log.debug(`Target setup failed for ${targetInfo.targetId}: ${e instanceof Error ? e.message : String(e)}`);
       }
 
       // Resume the target
       if (waitingForDebugger) {
         await this.sendCommand('Runtime.runIfWaitingForDebugger', {}, cdpSessionId)
           .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] runIfWaitingForDebugger skipped: ${e.message}`));
-      } else {
-        await this.sendCommand('Runtime.evaluate', {
-          expression: this.script,
-          returnByValue: true,
-        }, cdpSessionId)
-          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] late-inject eval skipped: ${e.message}`));
-        this.log.info(`Replay late-injected for already-running target ${targetInfo.targetId}`);
       }
+
+      // Diagnostic probe: check rrweb state 2s after target resumes
+      const probeTargetId = targetInfo.targetId;
+      const probeCdpSessionId = cdpSessionId;
+      setTimeout(async () => {
+        try {
+          const result = await this.sendCommand('Runtime.evaluate', {
+            expression: `JSON.stringify({
+              recording: typeof window.__browserlessRecording,
+              recValue: window.__browserlessRecording === true ? 'true(iframe)' : (window.__browserlessRecording ? 'object' : 'falsy'),
+              stopFn: typeof window.__browserlessStopRecording,
+              rrweb: typeof window.rrweb,
+              rrwebRecord: typeof (window.rrweb && window.rrweb.record),
+              error: (window.__browserlessRecording && window.__browserlessRecording._rrwebError) || null,
+              eventCount: window.__browserlessRecording?.events?.length ?? -1,
+              bufCount: window.__browserlessRecording?._buf?.length ?? -1,
+              body: !!document.body,
+              readyState: document.readyState,
+            })`,
+            returnByValue: true,
+          }, probeCdpSessionId);
+          this.log.info(`[rrweb-diag] target=${probeTargetId} ${result?.result?.value}`);
+        } catch (e) {
+          this.log.info(`[rrweb-diag] target=${probeTargetId} probe-failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }, 2000);
 
       // Start screencast — only when video=true
       if (this.video) {
@@ -789,37 +772,22 @@ export class ReplaySession {
     }
 
     // Cross-origin iframes (e.g., Cloudflare Turnstile)
+    // Extension handles rrweb injection via all_frames: true + world: "MAIN".
+    // We only need: Page.enable, resume debugger, Turnstile observer, Network/Runtime capture.
     if (targetInfo.type === 'iframe') {
       this.log.debug(`Iframe target attached (paused=${waitingForDebugger}): ${targetInfo.targetId} url=${targetInfo.url}`);
       this.targets.addIframeTarget(targetInfo.targetId, cdpSessionId);
 
       try {
         await this.sendCommand('Page.enable', {}, cdpSessionId);
-        await this.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
-          source: this.iframeScript,
-          runImmediately: true,
-        }, cdpSessionId);
-        this.log.info(`rrweb injected into iframe ${targetInfo.targetId}`);
       } catch (e) {
-        this.log.debug(`Iframe injection failed for ${targetInfo.targetId}: ${e instanceof Error ? e.message : String(e)}`);
+        this.log.debug(`Iframe Page.enable failed for ${targetInfo.targetId}: ${e instanceof Error ? e.message : String(e)}`);
       }
 
       if (waitingForDebugger) {
         await this.sendCommand('Runtime.runIfWaitingForDebugger', {}, cdpSessionId)
           .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] iframe runIfWaitingForDebugger skipped: ${e.message}`));
       }
-
-      // Fallback: Runtime.evaluate for iframe rrweb
-      setTimeout(async () => {
-        try {
-          await this.sendCommand('Runtime.evaluate', {
-            expression: this.iframeScript,
-            returnByValue: true,
-          }, cdpSessionId);
-        } catch {
-          // Iframe may have navigated or been destroyed
-        }
-      }, 50);
 
       // Turnstile iframe state tracking
       if (targetInfo.url?.includes('challenges.cloudflare.com')) {
@@ -911,12 +879,8 @@ export class ReplaySession {
     if (targetInfo.type === 'page') {
       const target = this.targets.getByTarget(targetInfo.targetId);
       if (target) {
-        // DON'T reset target.injected — addScriptToEvaluateOnNewDocument handles re-injection
-        // on full navigations (new document context). For SPA navigations, rrweb keeps running.
-        // DON'T schedule delayed replay re-injection — it's redundant with addScriptToEvaluateOnNewDocument
-        // and wastes a CDP round-trip evaluating the full rrweb script.
-        target.zeroEventCount = 0;
-
+        // Extension handles rrweb re-injection on navigation via content_scripts.
+        // We only need to re-enable auto-attach and notify CF solver.
         this.sendCommand('Target.setAutoAttach', {
           autoAttach: true,
           waitForDebuggerOnStart: true,
@@ -930,6 +894,8 @@ export class ReplaySession {
     }
 
     // Handle iframe navigation
+    // Extension handles rrweb re-injection on iframe navigation via all_frames + document_start.
+    // We only re-inject Turnstile observer (CF-specific CDP code) and maintain Network/Runtime.
     const iframeCdpSid = this.targets.getIframeCdpSession(targetInfo.targetId);
     if (iframeCdpSid && targetInfo.type === 'iframe') {
       if (targetInfo.url?.includes('challenges.cloudflare.com')) {
@@ -948,19 +914,6 @@ export class ReplaySession {
           }, iframeCdpSid)
             .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] turnstile observer eval skipped: ${e.message}`));
         }, 100);
-
-        this.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
-          source: this.iframeScript,
-          runImmediately: true,
-        }, iframeCdpSid)
-          .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] iframe script inject skipped: ${e.message}`));
-        setTimeout(() => {
-          this.sendCommand('Runtime.evaluate', {
-            expression: this.iframeScript,
-            returnByValue: true,
-          }, iframeCdpSid)
-            .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] iframe script eval skipped: ${e.message}`));
-        }, 50);
 
         this.sendCommand('Network.enable', {}, iframeCdpSid)
           .catch((e: Error) => this.log.debug(`[${targetInfo.targetId}] Network.enable skipped: ${e.message}`));
@@ -990,35 +943,40 @@ export class ReplaySession {
     return last;
   }
 
-  // ─── Polling ────────────────────────────────────────────────────────────
-
-  private scheduleFallbackPoll(): void {
-    if (this.state === 'DESTROYED') return;
-    this.pollInterval = setTimeout(async () => {
-      await this.pollEvents();
-      if (this.state !== 'DESTROYED') this.scheduleFallbackPoll();
-    }, 5000);
-  }
-
-  private async pollEvents(): Promise<void> {
-    if (this.state === 'DESTROYED') {
-      if (this.pollInterval) clearTimeout(this.pollInterval);
+  /**
+   * Inject a CF marker directly into the server-side event store.
+   * Bypasses Runtime.evaluate — events appear immediately in the replay
+   * without needing pollEvents() to drain the page's events array.
+   */
+  injectMarkerServerSide(cdpSessionId: string, tag: string, payload?: object): void {
+    const target = this.targets.getByCdpSession(cdpSessionId);
+    if (!target) {
+      this.log.warn(`[cf-marker] target not found for cdpSession=${cdpSessionId} tag=${tag} (known=${this.targets.size})`);
       return;
     }
-
-    this.healthCounter++;
-    if (this.healthCounter % 6 === 0) { // Every 30s (6 × 5000ms)
-      const healthy = this.targets.openPageWsCount;
-      const total = this.targets.pageWsCount;
-      let iframePending = 0;
-      for (const cmd of this.pendingCommands.values()) {
-        if (cmd.cdpSessionId && !this.targets.getByCdpSession(cmd.cdpSessionId)?.pageWebSocket) iframePending++;
-      }
-      this.log.info(`[WS Health] per-page: ${healthy}/${total} open, tracked: ${this.targets.size}, pending: ${this.pendingCommands.size} (iframe: ${iframePending})`);
-    }
-
-    for (const target of this.targets) {
-      await this.collectEvents(target.targetId);
-    }
+    this.log.info(`[cf-marker] injected tag=${tag} target=${target.targetId}`);
+    this.injectMarkerForTarget(target.targetId, tag, payload);
   }
+
+  /**
+   * Inject a custom marker by targetId. Used by Browserless.addReplayMarker CDP command.
+   * If targetId is empty, injects into the first (usually only) tracked page.
+   */
+  injectMarkerByTargetId(targetId: string, tag: string, payload?: object): void {
+    const resolvedTargetId = targetId || this.targets.firstTargetId();
+    if (!resolvedTargetId) {
+      this.log.warn(`[replay-marker] no target available for tag=${tag}`);
+      return;
+    }
+    this.injectMarkerForTarget(resolvedTargetId, tag, payload);
+  }
+
+  private injectMarkerForTarget(targetId: string, tag: string, payload?: object): void {
+    this.sessionReplay.addTabEvents(this.sessionId, targetId, [{
+      type: 5,
+      timestamp: Date.now(),
+      data: { tag, payload: payload || {} },
+    }]);
+  }
+
 }

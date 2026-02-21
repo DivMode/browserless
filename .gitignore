@@ -6,6 +6,7 @@ extensions/ublocklite
 
 # Generated rrweb bundles (created by scripts/bundle-rrweb*.js)
 src/generated/
+extensions/replay/rrweb-recorder.js
 
 # npm pack
 browserless.io-browserless-*.tgz

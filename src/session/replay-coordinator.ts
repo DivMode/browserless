@@ -42,6 +42,7 @@ export class ReplayCoordinator {
   private screencastCapture = new ScreencastCapture();
   private videoEncoder: VideoEncoder;
   private cloudflareSolvers = new Map<string, CloudflareSolver>();
+  private replaySessions = new Map<string, ReplaySession>();
   private baseUrl = process.env.BROWSERLESS_BASE_URL ?? '';
   constructor(private sessionReplay?: SessionReplay, private videoMgr?: VideoManager) {
     this.videoEncoder = new VideoEncoder(sessionReplay?.getStore() ?? null);
@@ -127,21 +128,13 @@ export class ReplayCoordinator {
       sessionRef!.sendCommand(method, params ?? {}, cdpSid, timeoutMs);
 
     // Create solver for this session (disabled until client enables)
+    // injectMarker uses server-side addTabEvents instead of Runtime.evaluate
+    // because extension-based recording has no pollEvents() loop to drain
+    // the page's events array — markers would only appear at finalization.
     const cloudflareSolver = new CloudflareSolver(
       sendViaSession,
       (cdpSid: string, tag: string, payload?: object) => {
-        const tagJson = JSON.stringify(tag);
-        const payloadJson = JSON.stringify(payload || {});
-        sendViaSession('Runtime.evaluate', {
-          expression: `(function(){
-            var r = window.__browserlessRecording;
-            if (!r || !r.events) return;
-            r.events.push({
-              type: 5, timestamp: Date.now(),
-              data: { tag: ${tagJson}, payload: ${payloadJson} }
-            });
-          })()`,
-        }, cdpSid).catch(() => {});
+        sessionRef?.injectMarkerServerSide(cdpSid, tag, payload);
       },
     );
     this.cloudflareSolvers.set(sessionId, cloudflareSolver);
@@ -166,8 +159,11 @@ export class ReplayCoordinator {
       return;
     }
 
+    this.replaySessions.set(sessionId, session);
+
     this.sessionReplay.registerCleanupFn(sessionId, async () => {
       this.cloudflareSolvers.delete(sessionId);
+      this.replaySessions.delete(sessionId);
       await session.destroy('cleanup');
     });
     this.sessionReplay.registerFinalCollector(sessionId, () => session.collectAllEvents());
@@ -208,6 +204,16 @@ export class ReplayCoordinator {
     });
 
     return result;
+  }
+
+  /**
+   * Create a callback for Browserless.addReplayMarker CDP command.
+   * Returns a function that injects markers by targetId, or undefined if no session.
+   */
+  getReplayMarkerCallback(sessionId: string): ((targetId: string, tag: string, payload?: object) => void) | undefined {
+    const session = this.replaySessions.get(sessionId);
+    if (!session) return undefined;
+    return (targetId, tag, payload) => session.injectMarkerByTargetId(targetId, tag, payload);
   }
 
   /**

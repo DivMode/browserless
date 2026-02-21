@@ -9,6 +9,7 @@ import {
   edgeExecutablePath,
   noop,
   once,
+  replayExtensionPath,
   screenxyPatchPath,
   ublockLitePath,
 } from '@browserless.io/browserless';
@@ -31,6 +32,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   protected config: Config;
   protected userDataDir: string | null;
   protected blockAds: boolean;
+  protected enableReplay: boolean;
   protected running = false;
   protected browser: Browser | null = null;
   protected browserWSEndpoint: string | null = null;
@@ -51,11 +53,13 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   constructor({
     blockAds,
     config,
+    enableReplay,
     userDataDir,
     logger,
   }: {
     blockAds: boolean;
     config: Config;
+    enableReplay?: boolean;
     logger: Logger;
     userDataDir: ChromiumCDP['userDataDir'];
   }) {
@@ -64,6 +68,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
     this.userDataDir = userDataDir;
     this.config = config;
     this.blockAds = blockAds;
+    this.enableReplay = enableReplay ?? false;
     this.logger = logger;
 
     this.logger.info(`Starting new ${this.constructor.name} instance`);
@@ -89,6 +94,12 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
 
   public setCloudflareSolver(cloudflareSolver: CloudflareSolver): void {
     this.cloudflareSolver = cloudflareSolver;
+  }
+
+  private replayMarkerCallback?: (targetId: string, tag: string, payload?: object) => void;
+
+  public setReplayMarkerCallback(fn: (targetId: string, tag: string, payload?: object) => void): void {
+    this.replayMarkerCallback = fn;
   }
 
   /**
@@ -253,6 +264,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
     const extensions = [
       this.blockAds ? ublockLitePath : null,
       screenxyPatchPath,
+      this.enableReplay ? replayExtensionPath : null,
       extensionLaunchArgs ? extensionLaunchArgs.split('=')[1] : null,
     ].filter((_) => !!_);
 
@@ -435,6 +447,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
           this.cloudflareSolver
             ? (config: any) => this.cloudflareSolver!.enable(config)
             : undefined,
+          this.replayMarkerCallback,
         );
 
         await this.cdpProxy.connect();

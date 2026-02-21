@@ -45,7 +45,7 @@ export class CloudflareSolveStrategies {
         await this.solveByClicking(active, 0.5 + Math.random() * 1.0);
         break;
       case 'interstitial':
-        await this.solveByClicking(active, 0.3 + Math.random() * 0.7);
+        await this.solveByClicking(active, 1.5 + Math.random() * 1.5);
         break;
       case 'turnstile':
         await this.solveTurnstile(active);
@@ -107,6 +107,65 @@ export class CloudflareSolveStrategies {
     try {
       await postClickDwell(this.sendCommand, pageCdpSessionId, targetX, targetY);
     } catch { /* page navigated after solve — expected */ }
+  }
+
+  /**
+   * Dispatch a click directly inside the Turnstile OOPIF via Runtime.evaluate.
+   * Input.dispatchMouseEvent on the parent page CDP session doesn't route into
+   * OOPIFs, so we evaluate JS inside the iframe's own CDP session instead.
+   */
+  private async clickInsideOOPIF(
+    active: ActiveDetection,
+    iframeViewportX: number,
+    iframeViewportY: number,
+  ): Promise<boolean> {
+    const { iframeCdpSessionId, pageCdpSessionId } = active;
+    if (!iframeCdpSessionId) return false;
+
+    const expression = `(() => {
+  const inputs = document.querySelectorAll('input');
+  let target = null;
+  for (const inp of inputs) {
+    const r = inp.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) { target = inp; break; }
+  }
+  if (!target) {
+    target = document.elementFromPoint(
+      window.innerWidth / 2, window.innerHeight / 2
+    );
+  }
+  if (!target) return JSON.stringify({ ok: false, error: 'no_target' });
+  const r = target.getBoundingClientRect();
+  const cx = r.x + r.width / 2;
+  const cy = r.y + r.height / 2;
+  const evt = new MouseEvent('click', {
+    bubbles: true, cancelable: true, view: window,
+    screenX: ${Math.round(iframeViewportX)} + cx,
+    screenY: ${Math.round(iframeViewportY)} + cy,
+    clientX: cx, clientY: cy,
+  });
+  target.dispatchEvent(evt);
+  return JSON.stringify({ ok: true, tag: target.tagName, cx: Math.round(cx), cy: Math.round(cy) });
+})()`;
+
+    try {
+      const result = await this.sendCommand('Runtime.evaluate', {
+        expression,
+        returnByValue: true,
+      }, iframeCdpSessionId);
+
+      const raw = result?.result?.value;
+      const parsed = raw ? JSON.parse(raw) : { ok: false, error: 'no_result' };
+
+      this.events.marker(pageCdpSessionId, 'cf.oopif_click', parsed);
+      this.events.emitProgress(active, 'oopif_click', parsed);
+      return parsed.ok === true;
+    } catch (err) {
+      this.events.marker(pageCdpSessionId, 'cf.oopif_click', {
+        ok: false, error: (err as Error)?.message || 'evaluate_failed',
+      });
+      return false;
+    }
   }
 
   /**
@@ -202,9 +261,28 @@ export class CloudflareSolveStrategies {
       return;
     }
 
+    // Strategy 1: coordinate click on parent page (works for interstitials, not OOPIFs)
     await this.performClick(active, coords.x, coords.y, {
       lightweight: true, deadline, method: coords.method,
     });
+
+    // Check if coordinate click solved it
+    await new Promise(r => setTimeout(r, 1500));
+    if (active.aborted || Date.now() > deadline) return;
+    if (await this.state.isSolved(pageCdpSessionId)) return;
+
+    // Strategy 2: direct OOPIF click — dispatch MouseEvent inside iframe CDP session
+    if (active.iframeCdpSessionId) {
+      const oopifResult = await this.clickInsideOOPIF(active, coords.x, coords.y);
+      if (oopifResult) {
+        await new Promise(r => setTimeout(r, 2000));
+        if (active.aborted || Date.now() > deadline) return;
+        if (await this.state.isSolved(pageCdpSessionId)) return;
+      }
+    }
+
+    // Strategy 3: tab+space fallback
+    await this.tryTabSpaceFallback(active, 2);
   }
 
   private async tryTabSpaceFallback(active: ActiveDetection, maxTabs = 5): Promise<void> {

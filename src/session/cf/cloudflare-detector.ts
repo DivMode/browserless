@@ -97,15 +97,41 @@ export class CloudflareDetector {
       this.state.activeDetections.delete(targetId);
       const duration = Date.now() - active.startTime;
       if (active.info.type === 'interstitial') {
-        this.events.emitSolved(active, {
-          solved: true,
-          type: 'interstitial',
-          method: 'auto_navigation',
-          signal: 'page_navigated',
-          duration_ms: duration,
-          attempts: active.attempt,
-          auto_resolved: true,
-        });
+        // Don't emit cf.solved yet — verify the destination isn't another challenge.
+        // Wait for new page to settle, then check.
+        await new Promise((r) => setTimeout(r, 500));
+        let destinationIsCF = false;
+        try {
+          const result = await this.sendCommand('Runtime.evaluate', {
+            expression: CF_DETECTION_JS,
+            returnByValue: true,
+          }, cdpSessionId);
+          const raw = result?.result?.value;
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            destinationIsCF = !!parsed.detected;
+          }
+        } catch {
+          // CDP error (context destroyed, etc.) — assume not CF, emit solved
+        }
+
+        if (destinationIsCF) {
+          this.log.info(`Navigation from interstitial landed on another CF challenge — suppressing cf.solved`);
+          this.events.marker(cdpSessionId, 'cf.rechallenge', {
+            type: 'interstitial', duration_ms: duration,
+          });
+          // Let detectAndSolve below handle the new challenge page
+        } else {
+          this.events.emitSolved(active, {
+            solved: true,
+            type: 'interstitial',
+            method: 'auto_navigation',
+            signal: 'page_navigated',
+            duration_ms: duration,
+            attempts: active.attempt,
+            auto_resolved: true,
+          });
+        }
       } else {
         this.events.emitFailed(active, 'page_navigated', duration);
       }
@@ -113,7 +139,10 @@ export class CloudflareDetector {
 
     if (!this.enabled || !url || url.startsWith('about:')) return;
 
-    await new Promise((r) => setTimeout(r, 500));
+    // If we already waited 500ms for interstitial verification above, skip the delay
+    if (!active || active.info.type !== 'interstitial') {
+      await new Promise((r) => setTimeout(r, 500));
+    }
     await this.detectAndSolve(targetId, cdpSessionId);
   }
 

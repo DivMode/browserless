@@ -420,13 +420,13 @@ export async function commitClick(
   x: number, y: number,
 ): Promise<void> {
   await sendCommand('Input.dispatchMouseEvent', {
-    type: 'mousePressed', x, y, button: 'left', clickCount: 1,
+    type: 'mousePressed', x, y, button: 'left', clickCount: 1, buttons: 1,
   }, cdpSessionId);
 
   await sleep(rand(80, 150));
 
   await sendCommand('Input.dispatchMouseEvent', {
-    type: 'mouseReleased', x, y, button: 'left', clickCount: 1,
+    type: 'mouseReleased', x, y, button: 'left', clickCount: 1, buttons: 0,
   }, cdpSessionId);
 }
 

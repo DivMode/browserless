@@ -6,7 +6,6 @@ export class TargetState {
   readonly cdpSessionId: string;
   readonly startTime = Date.now();
   injected = false;
-  zeroEventCount = 0;
   finalizedResult: StopTabRecordingResult | null = null;
   pageWebSocket: InstanceType<any> | null = null;
   failedReconnect = false;
@@ -74,6 +73,11 @@ export class TargetRegistry {
 
   get size(): number {
     return this.byTargetId.size;
+  }
+
+  /** Return the first tracked target ID (for default-target resolution). */
+  firstTargetId(): string | undefined {
+    return this.byTargetId.keys().next().value;
   }
 
   // ─── Iframe tracking ──────────────────────────────────────────────────
