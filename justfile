@@ -37,5 +37,18 @@ test:
 typecheck:
     npx tsc --noEmit
 
+# Start local Browserless server with auto-restart on rebuild
+dev port="3000":
+    PORT={{port}} npx env-cmd -f .env.dev bun --watch build/index.js
+
+# Run TypeScript compiler in watch mode (separate terminal)
+watch:
+    npx tsc --watch --preserveWatchOutput
+
+# One-time dev setup: build everything needed for local dev
+dev-setup: build build-ext
+    npm run build:function
+    npm run install:debugger
+
 # Build + deploy in one step
 ship: build build-ext deploy
