@@ -192,5 +192,8 @@
     "trailingComma": "all",
     "singleQuote": true,
     "printWidth": 80
+  },
+  "devDependencies": {
+    "env-cmd": "^11.0.0"
   }
 }

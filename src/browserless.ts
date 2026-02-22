@@ -419,13 +419,15 @@ export class Browserless extends EventEmitter {
           internalBrowsers.includes(route.browser) &&
           !installedBrowsers.some((b) => b.name === route.browser?.name)
         ) {
-          throw new Error(
-            dedent(`Couldn't load route "${route.path}" due to missing browser binary for "${route.browser?.name}".
+          console.warn(
+            dedent(`Skipping route "${route.path}" — missing browser binary for "${route.browser?.name}".
             Installed Browsers: ${installedBrowsers.map((b) => b.name).join(', ')}`),
           );
+          return null;
         }
         return route;
       })
+      .filter((e): e is NonNullable<typeof e> => e !== null)
       .filter((e, i, a) => a.findIndex((r) => r.name === e.name) !== i)
       .map((r) => r.name)
       .forEach((name) => {

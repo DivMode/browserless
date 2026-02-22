@@ -50,4 +50,59 @@
     configurable: true,
     enumerable: true,
   });
+
+  // sourceCapabilities — CDP events have null, real mouse events have InputDeviceCapabilities
+  if (typeof InputDeviceCapabilities !== 'undefined') {
+    const origCapDesc = origGetOwnPropDesc.call(Object, UIEvent.prototype, 'sourceCapabilities');
+    const origCapGet = origCapDesc && origCapDesc.get;
+    const mouseCaps = new InputDeviceCapabilities({firesTouchEvents: false});
+    const fakeCapGet = spoofToString(
+      function sourceCapabilities() { return mouseCaps; },
+      origCapGet
+    );
+    Object.defineProperty(UIEvent.prototype, 'sourceCapabilities', {
+      get: fakeCapGet,
+      configurable: true,
+      enumerable: true,
+    });
+  }
+
+  // PointerEvent patches — pressure, width, height
+  if (typeof PointerEvent !== 'undefined') {
+    const origPressureDesc = origGetOwnPropDesc.call(Object, PointerEvent.prototype, 'pressure');
+    const origPressureGet = origPressureDesc && origPressureDesc.get;
+    const fakePressureGet = spoofToString(
+      function pressure() { return (this.buttons > 0) ? 0.5 : 0; },
+      origPressureGet
+    );
+    Object.defineProperty(PointerEvent.prototype, 'pressure', {
+      get: fakePressureGet,
+      configurable: true,
+      enumerable: true,
+    });
+
+    const origWidthDesc = origGetOwnPropDesc.call(Object, PointerEvent.prototype, 'width');
+    const origWidthGet = origWidthDesc && origWidthDesc.get;
+    const fakeWidthGet = spoofToString(
+      function width() { return 1; },
+      origWidthGet
+    );
+    Object.defineProperty(PointerEvent.prototype, 'width', {
+      get: fakeWidthGet,
+      configurable: true,
+      enumerable: true,
+    });
+
+    const origHeightDesc = origGetOwnPropDesc.call(Object, PointerEvent.prototype, 'height');
+    const origHeightGet = origHeightDesc && origHeightDesc.get;
+    const fakeHeightGet = spoofToString(
+      function height() { return 1; },
+      origHeightGet
+    );
+    Object.defineProperty(PointerEvent.prototype, 'height', {
+      get: fakeHeightGet,
+      configurable: true,
+      enumerable: true,
+    });
+  }
 })();

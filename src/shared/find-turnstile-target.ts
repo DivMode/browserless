@@ -59,7 +59,12 @@ function collectDebug(): DebugInfo {
 }
 
 function hit(rect: DOMRect, method: string): ClickTarget {
-  return { x: rect.x + 30, y: rect.y + rect.height / 2, m: method, d: collectDebug() };
+  // Click at ~(30-34, 28-35) from top-left — where the checkbox sits in Turnstile.
+  // Off-center + randomized is more human-like than clicking exact center.
+  // SeleniumBase uses fixed (32, 32) from top-left.
+  const offX = 30 + Math.random() * 4;
+  const offY = 28 + Math.random() * 7;
+  return { x: rect.x + offX, y: rect.y + offY, m: method, d: collectDebug() };
 }
 
 function findShadowHosts(container: Element, method: string): ShadowHost[] {
@@ -184,6 +189,35 @@ function findTurnstileTarget(): ClickTarget {
     if (rect.width >= 200 && rect.height >= 40 && rect.x > 0 && rect.y > 0) {
       rect = scrollAndMeasure(widgetEls[i]);
       return hit(rect, 'cf-chl-widget');
+    }
+  }
+
+  // Method 9a: [data-callback] containing iframe (common Turnstile integration pattern)
+  const callbackEls = document.querySelectorAll<HTMLElement>('[data-callback*="captcha"] iframe, [data-callback*="Captcha"] iframe, [data-callback*="Success"] iframe, [data-callback*="success"] iframe');
+  for (let i = 0; i < callbackEls.length; i++) {
+    const rect = scrollAndMeasure(callbackEls[i]);
+    if (rect.width > 50 && rect.height > 30 && rect.x > 0 && rect.y > 0)
+      return hit(rect, 'data-callback-iframe');
+  }
+
+  // Method 9b: [id*="turnstile"] or [class*="turnstile"] broader match (Angular ngx-turnstile, etc.)
+  const turnstileBroad = document.querySelectorAll<HTMLElement>('[id*="turnstile"] div:not([class]), [class*="turnstile"] div:not([class]), ngx-turnstile div:not([class]), div#turnstile-widget div:not([class])');
+  for (let i = 0; i < turnstileBroad.length; i++) {
+    const rect = turnstileBroad[i].getBoundingClientRect();
+    if (rect.width >= 250 && rect.width <= 400 && rect.height >= 40 && rect.height <= 200 && rect.x > 0 && rect.y > 0) {
+      const measured = scrollAndMeasure(turnstileBroad[i]);
+      return hit(measured, 'turnstile-broad');
+    }
+  }
+
+  // Method 9c: form with cf-turnstile-response input → nearest non-class div container
+  const cfTurnForms = document.querySelectorAll<HTMLElement>('form div:not([class])');
+  for (let i = 0; i < cfTurnForms.length; i++) {
+    const input = cfTurnForms[i].querySelector('input[name*="cf-turn"]');
+    if (input) {
+      const rect = scrollAndMeasure(cfTurnForms[i]);
+      if (rect.width >= 200 && rect.height >= 40 && rect.x > 0 && rect.y > 0)
+        return hit(rect, 'form-cf-input');
     }
   }
 

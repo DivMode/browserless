@@ -83,6 +83,157 @@ export interface CloudflareResult {
 export type { CloudflareSnapshot } from './cloudflare-snapshot.generated.js';
 
 /**
+ * Comprehensive CDP mouse event patch — injected via CDP into OOPIFs where Chrome
+ * extensions can't load content scripts (cross-origin iframes run in separate renderer
+ * processes, so all_frames:true does NOT reach them).
+ *
+ * Patches all known CDP Input.dispatchMouseEvent detection vectors:
+ *
+ * 1. screenX/screenY (Chrome bug 40280325): CDP sets screenX=clientX, screenY=clientY.
+ *    Real events: screenX = clientX + window.screenX, screenY = clientY + window.screenY + chromeHeight.
+ *
+ * 2. sourceCapabilities: CDP events have null sourceCapabilities.
+ *    Real mouse events: InputDeviceCapabilities({firesTouchEvents: false}).
+ *
+ * 3. PointerEvent.pressure: CDP sends 0. Real mouse pointerdown has 0.5 (spec default
+ *    for active button press). pointerup/pointermove should be 0.
+ *
+ * 4. PointerEvent.width/height: CDP may send 0. Real mouse pointer events have 1x1.
+ */
+export const SCREENXY_PATCH_JS = `(function() {
+  // Guard: check if screenX getter already returns our patched value (clientX + screenX offset).
+  // Avoids re-patching without exposing any detectable property on window.
+  try {
+    var desc = Object.getOwnPropertyDescriptor(MouseEvent.prototype, 'screenX');
+    if (desc && desc.get) return; // already patched — native has no getter on screenX
+  } catch(e) {}
+  var chromeHeight = 85;
+
+  // 1. screenX/screenY — same as extensions/screenxy-patch/patch.js
+  Object.defineProperty(MouseEvent.prototype, 'screenX', {
+    get: function() { return this.clientX + (window.screenX || 0); },
+    configurable: true, enumerable: true,
+  });
+  Object.defineProperty(MouseEvent.prototype, 'screenY', {
+    get: function() { return this.clientY + (window.screenY || 0) + chromeHeight; },
+    configurable: true, enumerable: true,
+  });
+
+  // 2. sourceCapabilities — CDP events have null, real mouse events have InputDeviceCapabilities
+  if (typeof InputDeviceCapabilities !== 'undefined') {
+    var mouseCaps = new InputDeviceCapabilities({firesTouchEvents: false});
+    Object.defineProperty(UIEvent.prototype, 'sourceCapabilities', {
+      get: function() { return mouseCaps; },
+      configurable: true, enumerable: true,
+    });
+  }
+
+  // 3. PointerEvent.pressure — CDP sends 0, real pointerdown has 0.5
+  if (typeof PointerEvent !== 'undefined') {
+    Object.defineProperty(PointerEvent.prototype, 'pressure', {
+      get: function() { return (this.buttons > 0) ? 0.5 : 0; },
+      configurable: true, enumerable: true,
+    });
+    // 4. PointerEvent.width/height — CDP may send 0, real mouse events have 1
+    Object.defineProperty(PointerEvent.prototype, 'width', {
+      get: function() { return 1; },
+      configurable: true, enumerable: true,
+    });
+    Object.defineProperty(PointerEvent.prototype, 'height', {
+      get: function() { return 1; },
+      configurable: true, enumerable: true,
+    });
+  }
+})()`;
+
+/**
+ * Fix navigator.languages + crossOriginIsolated to match a real Chrome browser.
+ *
+ * Two problems solved:
+ * 1. Chrome with --lang=en-US sets navigator.languages to ["en-US"] but a real
+ *    user's browser has ["en-US", "en"]. CF's fingerprint checks this value.
+ * 2. crossOriginIsolated=true in some contexts when CF expects false.
+ *
+ * Critical: CF's fingerprint audit creates a hidden same-origin iframe and reads
+ * iframe.contentWindow.navigator.languages SYNCHRONOUSLY. Each iframe gets its own
+ * Navigator.prototype, so patching the parent's prototype doesn't help. And
+ * addScriptToEvaluateOnNewDocument doesn't fire on synchronously-created iframes
+ * (their initial about:blank document exists before any document load event).
+ *
+ * Solution: Intercept HTMLIFrameElement.prototype.contentWindow to auto-patch
+ * the navigator in each new iframe context the moment it's first accessed.
+ */
+export const NAVIGATOR_LANGUAGES_PATCH_JS = `(function() {
+  var langs = Object.freeze(['en-US', 'en']);
+
+  // Guard: check if Navigator.prototype.languages already returns our frozen array.
+  // This avoids re-patching without exposing any detectable property on window.
+  try {
+    var cur = Object.getOwnPropertyDescriptor(Navigator.prototype, 'languages');
+    if (cur && cur.get && cur.get() === langs) return;
+  } catch(e) {}
+
+  // Closure-scoped tracking — invisible to any external code.
+  // WeakSet allows GC of detached iframe windows.
+  var patched = new WeakSet();
+
+  function patchNavigator(nav, proto) {
+    try { Object.defineProperty(proto, 'languages', {
+      get: function() { return langs; },
+      configurable: true, enumerable: true,
+    }); } catch(e) {}
+    try { Object.defineProperty(nav, 'languages', {
+      get: function() { return langs; },
+      configurable: true, enumerable: true,
+    }); } catch(e) {}
+    try { Object.defineProperty(proto, 'language', {
+      get: function() { return 'en-US'; },
+      configurable: true, enumerable: true,
+    }); } catch(e) {}
+  }
+
+  function patchWindow(w) {
+    if (!w || patched.has(w)) return;
+    patched.add(w);
+    try {
+      var np = w.Navigator && w.Navigator.prototype;
+      if (np) patchNavigator(w.navigator, np);
+      // crossOriginIsolated is an own property per-window — must patch each instance
+      Object.defineProperty(w, 'crossOriginIsolated', {
+        get: function() { return false; },
+        configurable: true, enumerable: true,
+      });
+    } catch(e) {} // cross-origin — ignore
+  }
+
+  // Patch current frame
+  patchWindow(window);
+
+  // Watch for new iframes via MutationObserver — less detectable than
+  // overriding contentWindow getter. Patches same-origin iframes on insert.
+  try {
+    new MutationObserver(function(mutations) {
+      for (var m = 0; m < mutations.length; m++) {
+        var nodes = mutations[m].addedNodes;
+        for (var n = 0; n < nodes.length; n++) {
+          var node = nodes[n];
+          if (node.tagName === 'IFRAME') {
+            try { patchWindow(node.contentWindow); } catch(e) {}
+          }
+          // Also check children of added nodes
+          if (node.querySelectorAll) {
+            var iframes = node.querySelectorAll('iframe');
+            for (var f = 0; f < iframes.length; f++) {
+              try { patchWindow(iframes[f].contentWindow); } catch(e) {}
+            }
+          }
+        }
+      }
+    }).observe(document.documentElement || document, {childList: true, subtree: true});
+  } catch(e) {}
+})()`;
+
+/**
  * JS hook that wraps turnstile.render() to detect auto-solves.
  * Sets window.__turnstileSolved = true when callback fires.
  * Polls for late-arriving turnstile object (up to 30s).
@@ -177,6 +328,15 @@ export const CF_DETECTION_JS = `JSON.stringify((() => {
         return { detected: true, method: 'body_text_challenge' };
     if (document.querySelector('.cf-error-details, #cf-error-details'))
         return { detected: true, method: 'cf_error_page' };
+    var html = document.documentElement.innerHTML || '';
+    if (html.includes('challenges.cloudf'))
+        return { detected: true, method: 'challenges_domain' };
+    var cfForm = document.querySelector('form[action*="__cf_chl_f_tk"], form[action*="__cf_chl_jschl"]');
+    if (cfForm) return { detected: true, method: 'cf_form_action' };
+    var tsScript = document.querySelector('script[src*="/turnstile/"]');
+    if (tsScript) return { detected: true, method: 'turnstile_script' };
+    if (document.querySelector('#challenge-success-text'))
+        return { detected: true, method: 'challenge_success' };
     var footer = (document.querySelector('footer') || {}).innerText || '';
     var footerLower = footer.toLowerCase();
     if (footerLower.includes('ray id') && footerLower.includes('cloudflare'))
@@ -557,32 +717,31 @@ export const TURNSTILE_DETECT_AND_AWAIT_JS = `JSON.stringify((function() {
     if (!document.querySelector('.cf-turnstile, [data-sitekey], [name="cf-turnstile-response"], iframe[src*="challenges.cloudflare.com"]'))
       return null;
   }
+  var _k = Symbol.for('_ts');
   function getToken() {
     var t = null;
     if (typeof turnstile !== 'undefined' && turnstile.getResponse) {
       try { t = turnstile.getResponse() || null; } catch(e) {}
     }
     if (!t) { var inp = document.querySelector('input[name="cf-turnstile-response"]'); if (inp) t = inp.value || null; }
-    if (!t && window.__turnstileToken) t = window.__turnstileToken;
     return t;
   }
   var token = getToken();
   if (token) return { present: true, solved: true, tokenLength: token.length };
-  if (!window.__turnstileAwaitStarted) {
-    window.__turnstileAwaitStarted = true;
+  var st = window[_k];
+  if (!st) {
+    st = { started: true, result: null };
+    Object.defineProperty(window, _k, { value: st, configurable: false, enumerable: false });
     var iv = setInterval(function() {
       var t = getToken();
       if (t) {
         clearInterval(iv);
-        window.__turnstileAwaitResult = { solved: true, tokenLength: t.length };
-        if (typeof window.__turnstileSolvedBinding === 'function') {
-          try { window.__turnstileSolvedBinding(t); } catch(e) {}
-        }
+        st.result = { solved: true, tokenLength: t.length };
       }
     }, 100);
     setTimeout(function() { clearInterval(iv); }, 30000);
   }
-  if (window.__turnstileAwaitResult) return { present: true, solved: true, tokenLength: window.__turnstileAwaitResult.tokenLength };
+  if (st.result) return { present: true, solved: true, tokenLength: st.result.tokenLength };
   return { present: true, solved: false };
 })())`;
 
@@ -660,3 +819,235 @@ export const TURNSTILE_ERROR_CHECK_JS = `JSON.stringify((function() {
   }
   return null;
 })()`;
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════
+ * CF Fingerprint Audit — diagnostic injection
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * Ported from cloudflare-jsd/get_fingerprint.js
+ *
+ * Creates a hidden iframe (same technique CF uses internally) and
+ * enumerates all properties on window, navigator, and document.
+ * Classifies each property by CF's type encoding (o, N, F, T, etc.)
+ * and compares against the expected fingerprint from fp.go.
+ *
+ * Returns JSON with:
+ *   - mismatches: properties where our browser differs from expected
+ *   - critical: high-priority mismatches (webdriver, native functions, etc.)
+ *   - sample: first 30 captured property classifications
+ *   - counts: total properties per type
+ */
+export const CF_FINGERPRINT_AUDIT_JS = `JSON.stringify((function() {
+  try {
+    var S = document;
+    var n = {object:'o',string:'s',undefined:'u',symbol:'z',number:'n',bigint:'I',boolean:'b'};
+
+    function isNative(E, fn) {
+      try {
+        return fn instanceof E.Function &&
+          E.Function.prototype.toString.call(fn).indexOf('[native code]') > -1;
+      } catch(e) { return false; }
+    }
+
+    function classifyProp(E, obj, key) {
+      try {
+        var val = obj[key];
+        if (val && typeof val.catch === 'function') return 'p';
+      } catch(e) {}
+      try {
+        if (obj[key] == null) return obj[key] === undefined ? 'u' : 'x';
+      } catch(e) { return 'i'; }
+      var val = obj[key];
+      if (E.Array.isArray(val)) return 'a';
+      if (val === E.Array) return 'q0';
+      if (val === true) return 'T';
+      if (val === false) return 'F';
+      var t = typeof val;
+      if (t === 'function') return isNative(E, val) ? 'N' : 'f';
+      return n[t] || '?';
+    }
+
+    function getAllKeys(obj) {
+      var keys = [];
+      var cur = obj;
+      while (cur !== null) {
+        keys = keys.concat(Object.keys(cur));
+        try { cur = Object.getPrototypeOf(cur); } catch(e) { break; }
+      }
+      if (typeof Object.getOwnPropertyNames === 'function') {
+        try { keys = keys.concat(Object.getOwnPropertyNames(obj)); } catch(e) {}
+      }
+      // Deduplicate
+      var seen = {};
+      var unique = [];
+      for (var i = 0; i < keys.length; i++) {
+        if (!seen[keys[i]]) { seen[keys[i]] = true; unique.push(keys[i]); }
+      }
+      return unique;
+    }
+
+    function enumerate(E, obj, prefix, result) {
+      if (obj == null) return result;
+      var keys = getAllKeys(obj);
+      for (var i = 0; i < keys.length; i++) {
+        var key = keys[i];
+        var cls = classifyProp(E, obj, key);
+        var fullKey = prefix + key;
+        if (!result[cls]) result[cls] = [];
+        result[cls].push(fullKey);
+      }
+      return result;
+    }
+
+    // Create hidden iframe — same as CF's technique
+    // Wait for body to be available (CF interstitial pages load body async)
+    if (!S.body) return {error: 'no_body', readyState: S.readyState};
+    var iframe = S.createElement('iframe');
+    iframe.style.display = 'none';
+    iframe.tabIndex = -1;
+    S.body.appendChild(iframe);
+    var W = iframe.contentWindow;
+    var D = iframe.contentDocument;
+    if (!W || !D) { try { S.body.removeChild(iframe); } catch(e){} return {error: 'no_iframe_window'}; }
+
+    var fp = {};
+    fp = enumerate(W, W, '', fp);
+    fp = enumerate(W, W.clientInformation || W.navigator, 'n.', fp);
+    fp = enumerate(W, D, 'd.', fp);
+    S.body.removeChild(iframe);
+
+    // Expected values from cloudflare-jsd/fp.go
+    var expected = {
+      'F': ['closed','crossOriginIsolated','credentialless','n.webdriver',
+            'n.deprecatedRunAdAuctionEnforcesKAnonymity','d.xmlStandalone','d.hidden',
+            'd.wasDiscarded','d.prerendering','d.webkitHidden','d.fullscreen','d.webkitIsFullScreen'],
+      'T': ['isSecureContext','originAgentCluster','offscreenBuffering',
+            'n.pdfViewerEnabled','n.cookieEnabled','n.onLine',
+            'd.fullscreenEnabled','d.webkitFullscreenEnabled','d.pictureInPictureEnabled','d.isConnected'],
+      'N_sample': ['alert','atob','blur','btoa','fetch','Object','Function','Number','Boolean',
+                   'String','Date','Promise','Map','Set','eval','isNaN','WebSocket',
+                   'd.getElementById','d.querySelector','d.createElement'],
+      // Note: 'Array' intentionally excluded — CF's classifier returns 'q0' for it
+      // (val === E.Array check runs before the typeof==='function' check)
+      'o_sample': ['window','self','document','navigator','screen','crypto','console','JSON','Math',
+                   'n.geolocation','n.plugins','n.clipboard','n.mediaDevices','n.userAgentData'],
+    };
+
+    // Check critical mismatches
+    var mismatches = [];
+    var critical = [];
+
+    // Check booleans that should be False
+    var fpF = fp['F'] || [];
+    for (var i = 0; i < expected['F'].length; i++) {
+      var prop = expected['F'][i];
+      if (fpF.indexOf(prop) === -1) {
+        // Find what type it actually is
+        var actual = '?';
+        for (var t in fp) {
+          if (fp[t].indexOf(prop) !== -1) { actual = t; break; }
+        }
+        var entry = {prop: prop, expected: 'F', actual: actual};
+        mismatches.push(entry);
+        if (prop === 'n.webdriver') critical.push(entry);
+      }
+    }
+
+    // Check booleans that should be True
+    var fpT = fp['T'] || [];
+    for (var i = 0; i < expected['T'].length; i++) {
+      var prop = expected['T'][i];
+      if (fpT.indexOf(prop) === -1) {
+        var actual = '?';
+        for (var t in fp) {
+          if (fp[t].indexOf(prop) !== -1) { actual = t; break; }
+        }
+        mismatches.push({prop: prop, expected: 'T', actual: actual});
+      }
+    }
+
+    // Check native functions (should be 'N', not 'f' or missing)
+    var fpN = fp['N'] || [];
+    for (var i = 0; i < expected['N_sample'].length; i++) {
+      var prop = expected['N_sample'][i];
+      if (fpN.indexOf(prop) === -1) {
+        var actual = '?';
+        for (var t in fp) {
+          if (fp[t].indexOf(prop) !== -1) { actual = t; break; }
+        }
+        if (actual !== 'N') {
+          var entry = {prop: prop, expected: 'N', actual: actual};
+          mismatches.push(entry);
+          // Functions that should be native but aren't = puppeteer-stealth patches leaked
+          if (actual === 'f') critical.push(entry);
+        }
+      }
+    }
+
+    // Check objects
+    var fpO = fp['o'] || [];
+    for (var i = 0; i < expected['o_sample'].length; i++) {
+      var prop = expected['o_sample'][i];
+      if (fpO.indexOf(prop) === -1) {
+        var actual = '?';
+        for (var t in fp) {
+          if (fp[t].indexOf(prop) !== -1) { actual = t; break; }
+        }
+        if (actual !== 'o') mismatches.push({prop: prop, expected: 'o', actual: actual});
+      }
+    }
+
+    // Also check specific string values that CF validates
+    var strChecks = [];
+    try { strChecks.push({prop:'n.vendor', val: (W || window).navigator?.vendor, expected: 'Google Inc.'}); } catch(e){}
+    try { strChecks.push({prop:'n.platform', val: navigator.platform, expected: 'Linux x86_64'}); } catch(e){}
+    try { strChecks.push({prop:'n.webdriver', val: navigator.webdriver, expected: false}); } catch(e){}
+    try { strChecks.push({prop:'n.languages', val: JSON.stringify(navigator.languages), expected: '["en-US","en"]'}); } catch(e){}
+    try { strChecks.push({prop:'n.hardwareConcurrency', val: navigator.hardwareConcurrency}); } catch(e){}
+    try { strChecks.push({prop:'n.deviceMemory', val: navigator.deviceMemory}); } catch(e){}
+    try { strChecks.push({prop:'n.maxTouchPoints', val: navigator.maxTouchPoints, expected: 0}); } catch(e){}
+    try { strChecks.push({prop:'n.pdfViewerEnabled', val: navigator.pdfViewerEnabled, expected: true}); } catch(e){}
+    try { strChecks.push({prop:'n.cookieEnabled', val: navigator.cookieEnabled, expected: true}); } catch(e){}
+
+    // Puppeteer/automation specific checks
+    try { strChecks.push({prop:'window.chrome', val: typeof window.chrome, expected: 'object'}); } catch(e){}
+    try { strChecks.push({prop:'window.chrome.runtime', val: typeof window.chrome?.runtime}); } catch(e){}
+    try { strChecks.push({prop:'Notification.permission', val: typeof Notification !== 'undefined' ? Notification.permission : 'N/A'}); } catch(e){}
+    try { strChecks.push({prop:'navigator.permissions.query', val: typeof navigator.permissions?.query, expected: 'function'}); } catch(e){}
+
+    // Count properties per type
+    var counts = {};
+    for (var t in fp) { counts[t] = fp[t].length; }
+
+    // List ALL non-native functions (f) — these are automation artifacts CF can detect
+    var nonNativeFns = (fp['f'] || []).slice(0, 20);
+
+    // Check for Runtime.addBinding globals (CDP bindings are visible on window)
+    var bindingCheck = [];
+    var bindingNames = ['__csrfp','__perf','__turnstileSolvedBinding','__turnstileTargetBinding',
+                        '__turnstileStateBinding','__cfEventSpy',
+                        '__turnstileAwaitStarted','__turnstileAwaitResult','__turnstileSolved'];
+    for (var bi = 0; bi < bindingNames.length; bi++) {
+      var bname = bindingNames[bi];
+      try {
+        if (typeof window[bname] !== 'undefined') {
+          bindingCheck.push({name: bname, type: typeof window[bname]});
+        }
+      } catch(e) {}
+    }
+
+    return {
+      mismatches: mismatches.slice(0, 30),
+      critical: critical,
+      string_checks: strChecks,
+      counts: counts,
+      total_props: Object.values(fp).reduce(function(a,b){return a+b.length;}, 0),
+      webdriver_raw: navigator.webdriver,
+      non_native_fns: nonNativeFns,
+      visible_bindings: bindingCheck,
+    };
+  } catch(e) {
+    return {error: e.message || String(e)};
+  }
+})())`;

@@ -52,6 +52,7 @@ RUN apt-get update \
   unzip \
   wget \
   xvfb \
+  xdotool \
   dbus \
   dbus-x11 \
   libwebp-dev \
