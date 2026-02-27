@@ -1,16 +1,19 @@
+import type { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 import type { StopTabRecordingResult } from './replay-coordinator.js';
 
 /** All state for a single tracked CDP page target. */
 export class TargetState {
-  readonly targetId: string;
-  readonly cdpSessionId: string;
+  readonly targetId: TargetId;
+  readonly cdpSessionId: CdpSessionId;
   readonly startTime = Date.now();
   injected = false;
   finalizedResult: StopTabRecordingResult | null = null;
   pageWebSocket: InstanceType<any> | null = null;
   failedReconnect = false;
+  /** Pending timers to clear on destroy (e.g. rrweb diagnostic probe). */
+  pendingTimers: ReturnType<typeof setTimeout>[] = [];
 
-  constructor(targetId: string, cdpSessionId: string) {
+  constructor(targetId: TargetId, cdpSessionId: CdpSessionId) {
     this.targetId = targetId;
     this.cdpSessionId = cdpSessionId;
   }
@@ -23,41 +26,46 @@ export class TargetState {
  * Single `remove()` call atomically cleans all references + closes per-page WS.
  */
 export class TargetRegistry {
-  private readonly byTargetId = new Map<string, TargetState>();
-  private readonly byCdpSessionId = new Map<string, TargetState>();
+  private readonly byTargetId = new Map<TargetId, TargetState>();
+  private readonly byCdpSessionId = new Map<CdpSessionId, TargetState>();
 
   // Iframe tracking (separate concern — iframes aren't full targets)
-  private readonly iframeToCdpSession = new Map<string, string>();       // iframe cdpSid → page cdpSid
-  private readonly iframeTargetToCdpSession = new Map<string, string>(); // iframe targetId → iframe cdpSid
+  private readonly iframeToCdpSession = new Map<CdpSessionId, CdpSessionId>();       // iframe cdpSid → page cdpSid
+  private readonly iframeTargetToCdpSession = new Map<TargetId, CdpSessionId>(); // iframe targetId → iframe cdpSid
 
-  add(targetId: string, cdpSessionId: string): TargetState {
+  add(targetId: TargetId, cdpSessionId: CdpSessionId): TargetState {
     const state = new TargetState(targetId, cdpSessionId);
     this.byTargetId.set(targetId, state);
     this.byCdpSessionId.set(cdpSessionId, state);
     return state;
   }
 
-  getByTarget(targetId: string): TargetState | undefined {
+  getByTarget(targetId: TargetId): TargetState | undefined {
     return this.byTargetId.get(targetId);
   }
 
-  getByCdpSession(cdpSessionId: string): TargetState | undefined {
+  getByCdpSession(cdpSessionId: CdpSessionId): TargetState | undefined {
     return this.byCdpSessionId.get(cdpSessionId);
   }
 
-  findTargetIdByCdpSession(cdpSessionId: string): string | undefined {
+  findTargetIdByCdpSession(cdpSessionId: CdpSessionId): TargetId | undefined {
     return this.byCdpSessionId.get(cdpSessionId)?.targetId;
   }
 
   /** Remove target + close its per-page WS + clean iframe refs. One call, no missed Maps. */
-  remove(targetId: string): TargetState | undefined {
+  remove(targetId: TargetId): TargetState | undefined {
     const state = this.byTargetId.get(targetId);
     if (!state) return undefined;
     this.byTargetId.delete(targetId);
     this.byCdpSessionId.delete(state.cdpSessionId);
-    // Close per-page WS if open (clear ping interval eagerly — close event is async)
+    // Clear any pending timers (diagnostic probes, etc.)
+    for (const t of state.pendingTimers) clearTimeout(t);
+    state.pendingTimers.length = 0;
+    // Close per-page WS if open (clear ping + pong timers eagerly — close event is async)
     if (state.pageWebSocket) {
       clearInterval((state.pageWebSocket as any).__pingInterval);
+      const getPongTimeout = (state.pageWebSocket as any).__pongTimeout as (() => ReturnType<typeof setTimeout> | undefined) | undefined;
+      clearTimeout(getPongTimeout?.());
       try { state.pageWebSocket.close(); } catch {}
       state.pageWebSocket = null;
     }
@@ -67,7 +75,7 @@ export class TargetRegistry {
     return state;
   }
 
-  has(targetId: string): boolean {
+  has(targetId: TargetId): boolean {
     return this.byTargetId.has(targetId);
   }
 
@@ -76,37 +84,37 @@ export class TargetRegistry {
   }
 
   /** Return the first tracked target ID (for default-target resolution). */
-  firstTargetId(): string | undefined {
+  firstTargetId(): TargetId | undefined {
     return this.byTargetId.keys().next().value;
   }
 
   // ─── Iframe tracking ──────────────────────────────────────────────────
 
-  addIframe(iframeCdpSessionId: string, pageCdpSessionId: string): void {
+  addIframe(iframeCdpSessionId: CdpSessionId, pageCdpSessionId: CdpSessionId): void {
     this.iframeToCdpSession.set(iframeCdpSessionId, pageCdpSessionId);
   }
 
-  addIframeTarget(iframeTargetId: string, iframeCdpSessionId: string): void {
+  addIframeTarget(iframeTargetId: TargetId, iframeCdpSessionId: CdpSessionId): void {
     this.iframeTargetToCdpSession.set(iframeTargetId, iframeCdpSessionId);
   }
 
-  getParentCdpSession(iframeCdpSessionId: string): string | undefined {
+  getParentCdpSession(iframeCdpSessionId: CdpSessionId): CdpSessionId | undefined {
     return this.iframeToCdpSession.get(iframeCdpSessionId);
   }
 
-  getIframeCdpSession(iframeTargetId: string): string | undefined {
+  getIframeCdpSession(iframeTargetId: TargetId): CdpSessionId | undefined {
     return this.iframeTargetToCdpSession.get(iframeTargetId);
   }
 
-  isIframe(cdpSessionId: string): boolean {
+  isIframe(cdpSessionId: CdpSessionId): boolean {
     return this.iframeToCdpSession.has(cdpSessionId);
   }
 
-  removeIframe(cdpSessionId: string): void {
+  removeIframe(cdpSessionId: CdpSessionId): void {
     this.iframeToCdpSession.delete(cdpSessionId);
   }
 
-  removeIframeTarget(targetId: string): void {
+  removeIframeTarget(targetId: TargetId): void {
     this.iframeTargetToCdpSession.delete(targetId);
   }
 
@@ -135,7 +143,7 @@ export class TargetRegistry {
     let count = 0;
     for (const state of this.byTargetId.values()) {
       if (state.pageWebSocket) {
-        count += ((state.pageWebSocket as any).__pendingCmds as Map<any, any>)?.size ?? 0;
+        count += (state.pageWebSocket as any).__cdpConn?.pendingCount ?? 0;
       }
     }
     return count;
@@ -147,7 +155,7 @@ export class TargetRegistry {
     return this.byTargetId.values();
   }
 
-  get targetIds(): Iterable<string> {
+  get targetIds(): Iterable<TargetId> {
     return this.byTargetId.keys();
   }
 
@@ -158,8 +166,12 @@ export class TargetRegistry {
   /** Clear all state and close all per-page WebSockets. */
   clear(): void {
     for (const state of this.byTargetId.values()) {
+      for (const t of state.pendingTimers) clearTimeout(t);
+      state.pendingTimers.length = 0;
       if (state.pageWebSocket) {
         clearInterval((state.pageWebSocket as any).__pingInterval);
+        const getPongTimeout = (state.pageWebSocket as any).__pongTimeout as (() => ReturnType<typeof setTimeout> | undefined) | undefined;
+        clearTimeout(getPongTimeout?.());
         try { state.pageWebSocket.close(); } catch {}
       }
     }

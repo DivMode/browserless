@@ -13,6 +13,7 @@ import {
   screenxyPatchPath,
   ublockLitePath,
 } from '@browserless.io/browserless';
+import type { TargetId } from '../shared/cloudflare-detection.js';
 import puppeteer, { Browser, Page, Target } from 'puppeteer-core';
 import { Duplex } from 'stream';
 import { EventEmitter } from 'events';
@@ -26,6 +27,7 @@ import puppeteerStealth from 'puppeteer-extra';
 
 import { CDPProxy, ReplayCapableBrowser, ReplayCompleteParams, TabReplayCompleteParams } from '../cdp-proxy.js';
 import { CloudflareSolver } from '../session/cloudflare-solver.js';
+import type { CloudflareConfig } from '../shared/cloudflare-detection.js';
 puppeteerStealth.use(StealthPlugin());
 
 export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
@@ -96,10 +98,18 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
     this.cloudflareSolver = cloudflareSolver;
   }
 
-  private replayMarkerCallback?: (targetId: string, tag: string, payload?: object) => void;
+  private replayMarkerCallback?: (targetId: TargetId, tag: string, payload?: object) => void;
+  private getTabCountCallback?: () => number;
 
-  public setReplayMarkerCallback(fn: (targetId: string, tag: string, payload?: object) => void): void {
+  public setReplayMarkerCallback(fn: (targetId: TargetId, tag: string, payload?: object) => void): void {
     this.replayMarkerCallback = fn;
+  }
+
+  public setGetTabCount(fn: () => number): void {
+    this.getTabCountCallback = fn;
+    if (this.cdpProxy) {
+      this.cdpProxy.setGetTabCount(fn);
+    }
   }
 
   /**
@@ -457,30 +467,31 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
     socket: Duplex,
     head: Buffer,
   ): Promise<void> {
-    return new Promise(async (resolve, reject) => {
-      if (!this.browserWSEndpoint || !this.browser) {
-        throw new ServerError(
-          `No browserWSEndpoint found, did you launch first?`,
-        );
-      }
+    if (!this.browserWSEndpoint || !this.browser) {
+      throw new ServerError(
+        `No browserWSEndpoint found, did you launch first?`,
+      );
+    }
+
+    this.logger.info(
+      `Proxying ${req.parsed.href} to ${this.constructor.name}`,
+    );
+
+    const shouldMakePage = req.parsed.pathname.includes(
+      BLESS_PAGE_IDENTIFIER,
+    );
+    const page = shouldMakePage ? await this.browser.newPage() : null;
+    const pathname = page
+      ? path.join('/devtools', '/page', this.getPageId(page))
+      : req.parsed.pathname;
+    const target = new URL(pathname, this.browserWSEndpoint).href;
+    req.url = '';
+
+    // Delete headers known to cause issues
+    delete req.headers.origin;
+
+    return new Promise<void>((resolve, reject) => {
       socket.once('close', resolve);
-      this.logger.info(
-        `Proxying ${req.parsed.href} to ${this.constructor.name}`,
-      );
-
-      const shouldMakePage = req.parsed.pathname.includes(
-        BLESS_PAGE_IDENTIFIER,
-      );
-      const page = shouldMakePage ? await this.browser.newPage() : null;
-      const pathname = page
-        ? path.join('/devtools', '/page', this.getPageId(page))
-        : req.parsed.pathname;
-      const target = new URL(pathname, this.browserWSEndpoint).href;
-      req.url = '';
-
-      // Delete headers known to cause issues
-      delete req.headers.origin;
-
       this.proxy.ws(
         req,
         socket,
@@ -516,7 +527,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
       `Proxying ${req.parsed.href} to ${this.constructor.name} ${this.browserWSEndpoint}`,
     );
 
-    return new Promise(async (resolve, reject) => {
+    return new Promise<void>((resolve, reject) => {
       const close = once(() => {
         this.logger.debug(
           `proxyWebSocket close triggered: browser=${!!this.browser} cdpProxy=${!!this.cdpProxy}`,
@@ -536,8 +547,8 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
       socket.once('end', close);
       socket.once('error', close);
 
-      try {
-        // Create CDP-aware proxy for event injection
+      // Create and connect CDP-aware proxy (async, but errors routed to reject)
+      const setup = async () => {
         this.cdpProxy = new CDPProxy(
           socket,
           head,
@@ -547,13 +558,18 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
           close,
           this.onBeforeClose,
           this.cloudflareSolver
-            ? (config: any) => this.cloudflareSolver!.enable(config)
+            ? (config: CloudflareConfig) => this.cloudflareSolver!.enable(config)
             : undefined,
           this.replayMarkerCallback,
         );
 
         await this.cdpProxy.connect();
         this.logger.trace('CDPProxy connected successfully');
+
+        // Wire tab count callback for tab limit enforcement
+        if (this.getTabCountCallback) {
+          this.cdpProxy.setGetTabCount(this.getTabCountCallback);
+        }
 
         // Wire solver to CDPProxy for event emission
         if (this.cloudflareSolver && this.cdpProxy) {
@@ -566,14 +582,16 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
               this.cdpProxy!.sendViaBrowserWs(method, params || {}, sessionId, timeoutMs),
           );
         }
-      } catch (error) {
+      };
+
+      setup().catch((error) => {
         this.logger.error(
           `Error proxying session to ${this.constructor.name}: ${error}`,
         );
         this.cdpProxy = null;
         this.close();
-        return reject(error);
-      }
+        reject(error);
+      });
     });
   }
 

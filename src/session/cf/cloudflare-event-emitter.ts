@@ -1,8 +1,9 @@
 import { Logger } from '@browserless.io/browserless';
-import type { CloudflareInfo, CloudflareResult, CloudflareSnapshot } from '../../shared/cloudflare-detection.js';
+import type { Latch } from 'effect';
+import type { CdpSessionId, TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot } from '../../shared/cloudflare-detection.js';
 
 export type EmitClientEvent = (method: string, params: object) => Promise<void>;
-export type InjectMarker = (cdpSessionId: string, tag: string, payload?: object) => void;
+export type InjectMarker = (cdpSessionId: CdpSessionId, tag: string, payload?: object) => void;
 
 /**
  * Accumulates state during a CF solve phase.
@@ -29,7 +30,7 @@ export class CloudflareTracker {
   private falsePositiveCount = 0;
   private widgetErrorCount = 0;
   private iframeStates: string[] = [];
-  private widgetFindDebug: Record<string, unknown> | null = null;
+  private widgetFindDebug: Record<string, any> | null = null;
   private lastErrorType: string | null = null;
 
   constructor(info: CloudflareInfo) {
@@ -114,10 +115,10 @@ export class CloudflareTracker {
 
 export interface ActiveDetection {
   info: CloudflareInfo;
-  pageCdpSessionId: string;
-  pageTargetId: string;
-  iframeCdpSessionId?: string;
-  iframeTargetId?: string;
+  pageCdpSessionId: CdpSessionId;
+  pageTargetId: TargetId;
+  iframeCdpSessionId?: CdpSessionId;
+  iframeTargetId?: TargetId;
   startTime: number;
   attempt: number;
   aborted: boolean;
@@ -136,19 +137,23 @@ export interface ActiveDetection {
   clickDeliveredAt?: number;
   /** Number of CF rechallenges on this target so far. */
   rechallengeCount?: number;
+  /**
+   * Latch for abort coordination — opens when active.aborted is set to true.
+   * Allows Effect fibers to block on `latch.await` instead of polling `aborted`.
+   * Initialized closed (not aborted). Open = aborted.
+   */
+  abortLatch?: Latch.Latch;
 }
 
 /** Handles all CDP event emission for Cloudflare detection/solving. */
 export class CloudflareEventEmitter {
   private log = new Logger('cf-events');
-  private emitClientEvent: EmitClientEvent = async () => {};
   recordingMarkers = true;
 
-  constructor(private injectMarker: InjectMarker) {}
-
-  setEmitClientEvent(fn: EmitClientEvent): void {
-    this.emitClientEvent = fn;
-  }
+  constructor(
+    private injectMarker: InjectMarker,
+    private emitClientEvent: EmitClientEvent = async () => {},
+  ) {}
 
   emitDetected(active: ActiveDetection): void {
     this.emitClientEvent('Browserless.cloudflareDetected', {
@@ -201,16 +206,16 @@ export class CloudflareEventEmitter {
   }
 
   emitStandaloneAutoSolved(
-    targetId: string,
+    targetId: TargetId,
     signal: string,
     tokenLength: number,
-    cdpSessionId?: string,
+    cdpSessionId?: CdpSessionId,
   ): void {
     const info: CloudflareInfo = {
       type: 'turnstile', url: '', detectionMethod: signal,
     };
     const active: ActiveDetection = {
-      info, pageCdpSessionId: cdpSessionId || '', pageTargetId: targetId,
+      info, pageCdpSessionId: cdpSessionId || '' as CdpSessionId, pageTargetId: targetId,
       startTime: Date.now(), attempt: 0, aborted: true,
       tracker: new CloudflareTracker(info),
     };
@@ -226,7 +231,7 @@ export class CloudflareEventEmitter {
     });
   }
 
-  marker(cdpSessionId: string, tag: string, payload?: object): void {
+  marker(cdpSessionId: CdpSessionId, tag: string, payload?: object): void {
     if (this.recordingMarkers) {
       this.injectMarker(cdpSessionId, tag, payload);
     }

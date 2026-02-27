@@ -1,7 +1,15 @@
 import WebSocket from 'ws';
+// ws is CJS — Server lives on default export at runtime but TS types don't expose it
+const WebSocketServer = (WebSocket as any).Server as typeof import('ws').WebSocketServer;
 import { Duplex } from 'stream';
 import { IncomingMessage } from 'http';
 import { Config, Logger } from '@browserless.io/browserless';
+import { Schema } from 'effect';
+
+import { CloudflareConfig } from './shared/cloudflare-detection.js';
+import type { CdpSessionId, TargetId } from './shared/cloudflare-detection.js';
+import { decodeCDPCommand, decodeCDPMessage, decodeAddReplayMarkerParams } from './shared/cdp-schemas.js';
+import { CdpConnection } from './shared/cdp-rpc.js';
 
 /**
  * Replay metadata sent via CDP event.
@@ -23,7 +31,7 @@ export interface ReplayCompleteParams {
  */
 export interface TabReplayCompleteParams {
   sessionId: string;
-  targetId: string;
+  targetId: TargetId;
   duration: number;
   eventCount: number;
   frameCount: number;
@@ -88,6 +96,7 @@ export class CDPProxy {
   private isClosing = false;
   private closeRequested = false;
   private log = new Logger('cdp-proxy');
+  private getTabCount?: () => number;
 
   /**
    * Debug mode: log all CDP commands going through the proxy.
@@ -103,9 +112,13 @@ export class CDPProxy {
     private config: Config,
     private onClose?: () => void,
     private onBeforeClose?: () => Promise<void>,
-    private onEnableCloudflareSolver?: (config: any) => void,
-    private onAddReplayMarker?: (targetId: string, tag: string, payload?: object) => void,
+    private onEnableCloudflareSolver?: (config: CloudflareConfig) => void,
+    private onAddReplayMarker?: (targetId: TargetId, tag: string, payload?: object) => void,
   ) {}
+
+  setGetTabCount(fn: () => number): void {
+    this.getTabCount = fn;
+  }
 
   /**
    * Connect to browser and establish bidirectional proxy.
@@ -131,13 +144,13 @@ export class CDPProxy {
 
     // Step 2: Now upgrade the client socket (Chrome is ready to receive)
     return new Promise((resolve, reject) => {
-      const wss = new WebSocket.Server({ noServer: true });
+      const wss = new WebSocketServer({ noServer: true });
 
       wss.handleUpgrade(
         this.clientRequest,
         this.clientSocket,
         this.clientHead,
-        (clientWs) => {
+        (clientWs: WebSocket) => {
           this.clientWs = clientWs;
           this.log.trace('Client WebSocket upgraded');
 
@@ -150,7 +163,7 @@ export class CDPProxy {
             this.emitClientEvent('Browserless.sessionInfo', { sessionId }).catch(() => {});
           }
 
-          clientWs.on('error', (err) => {
+          clientWs.on('error', (err: Error) => {
             this.log.warn(`Client WebSocket error: ${err.message}`);
             this.handleClose();
           });
@@ -179,17 +192,25 @@ export class CDPProxy {
       if (!isBinary) {
         try {
           const raw = typeof data === 'string' ? data : data.toString();
-          const msg = JSON.parse(raw);
+          const cmdExit = decodeCDPCommand(JSON.parse(raw));
+          if (cmdExit._tag === 'Failure') {
+            // Not a valid CDP command — forward raw to browser
+            if (this.browserWs?.readyState === WebSocket.OPEN) {
+              this.browserWs.send(data, { binary: isBinary });
+            }
+            return;
+          }
+          const msg = cmdExit.value;
 
           // Intercept Browserless.getSessionInfo — respond with session ID directly
-          if (msg?.method === 'Browserless.getSessionInfo' && typeof msg?.id === 'number') {
+          if (msg.method === 'Browserless.getSessionInfo') {
             const sessionId = this.browserWsEndpoint.split('/').pop() || '';
             void this.sendClientResponse(msg.id, { sessionId });
             return;
           }
 
           // Gate Browserless.enableCloudflareSolver behind ENABLE_CLOUDFLARE_SOLVER flag
-          if (msg?.method === 'Browserless.enableCloudflareSolver' && typeof msg?.id === 'number') {
+          if (msg.method === 'Browserless.enableCloudflareSolver') {
             if (!this.config.getEnableCloudflareSolver()) {
               void this.sendClientResponse(msg.id, {
                 enabled: false,
@@ -198,21 +219,32 @@ export class CDPProxy {
               return;
             }
             if (this.onEnableCloudflareSolver) {
-              this.onEnableCloudflareSolver(msg.params || {});
+              const exit = Schema.decodeExit(CloudflareConfig)(msg.params || {}, {
+                onExcessProperty: 'ignore',
+              });
+              if (exit._tag === 'Failure') {
+                void this.sendClientResponse(msg.id, {
+                  enabled: false,
+                  error: `Invalid config: ${exit.cause.toString()}`,
+                });
+                return;
+              }
+              this.onEnableCloudflareSolver(exit.value);
             }
             void this.sendClientResponse(msg.id, { enabled: true });
             return;
           }
 
           // Intercept Browserless.addReplayMarker — inject custom marker into replay
-          if (msg?.method === 'Browserless.addReplayMarker' && typeof msg?.id === 'number') {
+          if (msg.method === 'Browserless.addReplayMarker') {
             if (this.onAddReplayMarker) {
-              const { targetId, tag, payload } = msg.params || {};
-              if (!tag) {
-                void this.sendClientResponse(msg.id, { error: 'tag is required' });
+              const markerExit = decodeAddReplayMarkerParams(msg.params || {});
+              if (markerExit._tag === 'Failure') {
+                void this.sendClientResponse(msg.id, { error: `Invalid params: ${markerExit.cause.toString()}` });
                 return;
               }
-              this.onAddReplayMarker(targetId || '', tag, payload);
+              const { targetId, tag, payload } = markerExit.value;
+              this.onAddReplayMarker((targetId || '') as TargetId, tag, payload);
               void this.sendClientResponse(msg.id, { success: true });
             } else {
               void this.sendClientResponse(msg.id, { error: 'Replay not enabled' });
@@ -221,7 +253,7 @@ export class CDPProxy {
           }
 
           // Delay Page.close to flush pending screencast frames + event collection
-          if (msg?.method === 'Page.close') {
+          if (msg.method === 'Page.close') {
             setTimeout(() => {
               if (this.browserWs?.readyState === WebSocket.OPEN) {
                 this.browserWs.send(data, { binary: isBinary });
@@ -231,12 +263,34 @@ export class CDPProxy {
           }
 
           // Intercept Browser.close to emit replayComplete before socket closes
-          if (msg?.method === 'Browser.close' && this.onBeforeClose && !this.closeRequested) {
+          if (msg.method === 'Browser.close' && this.onBeforeClose && !this.closeRequested) {
             this.closeRequested = true;
             // Run onBeforeClose FIRST (saves replay, emits tabReplayComplete),
             // THEN send the Browser.close response so client WS stays open.
-            void this.runBeforeCloseAndForward(data, isBinary, msg?.id);
+            void this.runBeforeCloseAndForward(data, isBinary, msg.id);
             return;
+          }
+
+          // Reject Target.createTarget when tab count exceeds limit.
+          // Sync path: getTabCount callback (from ReplaySession target registry).
+          // Async path: queries Chrome's Target.getTargets, must intercept + defer forwarding.
+          if (msg.method === 'Target.createTarget') {
+            const limit = this.config.getMaxTabsPerSession();
+            if (limit > 0) {
+              if (this.getTabCount) {
+                // Sync check — fast path when ReplaySession is tracking targets
+                const count = this.getTabCount();
+                if (count >= limit) {
+                  this.log.warn(`Tab limit reached (${count}/${limit}), rejecting Target.createTarget`);
+                  void this.sendClientError(msg.id, -32000, `Tab limit exceeded (${count}/${limit})`);
+                  return;
+                }
+              } else {
+                // Async fallback — intercept message, check via CDP, then forward or reject
+                void this.checkTabLimitAndForward(msg.id, limit, data, isBinary);
+                return;
+              }
+            }
           }
         } catch {
           // ignore parse errors
@@ -266,15 +320,19 @@ export class CDPProxy {
       if (!isBinary) {
         try {
           const raw = typeof data === 'string' ? data : data.toString();
-          const msg = JSON.parse(raw);
-          // Check if this is a response to a proxy-injected command
-          if (this.handleProxyResponse(msg)) return; // Don't forward to client
+          const msgExit = decodeCDPMessage(JSON.parse(raw));
+          if (msgExit._tag !== 'Failure') {
+            const msg = msgExit.value;
 
-          // Debug: log browser→client events (not responses)
-          if (this.cdpDebug && msg.method) {
-            const sid = msg.sessionId ? ` [sid=${msg.sessionId.substring(0, 16)}]` : '';
-            const params = msg.params ? JSON.stringify(msg.params).substring(0, 150) : '{}';
-            this.log.info(`[Chrome→CDP] ${msg.method}${sid} ${params}`);
+            // Check if this is a response to a proxy-injected command
+            if (msg.id !== undefined && this.handleProxyResponse(msg)) return;
+
+            // Debug: log browser→client events (not responses)
+            if (this.cdpDebug && msg.method) {
+              const sid = msg.sessionId ? ` [sid=${msg.sessionId.substring(0, 16)}]` : '';
+              const params = msg.params ? JSON.stringify(msg.params).substring(0, 150) : '{}';
+              this.log.info(`[Chrome→CDP] ${msg.method}${sid} ${params}`);
+            }
           }
         } catch { /* ignore parse errors */ }
       }
@@ -301,20 +359,23 @@ export class CDPProxy {
     clientMsgId?: number,
   ): Promise<void> {
     if (this.onBeforeClose) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
           this.onBeforeClose(),
-          new Promise((_, reject) =>
-            setTimeout(
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
               () => reject(new Error('onBeforeClose timeout')),
               ON_BEFORE_CLOSE_TIMEOUT_MS,
-            ),
-          ),
+            );
+          }),
         ]);
       } catch (e) {
         this.log.warn(
           `onBeforeClose failed: ${e instanceof Error ? e.message : String(e)}`,
         );
+      } finally {
+        clearTimeout(timer);
       }
     }
 
@@ -341,6 +402,45 @@ export class CDPProxy {
         }
       });
     });
+  }
+
+  private async sendClientError(id: number, code: number, message: string): Promise<void> {
+    if (this.clientWs?.readyState !== WebSocket.OPEN) return;
+    const payload = JSON.stringify({ id, error: { code, message } });
+    await new Promise<void>((resolve, reject) => {
+      this.clientWs!.send(payload, (err) => {
+        if (err) reject(err); else resolve();
+      });
+    });
+  }
+
+  /**
+   * Async tab limit check: query Chrome for target count, then forward or reject.
+   * Used when no sync getTabCount callback is available (no replay session).
+   */
+  private async checkTabLimitAndForward(
+    msgId: number,
+    limit: number,
+    data: WebSocket.RawData,
+    isBinary: boolean,
+  ): Promise<void> {
+    try {
+      const result = await this.sendViaBrowserWs('Target.getTargets', {}, undefined, 5000);
+      const targets: Array<{ type: string }> = result?.targetInfos ?? [];
+      const count = targets.filter(t => t.type === 'page').length;
+      if (count >= limit) {
+        this.log.warn(`Tab limit reached (${count}/${limit}), rejecting Target.createTarget`);
+        void this.sendClientError(msgId, -32000, `Tab limit exceeded (${count}/${limit})`);
+        return;
+      }
+    } catch (e) {
+      // If we can't determine tab count, allow the request through
+      this.log.debug(`Tab count check failed, allowing Target.createTarget: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // Under limit or check failed — forward to browser
+    if (this.browserWs?.readyState === WebSocket.OPEN) {
+      this.browserWs.send(data, { binary: isBinary });
+    }
   }
 
   /**
@@ -371,37 +471,33 @@ export class CDPProxy {
   }
 
   /**
-   * Send a CDP command through the proxy's browser WS.
+   * Send a CDP command through the proxy's browser WS via CdpConnection.
    */
-  private proxyCommandId = 200_000;
-  private proxyPendingCommands = new Map<number, { resolve: (result: any) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  private proxyConn: CdpConnection | null = null;
 
-  sendViaBrowserWs(method: string, params: object = {}, sessionId?: string, timeoutMs: number = 30_000): Promise<any> {
-    return new Promise((resolve, reject) => {
-      if (!this.browserWs || this.browserWs.readyState !== WebSocket.OPEN) {
-        reject(new Error('Browser WS not open'));
-        return;
-      }
-      const id = this.proxyCommandId++;
-      const msg: any = { id, method, params };
-      if (sessionId) msg.sessionId = sessionId;
+  /** Lazily initialize the proxy CdpConnection when browser WS is available. */
+  private getProxyConn(): CdpConnection | null {
+    if (!this.browserWs) return null;
+    if (!this.proxyConn) {
+      this.proxyConn = new CdpConnection(this.browserWs, {
+        startId: 200_000,
+        defaultTimeout: 30_000,
+      });
+    }
+    return this.proxyConn;
+  }
 
-      const timer = setTimeout(() => {
-        if (this.proxyPendingCommands.has(id)) {
-          this.proxyPendingCommands.delete(id);
-          reject(new Error(`CDP proxy command ${method} timed out`));
-        }
-      }, timeoutMs);
-      this.proxyPendingCommands.set(id, { resolve, reject, timer });
+  sendViaBrowserWs(method: string, params: object = {}, sessionId?: CdpSessionId, timeoutMs: number = 30_000): Promise<any> {
+    const conn = this.getProxyConn();
+    if (!conn) return Promise.reject(new Error('Browser WS not open'));
 
-      if (this.cdpDebug) {
-        const sid = sessionId ? ` [sid=${sessionId.substring(0, 16)}]` : '';
-        const p = JSON.stringify(params).substring(0, 200);
-        this.log.info(`[SOLVER→Chrome] id=${id} ${method}${sid} ${p}`);
-      }
+    if (this.cdpDebug) {
+      const sid = sessionId ? ` [sid=${sessionId.substring(0, 16)}]` : '';
+      const p = JSON.stringify(params).substring(0, 200);
+      this.log.info(`[SOLVER→Chrome] ${method}${sid} ${p}`);
+    }
 
-      this.browserWs.send(JSON.stringify(msg));
-    });
+    return conn.sendPromise(method, params, sessionId, timeoutMs);
   }
 
   /**
@@ -415,11 +511,10 @@ export class CDPProxy {
    * Returns a sendCommand function scoped to the fresh WS.
    * Call cleanup() when done to close the connection.
    */
-  createIsolatedConnection(): { send: (method: string, params?: object, sessionId?: string, timeoutMs?: number) => Promise<any>; cleanup: () => void } {
+  createIsolatedConnection(): { send: (method: string, params?: object, sessionId?: CdpSessionId, timeoutMs?: number) => Promise<any>; cleanup: () => void } {
     const endpoint = this.browserWsEndpoint;
     const ws = new WebSocket(endpoint);
-    let cmdId = 300_000;
-    const pending = new Map<number, { resolve: (result: any) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+    const conn = new CdpConnection(ws, { startId: 300_000, defaultTimeout: 30_000 });
     let connected = false;
     const waitForOpen = new Promise<void>((resolve, reject) => {
       ws.on('open', () => { connected = true; resolve(); });
@@ -429,45 +524,18 @@ export class CDPProxy {
     ws.on('message', (data) => {
       try {
         const msg = JSON.parse(data.toString());
-        if (typeof msg.id === 'number') {
-          const p = pending.get(msg.id);
-          if (p) {
-            pending.delete(msg.id);
-            clearTimeout(p.timer);
-            if (msg.error) {
-              p.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
-            } else {
-              p.resolve(msg.result);
-            }
-          }
-        }
+        conn.handleResponse(msg);
       } catch { /* ignore */ }
     });
 
     const send = async (method: string, params: object = {}, sessionId?: string, timeoutMs: number = 30_000): Promise<any> => {
       await waitForOpen;
-      return new Promise((resolve, reject) => {
-        if (ws.readyState !== WebSocket.OPEN) {
-          reject(new Error('Isolated WS not open'));
-          return;
-        }
-        const id = cmdId++;
-        const msg: any = { id, method, params };
-        if (sessionId) msg.sessionId = sessionId;
-        const timer = setTimeout(() => {
-          if (pending.has(id)) {
-            pending.delete(id);
-            reject(new Error(`Isolated CDP command ${method} timed out`));
-          }
-        }, timeoutMs);
-        pending.set(id, { resolve, reject, timer });
-        ws.send(JSON.stringify(msg));
-      });
+      return conn.sendPromise(method, params, sessionId as CdpSessionId | undefined, timeoutMs);
     };
 
     const cleanup = () => {
-      for (const [, p] of pending) { clearTimeout(p.timer); }
-      pending.clear();
+      conn.drainPending('isolated_cleanup');
+      conn.dispose();
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close();
       }
@@ -478,17 +546,7 @@ export class CDPProxy {
 
   /** Handle responses for proxy-injected commands (called from browser WS message handler) */
   private handleProxyResponse(msg: any): boolean {
-    if (typeof msg.id !== 'number') return false;
-    const pending = this.proxyPendingCommands.get(msg.id);
-    if (!pending) return false;
-    this.proxyPendingCommands.delete(msg.id);
-    clearTimeout(pending.timer);
-    if (msg.error) {
-      pending.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
-    } else {
-      pending.resolve(msg.result);
-    }
-    return true;
+    return this.proxyConn?.handleResponse(msg) ?? false;
   }
 
   /**
@@ -526,6 +584,11 @@ export class CDPProxy {
       this.clientWs.close();
     }
     this.clientWs = null;
+
+    // Clean up proxy CdpConnection before closing browser WS
+    this.proxyConn?.drainPending('proxy_close');
+    this.proxyConn?.dispose();
+    this.proxyConn = null;
 
     // Close browser WebSocket
     if (this.browserWs?.readyState === WebSocket.OPEN) {
