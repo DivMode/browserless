@@ -65,3 +65,20 @@ export const SolverEvents = ServiceMap.Service<{
   readonly emitFailed: (active: ActiveDetection, reason: string, duration: number, phaseLabel?: string) => Effect.Effect<void>;
   readonly marker: (sessionId: CdpSessionId, tag: string, payload?: object) => Effect.Effect<void>;
 }>('SolverEvents');
+
+// ═══════════════════════════════════════════════════════════════════════
+// SolveDeps — strategies + state tracker dependencies for solve functions
+//
+// Replaces the plain SolveDeps interface that was threaded as a parameter
+// to every solve function. Now provided via Layer — yield* in generators.
+// ═══════════════════════════════════════════════════════════════════════
+
+export const SolveDeps = ServiceMap.Service<{
+  readonly findAndClickViaCDP: (active: ActiveDetection, attempt: number) => Effect.Effect<boolean>;
+  readonly resolveAutoSolved: (active: ActiveDetection, signal: string) => Effect.Effect<void>;
+  readonly simulatePresence: (active: ActiveDetection) => Effect.Effect<void>;
+  /** Activity loop for embedded types (turnstile/non_interactive/invisible). Runtime.evaluate is safe. */
+  readonly startActivityLoopEmbedded: (active: ActiveDetection) => Effect.Effect<void>;
+  /** Activity loop for interstitial/managed types. Runtime.evaluate is FORBIDDEN. */
+  readonly startActivityLoopInterstitial: (active: ActiveDetection) => Effect.Effect<void>;
+}>('SolveDeps');

@@ -1,6 +1,11 @@
 import { Logger } from '@browserless.io/browserless';
 import { Effect } from 'effect';
-import { activityLoopSchedule } from './cf-schedules.js';
+import {
+  activityLoopSchedule,
+  INTERSTITIAL_SUCCESS_WAIT_MS,
+  EMBEDDED_SUCCESS_WAIT_MS,
+  STATE_POLL_INTERVAL_MS,
+} from './cf-schedules.js';
 import type { CdpSessionId, TargetId, CloudflareConfig } from '../../shared/cloudflare-detection.js';
 import {
   TURNSTILE_ERROR_CHECK_JS,
@@ -75,10 +80,16 @@ export class CloudflareStateTracker {
   config: Required<CloudflareConfig> = { maxAttempts: 3, attemptTimeout: 30000, recordingMarkers: true };
   destroyed = false;
 
+  /** Effect-returning OOPIF state check — wired by CloudflareSolver to strategies.checkOOPIFStateViaCDP. */
+  private checkOOPIFStateEffect: (iframeCdpSessionId: CdpSessionId) => Effect.Effect<'success' | 'fail' | 'expired' | 'timeout' | 'pending' | null>;
+
   constructor(
     private sendCommand: SendCommand,
     private events: CloudflareEventEmitter,
-  ) {}
+    checkOOPIFStateEffect: (iframeCdpSessionId: CdpSessionId) => Effect.Effect<'success' | 'fail' | 'expired' | 'timeout' | 'pending' | null>,
+  ) {
+    this.checkOOPIFStateEffect = checkOOPIFStateEffect;
+  }
 
   /**
    * Called when Turnstile iframe state changes (via CDP OOPIF DOM walk or direct call).
@@ -86,7 +97,7 @@ export class CloudflareStateTracker {
    */
   onTurnstileStateChange(state: string, iframeCdpSessionId: CdpSessionId): Effect.Effect<void> {
     const tracker = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.state.onTurnstileStateChange')(function*() {
       const pageTargetId = tracker.findPageByIframeSession(iframeCdpSessionId);
       if (!pageTargetId) return;
 
@@ -100,8 +111,8 @@ export class CloudflareStateTracker {
         // For interstitials, CF redirects after Turnstile success — takes 1-5s.
         // Poll until CF markers disappear or token appears, rather than a fixed wait.
         const isInterstitial = active.info.type === 'interstitial';
-        const maxWaitMs = isInterstitial ? 8000 : 1000;
-        const pollInterval = 500;
+        const maxWaitMs = isInterstitial ? INTERSTITIAL_SUCCESS_WAIT_MS : EMBEDDED_SUCCESS_WAIT_MS;
+        const pollInterval = STATE_POLL_INTERVAL_MS;
         const pollStart = Date.now();
         let token: string | null = null;
         let stillDetected = true;
@@ -160,11 +171,8 @@ export class CloudflareStateTracker {
           tracker.events.emitFailed(active, state, duration);
         }
       }
-    });
+    })();
   }
-
-  // Callback for OOPIF state check via CDP — wired by delegator to strategies.checkOOPIFStateViaCDP
-  checkOOPIFState: ((iframeCdpSessionId: CdpSessionId) => Promise<'success' | 'fail' | 'expired' | 'timeout' | 'pending' | null>) | null = null;
 
   /**
    * Called when TURNSTILE_CALLBACK_HOOK_JS detects an auto-solve on any page.
@@ -172,7 +180,7 @@ export class CloudflareStateTracker {
    */
   onAutoSolveBinding(cdpSessionId: CdpSessionId): Effect.Effect<void> {
     const tracker = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.state.onAutoSolveBinding')(function*() {
       const pageTargetId = tracker.findPageBySession(cdpSessionId);
       if (!pageTargetId) return;
 
@@ -191,7 +199,7 @@ export class CloudflareStateTracker {
         tracker.events.emitStandaloneAutoSolved(pageTargetId, 'callback_binding', token?.length || 0, cdpSessionId);
         tracker.bindingSolvedTargets.add(pageTargetId);
       }
-    });
+    })();
   }
 
   /**
@@ -256,7 +264,7 @@ export class CloudflareStateTracker {
    */
   resolveAutoSolved(active: ActiveDetection, signal: string): Effect.Effect<void> {
     const tracker = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.state.resolveAutoSolved')(function*() {
       const duration = Date.now() - active.startTime;
       const token = yield* tracker.getTokenEffect(active.pageCdpSessionId).pipe(
         Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
@@ -273,7 +281,7 @@ export class CloudflareStateTracker {
         phase_label: attr.label,
       });
       tracker.events.marker(active.pageCdpSessionId, 'cf.auto_solved', { signal, method: attr.method });
-    });
+    })();
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -361,18 +369,36 @@ export class CloudflareStateTracker {
   }
 
   /**
-   * Background loop that keeps the browser alive after click commit.
-   *
-   * Effect-native loop body uses isSolvedEffect/isWidgetErrorEffect directly.
-   * Fire-and-forget via Effect.runPromise — no ManagedRuntime needed.
+   * Shared OOPIF state check — used by both activity loop variants.
+   * Safe for ALL types: uses the iframe CDP session, not the page session.
    */
-  startActivityLoop(active: ActiveDetection): void {
-    // Capture `this` for Effect closures (Effect.gen doesn't support class `this` binding)
+  private checkOOPIFStateIteration(active: ActiveDetection): Effect.Effect<'aborted' | 'continue'> {
+    const tracker = this;
+    return Effect.fn('cf.state.checkOOPIF')(function*() {
+      if (active.iframeCdpSessionId) {
+        const oopifState = yield* tracker.checkOOPIFStateEffect(active.iframeCdpSessionId).pipe(
+          Effect.orElseSucceed(() => null), // OOPIF gone — iframe may have been destroyed
+        );
+        if (oopifState && oopifState !== 'pending') {
+          yield* tracker.onTurnstileStateChange(oopifState, active.iframeCdpSessionId);
+        }
+        if (active.aborted) return 'aborted' as const;
+      }
+      return 'continue' as const;
+    })();
+  }
+
+  /**
+   * Activity loop for embedded types (turnstile/non_interactive/invisible).
+   * Page is the EMBEDDING site — Runtime.evaluate is safe.
+   * Checks: isSolved + OOPIF state + widget error
+   */
+  activityLoopEmbedded(active: ActiveDetection): Effect.Effect<void> {
     const tracker = this;
 
     const activityIteration = (loopIter: number) =>
-      Effect.gen(function*() {
-        // Check if solved via Effect-native CDP method
+      Effect.fn('cf.state.activityIterationEmbedded')(function*() {
+        // Check if solved via Runtime.evaluate — safe because page is the embedding site
         const solved = yield* tracker.isSolvedEffect(active.pageCdpSessionId).pipe(
           Effect.catchTag('CdpSessionGone', () => Effect.succeed(false)),
         );
@@ -383,21 +409,11 @@ export class CloudflareStateTracker {
 
         tracker.events.emitProgress(active, 'activity_poll', { iteration: loopIter });
 
-        // Check OOPIF state via CDP DOM walk (replaces MutationObserver injection)
-        if (active.iframeCdpSessionId && tracker.checkOOPIFState) {
-          yield* Effect.tryPromise({
-            try: async () => {
-              const oopifState = await tracker.checkOOPIFState!(active.iframeCdpSessionId!);
-              if (oopifState && oopifState !== 'pending') {
-                await Effect.runPromise(tracker.onTurnstileStateChange(oopifState, active.iframeCdpSessionId!));
-              }
-            },
-            catch: () => undefined, // OOPIF gone
-          }).pipe(Effect.ignore);
-          if (active.aborted) return 'aborted' as const;
-        }
+        // Check OOPIF state via CDP DOM walk
+        const oopifResult = yield* tracker.checkOOPIFStateIteration(active);
+        if (oopifResult === 'aborted') return 'aborted' as const;
 
-        // Check widget error via Effect-native CDP method
+        // Check widget error via Runtime.evaluate — safe for embedded types
         const widgetErr = yield* tracker.isWidgetErrorEffect(active.pageCdpSessionId).pipe(
           Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
         );
@@ -410,16 +426,11 @@ export class CloudflareStateTracker {
           });
         }
 
-        // No mouse simulation — pydoll's solver doesn't do it, and CF may detect it.
-        // Just wait for the next poll interval.
         return 'continue' as const;
-      });
+      })();
 
-    // Effect.repeat runs the body, then consults the schedule for delay + continue.
-    // activityLoopSchedule: jittered ~3s interval, capped at 90s total.
-    // Effect.fail('done') breaks out of the repeat loop.
     let loopIter = 0;
-    const loop = Effect.suspend(() => {
+    return Effect.suspend(() => {
       if (active.aborted || tracker.destroyed) return Effect.fail('done' as const);
       loopIter++;
       return activityIteration(loopIter).pipe(
@@ -433,8 +444,47 @@ export class CloudflareStateTracker {
       Effect.repeat(activityLoopSchedule),
       Effect.catch(() => Effect.void),
     );
+  }
 
-    Effect.runPromise(loop).catch(() => {});
+  /**
+   * Activity loop for interstitial/managed types.
+   * Page IS the CF challenge — Runtime.evaluate is FORBIDDEN.
+   * Checks: OOPIF state only (uses iframe CDP session, not page session)
+   */
+  activityLoopInterstitial(active: ActiveDetection): Effect.Effect<void> {
+    const tracker = this;
+
+    const activityIteration = (loopIter: number) =>
+      Effect.fn('cf.state.activityIterationInterstitial')(function*() {
+        // NO isSolvedEffect — that uses Runtime.evaluate on the page session.
+        // For interstitials, solving is detected via page navigation (onPageNavigated).
+
+        tracker.events.emitProgress(active, 'activity_poll', { iteration: loopIter });
+
+        // Check OOPIF state via CDP DOM walk — safe, uses iframe session
+        const oopifResult = yield* tracker.checkOOPIFStateIteration(active);
+        if (oopifResult === 'aborted') return 'aborted' as const;
+
+        // NO isWidgetErrorEffect — that uses Runtime.evaluate on the page session.
+
+        return 'continue' as const;
+      })();
+
+    let loopIter = 0;
+    return Effect.suspend(() => {
+      if (active.aborted || tracker.destroyed) return Effect.fail('done' as const);
+      loopIter++;
+      return activityIteration(loopIter).pipe(
+        Effect.flatMap(result =>
+          result === 'aborted'
+            ? Effect.fail('done' as const)
+            : Effect.void,
+        ),
+      );
+    }).pipe(
+      Effect.repeat(activityLoopSchedule),
+      Effect.catch(() => Effect.void),
+    );
   }
 
   /** Register a page target ↔ CDP session mapping (maintains reverse index). */

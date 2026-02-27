@@ -10,27 +10,22 @@
  */
 import { Effect } from 'effect';
 import type { SolveOutcome } from './cloudflare-solve-strategies.js';
-import type { CloudflareSolveStrategies } from './cloudflare-solve-strategies.js';
-import type { CloudflareStateTracker } from './cloudflare-state-tracker.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
-import { TokenChecker, SolverEvents } from './cf-services.js';
+import { TokenChecker, SolverEvents, SolveDeps } from './cf-services.js';
+
+/** Yielded type of the SolveDeps service. */
+type SolveDepsI = typeof SolveDeps.Service;
+
 import {
   CLICK_RETRY_DELAY,
   TOKEN_POLL_DELAY,
   AUTO_NAV_WAIT_DELAY,
   AUTO_SOLVE_POLL_DELAY,
+  SOLVE_DEADLINE_MS,
+  POST_CLICK_DEADLINE_MS,
+  NAV_WAIT_MS,
+  MAX_CLICK_ATTEMPTS,
 } from './cf-schedules.js';
-
-/**
- * Strategies bridge — passed in by CloudflareSolver at the call site.
- * Contains the Effect-returning methods from CloudflareSolveStrategies
- * and the state tracker's resolveAutoSolved.
- */
-export interface SolveDeps {
-  strategies: CloudflareSolveStrategies;
-  stateTracker: CloudflareStateTracker;
-  simulatePresence: (active: ActiveDetection) => Promise<void>;
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // solveDetection — top-level dispatcher
@@ -45,16 +40,22 @@ export interface SolveDeps {
  */
 export const solveDetection = (
   active: ActiveDetection,
-  deps: SolveDeps,
 ) =>
   Effect.fn('cf.solveDetection')(function*() {
     if (active.aborted) return 'aborted' as SolveOutcome;
 
     const events = yield* SolverEvents;
+    const deps = yield* SolveDeps;
 
     switch (active.info.type) {
       case 'managed':
       case 'interstitial': {
+        // Interstitial activity loop — NO Runtime.evaluate (page IS the CF challenge)
+        if (!active.activityLoopStarted) {
+          active.activityLoopStarted = true;
+          yield* deps.startActivityLoopInterstitial(active).pipe(Effect.forkChild);
+        }
+
         const clicked = yield* solveByClicking(active, deps);
         if (active.aborted) return 'aborted' as SolveOutcome;
         if (clicked) return 'click_dispatched' as SolveOutcome;
@@ -69,12 +70,24 @@ export const solveDetection = (
       }
 
       case 'turnstile': {
+        // Embedded activity loop — Runtime.evaluate is safe (page is embedding site)
+        if (!active.activityLoopStarted) {
+          active.activityLoopStarted = true;
+          yield* deps.startActivityLoopEmbedded(active).pipe(Effect.forkChild);
+        }
+
         const clicked = yield* solveTurnstile(active, deps);
         return (active.aborted ? 'aborted' : clicked ? 'click_dispatched' : 'no_click') as SolveOutcome;
       }
 
       case 'non_interactive':
       case 'invisible': {
+        // Embedded activity loop — Runtime.evaluate is safe (page is embedding site)
+        if (!active.activityLoopStarted) {
+          active.activityLoopStarted = true;
+          yield* deps.startActivityLoopEmbedded(active).pipe(Effect.forkChild);
+        }
+
         yield* solveAutomatic(active, deps);
         return (active.aborted ? 'aborted' : 'auto_handled') as SolveOutcome;
       }
@@ -88,8 +101,9 @@ export const solveDetection = (
       }
     }
   })().pipe(
-    Effect.catch(() =>
-      Effect.gen(function*() {
+    Effect.catch((err) => {
+      console.error(`[cf.solveDetection] Caught error:`, err);
+      return Effect.fn('cf.solveDetection.errorFallback')(function*() {
         if (!active.aborted) {
           const events = yield* SolverEvents;
           yield* events.emitFailed(active, 'solve_exception', Date.now() - active.startTime);
@@ -97,8 +111,8 @@ export const solveDetection = (
           active.abortLatch?.openUnsafe();
         }
         return 'aborted' as SolveOutcome;
-      }),
-    ),
+      })();
+    }),
   );
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -110,22 +124,20 @@ export const solveDetection = (
 
 const solveByClicking = (
   active: ActiveDetection,
-  deps: SolveDeps,
+  deps: SolveDepsI,
 ) =>
   Effect.fn('cf.solveByClicking')(function*() {
     // Phase 1: Try to click the checkbox
     if (active.aborted) return false;
 
     const events = yield* SolverEvents;
-    const maxAttempts = 6;
-
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    for (let attempt = 0; attempt < MAX_CLICK_ATTEMPTS; attempt++) {
       if (active.aborted) return false;
 
       if (attempt > 0) yield* Effect.sleep(CLICK_RETRY_DELAY);
 
       // Call findAndClickViaCDP directly — it returns Effect<boolean>
-      const result = yield* deps.strategies.findAndClickViaCDP(active, attempt).pipe(
+      const result = yield* deps.findAndClickViaCDP(active, attempt).pipe(
         Effect.catch(() => Effect.succeed(false)),
       );
 
@@ -135,7 +147,7 @@ const solveByClicking = (
       }
     }
 
-    yield* events.emitProgress(active, 'cdp_click_complete', { success: false, attempts: maxAttempts });
+    yield* events.emitProgress(active, 'cdp_click_complete', { success: false, attempts: MAX_CLICK_ATTEMPTS });
     return false;
   })();
 
@@ -148,7 +160,7 @@ const solveByClicking = (
 
 const solveTurnstile = (
   active: ActiveDetection,
-  deps: SolveDeps,
+  deps: SolveDepsI,
 ) =>
   Effect.fn('cf.solveTurnstile')(function*() {
     if (active.aborted) return false;
@@ -156,12 +168,11 @@ const solveTurnstile = (
     const { pageCdpSessionId } = active;
     const events = yield* SolverEvents;
     const tokens = yield* TokenChecker;
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + SOLVE_DEADLINE_MS;
 
-    const maxAttempts = 6;
     let clicked = false;
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    for (let attempt = 0; attempt < MAX_CLICK_ATTEMPTS; attempt++) {
       if (active.aborted || Date.now() > deadline) return false;
 
       if (attempt > 0) {
@@ -178,12 +189,12 @@ const solveTurnstile = (
         );
         if (token) {
           yield* events.marker(pageCdpSessionId, 'cf.token_polled', { token_length: token.length });
-          yield* deps.stateTracker.resolveAutoSolved(active, 'token_poll');
+          yield* deps.resolveAutoSolved(active, 'token_poll');
           return true;
         }
       }
 
-      const result = yield* deps.strategies.findAndClickViaCDP(active, attempt).pipe(
+      const result = yield* deps.findAndClickViaCDP(active, attempt).pipe(
         Effect.catch(() => Effect.succeed(false)),
       );
 
@@ -195,7 +206,7 @@ const solveTurnstile = (
     }
 
     if (!clicked) {
-      yield* events.emitProgress(active, 'cdp_click_complete', { success: false, attempts: maxAttempts });
+      yield* events.emitProgress(active, 'cdp_click_complete', { success: false, attempts: MAX_CLICK_ATTEMPTS });
       yield* events.marker(pageCdpSessionId, 'cf.cdp_no_checkbox');
       // Widget not found — CF managed challenges may auto-pass without a widget.
       // Keep the detection alive so onPageNavigated() can emit cf.solved(auto_navigation).
@@ -226,17 +237,17 @@ const solveTurnstile = (
 const postClickWait = (
   active: ActiveDetection,
   deadline: number,
-  deps: SolveDeps,
+  deps: SolveDepsI,
 ) =>
   Effect.fn('cf.postClickWait')(function*() {
     const { pageCdpSessionId } = active;
     const events = yield* SolverEvents;
     const tokens = yield* TokenChecker;
 
-    const postClickDeadline = Math.min(active.startTime + 10_000, deadline);
+    const postClickDeadline = Math.min(active.startTime + POST_CLICK_DEADLINE_MS, deadline);
 
-    // Phase A: Wait up to 3s for page navigation (interstitial signal)
-    const navWaitEnd = Math.min(Date.now() + 3_000, postClickDeadline);
+    // Phase A: Wait up to NAV_WAIT_MS for page navigation (interstitial signal)
+    const navWaitEnd = Math.min(Date.now() + NAV_WAIT_MS, postClickDeadline);
     while (!active.aborted && Date.now() < navWaitEnd) {
       yield* Effect.sleep('200 millis');
     }
@@ -253,7 +264,7 @@ const postClickWait = (
       );
       if (token) {
         yield* events.marker(pageCdpSessionId, 'cf.token_polled', { token_length: token.length });
-        yield* deps.stateTracker.resolveAutoSolved(active, 'token_poll');
+        yield* deps.resolveAutoSolved(active, 'token_poll');
         return true;
       }
       yield* Effect.sleep(TOKEN_POLL_DELAY);
@@ -268,7 +279,7 @@ const postClickWait = (
 const pollForAutoSolveToken = (
   active: ActiveDetection,
   deadline: number,
-  deps: SolveDeps,
+  deps: SolveDepsI,
 ) =>
   Effect.fn('cf.pollForAutoSolveToken')(function*() {
     const { pageCdpSessionId } = active;
@@ -285,7 +296,7 @@ const pollForAutoSolveToken = (
       );
       if (token) {
         yield* events.marker(pageCdpSessionId, 'cf.token_polled', { token_length: token.length });
-        yield* deps.stateTracker.resolveAutoSolved(active, 'token_poll');
+        yield* deps.resolveAutoSolved(active, 'token_poll');
         return true;
       }
 
@@ -324,14 +335,13 @@ const waitForAutoNav = (active: ActiveDetection) =>
 
 const solveAutomatic = (
   active: ActiveDetection,
-  deps: SolveDeps,
+  deps: SolveDepsI,
 ) =>
   Effect.fn('cf.solveAutomatic')(function*() {
     if (active.aborted) return;
     const events = yield* SolverEvents;
     yield* events.marker(active.pageCdpSessionId, 'cf.presence_start', { type: active.info.type });
-    yield* Effect.tryPromise({
-      try: () => deps.simulatePresence(active),
-      catch: () => undefined,
-    });
+    yield* deps.simulatePresence(active).pipe(
+      Effect.orElseSucceed(() => undefined),
+    );
   })();

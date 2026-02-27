@@ -6,7 +6,7 @@ import { CloudflareStateTracker } from './cf/cloudflare-state-tracker.js';
 import { CloudflareEventEmitter } from './cf/cloudflare-event-emitter.js';
 import type { EmitClientEvent, InjectMarker, ActiveDetection } from './cf/cloudflare-event-emitter.js';
 import type { SendCommand } from './cf/cloudflare-state-tracker.js';
-import { CdpSender, TokenChecker, SolverEvents } from './cf/cf-services.js';
+import { CdpSender, TokenChecker, SolverEvents, SolveDeps } from './cf/cf-services.js';
 import { CdpSessionGone } from './cf/cf-errors.js';
 import { solveDetection as solveDetectionEffect } from './cf/cloudflare-solver.effect.js';
 import type { SolveOutcome } from './cf/cloudflare-solve-strategies.js';
@@ -14,7 +14,7 @@ import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
 import { Logger } from '@browserless.io/browserless';
 
 /** Service union type — the R channel of the Effect solver runtime. */
-type SolverR = typeof CdpSender.Identifier | typeof TokenChecker.Identifier | typeof SolverEvents.Identifier;
+type SolverR = typeof CdpSender.Identifier | typeof TokenChecker.Identifier | typeof SolverEvents.Identifier | typeof SolveDeps.Identifier;
 
 /**
  * Cloudflare detection and solving for a single browser session.
@@ -44,19 +44,16 @@ export class CloudflareSolver {
     let realEmit: EmitClientEvent = async () => {};
     this.events = new CloudflareEventEmitter(injectMarker, (...args) => realEmit(...args));
     this._setRealEmit = (fn) => { realEmit = fn; };
-    this.stateTracker = new CloudflareStateTracker(sendCommand, this.events);
     this.strategies = new CloudflareSolveStrategies(sendCommand, this.events, chromePort);
-    this.detector = new CloudflareDetector(sendCommand, this.events, this.stateTracker, this.strategies);
-
-    // Override strategies.solveDetection to route through Effect
-    this.strategies.solveDetection = (active: ActiveDetection) => this.solveViaEffect(active);
-
-    // Wire OOPIF state check — activity loop calls this to check iframe widget state via CDP DOM walk
-    this.stateTracker.checkOOPIFState = (iframeCdpSessionId) =>
-      Effect.runPromise(this.strategies.checkOOPIFStateViaCDP(iframeCdpSessionId));
-
-    // Wire fiber-based detection loop callback
-    this.detector.setStartDetectionLoop(
+    this.stateTracker = new CloudflareStateTracker(sendCommand, this.events,
+      // OOPIF state check — activity loop calls this to check iframe widget state via CDP DOM walk
+      (iframeCdpSessionId) => this.strategies.checkOOPIFStateViaCDP(iframeCdpSessionId),
+    );
+    this.detector = new CloudflareDetector(
+      sendCommand, this.events, this.stateTracker, this.strategies,
+      // Solve dispatcher — routes through Effect runtime
+      (active: ActiveDetection) => this.solveViaEffect(active),
+      // Detection loop — starts a fiber-based Turnstile detection poll
       (targetId, cdpSessionId) => this.startDetectionFiber(targetId, cdpSessionId),
     );
 
@@ -110,6 +107,19 @@ export class CloudflareSolver {
       marker: (sessionId, tag, payload) => Effect.sync(() => events.marker(sessionId, tag, payload)),
     }));
 
+    const strategies = this.strategies;
+    const solveDepsLayer = Layer.succeed(SolveDeps, SolveDeps.of({
+      findAndClickViaCDP: (active, attempt) => strategies.findAndClickViaCDP(active, attempt),
+      resolveAutoSolved: (active, signal) => stateTracker.resolveAutoSolved(active, signal),
+      simulatePresence: (active) =>
+        Effect.tryPromise({
+          try: () => simulateHumanPresence(sendCommand, active.pageCdpSessionId, 2.0 + Math.random() * 2.0),
+          catch: () => new Error('simulatePresence failed'),
+        }).pipe(Effect.asVoid, Effect.orElseSucceed(() => {})),
+      startActivityLoopEmbedded: (active) => stateTracker.activityLoopEmbedded(active),
+      startActivityLoopInterstitial: (active) => stateTracker.activityLoopInterstitial(active),
+    }));
+
     // Layer finalizer — cleans up state tracker when runtime disposes.
     // ManagedRuntime.dispose() closes its scope, triggering this finalizer.
     // effectDiscard strips Scope from R, so acquireRelease works seamlessly.
@@ -123,7 +133,7 @@ export class CloudflareSolver {
       ),
     );
 
-    return Layer.mergeAll(cdpSenderLayer, tokenCheckerLayer, solverEventsLayer, lifecycleLayer);
+    return Layer.mergeAll(cdpSenderLayer, tokenCheckerLayer, solverEventsLayer, solveDepsLayer, lifecycleLayer);
   }
 
   /**
@@ -132,16 +142,7 @@ export class CloudflareSolver {
    */
   private async solveViaEffect(active: ActiveDetection): Promise<SolveOutcome> {
     if (!this.runtime) return 'aborted';
-
-    const deps = {
-      strategies: this.strategies,
-      stateTracker: this.stateTracker,
-      simulatePresence: async (a: ActiveDetection) => {
-        await simulateHumanPresence(this.sendCommand, a.pageCdpSessionId, 2.0 + Math.random() * 2.0);
-      },
-    };
-
-    return this.runtime.runPromise(solveDetectionEffect(active, deps));
+    return this.runtime.runPromise(solveDetectionEffect(active));
   }
 
   setEmitClientEvent(fn: EmitClientEvent): void {
@@ -198,7 +199,11 @@ export class CloudflareSolver {
   }
 
   async onPageNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Promise<void> {
-    return this.detector.onPageNavigated(targetId, cdpSessionId, url);
+    if (!this.runtime) {
+      // Fallback: run directly if runtime already disposed
+      return Effect.runPromise(this.detector.onPageNavigatedEffect(targetId, cdpSessionId, url));
+    }
+    return this.runtime.runPromise(this.detector.onPageNavigatedEffect(targetId, cdpSessionId, url));
   }
 
   async onIframeAttached(
@@ -215,7 +220,10 @@ export class CloudflareSolver {
   }
 
   async onAutoSolveBinding(cdpSessionId: CdpSessionId): Promise<void> {
-    return Effect.runPromise(this.stateTracker.onAutoSolveBinding(cdpSessionId));
+    if (!this.runtime) {
+      return Effect.runPromise(this.stateTracker.onAutoSolveBinding(cdpSessionId));
+    }
+    return this.runtime.runPromise(this.stateTracker.onAutoSolveBinding(cdpSessionId));
   }
 
   onBeaconSolved(targetId: TargetId, tokenLength: number): void {

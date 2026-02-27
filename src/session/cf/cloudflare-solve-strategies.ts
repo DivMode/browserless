@@ -1,8 +1,17 @@
-import { Effect } from 'effect';
+import { Effect, Scope } from 'effect';
 import type { CdpSessionId, TargetId, CloudflareType } from '../../shared/cloudflare-detection.js';
 import type { ActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
 import type { SendCommand } from './cloudflare-state-tracker.js';
-// CdpSessionGone available for future typed error channels
+import { CdpConnection } from '../../shared/cdp-rpc.js';
+import { CdpSessionGone } from './cf-errors.js';
+import {
+  MAX_OOPIF_POLLS,
+  MAX_CHECKBOX_POLLS,
+  CHECKBOX_POLL_INTERVAL_MS,
+  CLEAN_WS_OPEN_TIMEOUT_MS,
+  CLEAN_WS_CMD_TIMEOUT_MS,
+  TARGET_GET_TIMEOUT_MS,
+} from './cf-schedules.js';
 
 /** Result from detectTurnstileViaCDP — includes type info when available. */
 export interface CFDetectionResult {
@@ -79,14 +88,6 @@ export class CloudflareSolveStrategies {
     this.sendViaProxy = fn;
   }
 
-  /**
-   * Overridable solve dispatcher. CloudflareSolver replaces this with the
-   * Effect-based solver in the constructor. No-op default — never called
-   * in production because the constructor always overrides it.
-   */
-  solveDetection: (active: ActiveDetection) => Promise<SolveOutcome> =
-    () => Promise.resolve('aborted' as SolveOutcome);
-
   // ── Runtime.callFunctionOn Element Finding (matches pydoll) ─────────
 
   /**
@@ -100,7 +101,7 @@ export class CloudflareSolveStrategies {
     oopifSessionId: CdpSessionId,
   ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
     const strategies = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.findCheckboxViaRuntime')(function*() {
       // Step 1: Get document node
       const doc = yield* Effect.tryPromise(() => send('DOM.getDocument', {
         depth: 0,
@@ -160,7 +161,7 @@ export class CloudflareSolveStrategies {
       }
 
       return null;
-    }).pipe(
+    })().pipe(
       Effect.catch(() => Effect.succeed(null)),
     );
   }
@@ -184,7 +185,7 @@ export class CloudflareSolveStrategies {
     contextId: number,
   ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
     const strategies = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.findCheckboxViaIsolatedWorld')(function*() {
       // Get document root in the isolated world (pydoll: Runtime.evaluate('document.documentElement'))
       const docResult = yield* Effect.tryPromise(() => send('Runtime.evaluate', {
         expression: 'document.documentElement',
@@ -235,7 +236,7 @@ export class CloudflareSolveStrategies {
       }
 
       return null;
-    }).pipe(
+    })().pipe(
       Effect.catch(() => Effect.succeed(null)),
     );
   }
@@ -245,7 +246,7 @@ export class CloudflareSolveStrategies {
     oopifSessionId: CdpSessionId,
     shadowBackendNodeId: number,
   ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
-    return Effect.gen(function*() {
+    return Effect.fn('cf.queryCheckboxInShadow')(function*() {
       // Resolve shadow root to objectId
       const shadowResolved = yield* Effect.tryPromise(() => send('DOM.resolveNode', {
         backendNodeId: shadowBackendNodeId,
@@ -272,7 +273,7 @@ export class CloudflareSolveStrategies {
         objectId: cbResult.result.objectId,
         backendNodeId: cbDesc.node.backendNodeId,
       };
-    });
+    })();
   }
 
   // ── CDP-based Shadow DOM Discovery + Trusted Click ──────────────────
@@ -298,22 +299,12 @@ export class CloudflareSolveStrategies {
     return this._findAndClickViaCDP(active, attempt);
   }
 
-  /**
-   * Also exposed as a Promise-returning wrapper for the bridge during transition.
-   */
-  async findAndClickViaCDPDirect(
-    active: ActiveDetection,
-    attempt = 0,
-  ): Promise<boolean> {
-    return Effect.runPromise(this._findAndClickViaCDP(active, attempt));
-  }
-
   private _findAndClickViaCDP(
     active: ActiveDetection,
     attempt = 0,
   ): Effect.Effect<boolean> {
     const strategies = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.findAndClickViaCDP')(function*() {
       const { pageCdpSessionId } = active;
 
       // Route OOPIF commands through CDPProxy's browser WS — matching pydoll's
@@ -452,7 +443,7 @@ export class CloudflareSolveStrategies {
         send, oopifSessionId, pageCdpSessionId, active,
         checkbox, cbMethod, iframeBackendNodeId, via, attempt, solveStart,
       );
-    }).pipe(
+    })().pipe(
       Effect.catch((err: unknown) => {
         strategies.events.marker(active.pageCdpSessionId, 'cf.cdp_error', {
           error: err instanceof Error ? err.message : 'unknown',
@@ -473,35 +464,33 @@ export class CloudflareSolveStrategies {
     pageTargetId: TargetId,
   ): Effect.Effect<{ backendNodeId: number | null; frameId: string | null }> {
     const strategies = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.phase1PageDomTraversal')(function*() {
       let backendNodeId: number | null = null;
       let frameId: string | null = null;
 
-      const cleanWsResult = yield* Effect.tryPromise(() => strategies.openCleanPageWs(pageTargetId)).pipe(
+      // acquireRelease guarantees WS cleanup even on fiber interruption
+      const conn = yield* strategies.openCleanPageWsScoped(pageTargetId).pipe(
+        Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
+      );
+      if (!conn) return { backendNodeId, frameId };
+
+      // DOM.getDocument(depth:-1, pierce:true) — C++ layer, finds shadow roots
+      const doc = yield* conn.send('DOM.getDocument', { depth: -1, pierce: true }).pipe(
         Effect.orElseSucceed(() => null),
       );
-      if (!cleanWsResult) return { backendNodeId, frameId };
-
-      try {
-        // DOM.getDocument(depth:-1, pierce:true) — C++ layer, finds shadow roots
-        const doc = yield* Effect.tryPromise(() => cleanWsResult.send('DOM.getDocument', { depth: -1, pierce: true })).pipe(
-          Effect.orElseSucceed(() => null),
-        );
-        if (doc?.root) {
-          // Walk tree for iframe[src*="challenges.cloudflare.com"]
-          const iframe = strategies.findCFIframeInTree(doc.root);
-          if (iframe) {
-            backendNodeId = iframe.backendNodeId;
-            frameId = iframe.frameId ?? null;
-          }
+      if (doc?.root) {
+        // Walk tree for iframe[src*="challenges.cloudflare.com"]
+        const iframe = strategies.findCFIframeInTree(doc.root);
+        if (iframe) {
+          backendNodeId = iframe.backendNodeId;
+          frameId = iframe.frameId ?? null;
         }
-      } finally {
-        // Phase 1 failure is non-fatal — Phase 2 fallback handles it
-        cleanWsResult.cleanup();
       }
 
+      // Phase 1 failure is non-fatal — Phase 2 fallback handles it.
+      // acquireRelease guarantees WS cleanup even on fiber interruption.
       return { backendNodeId, frameId };
-    });
+    })().pipe(Effect.scoped);
   }
 
   // ── Phase 2: OOPIF resolution ─────────────────────────────────────
@@ -514,7 +503,7 @@ export class CloudflareSolveStrategies {
     via: string,
   ): Effect.Effect<CdpSessionId | null> {
     const strategies = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.phase2OOPIFResolution')(function*() {
       const targetsResult = yield* Effect.tryPromise(() => send('Target.getTargets')).pipe(
         Effect.orElseSucceed(() => ({ targetInfos: [] as any[] })),
       );
@@ -571,7 +560,7 @@ export class CloudflareSolveStrategies {
       // likely hasn't appeared in Target.getTargets yet (Chrome registers OOPIFs
       // asynchronously after the iframe element appears in the DOM). Poll for it.
       if (!oopifSessionId) {
-        const maxOopifPolls = iframeFrameId ? 6 : 1; // 6 × 500ms = 3s max wait
+        const maxOopifPolls = iframeFrameId ? MAX_OOPIF_POLLS : 1; // 6 × 500ms = 3s max wait
         for (let oopifPoll = 0; oopifPoll < maxOopifPolls; oopifPoll++) {
           if (oopifPoll > 0) {
             yield* Effect.sleep('500 millis');
@@ -673,7 +662,7 @@ export class CloudflareSolveStrategies {
       }
 
       return oopifSessionId;
-    });
+    })();
   }
 
   // ── Phase 3: Checkbox finding (OOPIF session) ─────────────────────
@@ -687,7 +676,7 @@ export class CloudflareSolveStrategies {
     solveStart: number,
   ): Effect.Effect<{ checkbox: { objectId: string; backendNodeId: number }; method: string } | null> {
     const strategies = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.phase3CheckboxFind')(function*() {
       // Create isolated world
       let isolatedContextId: number | null = null;
       let oopifFrameId: string | null = null;
@@ -723,8 +712,8 @@ export class CloudflareSolveStrategies {
       let method = 'none';
       let pollCount = 0;
 
-      const maxPolls = 8; // up to 4 seconds of polling
-      const pollInterval = 500; // match pydoll's ~500ms gap
+      const maxPolls = MAX_CHECKBOX_POLLS; // up to 4 seconds of polling
+      const pollInterval = CHECKBOX_POLL_INTERVAL_MS; // match pydoll's ~500ms gap
 
       for (let poll = 0; poll < maxPolls; poll++) {
         if (active.aborted) return null;
@@ -772,7 +761,7 @@ export class CloudflareSolveStrategies {
       strategies.events.emitProgress(active, 'widget_found', { method, x: 0, y: 0 });
 
       return { checkbox, method };
-    });
+    })();
   }
 
   // ── Phase 4: Click dispatch ───────────────────────────────────────
@@ -790,7 +779,7 @@ export class CloudflareSolveStrategies {
     solveStart: number,
   ): Effect.Effect<boolean> {
     const strategies = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.phase4Click')(function*() {
       // Pydoll does a visibility check (getBoundingClientRect + getComputedStyle)
       // before clicking. This confirms the element is rendered and interactive.
       if (checkbox.objectId) {
@@ -930,7 +919,7 @@ export class CloudflareSolveStrategies {
         checkbox_to_click_ms: Date.now() - solveStart,
       });
       return true;
-    }).pipe(
+    })().pipe(
       Effect.catch(() => Effect.succeed(false)),
     );
   }
@@ -942,26 +931,23 @@ export class CloudflareSolveStrategies {
     iframeBackendNodeId: number,
   ): Effect.Effect<{ x: number | null; y: number | null }> {
     const strategies = this;
-    return Effect.gen(function*() {
-      const cleanWs = yield* Effect.tryPromise(() => strategies.openCleanPageWs(pageTargetId)).pipe(
-        Effect.orElseSucceed(() => null),
+    return Effect.fn('cf.getIframePageCoords')(function*() {
+      // acquireRelease guarantees WS cleanup even on fiber interruption
+      const conn = yield* strategies.openCleanPageWsScoped(pageTargetId).pipe(
+        Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
       );
-      if (!cleanWs) return { x: null, y: null };
+      if (!conn) return { x: null, y: null };
 
-      try {
-        const iframeBox = yield* Effect.tryPromise(() => cleanWs.send('DOM.getBoxModel', {
-          backendNodeId: iframeBackendNodeId,
-        })).pipe(Effect.orElseSucceed(() => null));
-        if (iframeBox?.model?.content) {
-          const q = iframeBox.model.content;
-          // content quad: [x0,y0, x1,y1, x2,y2, x3,y3] — top-left origin is q[0],q[1]
-          return { x: q[0] as number, y: q[1] as number };
-        }
-        return { x: null, y: null };
-      } finally {
-        cleanWs.cleanup();
+      const iframeBox = yield* conn.send('DOM.getBoxModel', {
+        backendNodeId: iframeBackendNodeId,
+      }).pipe(Effect.orElseSucceed(() => null));
+      if (iframeBox?.model?.content) {
+        const q = iframeBox.model.content;
+        // content quad: [x0,y0, x1,y1, x2,y2, x3,y3] — top-left origin is q[0],q[1]
+        return { x: q[0] as number, y: q[1] as number };
       }
-    });
+      return { x: null, y: null };
+    })().pipe(Effect.scoped);
   }
 
 
@@ -975,43 +961,47 @@ export class CloudflareSolveStrategies {
    * rejects all subsequent clicks through the tainted connection. A fresh page WS
    * has zero state — matching how pydoll connects via /devtools/page/{targetId}.
    *
-   * The WS is opened, used for one DOM.getDocument call, and immediately closed.
-   * Pattern from replay-session.ts:openPageWebSocket.
+   * Returns a scoped CdpConnection — callers use Effect.scoped to guarantee WS
+   * cleanup even on fiber interruption. Reuses CdpConnection from cdp-rpc.ts
+   * (same correlation map, timeout, and typed error handling).
    */
-  private async openCleanPageWs(targetId: TargetId): Promise<{
-    send: (method: string, params?: object) => Promise<any>;
-    cleanup: () => void;
-  }> {
-    const WebSocket = (await import('ws')).default;
-    const pageWsUrl = `ws://127.0.0.1:${this.chromePort}/devtools/page/${targetId}`;
-    const ws = new WebSocket(pageWsUrl);
-    const pending = new Map<number, { resolve: Function; reject: Function; timer: ReturnType<typeof setTimeout> }>();
-    let cmdId = 500_000;
+  private openCleanPageWsScoped(targetId: TargetId): Effect.Effect<CdpConnection, CdpSessionGone, Scope.Scope> {
+    const chromePort = this.chromePort;
+    return Effect.acquireRelease(
+      Effect.tryPromise({
+        try: async () => {
+          const WebSocket = (await import('ws')).default;
+          const pageWsUrl = `ws://127.0.0.1:${chromePort}/devtools/page/${targetId}`;
+          const ws = new WebSocket(pageWsUrl);
 
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => { ws.terminate(); reject(new Error('Clean page WS timeout')); }, 2000);
-      ws.on('open', () => { clearTimeout(timer); resolve(); });
-      ws.on('error', reject);
-    });
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => { ws.terminate(); reject(new Error('Clean page WS timeout')); }, CLEAN_WS_OPEN_TIMEOUT_MS);
+            ws.on('open', () => { clearTimeout(timer); resolve(); });
+            ws.on('error', reject);
+          });
 
-    ws.on('message', (data: Buffer) => {
-      const msg = JSON.parse(data.toString());
-      if (msg.id !== undefined) {
-        const p = pending.get(msg.id);
-        if (p) { clearTimeout(p.timer); pending.delete(msg.id); msg.error ? p.reject(new Error(msg.error.message)) : p.resolve(msg.result); }
-      }
-    });
+          const conn = new CdpConnection(ws, { startId: 500_000, defaultTimeout: CLEAN_WS_CMD_TIMEOUT_MS });
 
-    return {
-      send: (method, params = {}) => new Promise((resolve, reject) => {
-        const id = cmdId++;
-        const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method} timed out`)); }, 10_000);
-        pending.set(id, { resolve, reject, timer });
-        ws.send(JSON.stringify({ id, method, params }));
+          ws.on('message', (data: Buffer) => {
+            const msg = JSON.parse(data.toString());
+            conn.handleResponse(msg);
+          });
+
+          return conn;
+        },
+        catch: () => new CdpSessionGone({ sessionId: targetId as unknown as CdpSessionId, method: 'openCleanPageWs' }),
       }),
-      cleanup: () => { for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error('cleanup')); } pending.clear(); ws.terminate(); },
-    };
+      (conn) => Effect.sync(() => {
+        conn.drainPending('cleanWs scope close');
+        conn.dispose();
+        // Access the underlying WS to terminate it
+        // CdpConnection stores ws as private readonly — use the drain to clean up pending,
+        // then the WS will close when the connection object is GC'd or via terminate
+        try { (conn as any).ws?.terminate(); } catch { /* already closed */ }
+      }),
+    );
   }
+
 
   /**
    * Walk CDP DOM tree to find the CF challenge iframe node.
@@ -1058,10 +1048,10 @@ export class CloudflareSolveStrategies {
    */
   detectTurnstileViaCDP(_pageCdpSessionId: CdpSessionId): Effect.Effect<CFDetectionResult | null> {
     const strategies = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.detectTurnstileViaCDP')(function*() {
       const send = strategies.sendViaProxy || strategies.sendCommand;
       const result = yield* Effect.tryPromise(
-        () => send('Target.getTargets', {}, undefined, 5_000),
+        () => send('Target.getTargets', {}, undefined, TARGET_GET_TIMEOUT_MS),
       ).pipe(Effect.orElseSucceed(() => null));
       if (!result?.targetInfos?.length) return { present: false };
 
@@ -1072,7 +1062,7 @@ export class CloudflareSolveStrategies {
           && !isCFTestWidget(t.url),
       );
       return { present: hasCFIframe };
-    });
+    })();
   }
 
   /**
@@ -1092,7 +1082,7 @@ export class CloudflareSolveStrategies {
     'success' | 'fail' | 'expired' | 'timeout' | 'pending' | null
   > {
     const strategies = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.checkOOPIFStateViaCDP')(function*() {
       const doc = yield* Effect.tryPromise(
         () => strategies.sendCommand('DOM.getDocument', { depth: -1, pierce: true }, iframeCdpSessionId),
       ).pipe(Effect.orElseSucceed(() => null));
@@ -1100,7 +1090,7 @@ export class CloudflareSolveStrategies {
       if (!doc?.root) return null;
 
       return strategies.findStateInOOPIFTree(doc.root);
-    });
+    })();
   }
 
   // ── DOM Tree Walking ────────────────────────────────────────────────
