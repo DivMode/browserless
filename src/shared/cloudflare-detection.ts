@@ -10,7 +10,7 @@
 import { Schema } from 'effect';
 
 // ═══════════════════════════════════════════════════════════════════════
-// CDP branded identifiers — compile-time-only, zero runtime overhead
+// CDP branded identifiers — use .makeUnsafe() at boundaries
 // ═══════════════════════════════════════════════════════════════════════
 
 export const CdpSessionId = Schema.String.pipe(Schema.brand("CdpSessionId"));

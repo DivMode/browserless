@@ -10,7 +10,7 @@
  */
 import type { Effect } from 'effect';
 import { ServiceMap } from 'effect';
-import type { CdpSessionId, CloudflareResult } from '../../shared/cloudflare-detection.js';
+import type { CdpSessionId, TargetId, CloudflareResult } from '../../shared/cloudflare-detection.js';
 import type { CdpSessionGone, CdpTimeout } from './cf-errors.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
 
@@ -63,7 +63,7 @@ export const SolverEvents = ServiceMap.Service<{
   readonly emitProgress: (active: ActiveDetection, state: string, extra?: Record<string, any>) => Effect.Effect<void>;
   readonly emitSolved: (active: ActiveDetection, result: CloudflareResult) => Effect.Effect<void>;
   readonly emitFailed: (active: ActiveDetection, reason: string, duration: number, phaseLabel?: string) => Effect.Effect<void>;
-  readonly marker: (sessionId: CdpSessionId, tag: string, payload?: object) => Effect.Effect<void>;
+  readonly marker: (targetId: TargetId, tag: string, payload?: object) => Effect.Effect<void>;
 }>('SolverEvents');
 
 // ═══════════════════════════════════════════════════════════════════════

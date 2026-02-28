@@ -1,5 +1,6 @@
 import { Effect, Scope } from 'effect';
-import type { CdpSessionId, TargetId, CloudflareType } from '../../shared/cloudflare-detection.js';
+import { CdpSessionId } from '../../shared/cloudflare-detection.js';
+import type { TargetId, CloudflareType } from '../../shared/cloudflare-detection.js';
 import type { ActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
 import type { SendCommand } from './cloudflare-state-tracker.js';
 import { CdpConnection } from '../../shared/cdp-rpc.js';
@@ -305,7 +306,7 @@ export class CloudflareSolveStrategies {
   ): Effect.Effect<boolean> {
     const strategies = this;
     return Effect.fn('cf.findAndClickViaCDP')(function*() {
-      const { pageCdpSessionId } = active;
+      const { pageCdpSessionId, pageTargetId } = active;
 
       // Route OOPIF commands through CDPProxy's browser WS — matching pydoll's
       // actual routing through Browserless. Pydoll's OOPIF patch stores
@@ -394,7 +395,7 @@ export class CloudflareSolveStrategies {
         phase1Ms = Date.now() - phase1Start;
       }
 
-      strategies.events.marker(pageCdpSessionId, 'cf.page_traversal', {
+      strategies.events.marker(pageTargetId, 'cf.page_traversal', {
         iframe_backend_node_id: iframeBackendNodeId,
         iframe_frame_id: iframeFrameId ? (iframeFrameId as string).substring(0, 20) : null,
         via, attempt,
@@ -407,7 +408,7 @@ export class CloudflareSolveStrategies {
       // then for each target: attachToTarget → Page.getFrameTree → DOM.getFrameOwner
       // → match backendNodeId from Phase 1.
       const oopifSessionId = yield* strategies.phase2OOPIFResolution(
-        send, pageSend, pageCdpSessionId, iframeFrameId, via,
+        send, pageSend, pageCdpSessionId, pageTargetId, iframeFrameId, via,
       );
 
       if (!oopifSessionId) {
@@ -415,7 +416,7 @@ export class CloudflareSolveStrategies {
           Effect.map(r => r?.targetInfos),
           Effect.orElseSucceed(() => []),
         );
-        strategies.events.marker(pageCdpSessionId, 'cf.cdp_no_oopif', {
+        strategies.events.marker(pageTargetId, 'cf.cdp_no_oopif', {
           type: active.info.type, via,
           had_iframe_backend_id: !!iframeBackendNodeId,
           total_targets: targetInfos?.length ?? 0,
@@ -429,7 +430,7 @@ export class CloudflareSolveStrategies {
       //   → callFunctionOn(querySelector('body')) → DOM.describeNode(pierce=true, depth=1)
       //   → DOM.resolveNode(shadowRoot) → callFunctionOn(querySelector('span.cb-i'))
       const checkboxResult = yield* strategies.phase3CheckboxFind(
-        send, oopifSessionId, pageCdpSessionId, active, via, solveStart,
+        send, oopifSessionId, active, via, solveStart,
       );
       if (!checkboxResult) return false;
 
@@ -440,12 +441,12 @@ export class CloudflareSolveStrategies {
       // checkbox. The retry loop in solveByClicking polls every 500ms which
       // naturally gives CF's WASM time to arm.
       return yield* strategies.phase4Click(
-        send, oopifSessionId, pageCdpSessionId, active,
+        send, oopifSessionId, active,
         checkbox, cbMethod, iframeBackendNodeId, via, attempt, solveStart,
       );
     })().pipe(
       Effect.catch((err: unknown) => {
-        strategies.events.marker(active.pageCdpSessionId, 'cf.cdp_error', {
+        strategies.events.marker(active.pageTargetId, 'cf.cdp_error', {
           error: err instanceof Error ? err.message : 'unknown',
           via: strategies.sendViaProxy ? 'proxy_ws' : 'direct_ws', attempt,
         });
@@ -499,6 +500,7 @@ export class CloudflareSolveStrategies {
     send: SendCommand,
     pageSend: SendCommand,
     pageCdpSessionId: CdpSessionId,
+    pageTargetId: TargetId,
     iframeFrameId: string | null,
     via: string,
   ): Effect.Effect<CdpSessionId | null> {
@@ -543,7 +545,7 @@ export class CloudflareSolveStrategies {
 
           if (frameId === iframeFrameId || target.targetId === iframeFrameId) {
             oopifSessionId = trySessionId;
-            strategies.events.marker(pageCdpSessionId, 'cf.oopif_discovered', {
+            strategies.events.marker(pageTargetId, 'cf.oopif_discovered', {
               method: 'active', via,
               filter: 'frameId_match',
               targetId: target.targetId,
@@ -590,7 +592,7 @@ export class CloudflareSolveStrategies {
               const frameId = ft?.frameTree?.frame?.id;
               if (frameId && (frameId === iframeFrameId || target.targetId === iframeFrameId)) {
                 oopifSessionId = trySessionId;
-                strategies.events.marker(pageCdpSessionId, 'cf.oopif_discovered', {
+                strategies.events.marker(pageTargetId, 'cf.oopif_discovered', {
                   method: 'active', via,
                   filter: 'frameId_match_retry',
                   targetId: target.targetId,
@@ -638,7 +640,7 @@ export class CloudflareSolveStrategies {
                 const frameId = ft?.frameTree?.frame?.id;
                 if (frameId && frameId !== iframeFrameId && target.targetId !== iframeFrameId) {
                   // Stale OOPIF — doesn't match our Phase 1 iframe. Keep polling.
-                  strategies.events.marker(pageCdpSessionId, 'cf.oopif_stale', {
+                  strategies.events.marker(pageTargetId, 'cf.oopif_stale', {
                     via, targetId: target.targetId,
                     expected_frame_id: (iframeFrameId as string).substring(0, 20),
                     actual_frame_id: frameId?.substring(0, 20),
@@ -648,7 +650,7 @@ export class CloudflareSolveStrategies {
                 }
               }
               oopifSessionId = sessionId;
-              strategies.events.marker(pageCdpSessionId, 'cf.oopif_discovered', {
+              strategies.events.marker(pageTargetId, 'cf.oopif_discovered', {
                 method: 'active', via,
                 filter: pageFrameId ? 'parentFrameId' : 'url',
                 targetId: target.targetId,
@@ -670,12 +672,12 @@ export class CloudflareSolveStrategies {
   private phase3CheckboxFind(
     send: SendCommand,
     oopifSessionId: CdpSessionId,
-    pageCdpSessionId: CdpSessionId,
     active: ActiveDetection,
     via: string,
     solveStart: number,
   ): Effect.Effect<{ checkbox: { objectId: string; backendNodeId: number }; method: string } | null> {
     const strategies = this;
+    const pageTargetId = active.pageTargetId;
     return Effect.fn('cf.phase3CheckboxFind')(function*() {
       // Create isolated world
       let isolatedContextId: number | null = null;
@@ -697,7 +699,7 @@ export class CloudflareSolveStrategies {
         // Isolated world creation failed — fall through to non-isolated path
       }
 
-      strategies.events.marker(pageCdpSessionId, 'cf.cdp_dom_session', {
+      strategies.events.marker(pageTargetId, 'cf.cdp_dom_session', {
         using_iframe: true, type: active.info.type, via,
         isolated_world: !!isolatedContextId,
         oopif_frame_id: oopifFrameId ?? 'none',
@@ -748,12 +750,12 @@ export class CloudflareSolveStrategies {
       }
 
       if (!checkbox) {
-        strategies.events.marker(pageCdpSessionId, 'cf.cdp_no_checkbox', { via, polls: pollCount });
+        strategies.events.marker(pageTargetId, 'cf.cdp_no_checkbox', { via, polls: pollCount });
         return null;
       }
 
       const checkboxFoundAt = Date.now();
-      strategies.events.marker(pageCdpSessionId, 'cf.cdp_checkbox_found', {
+      strategies.events.marker(pageTargetId, 'cf.cdp_checkbox_found', {
         method, backendNodeId: checkbox.backendNodeId,
         has_objectId: !!checkbox.objectId, via, polls: pollCount,
         checkbox_found_ms: checkboxFoundAt - solveStart,
@@ -769,7 +771,6 @@ export class CloudflareSolveStrategies {
   private phase4Click(
     send: SendCommand,
     oopifSessionId: CdpSessionId,
-    pageCdpSessionId: CdpSessionId,
     active: ActiveDetection,
     checkbox: { objectId: string; backendNodeId: number },
     method: string,
@@ -779,6 +780,7 @@ export class CloudflareSolveStrategies {
     solveStart: number,
   ): Effect.Effect<boolean> {
     const strategies = this;
+    const pageTargetId = active.pageTargetId;
     return Effect.fn('cf.phase4Click')(function*() {
       // Pydoll does a visibility check (getBoundingClientRect + getComputedStyle)
       // before clicking. This confirms the element is rendered and interactive.
@@ -796,7 +798,7 @@ export class CloudflareSolveStrategies {
         }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
 
         if (visible?.result?.value === false) {
-          strategies.events.marker(pageCdpSessionId, 'cf.checkbox_not_visible', { via, polls: 0 });
+          strategies.events.marker(pageTargetId, 'cf.checkbox_not_visible', { via, polls: 0 });
           return false;
         }
       }
@@ -835,14 +837,14 @@ export class CloudflareSolveStrategies {
         }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
         const bounds = JSON.parse(boundsResult?.result?.value || '{}');
         if (!bounds.width) {
-          strategies.events.marker(pageCdpSessionId, 'cf.cdp_no_box_model', { method, via });
+          strategies.events.marker(pageTargetId, 'cf.cdp_no_box_model', { method, via });
           return false;
         }
         x = bounds.x + bounds.width / 2;
         y = bounds.y + bounds.height / 2;
         coordSource = 'getBoundingClientRect';
       } else {
-        strategies.events.marker(pageCdpSessionId, 'cf.cdp_no_box_model', { method, via });
+        strategies.events.marker(pageTargetId, 'cf.cdp_no_box_model', { method, via });
         return false;
       }
 
@@ -865,7 +867,7 @@ export class CloudflareSolveStrategies {
       const pageAbsX = iframePageX != null ? Math.round(iframePageX + clickX) : null;
       const pageAbsY = iframePageY != null ? Math.round(iframePageY + clickY) : null;
 
-      strategies.events.marker(pageCdpSessionId, 'cf.cdp_click_target', {
+      strategies.events.marker(pageTargetId, 'cf.cdp_click_target', {
         x: clickX, y: clickY,
         method, via, coordSource,
         page_x: pageAbsX,
@@ -906,7 +908,7 @@ export class CloudflareSolveStrategies {
       active.clickDeliveredAt = Date.now();
       strategies.events.emitProgress(active, 'clicked', { x: clickX, y: clickY });
 
-      strategies.events.marker(pageCdpSessionId, 'cf.oopif_click', {
+      strategies.events.marker(pageTargetId, 'cf.oopif_click', {
         ok: true, method: 'cdp_oopif_session', via, attempt,
         x: clickX, y: clickY,
         page_x: pageAbsX,
@@ -989,7 +991,7 @@ export class CloudflareSolveStrategies {
 
           return conn;
         },
-        catch: () => new CdpSessionGone({ sessionId: targetId as unknown as CdpSessionId, method: 'openCleanPageWs' }),
+        catch: () => new CdpSessionGone({ sessionId: CdpSessionId.makeUnsafe(''), method: 'openCleanPageWs' }),
       }),
       (conn) => Effect.sync(() => {
         conn.drainPending('cleanWs scope close');

@@ -1,5 +1,6 @@
 import { Effect, Fiber, Layer, ManagedRuntime } from 'effect';
-import type { CdpSessionId, TargetId, CloudflareConfig } from '../shared/cloudflare-detection.js';
+import { CdpSessionId } from '../shared/cloudflare-detection.js';
+import type { TargetId, CloudflareConfig } from '../shared/cloudflare-detection.js';
 import { CloudflareDetector } from './cf/cloudflare-detector.js';
 import { CloudflareSolveStrategies } from './cf/cloudflare-solve-strategies.js';
 import { CloudflareStateTracker } from './cf/cloudflare-state-tracker.js';
@@ -77,7 +78,7 @@ export class CloudflareSolver {
         Effect.tryPromise({
           try: () => sendCommand(method, params, sessionId, timeoutMs),
           catch: () => new CdpSessionGone({
-            sessionId: sessionId ?? ('' as CdpSessionId),
+            sessionId: sessionId ?? CdpSessionId.makeUnsafe(''),
             method,
           }),
         }),
@@ -85,7 +86,7 @@ export class CloudflareSolver {
         Effect.tryPromise({
           try: () => (self.sendViaProxy || sendCommand)(method, params, sessionId, timeoutMs),
           catch: () => new CdpSessionGone({
-            sessionId: sessionId ?? ('' as CdpSessionId),
+            sessionId: sessionId ?? CdpSessionId.makeUnsafe(''),
             method,
           }),
         }),
@@ -104,7 +105,7 @@ export class CloudflareSolver {
       emitSolved: (active, result) => Effect.sync(() => events.emitSolved(active, result)),
       emitFailed: (active, reason, duration, phaseLabel) =>
         Effect.sync(() => events.emitFailed(active, reason, duration, phaseLabel)),
-      marker: (sessionId, tag, payload) => Effect.sync(() => events.marker(sessionId, tag, payload)),
+      marker: (targetId, tag, payload) => Effect.sync(() => events.marker(targetId, tag, payload)),
     }));
 
     const strategies = this.strategies;

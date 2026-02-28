@@ -1,8 +1,9 @@
 import { expect } from 'chai';
 import { Cause, Effect, Fiber, Layer, Queue } from 'effect';
 import type { ReplayEvent } from '../shared/replay-schemas.js';
-import type { SessionId, TabEvent } from '../shared/replay-schemas.js';
-import type { TargetId } from '../shared/cloudflare-detection.js';
+import { SessionId } from '../shared/replay-schemas.js';
+import type { TabEvent } from '../shared/replay-schemas.js';
+import { TargetId } from '../shared/cloudflare-detection.js';
 import { ReplayWriter, ReplayMetrics } from './replay-services.js';
 import { tabConsumer } from './replay-pipeline.js';
 
@@ -12,8 +13,8 @@ const makeTabEvent = (
   type: number,
   timestamp: number,
 ): TabEvent => ({
-  sessionId: sessionId as SessionId,
-  targetId: targetId as TargetId,
+  sessionId: SessionId.makeUnsafe(sessionId),
+  targetId: TargetId.makeUnsafe(targetId),
   event: { type, timestamp, data: {} } as ReplayEvent,
 });
 
@@ -46,11 +47,11 @@ describe('Replay Pipeline (per-tab Queue)', () => {
         const queueB = yield* Queue.unbounded<TabEvent, Cause.Done>();
 
         // Fork consumers for each tab
-        const fiberA = yield* tabConsumer(queueA, 'sess-1' as SessionId, 'tgt-A' as TargetId).pipe(
+        const fiberA = yield* tabConsumer(queueA, SessionId.makeUnsafe('sess-1'), TargetId.makeUnsafe('tgt-A')).pipe(
           Effect.provide(layer),
           Effect.forkChild,
         );
-        const fiberB = yield* tabConsumer(queueB, 'sess-1' as SessionId, 'tgt-B' as TargetId).pipe(
+        const fiberB = yield* tabConsumer(queueB, SessionId.makeUnsafe('sess-1'), TargetId.makeUnsafe('tgt-B')).pipe(
           Effect.provide(layer),
           Effect.forkChild,
         );
@@ -89,7 +90,7 @@ describe('Replay Pipeline (per-tab Queue)', () => {
     await Effect.runPromise(
       Effect.gen(function*() {
         const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
-        const fiber = yield* tabConsumer(queue, 'sess-empty' as SessionId, 'tgt-X' as TargetId).pipe(
+        const fiber = yield* tabConsumer(queue, SessionId.makeUnsafe('sess-empty'), TargetId.makeUnsafe('tgt-X')).pipe(
           Effect.provide(layer),
           Effect.forkChild,
         );
@@ -107,7 +108,7 @@ describe('Replay Pipeline (per-tab Queue)', () => {
     await Effect.runPromise(
       Effect.gen(function*() {
         const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
-        const fiber = yield* tabConsumer(queue, 'sess-42' as SessionId, 'tgt-X' as TargetId).pipe(
+        const fiber = yield* tabConsumer(queue, SessionId.makeUnsafe('sess-42'), TargetId.makeUnsafe('tgt-X')).pipe(
           Effect.provide(layer),
           Effect.forkChild,
         );
@@ -145,7 +146,7 @@ describe('Replay Pipeline (per-tab Queue)', () => {
     await Effect.runPromise(
       Effect.gen(function*() {
         const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
-        const fiber = yield* tabConsumer(queue, 'sess-m' as SessionId, 'tgt-1' as TargetId).pipe(
+        const fiber = yield* tabConsumer(queue, SessionId.makeUnsafe('sess-m'), TargetId.makeUnsafe('tgt-1')).pipe(
           Effect.provide(layer),
           Effect.forkChild,
         );
@@ -171,11 +172,11 @@ describe('Replay Pipeline (per-tab Queue)', () => {
         const queueA = yield* Queue.unbounded<TabEvent, Cause.Done>();
         const queueB = yield* Queue.unbounded<TabEvent, Cause.Done>();
 
-        const fiberA = yield* tabConsumer(queueA, 'sess-tc' as SessionId, 'tgt-A' as TargetId).pipe(
+        const fiberA = yield* tabConsumer(queueA, SessionId.makeUnsafe('sess-tc'), TargetId.makeUnsafe('tgt-A')).pipe(
           Effect.provide(layer),
           Effect.forkChild,
         );
-        const fiberB = yield* tabConsumer(queueB, 'sess-tc' as SessionId, 'tgt-B' as TargetId).pipe(
+        const fiberB = yield* tabConsumer(queueB, SessionId.makeUnsafe('sess-tc'), TargetId.makeUnsafe('tgt-B')).pipe(
           Effect.provide(layer),
           Effect.forkChild,
         );

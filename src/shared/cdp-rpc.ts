@@ -23,7 +23,7 @@
 import { Effect } from 'effect';
 import type WebSocket from 'ws';
 import { CdpSessionGone, CdpTimeout } from '../session/cf/cf-errors.js';
-import type { CdpSessionId } from './cloudflare-detection.js';
+import { CdpSessionId } from './cloudflare-detection.js';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Types
@@ -83,7 +83,7 @@ export class CdpConnection {
     return Effect.callback<any, CdpSessionGone | CdpTimeout>((resume) => {
       if (this.disposed || this.ws.readyState !== 1 /* OPEN */) {
         resume(Effect.fail(new CdpSessionGone({
-          sessionId: sessionId ?? ('' as CdpSessionId),
+          sessionId: sessionId ?? (CdpSessionId.makeUnsafe('')),
           method,
         })));
         return;
@@ -111,7 +111,7 @@ export class CdpConnection {
         this.pending.delete(id);
         clearTimeout(timer);
         resume(Effect.fail(new CdpSessionGone({
-          sessionId: sessionId ?? ('' as CdpSessionId),
+          sessionId: sessionId ?? (CdpSessionId.makeUnsafe('')),
           method,
         })));
       }
@@ -168,7 +168,7 @@ export class CdpConnection {
 
     if (msg.error) {
       entry.resume(Effect.fail(new CdpSessionGone({
-        sessionId: '' as CdpSessionId,
+        sessionId: CdpSessionId.makeUnsafe(''),
         method: `response:${msg.id}`,
       })));
     } else {
@@ -185,7 +185,7 @@ export class CdpConnection {
     for (const [, entry] of this.pending) {
       clearTimeout(entry.timer);
       entry.resume(Effect.fail(new CdpSessionGone({
-        sessionId: '' as CdpSessionId,
+        sessionId: CdpSessionId.makeUnsafe(''),
         method: `drain:${reason}`,
       })));
     }

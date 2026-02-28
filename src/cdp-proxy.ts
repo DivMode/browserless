@@ -7,7 +7,7 @@ import { Config, Logger } from '@browserless.io/browserless';
 import { Schema } from 'effect';
 
 import { CloudflareConfig } from './shared/cloudflare-detection.js';
-import type { CdpSessionId, TargetId } from './shared/cloudflare-detection.js';
+import { CdpSessionId, TargetId } from './shared/cloudflare-detection.js';
 import { decodeCDPCommand, decodeCDPMessage, decodeAddReplayMarkerParams } from './shared/cdp-schemas.js';
 import { CdpConnection } from './shared/cdp-rpc.js';
 
@@ -244,7 +244,7 @@ export class CDPProxy {
                 return;
               }
               const { targetId, tag, payload } = markerExit.value;
-              this.onAddReplayMarker((targetId || '') as TargetId, tag, payload);
+              this.onAddReplayMarker(TargetId.makeUnsafe(targetId || ''), tag, payload);
               void this.sendClientResponse(msg.id, { success: true });
             } else {
               void this.sendClientResponse(msg.id, { error: 'Replay not enabled' });
@@ -530,7 +530,7 @@ export class CDPProxy {
 
     const send = async (method: string, params: object = {}, sessionId?: string, timeoutMs: number = 30_000): Promise<any> => {
       await waitForOpen;
-      return conn.sendPromise(method, params, sessionId as CdpSessionId | undefined, timeoutMs);
+      return conn.sendPromise(method, params, sessionId ? CdpSessionId.makeUnsafe(sessionId) : undefined, timeoutMs);
     };
 
     const cleanup = () => {

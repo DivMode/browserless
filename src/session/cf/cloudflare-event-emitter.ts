@@ -1,9 +1,10 @@
 import { Logger } from '@browserless.io/browserless';
 import type { Latch } from 'effect';
-import type { CdpSessionId, TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot } from '../../shared/cloudflare-detection.js';
+import { CdpSessionId } from '../../shared/cloudflare-detection.js';
+import type { TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot } from '../../shared/cloudflare-detection.js';
 
 export type EmitClientEvent = (method: string, params: object) => Promise<void>;
-export type InjectMarker = (cdpSessionId: CdpSessionId, tag: string, payload?: object) => void;
+export type InjectMarker = (targetId: TargetId, tag: string, payload?: object) => void;
 
 /**
  * Accumulates state during a CF solve phase.
@@ -176,7 +177,7 @@ export class CloudflareEventEmitter {
       targetId: active.pageTargetId,
       ...extra,
     }).catch(() => {});
-    this.marker(active.pageCdpSessionId, 'cf.state_change', { state, ...extra });
+    this.marker(active.pageTargetId, 'cf.state_change', { state, ...extra });
   }
 
   emitSolved(active: ActiveDetection, result: CloudflareResult): void {
@@ -187,7 +188,7 @@ export class CloudflareEventEmitter {
       targetId: active.pageTargetId,
       summary: active.tracker.snapshot(),
     }).catch(() => {});
-    this.marker(active.pageCdpSessionId, 'cf.solved', {
+    this.marker(active.pageTargetId, 'cf.solved', {
       type: result.type, method: result.method, duration_ms: result.duration_ms,
       phase_label: result.phase_label, signal: result.signal,
     });
@@ -202,7 +203,7 @@ export class CloudflareEventEmitter {
       summary: active.tracker.snapshot(),
       phase_label,
     }).catch(() => {});
-    this.marker(active.pageCdpSessionId, 'cf.failed', { reason, duration_ms: duration, phase_label });
+    this.marker(active.pageTargetId, 'cf.failed', { reason, duration_ms: duration, phase_label });
   }
 
   emitStandaloneAutoSolved(
@@ -215,14 +216,14 @@ export class CloudflareEventEmitter {
       type: 'turnstile', url: '', detectionMethod: signal,
     };
     const active: ActiveDetection = {
-      info, pageCdpSessionId: cdpSessionId || '' as CdpSessionId, pageTargetId: targetId,
+      info, pageCdpSessionId: cdpSessionId || CdpSessionId.makeUnsafe(''), pageTargetId: targetId,
       startTime: Date.now(), attempt: 0, aborted: true,
       tracker: new CloudflareTracker(info),
     };
 
     this.emitDetected(active);
-    if (cdpSessionId) {
-      this.marker(cdpSessionId, 'cf.detected', { type: 'turnstile' });
+    if (targetId) {
+      this.marker(targetId, 'cf.detected', { type: 'turnstile' });
     }
     this.emitSolved(active, {
       solved: true, type: 'turnstile', method: 'auto_solve',
@@ -231,9 +232,9 @@ export class CloudflareEventEmitter {
     });
   }
 
-  marker(cdpSessionId: CdpSessionId, tag: string, payload?: object): void {
+  marker(targetId: TargetId, tag: string, payload?: object): void {
     if (this.recordingMarkers) {
-      this.injectMarker(cdpSessionId, tag, payload);
+      this.injectMarker(targetId, tag, payload);
     }
   }
 }

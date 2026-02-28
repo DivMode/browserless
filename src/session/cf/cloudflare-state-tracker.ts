@@ -133,7 +133,7 @@ export class CloudflareStateTracker {
         }
 
         if (stillDetected && !token) {
-          tracker.events.marker(active.pageCdpSessionId, 'cf.false_positive', {
+          tracker.events.marker(active.pageTargetId, 'cf.false_positive', {
             state, waited_ms: Date.now() - pollStart, type: active.info.type,
           });
           tracker.events.emitProgress(active, 'false_positive');
@@ -280,7 +280,7 @@ export class CloudflareStateTracker {
         attempts: active.attempt, auto_resolved: attr.autoResolved, signal,
         phase_label: attr.label,
       });
-      tracker.events.marker(active.pageCdpSessionId, 'cf.auto_solved', { signal, method: attr.method });
+      tracker.events.marker(active.pageTargetId, 'cf.auto_solved', { signal, method: attr.method });
     })();
   }
 
@@ -418,7 +418,7 @@ export class CloudflareStateTracker {
           Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
         );
         if (widgetErr) {
-          tracker.events.marker(active.pageCdpSessionId, 'cf.widget_error_detected', {
+          tracker.events.marker(active.pageTargetId, 'cf.widget_error_detected', {
             error_type: widgetErr.type, has_token: widgetErr.has_token,
           });
           tracker.events.emitProgress(active, 'widget_error', {

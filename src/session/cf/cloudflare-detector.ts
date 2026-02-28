@@ -142,7 +142,7 @@ export class CloudflareDetector {
               // Label reflects what the attempt DID (✓ = click navigated), not that CF rechallenged
               const rechallengeAttr = deriveSolveAttribution('page_navigated', !!active.clickDelivered);
 
-              self.events.marker(cdpSessionId, 'cf.rechallenge', {
+              self.events.marker(targetId, 'cf.rechallenge', {
                 type: active.info.type, duration_ms: duration,
                 click_delivered: !!active.clickDelivered,
                 rechallenge_count: rechallengeCount,
@@ -233,7 +233,7 @@ export class CloudflareDetector {
 
             // Extra marker for timing analysis: how long between click and navigation?
             if (attr.method === 'click_navigation' && clickToNavMs !== null) {
-              self.events.marker(cdpSessionId, 'cf.click_to_nav', {
+              self.events.marker(targetId, 'cf.click_to_nav', {
                 click_to_nav_ms: clickToNavMs,
                 type: emitType,
               });
@@ -405,7 +405,7 @@ export class CloudflareDetector {
       this.state.pendingIframes.delete(targetId);
     }
     this.events.emitDetected(active);
-    this.events.marker(cdpSessionId, 'cf.detected', { type: cfType, method: 'url_pattern' });
+    this.events.marker(targetId, 'cf.detected', { type: cfType, method: 'url_pattern' });
 
     // Fire-and-forget via Promise bridge — solveDetection is already routed
     // through Effect solver via CloudflareSolver.solveViaEffect.
@@ -501,7 +501,7 @@ export class CloudflareDetector {
         self.state.pendingIframes.delete(targetId);
       }
       self.events.emitDetected(active);
-      self.events.marker(cdpSessionId, 'cf.detected', { type: cfType, method: 'cdp_dom_walk' });
+      self.events.marker(targetId, 'cf.detected', { type: cfType, method: 'cdp_dom_walk' });
 
       // solveDetection is still Promise-returning (routed through Effect solver via bridge)
       const outcome = yield* Effect.tryPromise(

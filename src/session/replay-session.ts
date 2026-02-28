@@ -5,12 +5,13 @@ import {
 } from '@browserless.io/browserless';
 
 import { Cause, Effect, Layer, ManagedRuntime, Queue } from 'effect';
-import type { SessionId, TabEvent } from '../shared/replay-schemas.js';
+import { SessionId } from '../shared/replay-schemas.js';
+import type { TabEvent } from '../shared/replay-schemas.js';
 import { ReplayStoreError } from '../shared/replay-schemas.js';
 import { ReplayWriter, ReplayMetrics } from './replay-services.js';
 import { tabConsumer } from './replay-pipeline.js';
 
-import type { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
+import { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 import { decodeCDPMessage, decodeRrwebEventBatch } from '../shared/cdp-schemas.js';
 import { CdpConnection } from '../shared/cdp-rpc.js';
 import { ScreencastCapture } from './screencast-capture.js';
@@ -272,7 +273,7 @@ export class ReplaySession {
   private async startTabPipeline(targetId: TargetId): Promise<void> {
     if (!this.pipelineRuntime || this.tabQueues.has(targetId)) return;
     const runtime = this.pipelineRuntime;
-    const sessionIdBranded = this.sessionId as unknown as SessionId;
+    const sessionIdBranded = SessionId.makeUnsafe(this.sessionId);
 
     // Create queue inside runtime scope, store reference for offerEvents/endUnsafe
     const self = this;
@@ -295,7 +296,7 @@ export class ReplaySession {
   private offerEvents(targetId: TargetId, events: readonly { type: number; timestamp: number; data: unknown }[]): void {
     const queue = this.tabQueues.get(targetId);
     if (!queue) return;
-    const sessionId = this.sessionId as unknown as SessionId;
+    const sessionId = SessionId.makeUnsafe(this.sessionId);
     for (const event of events) {
       Queue.offerUnsafe(queue, {
         sessionId,
@@ -463,7 +464,7 @@ export class ReplaySession {
     if (!this.browserConn) {
       return Promise.reject(new Error('Browser connection not initialized'));
     }
-    return this.browserConn.sendPromise(method, params, cdpSessionId as CdpSessionId | undefined, timeout);
+    return this.browserConn.sendPromise(method, params, cdpSessionId ? CdpSessionId.makeUnsafe(cdpSessionId) : undefined, timeout);
   }
 
   // ─── Per-page WebSocket ─────────────────────────────────────────────────
@@ -609,7 +610,7 @@ export class ReplaySession {
   // ─── Iframe CDP Event Handling ──────────────────────────────────────────
 
   private handleIframeCDPEvent(msg: any): void {
-    const pageSessionId = this.targets.getParentCdpSession(msg.sessionId as CdpSessionId);
+    const pageSessionId = this.targets.getParentCdpSession(CdpSessionId.makeUnsafe(msg.sessionId));
     if (!pageSessionId) return;
     const parentTargetId = this.targets.findTargetIdByCdpSession(pageSessionId);
     if (!parentTargetId) return;
@@ -695,7 +696,7 @@ export class ReplaySession {
       }
 
       // Iframe CDP events → rrweb recording events
-      if (msg.sessionId && this.targets.isIframe(msg.sessionId as CdpSessionId)) {
+      if (msg.sessionId && this.targets.isIframe(CdpSessionId.makeUnsafe(msg.sessionId))) {
         this.handleIframeCDPEvent(msg);
       }
 
@@ -711,7 +712,7 @@ export class ReplaySession {
       }
 
       // Console API calls from page targets — log [browserless-ext] prefixed messages for diagnostics
-      if (msg.method === 'Runtime.consoleAPICalled' && msg.sessionId && !this.targets.isIframe(msg.sessionId as CdpSessionId)) {
+      if (msg.method === 'Runtime.consoleAPICalled' && msg.sessionId && !this.targets.isIframe(CdpSessionId.makeUnsafe(msg.sessionId))) {
         const args: string[] = (msg.params?.args || [])
           .map((a: { value?: string; description?: string; type?: string }) =>
             a.value ?? a.description ?? String(a.type))
@@ -734,7 +735,7 @@ export class ReplaySession {
 
   private handleBindingCalled(msg: any): void {
     const name = msg.params?.name;
-    const cdpSessionId = msg.sessionId as CdpSessionId;
+    const cdpSessionId = CdpSessionId.makeUnsafe(msg.sessionId);
     if (name === '__rrwebPush') {
       try {
         const parsed = JSON.parse(msg.params.payload);
@@ -758,8 +759,8 @@ export class ReplaySession {
 
   private async handleAttachedToTarget(msg: any): Promise<void> {
     const { sessionId, targetInfo, waitingForDebugger } = msg.params;
-    const cdpSessionId = sessionId as CdpSessionId;
-    const targetId = targetInfo.targetId as TargetId;
+    const cdpSessionId = CdpSessionId.makeUnsafe(sessionId);
+    const targetId = TargetId.makeUnsafe(targetInfo.targetId);
 
     if (targetInfo.type === 'page') {
       this.log.info(`Target attached (paused=${waitingForDebugger}): targetId=${targetId} url=${targetInfo.url} type=${targetInfo.type}`);
@@ -853,7 +854,7 @@ export class ReplaySession {
           .catch((e: Error) => this.log.debug(`[${targetId}] iframe runIfWaitingForDebugger skipped: ${e.message}`));
       }
 
-      const parentCdpSid = (msg.sessionId as CdpSessionId | undefined) || this.getLastPageCdpSession();
+      const parentCdpSid = (msg.sessionId ? CdpSessionId.makeUnsafe(msg.sessionId) : undefined) || this.getLastPageCdpSession();
       if (parentCdpSid) {
         this.targets.addIframe(cdpSessionId, parentCdpSid);
         this.cloudflareSolver.onIframeAttached(targetId, cdpSessionId, targetInfo.url, parentCdpSid)
@@ -864,7 +865,7 @@ export class ReplaySession {
 
   private async handleTargetCreated(msg: any): Promise<void> {
     const { targetInfo } = msg.params;
-    if (targetInfo.type === 'page' && !this.targets.has(targetInfo.targetId as TargetId)) {
+    if (targetInfo.type === 'page' && !this.targets.has(TargetId.makeUnsafe(targetInfo.targetId))) {
       this.log.info(`Discovered external target ${targetInfo.targetId} (url=${targetInfo.url}), attaching...`);
       try {
         await this.sendCommand('Target.attachToTarget', {
@@ -878,7 +879,7 @@ export class ReplaySession {
   }
 
   private async handleTargetDestroyed(msg: any): Promise<void> {
-    const targetId = msg.params.targetId as TargetId;
+    const targetId = TargetId.makeUnsafe(msg.params.targetId);
 
     const target = this.targets.getByTarget(targetId);
     if (target) {
@@ -926,7 +927,7 @@ export class ReplaySession {
 
   private async handleTargetInfoChanged(msg: any): Promise<void> {
     const { targetInfo } = msg.params;
-    const changedTargetId = targetInfo.targetId as TargetId;
+    const changedTargetId = TargetId.makeUnsafe(targetInfo.targetId);
 
     if (targetInfo.type === 'page') {
       const target = this.targets.getByTarget(changedTargetId);
@@ -1005,7 +1006,7 @@ export class ReplaySession {
 
     if (!isCFUrl) return;
 
-    const frameCdpSessionId = msg.sessionId as CdpSessionId;
+    const frameCdpSessionId = CdpSessionId.makeUnsafe(msg.sessionId);
     const target = this.targets.getByCdpSession(frameCdpSessionId);
     if (!target) return;
 
@@ -1025,21 +1026,6 @@ export class ReplaySession {
       last = target.cdpSessionId;
     }
     return last;
-  }
-
-  /**
-   * Inject a CF marker directly into the server-side event store.
-   * Bypasses Runtime.evaluate — events appear immediately in the replay
-   * without needing pollEvents() to drain the page's events array.
-   */
-  injectMarkerServerSide(cdpSessionId: CdpSessionId, tag: string, payload?: object): void {
-    const target = this.targets.getByCdpSession(cdpSessionId);
-    if (!target) {
-      this.log.warn(`[cf-marker] target not found for cdpSession=${cdpSessionId} tag=${tag} (known=${this.targets.size})`);
-      return;
-    }
-    this.log.info(`[cf-marker] injected tag=${tag} target=${target.targetId}`);
-    this.injectMarkerForTarget(target.targetId, tag, payload);
   }
 
   /**

@@ -6,7 +6,8 @@ import {
   TabReplayCompleteParams,
 } from '@browserless.io/browserless';
 
-import type { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
+import { TargetId } from '../shared/cloudflare-detection.js';
+import type { CdpSessionId } from '../shared/cloudflare-detection.js';
 import { ScreencastCapture } from './screencast-capture.js';
 import { CloudflareSolver } from './cloudflare-solver.js';
 import { ReplaySession } from './replay-session.js';
@@ -82,7 +83,7 @@ export class ReplayCoordinator {
    *  pydoll paths where getSessionInfo returned empty).
    */
   handleCfBeacon(sessionId: string, targetId: string, tokenLength: number): boolean {
-    const brandedTargetId = targetId as TargetId;
+    const brandedTargetId = TargetId.makeUnsafe(targetId);
     if (sessionId) {
       const solver = this.cloudflareSolvers.get(sessionId);
       if (solver) {
@@ -136,8 +137,8 @@ export class ReplayCoordinator {
     const chromePort = new URL(wsEndpoint).port;
     const cloudflareSolver = new CloudflareSolver(
       sendViaSession,
-      (cdpSid: CdpSessionId, tag: string, payload?: object) => {
-        sessionRef?.injectMarkerServerSide(cdpSid, tag, payload);
+      (targetId: TargetId, tag: string, payload?: object) => {
+        sessionRef?.injectMarkerByTargetId(targetId, tag, payload);
       },
       chromePort,
     );

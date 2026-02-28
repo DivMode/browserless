@@ -60,7 +60,7 @@ export const solveDetection = (
         if (active.aborted) return 'aborted' as SolveOutcome;
         if (clicked) return 'click_dispatched' as SolveOutcome;
 
-        yield* events.marker(active.pageCdpSessionId, 'cf.waiting_auto_nav', {
+        yield* events.marker(active.pageTargetId, 'cf.waiting_auto_nav', {
           type: active.info.type,
           attempts_exhausted: true,
         });
@@ -165,10 +165,25 @@ const solveTurnstile = (
   Effect.fn('cf.solveTurnstile')(function*() {
     if (active.aborted) return false;
 
-    const { pageCdpSessionId } = active;
+    const { pageCdpSessionId, pageTargetId } = active;
     const events = yield* SolverEvents;
     const tokens = yield* TokenChecker;
     const deadline = Date.now() + SOLVE_DEADLINE_MS;
+
+    // Pre-loop token check — safe because 'turnstile' case is always EMBEDDED
+    // (interstitial routes to solveByClicking via case 'interstitial').
+    // Runtime.evaluate targets the embedding page (e.g. ahrefs.com), not the
+    // CF OOPIF, so it doesn't trigger CF's WASM V8 detection.
+    // Non-interactive widgets auto-solve within ~1-3s — catch them immediately
+    // instead of wasting 27s on checkbox polling that will always fail.
+    const earlyToken = yield* tokens.getToken(pageCdpSessionId).pipe(
+      Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
+    );
+    if (earlyToken) {
+      yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: earlyToken.length, early: true });
+      yield* deps.resolveAutoSolved(active, 'token_poll');
+      return true;
+    }
 
     let clicked = false;
 
@@ -177,21 +192,18 @@ const solveTurnstile = (
 
       if (attempt > 0) {
         yield* Effect.sleep(CLICK_RETRY_DELAY);
+      }
 
-        // Token check on retries only — NEVER on attempt 0.
-        // getToken() uses Runtime.evaluate on the page session. On attempt 0,
-        // the CF WASM is still monitoring V8 evaluation events — calling
-        // Runtime.evaluate poisons the session and causes rechallenges.
-        // By attempt 1+, the click has already been dispatched, so Runtime.evaluate
-        // is safe (CF's detection window has closed).
-        const token = yield* tokens.getToken(pageCdpSessionId).pipe(
-          Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
-        );
-        if (token) {
-          yield* events.marker(pageCdpSessionId, 'cf.token_polled', { token_length: token.length });
-          yield* deps.resolveAutoSolved(active, 'token_poll');
-          return true;
-        }
+      // Token check every attempt — safe for embedded turnstile (see above).
+      // Non-interactive widgets may auto-solve mid-loop; catch them before
+      // wasting another 4s on checkbox polling.
+      const token = yield* tokens.getToken(pageCdpSessionId).pipe(
+        Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
+      );
+      if (token) {
+        yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: token.length });
+        yield* deps.resolveAutoSolved(active, 'token_poll');
+        return true;
       }
 
       const result = yield* deps.findAndClickViaCDP(active, attempt).pipe(
@@ -207,7 +219,7 @@ const solveTurnstile = (
 
     if (!clicked) {
       yield* events.emitProgress(active, 'cdp_click_complete', { success: false, attempts: MAX_CLICK_ATTEMPTS });
-      yield* events.marker(pageCdpSessionId, 'cf.cdp_no_checkbox');
+      yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox');
       // Widget not found — CF managed challenges may auto-pass without a widget.
       // Keep the detection alive so onPageNavigated() can emit cf.solved(auto_navigation).
     }
@@ -240,7 +252,7 @@ const postClickWait = (
   deps: SolveDepsI,
 ) =>
   Effect.fn('cf.postClickWait')(function*() {
-    const { pageCdpSessionId } = active;
+    const { pageCdpSessionId, pageTargetId } = active;
     const events = yield* SolverEvents;
     const tokens = yield* TokenChecker;
 
@@ -263,7 +275,7 @@ const postClickWait = (
         Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
       );
       if (token) {
-        yield* events.marker(pageCdpSessionId, 'cf.token_polled', { token_length: token.length });
+        yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: token.length });
         yield* deps.resolveAutoSolved(active, 'token_poll');
         return true;
       }
@@ -282,7 +294,7 @@ const pollForAutoSolveToken = (
   deps: SolveDepsI,
 ) =>
   Effect.fn('cf.pollForAutoSolveToken')(function*() {
-    const { pageCdpSessionId } = active;
+    const { pageCdpSessionId, pageTargetId } = active;
     const events = yield* SolverEvents;
     const tokens = yield* TokenChecker;
 
@@ -295,7 +307,7 @@ const pollForAutoSolveToken = (
         Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
       );
       if (token) {
-        yield* events.marker(pageCdpSessionId, 'cf.token_polled', { token_length: token.length });
+        yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: token.length });
         yield* deps.resolveAutoSolved(active, 'token_poll');
         return true;
       }
@@ -340,7 +352,7 @@ const solveAutomatic = (
   Effect.fn('cf.solveAutomatic')(function*() {
     if (active.aborted) return;
     const events = yield* SolverEvents;
-    yield* events.marker(active.pageCdpSessionId, 'cf.presence_start', { type: active.info.type });
+    yield* events.marker(active.pageTargetId, 'cf.presence_start', { type: active.info.type });
     yield* deps.simulatePresence(active).pipe(
       Effect.orElseSucceed(() => undefined),
     );
