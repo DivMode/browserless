@@ -4,7 +4,7 @@ import {
   TabReplayCompleteParams,
 } from '@browserless.io/browserless';
 
-import { Cause, Effect, Fiber, Layer, ManagedRuntime, Queue, Schedule } from 'effect';
+import { Cause, Effect, Fiber, FiberMap, Layer, ManagedRuntime, Queue, Schedule } from 'effect';
 import { SessionId } from '../shared/replay-schemas.js';
 import type { TabEvent } from '../shared/replay-schemas.js';
 import { ReplayStoreError } from '../shared/replay-schemas.js';
@@ -14,7 +14,7 @@ import { tabConsumer } from './replay-pipeline.js';
 import { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 import { decodeCDPMessage, decodeRrwebEventBatch } from '../shared/cdp-schemas.js';
 import { CdpConnection } from '../shared/cdp-rpc.js';
-import { ScreencastCapture } from './screencast-capture.js';
+import type { VideoHooks } from './video-services.js';
 import { CloudflareSolver } from './cloudflare-solver.js';
 import { registerSessionState, tabDuration, replayEventsTotal } from '../prom-metrics.js';
 import { TargetRegistry } from './target-state.js';
@@ -35,11 +35,12 @@ export interface ReplaySessionOptions {
   sessionId: string;
   wsEndpoint: string;
   sessionReplay: SessionReplay;
-  screencastCapture: ScreencastCapture;
   cloudflareSolver: CloudflareSolver;
   baseUrl: string;
   video?: boolean;
   videosDir?: string;
+  /** Video capture lifecycle hooks — fully decoupled from replay */
+  videoHooks?: VideoHooks;
   onTabReplayComplete?: (metadata: TabReplayCompleteParams) => void;
 }
 
@@ -59,11 +60,11 @@ export class ReplaySession {
   private readonly sessionId: string;
   private readonly wsEndpoint: string;
   private readonly sessionReplay: SessionReplay;
-  private readonly screencastCapture: ScreencastCapture;
   private readonly cloudflareSolver: CloudflareSolver;
   private readonly baseUrl: string;
   private readonly video: boolean;
   private readonly videosDir?: string;
+  private readonly videoHooks?: VideoHooks;
   private readonly onTabReplayComplete?: (metadata: TabReplayCompleteParams) => void;
   private readonly chromePort: string;
 
@@ -76,8 +77,10 @@ export class ReplaySession {
 
   // Per-tab Queues — one Queue per tab, each consumed by its own fiber
   private tabQueues = new Map<string, Queue.Queue<TabEvent, Cause.Done>>();
-  private tabConsumerFibers = new Map<string, Fiber.Fiber<void>>();
   private eventCounts = new Map<string, number>();
+
+  /** Scope-bound fiber collection — auto-interrupts all fibers on ManagedRuntime.dispose(). */
+  private _fiberMap: FiberMap.FiberMap<string> | null = null;
   private sessionRuntime: ManagedRuntime.ManagedRuntime<
     typeof ReplayWriter.Identifier | typeof ReplayMetrics.Identifier, never
   > | null = null;
@@ -94,11 +97,11 @@ export class ReplaySession {
     this.sessionId = options.sessionId;
     this.wsEndpoint = options.wsEndpoint;
     this.sessionReplay = options.sessionReplay;
-    this.screencastCapture = options.screencastCapture;
     this.cloudflareSolver = options.cloudflareSolver;
     this.baseUrl = options.baseUrl;
     this.video = options.video ?? false;
     this.videosDir = options.videosDir;
+    this.videoHooks = options.videoHooks;
     this.onTabReplayComplete = options.onTabReplayComplete;
     this.chromePort = new URL(options.wsEndpoint).port;
     this.setupMessageRouting();
@@ -148,9 +151,9 @@ export class ReplaySession {
     // Wire up WS message handler
     ws.on('message', (data: Buffer) => this.handleCDPMessage(data));
 
-    // Wire up WS close handler — drain pending commands before destroying
+    // Wire up WS close handler — dispose drains pending commands automatically
     ws.on('close', () => {
-      this.browserConn?.drainPending('ws_close');
+      this.browserConn?.dispose();
       this.destroy('ws_close');
     });
 
@@ -188,9 +191,9 @@ export class ReplaySession {
 
       yield* sendRetry('Target.setDiscoverTargets', { discover: true });
 
-      if (session.video && session.videosDir) {
+      if (session.video && session.videosDir && session.videoHooks) {
         yield* Effect.tryPromise(() =>
-          session.screencastCapture.initSession(session.sessionId, session.sendCommand.bind(session) as any, session.videosDir!));
+          session.videoHooks!.onInit(session.sessionId, session.sendCommand.bind(session) as any, session.videosDir!));
       }
 
       session.log.debug(`Replay auto-attach enabled for session ${session.sessionId}`);
@@ -262,7 +265,28 @@ export class ReplaySession {
       registerSession: (state) => Effect.sync(() => registerSessionState(state)),
     }));
 
-    const sessionLayer = Layer.mergeAll(writerLayer, metricsLayer);
+    // Lifecycle layer — FiberMap creation + resource cleanup on scope close.
+    // ManagedRuntime.dispose() closes its scope, triggering finalizers in reverse order:
+    //   1. FiberMap's internal release → Fiber.interruptAll (keepalive, probe, screencast fibers)
+    //   2. Our release → close per-page WebSockets + browser connection
+    const self = this;
+    const lifecycleLayer = Layer.effectDiscard(
+      Effect.acquireRelease(
+        Effect.gen(function*() {
+          self._fiberMap = yield* FiberMap.make<string>();
+        }),
+        () => Effect.sync(() => {
+          // Close all per-page WebSockets (scope-guaranteed cleanup)
+          self.targets.clear();
+          // Drain browser connection
+          self.browserConn?.dispose();
+          self.browserConn = null;
+          self._fiberMap = null;
+        }),
+      ),
+    );
+
+    const sessionLayer = Layer.mergeAll(writerLayer, metricsLayer, lifecycleLayer);
     this.sessionRuntime = ManagedRuntime.make(sessionLayer);
   }
 
@@ -282,11 +306,12 @@ export class ReplaySession {
       self.tabQueues.set(targetId, queue);
     }));
 
-    // Fork consumer fiber — runs until Queue is ended. Store ref for Fiber.await in teardown.
+    // Fork consumer fiber — runs until Queue is ended. Tracked in FiberMap for auto-interrupt on dispose.
     const queue = this.tabQueues.get(targetId);
-    if (queue) {
-      const fiber = runtime.runFork(tabConsumer(queue, sessionIdBranded, targetId));
-      this.tabConsumerFibers.set(targetId, fiber);
+    if (queue && this._fiberMap) {
+      runtime.runFork(
+        FiberMap.run(this._fiberMap, `tab:${targetId}`, tabConsumer(queue, sessionIdBranded, targetId)),
+      );
     }
   }
 
@@ -347,21 +372,26 @@ export class ReplaySession {
     }
     this.tabQueues.clear();
 
-    // Phase 3: Await all consumer fibers — guarantees files are written before callbacks.
-    // 5s timeout per fiber prevents hanging on stuck consumers.
-    const fibers = [...this.tabConsumerFibers.values()];
-    const awaitFibers = Effect.gen(function*() {
-      for (const fiber of fibers) {
-        yield* Fiber.await(fiber).pipe(
-          Effect.timeout('5 seconds'),
-          Effect.ignore,
-        );
-      }
-    });
-
-    await Effect.runPromise(awaitFibers).catch((e) => {
-      this.log.warn(`Fiber await error: ${e instanceof Error ? e.message : String(e)}`);
-    });
+    // Phase 3: Graceful drain — await tab consumer fibers so replay files are written before callbacks.
+    // FiberMap provides access to individual fibers by key. 5s timeout prevents hanging.
+    if (this._fiberMap) {
+      const targetIds = [...this.targets.targetIds];
+      const fiberMap = this._fiberMap;
+      const awaitConsumers = Effect.gen(function*() {
+        for (const targetId of targetIds) {
+          const fiber = yield* FiberMap.get(fiberMap, `tab:${targetId}`);
+          if (fiber) {
+            yield* Fiber.await(fiber).pipe(
+              Effect.timeout('5 seconds'),
+              Effect.ignore,
+            );
+          }
+        }
+      });
+      await Effect.runPromise(awaitConsumers).catch((e) => {
+        this.log.warn(`Fiber await error: ${e instanceof Error ? e.message : String(e)}`);
+      });
+    }
 
     // Phase 4: Fire tab-complete callbacks — replay files now exist on disk.
     for (const target of [...this.targets]) {
@@ -383,9 +413,10 @@ export class ReplaySession {
         }
       }
     }
-    this.tabConsumerFibers.clear();
 
-    // Phase 5: Dispose session runtime — interrupts remaining fibers, runs Layer finalizers.
+    // Phase 5: Dispose session runtime — runs all Layer finalizers in reverse order:
+    //   1. FiberMap release → Fiber.interruptAll (keepalive, probe, screencast, remaining tab fibers)
+    //   2. Lifecycle release → targets.clear() (closes per-page WSs), browserConn.dispose()
     if (this.sessionRuntime) {
       await this.sessionRuntime.dispose().catch((e) => {
         this.log.warn(`Session runtime dispose error: ${e instanceof Error ? e.message : String(e)}`);
@@ -393,22 +424,6 @@ export class ReplaySession {
       this.sessionRuntime = null;
     }
     this.eventCounts.clear();
-
-    // Phase 6: Close connections — after runtime dispose, no more Effect code running.
-    this.browserConn?.drainPending('session_destroyed');
-    this.browserConn?.dispose();
-    this.browserConn = null;
-
-    for (const target of this.targets) {
-      if (target.pageWebSocket) {
-        const conn = (target.pageWebSocket as any).__cdpConn as CdpConnection | undefined;
-        conn?.drainPending('session_destroyed');
-        conn?.dispose();
-      }
-    }
-
-    // Clear all target state (closes all per-page WSs)
-    this.targets.clear();
 
     // Close main WS (no-op if already closed via ws_close)
     try { this.ws?.close(); } catch {}
@@ -470,11 +485,13 @@ export class ReplaySession {
             return pageConn.sendPromise(method, params, undefined, timeout);
           }
         } else {
-          // Dead WS — remove and attempt reconnect (once per target)
+          // Dead WS — remove and attempt reconnect via FiberMap (once per target)
           target.pageWebSocket = null;
-          if (!target.failedReconnect) {
-            this.openPageWebSocket(target.targetId, cdpSessionId)
-              .catch(() => { target.failedReconnect = true; });
+          if (!target.failedReconnect && this.sessionRuntime && this._fiberMap) {
+            target.failedReconnect = true;
+            this.sessionRuntime.runFork(
+              FiberMap.run(this._fiberMap, `pageWs:${target.targetId}`, this.openPageWs(target.targetId)),
+            );
           }
           // Fall through to browser-level WS
         }
@@ -490,74 +507,26 @@ export class ReplaySession {
 
   // ─── Per-page WebSocket ─────────────────────────────────────────────────
 
-  private openPageWebSocket(targetId: TargetId, _cdpSessionId: CdpSessionId): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const WebSocket = this.WebSocket;
-      const pageWsUrl = `ws://127.0.0.1:${this.chromePort}/devtools/page/${targetId}`;
+  /**
+   * Open a per-page WebSocket for zero-contention CDP routing.
+   *
+   * Returns an Effect that:
+   * 1. Opens the WS via Effect.callback (cleanup terminates WS on interruption)
+   * 2. Wires CdpConnection + message handler
+   * 3. Forks a keepalive fiber (child of this fiber — auto-interrupted together)
+   *
+   * Caller forks this into FiberMap so the whole lifecycle (open + keepalive)
+   * is auto-interrupted on session dispose.
+   */
+  private openPageWs(targetId: TargetId): Effect.Effect<void> {
+    const session = this;
+    const WebSocket = this.WebSocket;
+    const pageWsUrl = `ws://127.0.0.1:${this.chromePort}/devtools/page/${targetId}`;
+
+    return Effect.gen(function*() {
       const pageWs = new WebSocket(pageWsUrl);
-      let settled = false;
 
-      const connectTimer = setTimeout(() => {
-        settled = true;
-        pageWs.terminate();
-        reject(new Error('Per-page WS connect timeout'));
-      }, 2_000);
-
-      pageWs.on('open', () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(connectTimer);
-
-        const target = this.targets.getByTarget(targetId);
-        if (target) {
-          target.pageWebSocket = pageWs;
-        }
-
-        // Create CdpConnection for per-page WS
-        const pageConn = new CdpConnection(pageWs, {
-          startId: this.pageWsCmdId,
-          defaultTimeout: 30_000,
-        });
-        this.pageWsCmdId += 10_000;
-        (pageWs as any).__cdpConn = pageConn;
-
-        // Keepalive: forked fiber pings every 30s, terminates on missed pong.
-        // Fiber is interrupted when sessionRuntime disposes (stops Effect.sleep),
-        // but Effect.callback cleanup does NOT run via dispose — pongTimeout may
-        // leak for up to 30s. Harmless: fires into a closed/terminated socket.
-        if (this.sessionRuntime) {
-          const session = this;
-          this.sessionRuntime.runFork(
-            Effect.gen(function*() {
-              while (pageWs.readyState === WebSocket.OPEN) {
-                yield* Effect.sleep('30 seconds');
-                if (pageWs.readyState !== WebSocket.OPEN) break;
-                pageWs.ping();
-                // Wait for pong or timeout
-                const gotPong = yield* Effect.callback<boolean>((resume) => {
-                  const pongTimeout = setTimeout(() => {
-                    resume(Effect.succeed(false));
-                  }, 30_000);
-                  pageWs.once('pong', () => {
-                    clearTimeout(pongTimeout);
-                    resume(Effect.succeed(true));
-                  });
-                  return Effect.sync(() => clearTimeout(pongTimeout));
-                });
-                if (!gotPong) {
-                  session.log.debug(`Per-page WS for ${targetId} missed pong — closing (fallback to browser WS)`);
-                  pageWs.terminate();
-                  break;
-                }
-              }
-            }).pipe(Effect.ignore),
-          );
-        }
-
-        this.log.debug(`Per-page WS opened for target ${targetId}`);
-        resolve();
-      });
-
+      // Wire persistent handlers before waiting for open
       pageWs.on('message', (data: Buffer) => {
         try {
           const msg = JSON.parse(data.toString());
@@ -565,18 +534,74 @@ export class ReplaySession {
           conn?.handleResponse(msg);
         } catch {}
       });
-
       pageWs.on('error', () => { /* silent — fallback to browser WS */ });
       pageWs.on('close', () => {
-        const target = this.targets.getByTarget(targetId);
+        const target = session.targets.getByTarget(targetId);
         if (target && target.pageWebSocket === pageWs) {
           target.pageWebSocket = null;
         }
         const conn = (pageWs as any).__cdpConn as CdpConnection | undefined;
-        conn?.drainPending('per_page_ws_closed');
         conn?.dispose();
       });
-    });
+
+      // Wait for WS open — cleanup terminates WS if fiber is interrupted mid-handshake
+      yield* Effect.callback<void, Error>((resume) => {
+        pageWs.on('open', () => resume(Effect.void));
+        return Effect.sync(() => pageWs.terminate());
+      }).pipe(Effect.timeout('2 seconds'), Effect.catch(() =>
+        Effect.fail(new Error('Per-page WS connect timeout')),
+      ));
+
+      // WS is open — wire CdpConnection + register on target
+      const target = session.targets.getByTarget(targetId);
+      if (target) {
+        target.pageWebSocket = pageWs;
+      }
+
+      const pageConn = new CdpConnection(pageWs, {
+        startId: session.pageWsCmdId,
+        defaultTimeout: 30_000,
+      });
+      session.pageWsCmdId += 10_000;
+      (pageWs as any).__cdpConn = pageConn;
+
+      session.log.debug(`Per-page WS opened for target ${targetId}`);
+
+      // Keepalive loop — runs as a child of this fiber (interrupted together)
+      while (pageWs.readyState === WebSocket.OPEN) {
+        yield* Effect.sleep('30 seconds');
+        if (pageWs.readyState !== WebSocket.OPEN) break;
+        pageWs.ping();
+        const gotPong = yield* Effect.callback<boolean>((resume) => {
+          let pongSettled = false;
+          const pongTimeout = setTimeout(() => {
+            if (pongSettled) return;
+            pongSettled = true;
+            pageWs.removeListener('pong', onPong);
+            resume(Effect.succeed(false));
+          }, 30_000);
+          const onPong = () => {
+            if (pongSettled) return;
+            pongSettled = true;
+            clearTimeout(pongTimeout);
+            resume(Effect.succeed(true));
+          };
+          pageWs.once('pong', onPong);
+          return Effect.sync(() => {
+            if (!pongSettled) {
+              pongSettled = true;
+              clearTimeout(pongTimeout);
+              pageWs.removeListener('pong', onPong);
+            }
+          });
+        });
+        if (!gotPong) {
+          session.log.debug(`Per-page WS for ${targetId} missed pong — closing (fallback to browser WS)`);
+          pageWs.terminate();
+          break;
+        }
+      }
+    }).pipe(Effect.ignore);
   }
 
   // ─── Event Collection ───────────────────────────────────────────────────
@@ -626,10 +651,12 @@ export class ReplaySession {
 
     await this.collectEvents(targetId);
 
-    // Stop screencast for this target
+    // Stop screencast for this target (via VideoHooks — fully decoupled)
     const cdpSid = target?.cdpSessionId;
-    if (cdpSid && this.video) {
-      await this.screencastCapture.stopTargetCapture(this.sessionId, cdpSid);
+    if (cdpSid && this.video && this.videoHooks) {
+      await Effect.runPromise(
+        this.videoHooks.onFinalizeTab(this.sessionId, cdpSid),
+      ).catch(() => {});
     }
 
     if (target) {
@@ -730,10 +757,9 @@ export class ReplaySession {
         this.handleIframeCDPEvent(msg);
       }
 
-      // Screencast frames
-      if (this.video && msg.method === 'Page.screencastFrame' && msg.sessionId) {
-        this.screencastCapture.handleFrame(this.sessionId, msg.sessionId, msg.params)
-          .catch((e: Error) => this.log.debug(`Screencast frame failed: ${e.message}`));
+      // Screencast frames — sync Queue.offerUnsafe (no async, no .catch needed)
+      if (this.video && msg.method === 'Page.screencastFrame' && msg.sessionId && this.videoHooks) {
+        this.videoHooks.onFrame(this.sessionId, msg.sessionId, msg.params);
       }
 
       // Binding calls (rrweb push, turnstile solved, turnstile target)
@@ -833,8 +859,8 @@ export class ReplaySession {
       }
 
       // Diagnostic probe: check rrweb state 2s after target resumes.
-      // Forked as child fiber — auto-interrupted when sessionRuntime disposes.
-      if (this.sessionRuntime) {
+      // Tracked in FiberMap — auto-interrupted on scope close.
+      if (this.sessionRuntime && this._fiberMap) {
         const probeTargetId = targetId;
         const probeCdpSessionId = cdpSessionId;
         const session = this;
@@ -864,19 +890,32 @@ export class ReplaySession {
             return Effect.void;
           }),
         );
-        this.sessionRuntime.runFork(probeEffect);
+        this.sessionRuntime.runFork(
+          FiberMap.run(this._fiberMap, `probe:${targetId}`, probeEffect),
+        );
       }
 
-      // Start screencast — only when video=true
-      if (this.video) {
-        this.screencastCapture.addTarget(this.sessionId, this.sendCommand.bind(this) as any, cdpSessionId, targetId)
-          .catch((e: Error) => this.log.debug(`[${targetId}] screencast addTarget skipped: ${e.message}`));
+      // Start screencast — fully decoupled via VideoHooks
+      // Tracked in FiberMap — auto-interrupted on scope close.
+      if (this.video && this.videoHooks && this.sessionRuntime && this._fiberMap) {
+        this.sessionRuntime.runFork(
+          FiberMap.run(this._fiberMap, `screencast:${targetId}`,
+            this.videoHooks.onTargetAttached(this.sessionId, this.sendCommand.bind(this) as any, cdpSessionId, targetId).pipe(
+              Effect.catch((e) => {
+                this.log.debug(`[${targetId}] screencast addTarget skipped: ${e}`);
+                return Effect.void;
+              }),
+            ),
+          ),
+        );
       }
 
-      // Open per-page WebSocket for zero-contention
-      this.openPageWebSocket(targetId, cdpSessionId).catch((err: Error) => {
-        this.log.debug(`Per-page WS failed for ${targetId}: ${err.message}`);
-      });
+      // Open per-page WebSocket for zero-contention — tracked in FiberMap, auto-interrupted on dispose.
+      if (this.sessionRuntime && this._fiberMap) {
+        this.sessionRuntime.runFork(
+          FiberMap.run(this._fiberMap, `pageWs:${targetId}`, this.openPageWs(targetId)),
+        );
+      }
     }
 
     // Cross-origin iframes (e.g., Cloudflare Turnstile)
@@ -933,12 +972,17 @@ export class ReplaySession {
       }
 
       // Await consumer fiber — guarantees replay file is written before callback fires.
-      const fiber = this.tabConsumerFibers.get(targetId);
-      if (fiber) {
+      // Fiber is tracked in FiberMap by key `tab:${targetId}`.
+      if (this._fiberMap) {
+        const fiberMap = this._fiberMap;
         await Effect.runPromise(
-          Fiber.await(fiber).pipe(Effect.timeout('5 seconds'), Effect.ignore),
+          Effect.gen(function*() {
+            const fiber = yield* FiberMap.get(fiberMap, `tab:${targetId}`);
+            if (fiber) {
+              yield* Fiber.await(fiber).pipe(Effect.timeout('5 seconds'), Effect.ignore);
+            }
+          }),
         ).catch(() => {});
-        this.tabConsumerFibers.delete(targetId);
       }
 
       // Fire callback — replay file now exists on disk.
@@ -960,8 +1004,8 @@ export class ReplaySession {
         }
       }
 
-      // Clean up screencast
-      this.screencastCapture.handleTargetDestroyed(this.sessionId, target.cdpSessionId);
+      // Clean up screencast (via VideoHooks — fully decoupled)
+      this.videoHooks?.onTargetDestroyed(this.sessionId, target.cdpSessionId);
     }
 
     // Interrupt detection fiber for this target (replaces AbortController)

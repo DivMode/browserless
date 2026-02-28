@@ -10,8 +10,7 @@
  * The caller is responsible for:
  *   1. Opening the WebSocket
  *   2. Calling conn.handleResponse(msg) from their WS message handler
- *   3. Calling conn.drainPending() on WS close
- *   4. Calling conn.dispose() when done
+ *   3. Calling conn.dispose() when done (auto-drains pending commands)
  *
  * Usage:
  *   const conn = new CdpConnection(ws, { startId: 1, defaultTimeout: 30_000 });
@@ -193,11 +192,13 @@ export class CdpConnection {
   }
 
   /**
-   * Mark as disposed. No new commands will be accepted.
-   * Does NOT drain pending — call drainPending() first if needed.
+   * Drain all pending commands and mark as disposed.
+   * No new commands will be accepted after this call. Idempotent.
    */
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
+    this.drainPending('disposed');
   }
 
   /** Number of commands awaiting responses. */

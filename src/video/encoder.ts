@@ -1,8 +1,8 @@
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn } from 'child_process';
 import { readdir, rename, rm, writeFile } from 'fs/promises';
 import path from 'path';
 
-import { Effect, Layer, ManagedRuntime, Queue } from 'effect';
+import { Duration, Effect, Layer, ManagedRuntime, Queue } from 'effect';
 import {
   Logger,
   exists,
@@ -45,8 +45,6 @@ export class VideoEncoder {
   private runtime = ManagedRuntime.make(Layer.empty);
   private effectQueue: Queue.Queue<EncodeJob> | null = null;
   private ready: Promise<void>;
-  /** Currently running ffmpeg process (for interruption on dispose). */
-  private activeProc: ChildProcess | null = null;
 
   constructor(private store: IReplayStore | null) {
     // Initialize queue + consumer loop as a root fiber.
@@ -113,12 +111,9 @@ export class VideoEncoder {
 
   /**
    * Graceful shutdown — ends queue, interrupts consumer fiber (kills any running ffmpeg).
+   * ManagedRuntime.dispose() interrupts the consumer → interrupts ffmpeg callback → kills proc.
    */
   dispose(): void {
-    if (this.activeProc) {
-      this.activeProc.kill('SIGKILL');
-      this.activeProc = null;
-    }
     this.runtime.dispose();
   }
 
@@ -266,9 +261,9 @@ export class VideoEncoder {
       playlistLines.push('');
       await writeFile(playlistPath, playlistLines.join('\n'), 'utf-8');
 
-      // Encode via ffmpeg (tracks activeProc for kill-on-dispose)
+      // Encode via ffmpeg — Effect.callback auto-kills proc on fiber interruption
       const ffmpegPlaylistPath = path.join(sessionDir, '_encoding.m3u8');
-      await this.runFfmpegHls(concatPath, sessionDir, ffmpegPlaylistPath, sessionId);
+      await Effect.runPromise(this.runFfmpegHlsEffect(concatPath, sessionDir, ffmpegPlaylistPath, sessionId));
 
       // Replace estimated playlist with ffmpeg's exact durations
       if (await exists(ffmpegPlaylistPath)) {
@@ -299,68 +294,68 @@ export class VideoEncoder {
 
   /**
    * Run ffmpeg to encode frames into HLS segments.
-   * Tracks activeProc so dispose() can kill it on shutdown.
+   *
+   * Effect.callback wraps the spawn — cleanup finalizer kills the process on
+   * fiber interruption. Effect.timeout replaces manual setTimeout.
+   * ManagedRuntime.dispose() → interrupts consumer → interrupts this callback → kills proc.
    */
-  private runFfmpegHls(concatPath: string, sessionDir: string, playlistPath: string, sessionId: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const segDur = VideoEncoder.SEGMENT_DURATION;
-      const segmentPattern = path.join(sessionDir, 'seg%03d.ts');
+  private runFfmpegHlsEffect(concatPath: string, sessionDir: string, playlistPath: string, sessionId: string): Effect.Effect<void, Error> {
+    const encoder = this;
+    const segDur = VideoEncoder.SEGMENT_DURATION;
+    const segmentPattern = path.join(sessionDir, 'seg%03d.ts');
 
-      const args = [
-        '-f', 'concat',
-        '-safe', '0',
-        '-i', concatPath,
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-crf', '28',
-        '-pix_fmt', 'yuv420p',
-        '-force_key_frames', `expr:gte(t,n_forced*${segDur})`,
-        '-f', 'hls',
-        '-hls_time', String(segDur),
-        '-hls_list_size', '0',
-        '-hls_playlist_type', 'vod',
-        '-hls_segment_filename', segmentPattern,
-        '-hls_flags', 'temp_file',
-        '-y',
-        playlistPath,
-      ];
+    const args = [
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', concatPath,
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-crf', '28',
+      '-pix_fmt', 'yuv420p',
+      '-force_key_frames', `expr:gte(t,n_forced*${segDur})`,
+      '-f', 'hls',
+      '-hls_time', String(segDur),
+      '-hls_list_size', '0',
+      '-hls_playlist_type', 'vod',
+      '-hls_segment_filename', segmentPattern,
+      '-hls_flags', 'temp_file',
+      '-y',
+      playlistPath,
+    ];
 
+    return Effect.callback<void, Error>((resume) => {
       const proc = spawn('ffmpeg', args, {
         cwd: sessionDir,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
-      this.activeProc = proc;
-
       let stderrTail = '';
       proc.stderr.on('data', (data: Buffer) => {
         const chunk = data.toString();
         stderrTail = (stderrTail + chunk).slice(-2000);
-        this.parseProgress(chunk, sessionId);
+        encoder.parseProgress(chunk, sessionId);
       });
 
       proc.on('close', (code) => {
-        this.activeProc = null;
-        clearTimeout(timeout);
         if (code === 0) {
-          resolve();
+          resume(Effect.void);
         } else {
-          reject(new Error(`ffmpeg HLS exited with code ${code}: ${stderrTail.slice(-500)}`));
+          resume(Effect.fail(new Error(`ffmpeg HLS exited with code ${code}: ${stderrTail.slice(-500)}`)));
         }
       });
 
       proc.on('error', (err) => {
-        this.activeProc = null;
-        clearTimeout(timeout);
-        reject(new Error(`ffmpeg HLS spawn failed: ${err.message}`));
+        resume(Effect.fail(new Error(`ffmpeg HLS spawn failed: ${err.message}`)));
       });
 
-      // Kill ffmpeg if it takes too long (5 minutes per video)
-      const timeout = setTimeout(() => {
-        proc.kill('SIGKILL');
-        reject(new Error(`ffmpeg HLS timed out for ${sessionId}`));
-      }, 5 * 60 * 1000);
-    });
+      // Cleanup: kill ffmpeg on fiber interruption (shutdown, timeout, etc.)
+      return Effect.sync(() => { proc.kill('SIGKILL'); });
+    }).pipe(
+      Effect.timeout(Duration.minutes(5)),
+      Effect.catchTag('TimeoutError', () =>
+        Effect.fail(new Error(`ffmpeg HLS timed out for ${sessionId}`)),
+      ),
+    );
   }
 
   /**

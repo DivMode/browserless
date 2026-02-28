@@ -1,309 +1,329 @@
+/**
+ * CDP Screencast frame capture — fully independent from replay.
+ *
+ * This module knows nothing about replay-session, replay-coordinator, or
+ * rrweb. It receives CDP lifecycle events via VideoHooks (defined in
+ * video-services.ts) and manages video frame capture independently.
+ *
+ * Architecture mirrors replay-pipeline.ts:
+ *   Chrome pushes Page.screencastFrame → Queue.offerUnsafe → Stream.fromQueue consumer
+ *     ├─ write PNG to disk
+ *     ├─ send Page.screencastFrameAck (backpressure)
+ *     └─ reset fallback timer (interrupt + re-fork child fiber)
+ *   Queue.endUnsafe → stream ends → consumer returns frameCount
+ *
+ * Per-target state is a Queue + consumer Fiber — no mutable Maps of timers.
+ * When a target is destroyed or session stops, Queue.endUnsafe signals the
+ * stream consumer. Child fibers (fallback screenshots) are interrupted
+ * automatically when the consumer ends.
+ */
 import { mkdir, writeFile } from 'fs/promises';
 import path from 'path';
 
 import { Logger } from '@browserless.io/browserless';
+import { Cause, Effect, Fiber, Queue, Ref, Stream } from 'effect';
 
-/**
- * CDP Screencast frame capture per session.
- *
- * Uses the existing raw WebSocket connection to the browser (same pattern as
- * replay-coordinator.ts) to capture pixel-perfect video frames.
- *
- * Per tab:
- * - Page.startScreencast sends PNG frames when the page visually changes
- * - Static page fallback: if no frame arrives in 2 seconds, fire
- *   Page.captureScreenshot (handles Turnstile "Just a moment..." pages)
- * - Frames saved as {timestamp_ms}.png in {videosDir}/{sessionId}--tab-{targetId}/frames/
- *
- * Frame acknowledgment (Page.screencastFrameAck) tells Chrome to send the
- * next frame. Without ack, Chrome stops sending frames.
- */
+import type { FrameParams, SendCommand, VideoHooks } from './video-services.js';
 
-type SendCommand = (method: string, params: object, cdpSessionId?: string) => Promise<unknown>;
+// ─── Frame event pushed into per-target Queue ────────────────────────
 
-interface CaptureSession {
-  sessionId: string;
-  videosDir: string;
-  frameCount: number;
-  /** Per-target frame counts, keyed by CDP session ID */
-  targetFrameCounts: Map<string, number>;
-  /** Per-target frame directories, keyed by CDP session ID → absolute path */
-  targetDirs: Map<string, string>;
-  /** Per-target fallback timers */
-  fallbackTimers: Map<string, ReturnType<typeof setTimeout>>;
-  /** CDP session IDs we're capturing from */
-  activeTargets: Set<string>;
-  /** Reference to the WebSocket sendCommand for this session */
-  sendCommand: SendCommand;
-  stopped: boolean;
+interface FrameEvent {
+  data: string;
+  timestamp: number;
+  /** CDP screencast frame sessionId for ack — 0 for fallback screenshots */
+  ackSessionId: number;
 }
 
-export class ScreencastCapture {
-  private log = new Logger('screencast-capture');
-  private sessions = new Map<string, CaptureSession>();
+// ─── Per-target state ────────────────────────────────────────────────
 
-  /** Screencast resolution settings */
-  private readonly maxWidth = 1280;
-  private readonly maxHeight = 720;
-  private readonly fallbackIntervalMs = 2000;
+interface TargetState {
+  queue: Queue.Queue<FrameEvent, Cause.Done>;
+  fiber: Fiber.Fiber<number>;
+  frameCount: number;
+}
 
-  /**
-   * Initialize screencast capture for a session.
-   *
-   * Called by ReplayCoordinator when a replay session starts.
-   * Stores videosDir and sessionId — per-target directories are
-   * created in addTarget() when we know the targetId.
-   */
-  async initSession(
+// ─── Per-session state ───────────────────────────────────────────────
+
+interface SessionState {
+  videosDir: string;
+  sendCommand: SendCommand;
+  targets: Map<string, TargetState>;
+  totalFrames: number;
+}
+
+// ─── Per-target consumer fiber ───────────────────────────────────────
+
+const MAX_WIDTH = 1280;
+const MAX_HEIGHT = 720;
+
+/**
+ * Consumes frames from a per-target Queue. One fiber per target.
+ *
+ * Frames arrive from either:
+ * - Page.screencastFrame events (pushed via Queue.offerUnsafe)
+ * - Fallback screenshots (pushed by the fallback child fiber)
+ *
+ * The fallback child fiber fires Page.captureScreenshot every 2s when no
+ * real frames arrive. It resets on each real frame (interrupt + re-fork).
+ *
+ * Returns the total frame count when the Queue is ended.
+ */
+const targetConsumer = (
+  queue: Queue.Queue<FrameEvent, Cause.Done>,
+  targetDir: string,
+  cdpSessionId: string,
+  sendCommand: SendCommand,
+): Effect.Effect<number> =>
+  Effect.fn('screencast.target')(function*() {
+    let frameCount = 0;
+
+    // Ref holds the current fallback fiber so we can interrupt+restart it
+    const fallbackRef = yield* Ref.make<Fiber.Fiber<void> | null>(null);
+
+    const startFallback = Effect.gen(function*() {
+      // Interrupt previous fallback if still running
+      const prev = yield* Ref.get(fallbackRef);
+      if (prev) yield* Fiber.interrupt(prev).pipe(Effect.ignore);
+
+      const fb = yield* Effect.forkChild(
+        Effect.sleep('2 seconds').pipe(
+          Effect.andThen(Effect.tryPromise(async () => {
+            const result = await sendCommand(
+              'Page.captureScreenshot', { format: 'png' }, cdpSessionId,
+            ) as { data?: string } | undefined;
+            if (result?.data) {
+              Queue.offerUnsafe(queue, {
+                data: result.data,
+                timestamp: Date.now(),
+                ackSessionId: 0,
+              });
+            }
+          })),
+          Effect.ignore,
+          Effect.andThen(Effect.sleep('2 seconds')),
+          Effect.repeat({ while: () => true }),
+        ),
+      );
+      yield* Ref.set(fallbackRef, fb);
+    });
+
+    // Start initial fallback
+    yield* startFallback;
+
+    yield* Stream.fromQueue(queue).pipe(
+      Stream.runForEach((frame: FrameEvent) =>
+        Effect.gen(function*() {
+          const framePath = path.join(targetDir, `${frame.timestamp}.png`);
+          yield* Effect.tryPromise(() =>
+            writeFile(framePath, Buffer.from(frame.data, 'base64')),
+          ).pipe(Effect.ignore);
+          frameCount++;
+
+          if (frame.ackSessionId > 0) {
+            yield* Effect.tryPromise(() =>
+              sendCommand('Page.screencastFrameAck', {
+                sessionId: frame.ackSessionId,
+              }, cdpSessionId),
+            ).pipe(Effect.ignore);
+
+            // Real frame arrived → reset fallback timer
+            yield* startFallback;
+          }
+        }),
+      ),
+    );
+
+    // Queue ended — clean up fallback fiber
+    const fb = yield* Ref.get(fallbackRef);
+    if (fb) yield* Fiber.interrupt(fb).pipe(Effect.ignore);
+
+    return frameCount;
+  })();
+
+// ─── Factory ─────────────────────────────────────────────────────────
+
+/**
+ * Create an independent screencast capture system.
+ *
+ * Returns VideoHooks (for replay-session to call at lifecycle points)
+ * plus stopCapture/getFrameCount for the coordinator to use directly.
+ *
+ * No class, no `this` — state is closure-scoped.
+ */
+export const createScreencastCapture = () => {
+  const log = new Logger('screencast-capture');
+  const sessions = new Map<string, SessionState>();
+
+  // ── initSession ──────────────────────────────────────────────────
+
+  const initSession = async (
     sessionId: string,
     sendCommand: SendCommand,
     videosDir: string,
-  ): Promise<void> {
-    this.sessions.set(sessionId, {
-      sessionId,
+  ): Promise<void> => {
+    sessions.set(sessionId, {
       videosDir,
-      frameCount: 0,
-      targetFrameCounts: new Map(),
-      targetDirs: new Map(),
-      fallbackTimers: new Map(),
-      activeTargets: new Set(),
       sendCommand,
-      stopped: false,
+      targets: new Map(),
+      totalFrames: 0,
     });
+    log.debug(`Screencast session initialized: ${sessionId}`);
+  };
 
-    this.log.debug(`Screencast session initialized: ${sessionId}`);
-  }
+  // ── addTarget ────────────────────────────────────────────────────
 
-  /**
-   * Add a target to an existing capture session and start screencast on it.
-   *
-   * Computes the final frame directory directly from targetId — no staging
-   * directory, no subsequent rename/move. This eliminates the ~13s bottleneck
-   * that occurred when moveTargetFrames() renamed ~300 PNG files.
-   *
-   * Called by ReplayCoordinator when a new page target is auto-attached
-   * (after rrweb injection and target resume).
-   */
-  async addTarget(
+  const addTarget = (
     sessionId: string,
     sendCommand: SendCommand,
     cdpSessionId: string,
     targetId: string,
-  ): Promise<void> {
-    const session = this.sessions.get(sessionId);
-    if (!session || session.stopped) return;
+  ): Effect.Effect<void> =>
+    Effect.fn('screencast.addTarget')(function*() {
+      const session = sessions.get(sessionId);
+      if (!session) return;
 
-    try {
-      // Write frames directly to final tab video directory (no staging/move)
       const tabReplayId = `${sessionId}--tab-${targetId}`;
       const targetDir = path.join(session.videosDir, tabReplayId, 'frames');
-      await mkdir(targetDir, { recursive: true });
-      session.targetDirs.set(cdpSessionId, targetDir);
+      yield* Effect.tryPromise(() => mkdir(targetDir, { recursive: true })).pipe(Effect.ignore);
 
-      await sendCommand('Page.startScreencast', {
-        format: 'png',
-        maxWidth: this.maxWidth,
-        maxHeight: this.maxHeight,
-      }, cdpSessionId);
+      yield* Effect.tryPromise(() =>
+        sendCommand('Page.startScreencast', {
+          format: 'png',
+          maxWidth: MAX_WIDTH,
+          maxHeight: MAX_HEIGHT,
+        }, cdpSessionId),
+      ).pipe(Effect.ignore);
 
-      session.activeTargets.add(cdpSessionId);
-      session.targetFrameCounts.set(cdpSessionId, 0);
-      this.resetFallbackTimer(session, cdpSessionId);
+      const queue = yield* Queue.unbounded<FrameEvent, Cause.Done>();
+      // Fork consumer as a top-level daemon fiber on the global runtime.
+      // forkChild would scope it to this addTarget fiber, causing interruption
+      // when addTarget completes. The consumer must outlive addTarget.
+      const fiber = Effect.runFork(
+        targetConsumer(queue, targetDir, cdpSessionId, sendCommand),
+      );
+      session.targets.set(cdpSessionId, { queue, fiber, frameCount: 0 });
 
-      this.log.debug(`Screencast started on target (session ${sessionId})`);
-    } catch (e) {
-      this.log.debug(`Failed to start screencast: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
+      log.debug(`Screencast started on target (session ${sessionId})`);
+    })();
 
-  /**
-   * Handle a screencast frame event from CDP.
-   *
-   * Called from the replay-coordinator's WebSocket message handler when
-   * a Page.screencastFrame event arrives.
-   *
-   * Flow:
-   * 1. Write PNG data to per-target directory (already at final path)
-   * 2. Acknowledge frame (tells Chrome to send next one)
-   * 3. Reset fallback timer (page is active)
-   */
-  async handleFrame(
+  // ── handleFrame (sync — hot path) ────────────────────────────────
+
+  const handleFrame = (
     sessionId: string,
     cdpSessionId: string,
-    params: { data: string; metadata: { timestamp: number }; sessionId: number },
-  ): Promise<void> {
-    const session = this.sessions.get(sessionId);
-    if (!session || session.stopped) return;
+    params: FrameParams,
+  ): void => {
+    const session = sessions.get(sessionId);
+    if (!session) return;
 
-    const targetDir = session.targetDirs.get(cdpSessionId);
-    if (!targetDir) return;
+    const target = session.targets.get(cdpSessionId);
+    if (!target) return;
 
-    try {
-      // Write frame to per-target directory (already at final path)
-      const timestamp = Math.round(params.metadata.timestamp * 1000);
-      const framePath = path.join(targetDir, `${timestamp}.png`);
-      await writeFile(framePath, Buffer.from(params.data, 'base64'));
-      session.frameCount++;
+    const timestamp = Math.round(params.metadata.timestamp * 1000);
+    Queue.offerUnsafe(target.queue, {
+      data: params.data,
+      timestamp,
+      ackSessionId: params.sessionId,
+    });
+    target.frameCount++;
+    session.totalFrames++;
+  };
 
-      // Increment per-target frame count
-      const targetCount = session.targetFrameCounts.get(cdpSessionId) ?? 0;
-      session.targetFrameCounts.set(cdpSessionId, targetCount + 1);
+  // ── stopTargetCapture ────────────────────────────────────────────
 
-      // Acknowledge frame so Chrome sends the next one
-      await session.sendCommand('Page.screencastFrameAck', {
-        sessionId: params.sessionId,
-      }, cdpSessionId).catch(() => {});
+  const stopTargetCapture = (
+    sessionId: string,
+    cdpSessionId: string,
+  ): Effect.Effect<number> =>
+    Effect.gen(function*() {
+      const session = sessions.get(sessionId);
+      if (!session) return 0;
 
-      // Reset fallback timer — page is sending frames
-      this.resetFallbackTimer(session, cdpSessionId);
-    } catch (e) {
-      this.log.debug(`Frame write failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
+      yield* Effect.tryPromise(() =>
+        session.sendCommand('Page.stopScreencast', {}, cdpSessionId),
+      ).pipe(Effect.ignore);
 
-  /**
-   * Reset the static page fallback timer for a specific target.
-   *
-   * If no screencast frame arrives within fallbackIntervalMs, fire a
-   * Page.captureScreenshot. This handles pages like Turnstile's
-   * "Just a moment..." where nothing visually changes.
-   */
-  private resetFallbackTimer(session: CaptureSession, cdpSessionId: string): void {
-    const existing = session.fallbackTimers.get(cdpSessionId);
-    if (existing) {
-      clearTimeout(existing);
-    }
+      const target = session.targets.get(cdpSessionId);
+      if (!target) return 0;
 
-    const timer = setTimeout(async () => {
-      // Guard: stop if session was removed or stopped (handles Chrome crashes where
-      // handleTargetDestroyed never fires)
-      if (session.stopped || !this.sessions.has(session.sessionId)) return;
+      Queue.endUnsafe(target.queue);
 
-      const targetDir = session.targetDirs.get(cdpSessionId);
-      if (!targetDir) return;
+      yield* Fiber.await(target.fiber).pipe(
+        Effect.timeout('5 seconds'),
+        Effect.ignore,
+      );
 
-      try {
-        const result = await session.sendCommand('Page.captureScreenshot', {
-          format: 'png',
-        }, cdpSessionId) as { data?: string } | undefined;
+      const count = target.frameCount;
+      session.targets.delete(cdpSessionId);
 
-        if (result?.data) {
-          const timestamp = Date.now();
-          const framePath = path.join(targetDir, `${timestamp}.png`);
-          await writeFile(framePath, Buffer.from(result.data, 'base64'));
-          session.frameCount++;
+      log.info(`Screencast stopped for target ${cdpSessionId}: ${count} frames`);
+      return count;
+    });
 
-          const targetCount = session.targetFrameCounts.get(cdpSessionId) ?? 0;
-          session.targetFrameCounts.set(cdpSessionId, targetCount + 1);
+  // ── stopCapture (all targets) ────────────────────────────────────
 
-          this.log.debug(`Fallback screenshot captured for session ${session.sessionId}`);
-        }
-      } catch {
-        // Target may be closed or navigating
+  const stopCapture = (sessionId: string): Effect.Effect<number> =>
+    Effect.gen(function*() {
+      const session = sessions.get(sessionId);
+      if (!session) return 0;
+
+      for (const [, target] of session.targets) {
+        Queue.endUnsafe(target.queue);
       }
 
-      // Schedule next fallback if still active and session still exists
-      if (!session.stopped && session.activeTargets.has(cdpSessionId) && this.sessions.has(session.sessionId)) {
-        this.resetFallbackTimer(session, cdpSessionId);
+      for (const cdpSessionId of session.targets.keys()) {
+        yield* Effect.tryPromise(() =>
+          session.sendCommand('Page.stopScreencast', {}, cdpSessionId),
+        ).pipe(Effect.ignore);
       }
-    }, this.fallbackIntervalMs);
 
-    session.fallbackTimers.set(cdpSessionId, timer);
-  }
-
-  /**
-   * Stop screencast capture for a single target.
-   * Returns the frame count for that target.
-   */
-  async stopTargetCapture(sessionId: string, cdpSessionId: string): Promise<number> {
-    const session = this.sessions.get(sessionId);
-    if (!session) return 0;
-
-    // Stop screencast on this target
-    try {
-      await session.sendCommand('Page.stopScreencast', {}, cdpSessionId);
-    } catch {
-      // Target may already be closed
-    }
-
-    // Clear per-target fallback timer
-    const timer = session.fallbackTimers.get(cdpSessionId);
-    if (timer) {
-      clearTimeout(timer);
-      session.fallbackTimers.delete(cdpSessionId);
-    }
-
-    session.activeTargets.delete(cdpSessionId);
-
-    const frameCount = session.targetFrameCounts.get(cdpSessionId) ?? 0;
-    session.targetFrameCounts.delete(cdpSessionId);
-    session.targetDirs.delete(cdpSessionId);
-
-    this.log.info(`Screencast stopped for target ${cdpSessionId}: ${frameCount} frames`);
-    return frameCount;
-  }
-
-  /**
-   * Stop screencast capture for a session.
-   * Frames are already at their final paths — just stop capture and clean up.
-   */
-  async stopCapture(sessionId: string): Promise<number> {
-    const session = this.sessions.get(sessionId);
-    if (!session) return 0;
-
-    session.stopped = true;
-
-    // Clear all fallback timers
-    for (const [, timer] of session.fallbackTimers) {
-      clearTimeout(timer);
-    }
-    session.fallbackTimers.clear();
-
-    // Stop screencast on all active targets
-    for (const cdpSessionId of session.activeTargets) {
-      try {
-        await session.sendCommand('Page.stopScreencast', {}, cdpSessionId);
-      } catch {
-        // Target may already be closed
+      for (const [, target] of session.targets) {
+        yield* Fiber.await(target.fiber).pipe(
+          Effect.timeout('5 seconds'),
+          Effect.ignore,
+        );
       }
+
+      const frameCount = session.totalFrames;
+      session.targets.clear();
+      sessions.delete(sessionId);
+
+      log.info(`Screencast stopped for session ${sessionId}: ${frameCount} frames`);
+      return frameCount;
+    });
+
+  // ── handleTargetDestroyed (sync) ─────────────────────────────────
+
+  const handleTargetDestroyed = (sessionId: string, cdpSessionId: string): void => {
+    const session = sessions.get(sessionId);
+    if (!session) return;
+
+    const target = session.targets.get(cdpSessionId);
+    if (target) {
+      Queue.endUnsafe(target.queue);
     }
+  };
 
-    const frameCount = session.frameCount;
-    this.sessions.delete(sessionId);
+  // ── Public API ───────────────────────────────────────────────────
 
-    this.log.info(`Screencast stopped for session ${sessionId}: ${frameCount} frames`);
-    return frameCount;
-  }
+  const hooks: VideoHooks = {
+    onInit: initSession,
+    onTargetAttached: (sid, cmd, cdp, tid) => addTarget(sid, cmd, cdp, tid),
+    onFrame: handleFrame,
+    onFinalizeTab: (sid, cdp) => stopTargetCapture(sid, cdp),
+    onTargetDestroyed: handleTargetDestroyed,
+  };
 
-  /**
-   * Handle target destroyed event — remove from active targets.
-   */
-  handleTargetDestroyed(sessionId: string, cdpSessionId: string): void {
-    const session = this.sessions.get(sessionId);
-    if (session) {
-      session.activeTargets.delete(cdpSessionId);
+  return {
+    /** VideoHooks for replay-session — the decoupled interface */
+    hooks,
+    /** Direct access for coordinator: stop all targets, get frame count */
+    stopCapture,
+    getFrameCount: (sessionId: string): number =>
+      sessions.get(sessionId)?.totalFrames ?? 0,
+    isCapturing: (sessionId: string): boolean =>
+      sessions.has(sessionId),
+  };
+};
 
-      // Clear per-target fallback timer
-      const timer = session.fallbackTimers.get(cdpSessionId);
-      if (timer) {
-        clearTimeout(timer);
-        session.fallbackTimers.delete(cdpSessionId);
-      }
-    }
-  }
-
-  /**
-   * Check if a session is being captured.
-   */
-  isCapturing(sessionId: string): boolean {
-    const session = this.sessions.get(sessionId);
-    return !!session && !session.stopped;
-  }
-
-  /**
-   * Get frame count for a session.
-   */
-  getFrameCount(sessionId: string): number {
-    return this.sessions.get(sessionId)?.frameCount ?? 0;
-  }
-}
+export type ScreencastCapture = ReturnType<typeof createScreencastCapture>;
