@@ -495,6 +495,24 @@ export class CloudflareStateTracker {
 
   /** Clean up all state for a destroyed page target. */
   unregisterPage(targetId: TargetId): void {
+    // Emit cf.solved for any unresolved detection BEFORE deleting it.
+    // Without this, the detection is silently dropped and emitUnresolvedDetections()
+    // (called later during session cleanup) never sees it — producing orphaned
+    // cf.detected without cf.solved, which pydoll reports as "Emb✗ no_resolution".
+    const active = this.activeDetections.get(targetId);
+    if (active && !active.aborted) {
+      active.aborted = true;
+      active.abortLatch?.openUnsafe();
+      const duration = Date.now() - active.startTime;
+      const attr = deriveSolveAttribution('session_close', !!active.clickDelivered);
+      this.log.info(`Tab-close fallback: emitting solved for unresolved detection on ${targetId}`);
+      this.events.emitSolved(active, {
+        solved: true, type: active.info.type, method: attr.method,
+        duration_ms: duration, attempts: 0, auto_resolved: attr.autoResolved,
+        signal: 'session_close', token_length: 0, phase_label: attr.label,
+      });
+    }
+
     const cdpSessionId = this.knownPages.get(targetId);
     if (cdpSessionId) {
       this.sessionToTarget.delete(cdpSessionId);
