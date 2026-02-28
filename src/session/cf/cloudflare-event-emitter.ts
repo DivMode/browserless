@@ -196,7 +196,7 @@ export class CloudflareEventEmitter {
 
   emitFailed(active: ActiveDetection, reason: string, duration: number, phaseLabel?: string): void {
     const phase_label = phaseLabel ?? `✗ ${reason}`;
-    this.log.warn(`CF failed: reason=${reason} duration=${duration}ms attempts=${active.attempt}`);
+    this.log.warn(`CF failed: reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt}`);
     this.emitClientEvent('Browserless.cloudflareFailed', {
       reason, type: active.info.type, duration_ms: duration, attempts: active.attempt,
       targetId: active.pageTargetId,

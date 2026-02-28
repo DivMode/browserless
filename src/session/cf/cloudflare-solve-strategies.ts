@@ -669,6 +669,63 @@ export class CloudflareSolveStrategies {
     })();
   }
 
+  // ── Shadow DOM diagnostics (for checkbox-not-found debugging) ─────
+
+  /**
+   * Snapshot the OOPIF shadow DOM structure for diagnostics when checkbox isn't found.
+   * Runs Runtime.evaluate on the OOPIF session (separate V8 isolate — safe from CF WASM).
+   * Returns compact summary: { alive, bodyLength, tags, shadow, cbI, inp }.
+   */
+  private diagnoseShadowDOM(
+    send: SendCommand,
+    oopifSessionId: CdpSessionId,
+    isolatedContextId: number | null,
+  ): Effect.Effect<Record<string, unknown>> {
+    return Effect.fn('cf.diagnoseShadowDOM')(function*() {
+      const result: Record<string, unknown> = { alive: false };
+
+      // Check if OOPIF session is alive via body innerHTML length
+      const evalOpts = isolatedContextId
+        ? { contextId: isolatedContextId }
+        : {};
+
+      const docResult = yield* Effect.tryPromise(() => send('Runtime.evaluate', {
+        expression: 'document.body ? document.body.innerHTML.length : -1',
+        returnByValue: true,
+        ...evalOpts,
+      }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+
+      if (docResult?.result?.value != null) {
+        result.alive = true;
+        result.bodyLen = docResult.result.value;
+      } else {
+        return result; // Session dead — no point in further queries
+      }
+
+      // Get compact tag summary + shadow root count + checkbox selector matches
+      const tagsResult = yield* Effect.tryPromise(() => send('Runtime.evaluate', {
+        expression: `(function() {
+          var b = document.body;
+          if (!b) return { tags: [], shadow: 0 };
+          var tags = Array.from(b.children).map(function(c) { return c.tagName ? c.tagName.toLowerCase() : '?'; });
+          var shadow = 0;
+          b.querySelectorAll('*').forEach(function(el) { if (el.shadowRoot) shadow++; });
+          var cbI = !!b.querySelector('span.cb-i');
+          var inp = !!b.querySelector('input[type="checkbox"]');
+          return { tags: tags, shadow: shadow, cbI: cbI, inp: inp };
+        })()`,
+        returnByValue: true,
+        ...evalOpts,
+      }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+
+      if (tagsResult?.result?.value) {
+        Object.assign(result, tagsResult.result.value);
+      }
+
+      return result;
+    })().pipe(Effect.orElseSucceed(() => ({ error: 'diag_failed' } as Record<string, unknown>)));
+  }
+
   // ── Phase 3: Checkbox finding (OOPIF session) ─────────────────────
 
   private phase3CheckboxFind(
@@ -753,7 +810,9 @@ export class CloudflareSolveStrategies {
       }
 
       if (!checkbox) {
-        yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox', { via, polls: pollCount });
+        // Snapshot shadow DOM state for diagnostics — tells us WHY the checkbox wasn't found
+        const diag = yield* strategies.diagnoseShadowDOM(send, oopifSessionId, isolatedContextId);
+        yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox', { via, polls: pollCount, diag });
         return null;
       }
 
