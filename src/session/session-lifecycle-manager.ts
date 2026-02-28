@@ -8,6 +8,7 @@ import {
 } from '@browserless.io/browserless';
 import { rm } from 'fs/promises';
 
+import { Effect } from 'effect';
 import { sessionDuration } from '../prom-metrics.js';
 import { ReplayCoordinator } from './replay-coordinator.js';
 import { SessionRegistry } from './session-registry.js';
@@ -259,10 +260,17 @@ export class SessionLifecycleManager {
   }
 
   /**
-   * Shutdown: close all browsers and clear timers.
+   * Shutdown: stop all replay sessions, close all browsers, clear timers.
    */
   async shutdown(): Promise<void> {
     this.log.info('Closing down browser sessions');
+
+    // Stop all replay sessions (screencast + rrweb + video encoder)
+    if (this.replayCoordinator) {
+      await Effect.runPromise(this.replayCoordinator.shutdown()).catch((e) => {
+        this.log.warn(`Replay coordinator shutdown failed: ${e instanceof Error ? e.message : String(e)}`);
+      });
+    }
 
     // Close all browsers
     const sessions = this.registry.toArray();

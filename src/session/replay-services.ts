@@ -1,17 +1,17 @@
 /**
  * Effect service definitions for the replay system.
  *
- * Three services matching the replay pipeline's dependencies:
+ * Two services matching the replay pipeline's dependencies:
  * - ReplayWriter: file + SQLite writes
  * - ReplayMetrics: Prometheus gauge/counter operations
- * - ScreencastService: per-target video frame capture
+ *
+ * Video capture (ScreencastService) lives in video-services.ts.
  *
  * Concrete implementations are provided via Layer in replay-session.ts.
  * Tests use Layer.succeed with mocks (same pattern as cf-services.ts).
  */
 import type { Effect } from 'effect';
 import { ServiceMap } from 'effect';
-import type { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 import type { ReplayEvent, ReplayMetadata, ReplayStoreError } from '../shared/replay-schemas.js';
 
 // ─── ReplayWriter ───────────────────────────────────────────────────
@@ -48,34 +48,3 @@ export const ReplayMetrics = ServiceMap.Service<{
   readonly registerSession: (state: SessionGaugeState) => Effect.Effect<() => void>;
 }>('ReplayMetrics');
 
-// ─── ScreencastService ──────────────────────────────────────────────
-// Per-target video frame capture.
-
-export interface FrameParams {
-  data: string;
-  metadata: { timestamp: number };
-  sessionId: number;
-}
-
-export const ScreencastService = ServiceMap.Service<{
-  readonly addTarget: (
-    sessionId: string,
-    cdpSessionId: CdpSessionId,
-    targetId: TargetId,
-  ) => Effect.Effect<void>;
-
-  readonly handleFrame: (
-    sessionId: string,
-    cdpSessionId: string,
-    params: FrameParams,
-  ) => Effect.Effect<void>;
-
-  readonly stopTarget: (
-    sessionId: string,
-    cdpSessionId: string,
-  ) => Effect.Effect<number>;
-
-  readonly stopAll: (
-    sessionId: string,
-  ) => Effect.Effect<number>;
-}>('ScreencastService');

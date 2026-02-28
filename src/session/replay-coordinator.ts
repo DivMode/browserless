@@ -6,9 +6,10 @@ import {
   TabReplayCompleteParams,
 } from '@browserless.io/browserless';
 
+import { Deferred, Effect } from 'effect';
 import { TargetId } from '../shared/cloudflare-detection.js';
 import type { CdpSessionId } from '../shared/cloudflare-detection.js';
-import { ScreencastCapture } from './screencast-capture.js';
+import { createScreencastCapture } from './screencast-capture.js';
 import { CloudflareSolver } from './cloudflare-solver.js';
 import { ReplaySession } from './replay-session.js';
 import { VideoEncoder } from '../video/encoder.js';
@@ -41,7 +42,7 @@ export interface StopTabRecordingResult {
 
 export class ReplayCoordinator {
   private log = new Logger('replay-coordinator');
-  private screencastCapture = new ScreencastCapture();
+  private screencast = createScreencastCapture();
   private videoEncoder: VideoEncoder;
   private cloudflareSolvers = new Map<string, CloudflareSolver>();
   private replaySessions = new Map<string, ReplaySession>();
@@ -50,20 +51,6 @@ export class ReplayCoordinator {
     this.videoEncoder = new VideoEncoder(sessionReplay?.getStore() ?? null);
     // Expose encoder to VideoManager for on-demand encoding from routes
     videoMgr?.setVideoEncoder(this.videoEncoder);
-
-    // SIGTERM handler: Docker sends SIGTERM before SIGKILL (10s grace).
-    // Save all in-flight replay sessions before exit.
-    if (sessionReplay) {
-      process.once('SIGTERM', async () => {
-        this.log.info('SIGTERM received, finalizing replay sessions...');
-        try {
-          await sessionReplay.stopAllReplays();
-        } catch (e) {
-          this.log.warn(`SIGTERM stopAllReplays failed: ${e instanceof Error ? e.message : String(e)}`);
-        }
-        process.exit(0);
-      });
-    }
   }
 
   /**
@@ -124,11 +111,16 @@ export class ReplayCoordinator {
       return;
     }
 
-    // Use a mutable ref so the solver's callbacks can reference
-    // the session without circular init (solver is created first).
-    let sessionRef: ReplaySession | null = null;
+    // Deferred resolves when session is created — solver's callbacks await it
+    // instead of relying on a mutable ref with non-null assertion.
+    const sessionDeferred = await Effect.runPromise(Deferred.make<ReplaySession, Error>());
+
     const sendViaSession = (method: string, params?: object, cdpSid?: CdpSessionId, timeoutMs?: number): Promise<any> =>
-      sessionRef!.sendCommand(method, params ?? {}, cdpSid, timeoutMs);
+      Effect.runPromise(
+        Deferred.await(sessionDeferred).pipe(
+          Effect.flatMap((s) => Effect.tryPromise(() => s.sendCommand(method, params ?? {}, cdpSid, timeoutMs))),
+        ),
+      );
 
     // Create solver for this session (disabled until client enables)
     // injectMarker uses server-side addTabEvents instead of Runtime.evaluate
@@ -138,7 +130,13 @@ export class ReplayCoordinator {
     const cloudflareSolver = new CloudflareSolver(
       sendViaSession,
       (targetId: TargetId, tag: string, payload?: object) => {
-        sessionRef?.injectMarkerByTargetId(targetId, tag, payload);
+        // Best-effort marker injection — Deferred.await is fast (already resolved in happy path)
+        Effect.runPromise(
+          Deferred.await(sessionDeferred).pipe(
+            Effect.flatMap((s) => Effect.sync(() => s.injectMarkerByTargetId(targetId, tag, payload))),
+            Effect.ignore,
+          ),
+        ).catch(() => {});
       },
       chromePort,
     );
@@ -148,18 +146,21 @@ export class ReplayCoordinator {
       sessionId,
       wsEndpoint,
       sessionReplay: this.sessionReplay,
-      screencastCapture: this.screencastCapture,
       cloudflareSolver,
       baseUrl: this.baseUrl,
       video: options?.video,
       videosDir: this.videoMgr?.getVideosDir(),
+      videoHooks: options?.video ? this.screencast.hooks : undefined,
       onTabReplayComplete: options?.onTabReplayComplete,
     });
-    sessionRef = session;
 
     try {
       await session.initialize();
+      // Resolve Deferred — all pending sendViaSession/injectMarker calls proceed
+      await Effect.runPromise(Deferred.succeed(sessionDeferred, session));
     } catch (e) {
+      // Fail Deferred — all pending waiters get a rejected Promise instead of crash
+      await Effect.runPromise(Deferred.fail(sessionDeferred, e instanceof Error ? e : new Error(String(e)))).catch(() => {});
       this.log.warn(`Failed to setup replay: ${e instanceof Error ? e.message : String(e)}`);
       this.cloudflareSolvers.delete(sessionId);
       await session.destroy('error').catch(() => {});
@@ -180,11 +181,53 @@ export class ReplayCoordinator {
   }
 
   /**
-   * Stop replay capture for a session.
-   * Returns both filepath and metadata for CDP event injection.
+   * Stop replay capture for a session — Effect pipeline.
    *
-   * Stops both rrweb and screencast capture. If screencast captured frames,
-   * queues background ffmpeg encoding (returns immediately).
+   * Composes: screencast stop → session destroy → rrweb registry cleanup.
+   * Map cleanup runs via Effect.ensuring (guaranteed on success/failure/interruption).
+   */
+  private stopReplayEffect(
+    sessionId: string,
+    metadata?: {
+      browserType?: string;
+      routePath?: string;
+      trackingId?: string;
+    }
+  ): Effect.Effect<StopReplayResult | null> {
+    const coordinator = this;
+    const sessionReplay = this.sessionReplay;
+    if (!sessionReplay) return Effect.succeed(null);
+
+    return Effect.gen(function*() {
+      // Phase 1: Stop screencast capture → frame count
+      const frameCount = yield* Effect.tryPromise(
+        () => Effect.runPromise(coordinator.screencast.stopCapture(sessionId)),
+      ).pipe(Effect.orElseSucceed(() => 0));
+
+      // Phase 2: Destroy the ReplaySession — ends Queue, waits for pipeline to write files
+      const session = coordinator.replaySessions.get(sessionId);
+      if (session) {
+        yield* Effect.tryPromise(() => session.destroy('cleanup')).pipe(Effect.ignore);
+      }
+
+      // Phase 3: Stop rrweb replay capture (session registry cleanup)
+      const result = yield* Effect.tryPromise(
+        () => sessionReplay.stopReplay(sessionId, { ...metadata, frameCount }),
+      ).pipe(Effect.orElseSucceed(() => null));
+
+      return result;
+    }).pipe(
+      // Guaranteed Map cleanup on success, failure, or interruption
+      Effect.ensuring(Effect.sync(() => {
+        coordinator.replaySessions.delete(sessionId);
+        coordinator.cloudflareSolvers.delete(sessionId);
+      })),
+    );
+  }
+
+  /**
+   * Stop replay capture for a session.
+   * Bridges the Effect pipeline for external callers.
    */
   async stopReplay(
     sessionId: string,
@@ -194,26 +237,37 @@ export class ReplayCoordinator {
       trackingId?: string;
     }
   ): Promise<StopReplayResult | null> {
-    if (!this.sessionReplay) return null;
+    return Effect.runPromise(this.stopReplayEffect(sessionId, metadata));
+  }
 
-    // Stop screencast capture and get frame count
-    const frameCount = await this.screencastCapture.stopCapture(sessionId);
+  /**
+   * Graceful shutdown — stops all active screencast captures, destroys all
+   * replay sessions, and flushes the rrweb registry.
+   *
+   * Composable: server SIGTERM handler calls this instead of having an
+   * independent cleanup path in the coordinator constructor.
+   */
+  shutdown(): Effect.Effect<void> {
+    const coordinator = this;
+    return Effect.gen(function*() {
+      const sessionIds = [...coordinator.replaySessions.keys()];
+      coordinator.log.info(`Shutting down ${sessionIds.length} replay session(s)...`);
 
-    // Destroy the ReplaySession — ends Queue, waits for pipeline to write files
-    const session = this.replaySessions.get(sessionId);
-    if (session) {
-      await session.destroy('cleanup');
-      this.replaySessions.delete(sessionId);
-      this.cloudflareSolvers.delete(sessionId);
-    }
+      // Stop each session through the full pipeline (screencast + session + rrweb)
+      for (const sessionId of sessionIds) {
+        yield* coordinator.stopReplayEffect(sessionId).pipe(Effect.ignore);
+      }
 
-    // Stop rrweb replay capture (session registry cleanup)
-    const result = await this.sessionReplay.stopReplay(sessionId, {
-      ...metadata,
-      frameCount,
+      // Final rrweb registry flush (catches sessions not tracked by coordinator)
+      if (coordinator.sessionReplay) {
+        yield* Effect.tryPromise(() => coordinator.sessionReplay!.stopAllReplays()).pipe(Effect.ignore);
+      }
+
+      // Dispose video encoder (kills in-flight ffmpeg)
+      coordinator.videoEncoder.dispose();
+
+      coordinator.log.info('Replay coordinator shutdown complete');
     });
-
-    return result;
   }
 
   /**
