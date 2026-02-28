@@ -163,6 +163,57 @@ describe('Replay Pipeline (per-tab Queue)', () => {
     );
   });
 
+  it('Fiber.await guarantees file is written before callback can fire', async () => {
+    const timeline: string[] = [];
+    const written: Array<{ id: string; events: readonly ReplayEvent[] }> = [];
+
+    // Writer records when the file is written
+    const writerLayer = Layer.succeed(ReplayWriter, ReplayWriter.of({
+      writeTabReplay: (id, events, _meta) => {
+        written.push({ id, events: [...events] });
+        timeline.push('file_written');
+        return Effect.succeed(`/tmp/${id}.json`);
+      },
+      writeMetadata: () => Effect.void,
+    }));
+
+    const metricsLayer = Layer.succeed(ReplayMetrics, ReplayMetrics.of({
+      incEvents: () => Effect.void,
+      observeTabDuration: () => Effect.void,
+      registerSession: () => Effect.succeed(() => {}),
+    }));
+
+    const layer = Layer.mergeAll(writerLayer, metricsLayer);
+
+    await Effect.runPromise(
+      Effect.gen(function*() {
+        const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
+        const fiber = yield* tabConsumer(queue, SessionId.makeUnsafe('sess-order'), TargetId.makeUnsafe('tgt-1')).pipe(
+          Effect.provide(layer),
+          Effect.forkChild,
+        );
+
+        // Push events
+        yield* Queue.offer(queue, makeTabEvent('sess-order', 'tgt-1', 2, 1000));
+        yield* Queue.offer(queue, makeTabEvent('sess-order', 'tgt-1', 3, 2000));
+
+        // End queue — consumer fiber starts draining + writing
+        yield* Queue.end(queue);
+
+        // Await fiber — blocks until file is written
+        yield* Fiber.await(fiber);
+
+        // Simulate callback firing AFTER Fiber.await
+        timeline.push('callback_fired');
+
+        // The critical ordering: file_written MUST come before callback_fired
+        expect(timeline).to.deep.equal(['file_written', 'callback_fired']);
+        expect(written).to.have.length(1);
+        expect(written[0].events).to.have.length(2);
+      }),
+    );
+  });
+
   it('writes immediately when one Queue ends while another stays open', async () => {
     const written: Array<{ id: string; events: readonly ReplayEvent[] }> = [];
     const layer = makeMockLayers(written);

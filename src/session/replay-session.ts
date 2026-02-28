@@ -4,7 +4,7 @@ import {
   TabReplayCompleteParams,
 } from '@browserless.io/browserless';
 
-import { Cause, Effect, Layer, ManagedRuntime, Queue } from 'effect';
+import { Cause, Effect, Fiber, Layer, ManagedRuntime, Queue, Schedule } from 'effect';
 import { SessionId } from '../shared/replay-schemas.js';
 import type { TabEvent } from '../shared/replay-schemas.js';
 import { ReplayStoreError } from '../shared/replay-schemas.js';
@@ -76,8 +76,9 @@ export class ReplaySession {
 
   // Per-tab Queues — one Queue per tab, each consumed by its own fiber
   private tabQueues = new Map<string, Queue.Queue<TabEvent, Cause.Done>>();
+  private tabConsumerFibers = new Map<string, Fiber.Fiber<void>>();
   private eventCounts = new Map<string, number>();
-  private pipelineRuntime: ManagedRuntime.ManagedRuntime<
+  private sessionRuntime: ManagedRuntime.ManagedRuntime<
     typeof ReplayWriter.Identifier | typeof ReplayMetrics.Identifier, never
   > | null = null;
 
@@ -117,9 +118,9 @@ export class ReplaySession {
   async initialize(): Promise<void> {
     this.WebSocket = (await import('ws')).default;
 
-    // ─── Effect Pipeline Runtime ──────────────────────────────────────
+    // ─── Effect Session Runtime ──────────────────────────────────────
     // Must be created BEFORE WS setup — setAutoAttach triggers Target.attachedToTarget
-    // immediately, and handleAttachedToTarget needs pipelineRuntime to create tab queues.
+    // immediately, and handleAttachedToTarget needs sessionRuntime to create tab queues.
     await this.startPipeline();
 
     const ws = new this.WebSocket(this.wsEndpoint);
@@ -131,7 +132,6 @@ export class ReplaySession {
     });
 
     // Register live data structures for Prometheus gauges.
-    // pageWebSockets.size → WS count (via getter), trackedTargets.size → target count
     const targets = this.targets;
     const self = this;
     this.unregisterGauges = registerSessionState({
@@ -139,10 +139,10 @@ export class ReplaySession {
       trackedTargets: targets,
       pendingCommands: { get size() { return self.browserConn?.pendingCount ?? 0; } },
       getPagePendingCount: () => targets.getPagePendingCount(),
-      getEstimatedBytes: () => 0, // merged array removed — per-tab arrays are freed incrementally
+      getEstimatedBytes: () => 0,
     });
 
-    // Create CdpConnection for browser-level WS (replaces manual pendingCommands map)
+    // Create CdpConnection for browser-level WS
     this.browserConn = new CdpConnection(ws, { startId: 1, defaultTimeout: 30_000 });
 
     // Wire up WS message handler
@@ -154,63 +154,63 @@ export class ReplaySession {
       this.destroy('ws_close');
     });
 
-    // Await WebSocket open + setAutoAttach BEFORE returning.
-    await new Promise<void>((resolveSetup, rejectSetup) => {
+    // Await WebSocket open + CDP setup via Effect
+    const openWs = Effect.callback<void, Error>((resume) => {
       const setupTimeout = setTimeout(() => {
-        rejectSetup(new Error('WebSocket open + setAutoAttach timed out after 10s'));
-      }, 10000);
-
-      ws.on('open', async () => {
-        try {
-          const sendWithRetry = async (method: string, params: object = {}, maxAttempts = 3) => {
-            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-              try {
-                return await this.sendCommand(method, params);
-              } catch (e) {
-                if (attempt === maxAttempts) throw e;
-                this.log.debug(`CDP ${method} attempt ${attempt} failed, retrying...`);
-                await new Promise((r) => setTimeout(r, 1000 * attempt));
-              }
-            }
-          };
-
-          await sendWithRetry('Target.setAutoAttach', {
-            autoAttach: true,
-            waitForDebuggerOnStart: true,
-            flatten: true,
-          });
-
-          this.log.info(`Target.setAutoAttach succeeded for session ${this.sessionId}`);
-
-          await sendWithRetry('Target.setDiscoverTargets', { discover: true });
-
-          // Initialize screencast capture — only when video=true
-          if (this.video && this.videosDir) {
-            await this.screencastCapture.initSession(this.sessionId, this.sendCommand.bind(this) as any, this.videosDir);
-          }
-
-          this.log.debug(`Replay auto-attach enabled for session ${this.sessionId}`);
-          clearTimeout(setupTimeout);
-          resolveSetup();
-        } catch (e) {
-          this.log.warn(`Failed to set up replay: ${e}`);
-          clearTimeout(setupTimeout);
-          resolveSetup(); // Don't reject — recording setup failure shouldn't block the session
-        }
+        resume(Effect.fail(new Error('WebSocket open + setAutoAttach timed out after 10s')));
+      }, 10_000);
+      ws.on('open', () => {
+        clearTimeout(setupTimeout);
+        resume(Effect.void);
       });
+      return Effect.sync(() => clearTimeout(setupTimeout));
     });
 
-    // No main WS ping/pong — Chrome process death fires WS 'close' event.
-    // SessionLifecycleManager handles zombie sessions via TTL.
+    // CDP command with exponential backoff retry (3 attempts: 0ms, 1s, 2s)
+    const sendRetry = (method: string, params: object = {}) =>
+      Effect.tryPromise({
+        try: () => this.sendCommand(method, params),
+        catch: (e) => e instanceof Error ? e : new Error(String(e)),
+      }).pipe(
+        Effect.retry({ times: 2, schedule: Schedule.exponential('1 second') }),
+      );
 
-    // Extension handles rrweb injection — no polling needed.
-    // Events arrive via Runtime.addBinding('__rrwebPush') push delivery.
+    const session = this;
+    const setupCdp = Effect.gen(function*() {
+      yield* openWs;
+
+      yield* sendRetry('Target.setAutoAttach', {
+        autoAttach: true,
+        waitForDebuggerOnStart: true,
+        flatten: true,
+      });
+      session.log.info(`Target.setAutoAttach succeeded for session ${session.sessionId}`);
+
+      yield* sendRetry('Target.setDiscoverTargets', { discover: true });
+
+      if (session.video && session.videosDir) {
+        yield* Effect.tryPromise(() =>
+          session.screencastCapture.initSession(session.sessionId, session.sendCommand.bind(session) as any, session.videosDir!));
+      }
+
+      session.log.debug(`Replay auto-attach enabled for session ${session.sessionId}`);
+    });
+
+    // Run CDP setup — recording failures don't block the session
+    await Effect.runPromise(
+      setupCdp.pipe(
+        Effect.catch(() => {
+          this.log.warn(`Failed to set up replay`);
+          return Effect.void;
+        }),
+      ),
+    );
 
     this.state = 'ACTIVE';
   }
 
   /**
-   * Build the Effect Layer and create the pipeline runtime.
+   * Build the Effect Layer and create the session runtime.
    * Per-tab fibers are forked later via startTabPipeline().
    */
   private async startPipeline(): Promise<void> {
@@ -262,8 +262,8 @@ export class ReplaySession {
       registerSession: (state) => Effect.sync(() => registerSessionState(state)),
     }));
 
-    const pipelineLayer = Layer.mergeAll(writerLayer, metricsLayer);
-    this.pipelineRuntime = ManagedRuntime.make(pipelineLayer);
+    const sessionLayer = Layer.mergeAll(writerLayer, metricsLayer);
+    this.sessionRuntime = ManagedRuntime.make(sessionLayer);
   }
 
   /**
@@ -271,8 +271,8 @@ export class ReplaySession {
    * Called from handleAttachedToTarget when a new page target is added.
    */
   private async startTabPipeline(targetId: TargetId): Promise<void> {
-    if (!this.pipelineRuntime || this.tabQueues.has(targetId)) return;
-    const runtime = this.pipelineRuntime;
+    if (!this.sessionRuntime || this.tabQueues.has(targetId)) return;
+    const runtime = this.sessionRuntime;
     const sessionIdBranded = SessionId.makeUnsafe(this.sessionId);
 
     // Create queue inside runtime scope, store reference for offerEvents/endUnsafe
@@ -282,10 +282,11 @@ export class ReplaySession {
       self.tabQueues.set(targetId, queue);
     }));
 
-    // Fork consumer fiber — runs until Queue is ended
+    // Fork consumer fiber — runs until Queue is ended. Store ref for Fiber.await in teardown.
     const queue = this.tabQueues.get(targetId);
     if (queue) {
-      runtime.runFork(tabConsumer(queue, sessionIdBranded, targetId));
+      const fiber = runtime.runFork(tabConsumer(queue, sessionIdBranded, targetId));
+      this.tabConsumerFibers.set(targetId, fiber);
     }
   }
 
@@ -329,17 +330,44 @@ export class ReplaySession {
     // Clean up solver
     this.cloudflareSolver.destroy();
 
-    // Finalize all tabs — flush page buffers into the Queue, stop screencast.
-    // Pipeline writes the actual replay JSON files when the queue ends (below).
+    // Phase 1: Finalize all tabs — flush page buffers into the Queue, stop screencast.
     for (const target of [...this.targets]) {
       try {
         if (source === 'cleanup') {
           await this.finalizeTab(target.targetId);
         }
-        // Fire tab-complete callbacks with estimated values.
-        // Real event counts are in the per-tab JSON files written by the pipeline.
-        if (this.onTabReplayComplete) {
-          const tabReplayId = `${this.sessionId}--tab-${target.targetId}`;
+      } catch (e) {
+        this.log.warn(`destroy finalize failed for ${target.targetId}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    // Phase 2: End all tab queues — triggers consumer fibers to drain + write files.
+    for (const [, queue] of this.tabQueues) {
+      Queue.endUnsafe(queue);
+    }
+    this.tabQueues.clear();
+
+    // Phase 3: Await all consumer fibers — guarantees files are written before callbacks.
+    // 5s timeout per fiber prevents hanging on stuck consumers.
+    const fibers = [...this.tabConsumerFibers.values()];
+    const awaitFibers = Effect.gen(function*() {
+      for (const fiber of fibers) {
+        yield* Fiber.await(fiber).pipe(
+          Effect.timeout('5 seconds'),
+          Effect.ignore,
+        );
+      }
+    });
+
+    await Effect.runPromise(awaitFibers).catch((e) => {
+      this.log.warn(`Fiber await error: ${e instanceof Error ? e.message : String(e)}`);
+    });
+
+    // Phase 4: Fire tab-complete callbacks — replay files now exist on disk.
+    for (const target of [...this.targets]) {
+      if (this.onTabReplayComplete) {
+        const tabReplayId = `${this.sessionId}--tab-${target.targetId}`;
+        try {
           this.onTabReplayComplete({
             sessionId: this.sessionId,
             targetId: target.targetId,
@@ -350,34 +378,27 @@ export class ReplaySession {
             replayUrl: `${this.baseUrl}/replay/${tabReplayId}`,
             videoUrl: undefined,
           });
+        } catch (e) {
+          this.log.warn(`onTabReplayComplete callback failed: ${e instanceof Error ? e.message : String(e)}`);
         }
-      } catch (e) {
-        this.log.warn(`destroy finalize failed for ${target.targetId}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
+    this.tabConsumerFibers.clear();
 
-    // End all remaining tab queues (safety net for tabs still alive at session teardown).
-    // Each consumer fiber will drain remaining events and write its replay file.
-    for (const [, queue] of this.tabQueues) {
-      Queue.endUnsafe(queue);
-    }
-    this.tabQueues.clear();
-
-    // Dispose pipeline runtime — waits for pipeline fiber to complete (file writes).
-    if (this.pipelineRuntime) {
-      await this.pipelineRuntime.dispose().catch((e) => {
-        this.log.warn(`Pipeline dispose error: ${e instanceof Error ? e.message : String(e)}`);
+    // Phase 5: Dispose session runtime — interrupts remaining fibers, runs Layer finalizers.
+    if (this.sessionRuntime) {
+      await this.sessionRuntime.dispose().catch((e) => {
+        this.log.warn(`Session runtime dispose error: ${e instanceof Error ? e.message : String(e)}`);
       });
-      this.pipelineRuntime = null;
+      this.sessionRuntime = null;
     }
     this.eventCounts.clear();
 
-    // Reject all pending browser WS commands
+    // Phase 6: Close connections — after runtime dispose, no more Effect code running.
     this.browserConn?.drainPending('session_destroyed');
     this.browserConn?.dispose();
     this.browserConn = null;
 
-    // Close per-page WebSockets + reject their pending commands via CdpConnection
     for (const target of this.targets) {
       if (target.pageWebSocket) {
         const conn = (target.pageWebSocket as any).__cdpConn as CdpConnection | undefined;
@@ -386,7 +407,7 @@ export class ReplaySession {
       }
     }
 
-    // Clear all target state (closes all per-page WSs + clears pending timers)
+    // Clear all target state (closes all per-page WSs)
     this.targets.clear();
 
     // Close main WS (no-op if already closed via ws_close)
@@ -492,33 +513,46 @@ export class ReplaySession {
           target.pageWebSocket = pageWs;
         }
 
-        // Create CdpConnection for per-page WS (replaces manual __pendingCmds map)
+        // Create CdpConnection for per-page WS
         const pageConn = new CdpConnection(pageWs, {
           startId: this.pageWsCmdId,
           defaultTimeout: 30_000,
         });
-        this.pageWsCmdId += 10_000; // Reserve range per page WS
+        this.pageWsCmdId += 10_000;
         (pageWs as any).__cdpConn = pageConn;
 
-        // Keepalive: ping every 30s, close if no pong within 30s.
-        // A dead per-page WS is NOT fatal — sendCommand falls back to browser WS.
-        let activePongTimeout: ReturnType<typeof setTimeout> | undefined;
-        const pingInterval = setInterval(() => {
-          if (pageWs.readyState !== WebSocket.OPEN) {
-            clearInterval(pingInterval);
-            return;
-          }
-          pageWs.ping();
-          activePongTimeout = setTimeout(() => {
-            activePongTimeout = undefined;
-            this.log.debug(`Per-page WS for ${targetId} missed pong — closing (fallback to browser WS)`);
-            pageWs.terminate();
-          }, 30_000);
-          pageWs.once('pong', () => { clearTimeout(activePongTimeout); activePongTimeout = undefined; });
-        }, 30_000);
-
-        (pageWs as any).__pingInterval = pingInterval;
-        (pageWs as any).__pongTimeout = () => activePongTimeout;
+        // Keepalive: forked fiber pings every 30s, terminates on missed pong.
+        // Fiber is interrupted when sessionRuntime disposes (stops Effect.sleep),
+        // but Effect.callback cleanup does NOT run via dispose — pongTimeout may
+        // leak for up to 30s. Harmless: fires into a closed/terminated socket.
+        if (this.sessionRuntime) {
+          const session = this;
+          this.sessionRuntime.runFork(
+            Effect.gen(function*() {
+              while (pageWs.readyState === WebSocket.OPEN) {
+                yield* Effect.sleep('30 seconds');
+                if (pageWs.readyState !== WebSocket.OPEN) break;
+                pageWs.ping();
+                // Wait for pong or timeout
+                const gotPong = yield* Effect.callback<boolean>((resume) => {
+                  const pongTimeout = setTimeout(() => {
+                    resume(Effect.succeed(false));
+                  }, 30_000);
+                  pageWs.once('pong', () => {
+                    clearTimeout(pongTimeout);
+                    resume(Effect.succeed(true));
+                  });
+                  return Effect.sync(() => clearTimeout(pongTimeout));
+                });
+                if (!gotPong) {
+                  session.log.debug(`Per-page WS for ${targetId} missed pong — closing (fallback to browser WS)`);
+                  pageWs.terminate();
+                  break;
+                }
+              }
+            }).pipe(Effect.ignore),
+          );
+        }
 
         this.log.debug(`Per-page WS opened for target ${targetId}`);
         resolve();
@@ -538,10 +572,6 @@ export class ReplaySession {
         if (target && target.pageWebSocket === pageWs) {
           target.pageWebSocket = null;
         }
-        clearInterval((pageWs as any).__pingInterval);
-        // Clear outstanding pong timeout (prevents 30s fire-into-dead-socket)
-        const getPongTimeout = (pageWs as any).__pongTimeout as (() => ReturnType<typeof setTimeout> | undefined) | undefined;
-        clearTimeout(getPongTimeout?.());
         const conn = (pageWs as any).__cdpConn as CdpConnection | undefined;
         conn?.drainPending('per_page_ws_closed');
         conn?.dispose();
@@ -802,32 +832,40 @@ export class ReplaySession {
           .catch((e: Error) => this.log.debug(`[${targetId}] runIfWaitingForDebugger skipped: ${e.message}`));
       }
 
-      // Diagnostic probe: check rrweb state 2s after target resumes
-      const probeTargetId = targetId;
-      const probeCdpSessionId = cdpSessionId;
-      const probeTimer = setTimeout(async () => {
-        try {
-          const result = await this.sendCommand('Runtime.evaluate', {
-            expression: `JSON.stringify({
-              recording: typeof window.__browserlessRecording,
-              recValue: window.__browserlessRecording === true ? 'true(iframe)' : (window.__browserlessRecording ? 'object' : 'falsy'),
-              stopFn: typeof window.__browserlessStopRecording,
-              rrweb: typeof window.rrweb,
-              rrwebRecord: typeof (window.rrweb && window.rrweb.record),
-              error: (window.__browserlessRecording && window.__browserlessRecording._rrwebError) || null,
-              eventCount: window.__browserlessRecording?.events?.length ?? -1,
-              bufCount: window.__browserlessRecording?._buf?.length ?? -1,
-              body: !!document.body,
-              readyState: document.readyState,
-            })`,
-            returnByValue: true,
-          }, probeCdpSessionId);
-          this.log.info(`[rrweb-diag] target=${probeTargetId} ${result?.result?.value}`);
-        } catch (e) {
-          this.log.info(`[rrweb-diag] target=${probeTargetId} probe-failed: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }, 2000);
-      target.pendingTimers.push(probeTimer);
+      // Diagnostic probe: check rrweb state 2s after target resumes.
+      // Forked as child fiber — auto-interrupted when sessionRuntime disposes.
+      if (this.sessionRuntime) {
+        const probeTargetId = targetId;
+        const probeCdpSessionId = cdpSessionId;
+        const session = this;
+        const probeEffect = Effect.gen(function*() {
+          yield* Effect.sleep('2 seconds');
+          const result = yield* Effect.tryPromise(() =>
+            session.sendCommand('Runtime.evaluate', {
+              expression: `JSON.stringify({
+                recording: typeof window.__browserlessRecording,
+                recValue: window.__browserlessRecording === true ? 'true(iframe)' : (window.__browserlessRecording ? 'object' : 'falsy'),
+                stopFn: typeof window.__browserlessStopRecording,
+                rrweb: typeof window.rrweb,
+                rrwebRecord: typeof (window.rrweb && window.rrweb.record),
+                error: (window.__browserlessRecording && window.__browserlessRecording._rrwebError) || null,
+                eventCount: window.__browserlessRecording?.events?.length ?? -1,
+                bufCount: window.__browserlessRecording?._buf?.length ?? -1,
+                body: !!document.body,
+                readyState: document.readyState,
+              })`,
+              returnByValue: true,
+            }, probeCdpSessionId),
+          );
+          session.log.info(`[rrweb-diag] target=${probeTargetId} ${result?.result?.value}`);
+        }).pipe(
+          Effect.catch((e) => {
+            session.log.info(`[rrweb-diag] target=${probeTargetId} probe-failed: ${e}`);
+            return Effect.void;
+          }),
+        );
+        this.sessionRuntime.runFork(probeEffect);
+      }
 
       // Start screencast — only when video=true
       if (this.video) {
@@ -894,8 +932,16 @@ export class ReplaySession {
         this.tabQueues.delete(targetId);
       }
 
-      // Fire callback — pipeline writes the replay file after processing the sentinel.
-      // Callback provides the replayUrl so pydoll's ReplayListener can store it.
+      // Await consumer fiber — guarantees replay file is written before callback fires.
+      const fiber = this.tabConsumerFibers.get(targetId);
+      if (fiber) {
+        await Effect.runPromise(
+          Fiber.await(fiber).pipe(Effect.timeout('5 seconds'), Effect.ignore),
+        ).catch(() => {});
+        this.tabConsumerFibers.delete(targetId);
+      }
+
+      // Fire callback — replay file now exists on disk.
       if (this.onTabReplayComplete) {
         const tabReplayId = `${this.sessionId}--tab-${targetId}`;
         try {
