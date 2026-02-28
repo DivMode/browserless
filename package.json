@@ -36,7 +36,8 @@
     "prettier": "prettier '{src,functions,scripts,bin,external,.github}/**/*.{js,ts,json,yml,yaml,md}' --log-level error --write",
     "test": "npm run build:tests && cross-env DEBUG=quiet mocha",
     "coverage": "npm run build:ts && c8 --reporter=text --reporter=html --reporter=lcov cross-env DEBUG=quiet mocha",
-    "start": "env-cmd -f .env bun build"
+    "start": "env-cmd -f .env bun build",
+    "prepare": "husky"
   },
   "files": [
     "assets/*",
@@ -194,6 +195,7 @@
     "printWidth": 80
   },
   "devDependencies": {
-    "env-cmd": "^11.0.0"
+    "env-cmd": "^11.0.0",
+    "husky": "^9.1.7"
   }
 }
