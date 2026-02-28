@@ -291,6 +291,8 @@ export class VideoEncoder {
       this.log.error(`Encoding failed for ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
       this.store?.updateEncodingStatus(sessionId, 'failed');
       this.updateProgress(sessionId, { status: 'failed' });
+      // Clean up progress entry after 30s (same as success path) to unblock re-encode attempts
+      setTimeout(() => { this.progress.delete(sessionId); }, 30_000);
       // Keep frames on failure for debugging
     }
   }

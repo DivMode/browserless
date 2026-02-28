@@ -175,7 +175,9 @@ export class ScreencastCapture {
     }
 
     const timer = setTimeout(async () => {
-      if (session.stopped) return;
+      // Guard: stop if session was removed or stopped (handles Chrome crashes where
+      // handleTargetDestroyed never fires)
+      if (session.stopped || !this.sessions.has(session.sessionId)) return;
 
       const targetDir = session.targetDirs.get(cdpSessionId);
       if (!targetDir) return;
@@ -200,8 +202,8 @@ export class ScreencastCapture {
         // Target may be closed or navigating
       }
 
-      // Schedule next fallback if still active
-      if (!session.stopped && session.activeTargets.has(cdpSessionId)) {
+      // Schedule next fallback if still active and session still exists
+      if (!session.stopped && session.activeTargets.has(cdpSessionId) && this.sessions.has(session.sessionId)) {
         this.resetFallbackTimer(session, cdpSessionId);
       }
     }, this.fallbackIntervalMs);

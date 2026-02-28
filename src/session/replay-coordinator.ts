@@ -166,13 +166,8 @@ export class ReplayCoordinator {
     }
 
     this.replaySessions.set(sessionId, session);
-
-    this.sessionReplay.registerCleanupFn(sessionId, async () => {
-      this.cloudflareSolvers.delete(sessionId);
-      this.replaySessions.delete(sessionId);
-      await session.destroy('cleanup');
-    });
-    this.sessionReplay.registerFinalCollector(sessionId, () => session.collectAllEvents());
+    // Pipeline drain + cleanup now handled by ReplaySession.destroy() and coordinator.stopReplay().
+    // No registerCleanupFn/registerFinalCollector needed — the Effect pipeline manages lifecycle.
   }
 
   /**
@@ -203,7 +198,15 @@ export class ReplayCoordinator {
     // Stop screencast capture and get frame count
     const frameCount = await this.screencastCapture.stopCapture(sessionId);
 
-    // Stop rrweb replay capture (includes frame count in metadata)
+    // Destroy the ReplaySession — ends Queue, waits for pipeline to write files
+    const session = this.replaySessions.get(sessionId);
+    if (session) {
+      await session.destroy('cleanup');
+      this.replaySessions.delete(sessionId);
+      this.cloudflareSolvers.delete(sessionId);
+    }
+
+    // Stop rrweb replay capture (session registry cleanup)
     const result = await this.sessionReplay.stopReplay(sessionId, {
       ...metadata,
       frameCount,

@@ -86,6 +86,7 @@ export class SessionLifecycleManager {
       this.timers.set(
         session.id,
         global.setTimeout(() => {
+          this.timers.delete(session.id);
           const currentSession = this.registry.get(browser);
           if (currentSession) {
             this.log.trace(`Timer hit for "${currentSession.id}"`);

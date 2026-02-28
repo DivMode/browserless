@@ -4,15 +4,21 @@ import {
   TabReplayCompleteParams,
 } from '@browserless.io/browserless';
 
+import { Cause, Effect, Layer, ManagedRuntime, Queue } from 'effect';
+import type { SessionId, TabEvent } from '../shared/replay-schemas.js';
+import { ReplayStoreError } from '../shared/replay-schemas.js';
+import { ReplayWriter, ReplayMetrics } from './replay-services.js';
+import { tabConsumer } from './replay-pipeline.js';
+
 import type { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 import { decodeCDPMessage, decodeRrwebEventBatch } from '../shared/cdp-schemas.js';
 import { CdpConnection } from '../shared/cdp-rpc.js';
 import { ScreencastCapture } from './screencast-capture.js';
 import { CloudflareSolver } from './cloudflare-solver.js';
-import { registerSessionState, tabDuration } from '../prom-metrics.js';
+import { registerSessionState, tabDuration, replayEventsTotal } from '../prom-metrics.js';
 import { TargetRegistry } from './target-state.js';
 
-import type { StopTabRecordingResult } from './replay-coordinator.js';
+
 
 /**
  * Lifecycle states for a replay session.
@@ -67,6 +73,13 @@ export class ReplaySession {
   private browserConn: CdpConnection | null = null;
   private pageWsCmdId = 100_000;
 
+  // Per-tab Queues — one Queue per tab, each consumed by its own fiber
+  private tabQueues = new Map<string, Queue.Queue<TabEvent, Cause.Done>>();
+  private eventCounts = new Map<string, number>();
+  private pipelineRuntime: ManagedRuntime.ManagedRuntime<
+    typeof ReplayWriter.Identifier | typeof ReplayMetrics.Identifier, never
+  > | null = null;
+
   // WebSocket (set during initialize)
   private ws: InstanceType<any> | null = null;
   private WebSocket: any = null;
@@ -102,6 +115,12 @@ export class ReplaySession {
    */
   async initialize(): Promise<void> {
     this.WebSocket = (await import('ws')).default;
+
+    // ─── Effect Pipeline Runtime ──────────────────────────────────────
+    // Must be created BEFORE WS setup — setAutoAttach triggers Target.attachedToTarget
+    // immediately, and handleAttachedToTarget needs pipelineRuntime to create tab queues.
+    await this.startPipeline();
+
     const ws = new this.WebSocket(this.wsEndpoint);
     this.ws = ws;
 
@@ -113,15 +132,13 @@ export class ReplaySession {
     // Register live data structures for Prometheus gauges.
     // pageWebSockets.size → WS count (via getter), trackedTargets.size → target count
     const targets = this.targets;
-    const sessionReplay = this.sessionReplay;
-    const sessionId = this.sessionId;
     const self = this;
     this.unregisterGauges = registerSessionState({
       pageWebSockets: { get size() { return targets.pageWsCount; } },
       trackedTargets: targets,
       pendingCommands: { get size() { return self.browserConn?.pendingCount ?? 0; } },
       getPagePendingCount: () => targets.getPagePendingCount(),
-      getEstimatedBytes: () => sessionReplay.getReplayState(sessionId)?.estimatedBytes ?? 0,
+      getEstimatedBytes: () => 0, // merged array removed — per-tab arrays are freed incrementally
     });
 
     // Create CdpConnection for browser-level WS (replaces manual pendingCommands map)
@@ -192,6 +209,104 @@ export class ReplaySession {
   }
 
   /**
+   * Build the Effect Layer and create the pipeline runtime.
+   * Per-tab fibers are forked later via startTabPipeline().
+   */
+  private async startPipeline(): Promise<void> {
+    const sessionReplay = this.sessionReplay;
+    const replaysDir = sessionReplay.getReplaysDir();
+
+    const writerLayer = Layer.succeed(ReplayWriter, ReplayWriter.of({
+      writeTabReplay: (tabReplayId, events, metadata) =>
+        Effect.tryPromise({
+          try: async () => {
+            const { writeFile } = await import('fs/promises');
+            const path = await import('path');
+            const filepath = path.join(replaysDir, `${tabReplayId}.json`);
+            const replay = { events, metadata };
+            await writeFile(filepath, JSON.stringify(replay), 'utf-8');
+            const store = sessionReplay.getStore();
+            if (store) {
+              const result = store.insert(metadata as any);
+              if (!result.ok) throw new Error(result.error.message);
+            }
+            return filepath;
+          },
+          catch: (e) => new ReplayStoreError({
+            message: e instanceof Error ? e.message : String(e),
+          }),
+        }),
+      writeMetadata: (metadata) =>
+        Effect.try({
+          try: () => {
+            const store = sessionReplay.getStore();
+            if (store) {
+              const result = store.insert(metadata as any);
+              if (!result.ok) throw new Error(result.error.message);
+            }
+          },
+          catch: (e) => new ReplayStoreError({
+            message: e instanceof Error ? e.message : String(e),
+          }),
+        }),
+    }));
+
+    const metricsLayer = Layer.succeed(ReplayMetrics, ReplayMetrics.of({
+      incEvents: (count) => Effect.sync(() => {
+        for (let i = 0; i < count; i++) replayEventsTotal.inc();
+      }),
+      observeTabDuration: (seconds) => Effect.sync(() => {
+        tabDuration.observe(seconds);
+      }),
+      registerSession: (state) => Effect.sync(() => registerSessionState(state)),
+    }));
+
+    const pipelineLayer = Layer.mergeAll(writerLayer, metricsLayer);
+    this.pipelineRuntime = ManagedRuntime.make(pipelineLayer);
+  }
+
+  /**
+   * Create a per-tab Queue and fork a tabConsumer fiber for this target.
+   * Called from handleAttachedToTarget when a new page target is added.
+   */
+  private async startTabPipeline(targetId: TargetId): Promise<void> {
+    if (!this.pipelineRuntime || this.tabQueues.has(targetId)) return;
+    const runtime = this.pipelineRuntime;
+    const sessionIdBranded = this.sessionId as unknown as SessionId;
+
+    // Create queue inside runtime scope, store reference for offerEvents/endUnsafe
+    const self = this;
+    await runtime.runPromise(Effect.gen(function*() {
+      const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
+      self.tabQueues.set(targetId, queue);
+    }));
+
+    // Fork consumer fiber — runs until Queue is ended
+    const queue = this.tabQueues.get(targetId);
+    if (queue) {
+      runtime.runFork(tabConsumer(queue, sessionIdBranded, targetId));
+    }
+  }
+
+  /**
+   * Push events into the Effect Stream pipeline via Queue.
+   * Called from WS handler context (no Effect fiber) — uses Unsafe variants.
+   */
+  private offerEvents(targetId: TargetId, events: readonly { type: number; timestamp: number; data: unknown }[]): void {
+    const queue = this.tabQueues.get(targetId);
+    if (!queue) return;
+    const sessionId = this.sessionId as unknown as SessionId;
+    for (const event of events) {
+      Queue.offerUnsafe(queue, {
+        sessionId,
+        targetId,
+        event: event as TabEvent['event'],
+      });
+    }
+    this.eventCounts.set(targetId, (this.eventCounts.get(targetId) ?? 0) + events.length);
+  }
+
+  /**
    * Converged teardown — all three paths (ws_close, cleanup, error) come here.
    * Idempotent via destroyPromise.
    */
@@ -213,50 +328,48 @@ export class ReplaySession {
     // Clean up solver
     this.cloudflareSolver.destroy();
 
-    // Finalize all tabs and fire callbacks for ALL destroy sources.
-    // 'cleanup': orderly shutdown — collectEvents + stopTabReplay (full finalization).
-    // 'ws_close'/'error': Chrome is gone — skip collectEvents, but save in-memory
-    //   events via stopTabReplay directly. The replay file will be valid (possibly truncated).
+    // Finalize all tabs — flush page buffers into the Queue, stop screencast.
+    // Pipeline writes the actual replay JSON files when the queue ends (below).
     for (const target of [...this.targets]) {
       try {
-        let result: StopTabRecordingResult | null = null;
         if (source === 'cleanup') {
-          result = await this.finalizeTab(target.targetId);
-        } else {
-          // WS close / error: Chrome is gone, but we CAN save in-memory events
-          const tabResult = await this.sessionReplay.stopTabReplay(
-            this.sessionId, target.targetId
-          );
-          if (tabResult) {
-            const tabReplayId = tabResult.metadata.id;
-            result = {
-              replayId: tabReplayId,
-              duration: tabResult.metadata.duration,
-              eventCount: tabResult.metadata.eventCount,
-              replayUrl: `${this.baseUrl}/replay/${tabReplayId}`,
-              frameCount: 0,
-              encodingStatus: 'none',
-              videoUrl: '',
-            };
-          }
+          await this.finalizeTab(target.targetId);
         }
+        // Fire tab-complete callbacks with estimated values.
+        // Real event counts are in the per-tab JSON files written by the pipeline.
         if (this.onTabReplayComplete) {
           const tabReplayId = `${this.sessionId}--tab-${target.targetId}`;
           this.onTabReplayComplete({
             sessionId: this.sessionId,
             targetId: target.targetId,
-            duration: result?.duration ?? (Date.now() - target.startTime),
-            eventCount: result?.eventCount ?? 0,
-            frameCount: result?.frameCount ?? 0,
-            encodingStatus: result?.encodingStatus ?? 'none',
-            replayUrl: result?.replayUrl ?? `${this.baseUrl}/replay/${tabReplayId}`,
-            videoUrl: result?.videoUrl || undefined,
+            duration: Date.now() - target.startTime,
+            eventCount: this.eventCounts.get(target.targetId) ?? 0,
+            frameCount: 0,
+            encodingStatus: 'none',
+            replayUrl: `${this.baseUrl}/replay/${tabReplayId}`,
+            videoUrl: undefined,
           });
         }
       } catch (e) {
         this.log.warn(`destroy finalize failed for ${target.targetId}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
+
+    // End all remaining tab queues (safety net for tabs still alive at session teardown).
+    // Each consumer fiber will drain remaining events and write its replay file.
+    for (const [, queue] of this.tabQueues) {
+      Queue.endUnsafe(queue);
+    }
+    this.tabQueues.clear();
+
+    // Dispose pipeline runtime — waits for pipeline fiber to complete (file writes).
+    if (this.pipelineRuntime) {
+      await this.pipelineRuntime.dispose().catch((e) => {
+        this.log.warn(`Pipeline dispose error: ${e instanceof Error ? e.message : String(e)}`);
+      });
+      this.pipelineRuntime = null;
+    }
+    this.eventCounts.clear();
 
     // Reject all pending browser WS commands
     this.browserConn?.drainPending('session_destroyed');
@@ -462,7 +575,7 @@ export class ReplaySession {
       if (result?.result?.value) {
         const { events } = JSON.parse(result.result.value);
         if (events?.length) {
-          this.sessionReplay.addTabEvents(this.sessionId, targetId, events);
+          this.offerEvents(targetId, events);
         }
       }
     } catch {
@@ -472,53 +585,25 @@ export class ReplaySession {
 
   // ─── Tab Finalization ───────────────────────────────────────────────────
 
-  private async finalizeTab(targetId: TargetId): Promise<StopTabRecordingResult | null> {
+  /**
+   * Flush page buffers into the Queue and stop screencast.
+   * The pipeline writes the actual replay JSON when the queue ends.
+   */
+  private async finalizeTab(targetId: TargetId): Promise<void> {
     const target = this.targets.getByTarget(targetId);
-
-    // Prevent double-finalization
-    if (target?.finalizedResult) {
-      return target.finalizedResult;
-    }
+    if (target?.finalizedResult) return; // prevent double-finalization
 
     await this.collectEvents(targetId);
 
-    // Stop screencast for this target and get per-tab frame count
+    // Stop screencast for this target
     const cdpSid = target?.cdpSessionId;
-    let tabFrameCount = 0;
     if (cdpSid && this.video) {
-      tabFrameCount = await this.screencastCapture.stopTargetCapture(this.sessionId, cdpSid);
+      await this.screencastCapture.stopTargetCapture(this.sessionId, cdpSid);
     }
-
-    const tabResult = await this.sessionReplay.stopTabReplay(this.sessionId, targetId, undefined, tabFrameCount);
-    if (!tabResult) {
-      if (tabFrameCount === 0) {
-        this.log.debug(
-          `finalizeTab: skipping inactive tab ${targetId}, session ${this.sessionId} (no frames)`
-        );
-      } else {
-        this.log.warn(
-          `finalizeTab: stopTabReplay returned null for target ${targetId}, session ${this.sessionId}. ` +
-          `isReplaying=${this.sessionReplay.isReplaying(this.sessionId)}, frameCount=${tabFrameCount}`
-        );
-      }
-      return null;
-    }
-
-    const tabReplayId = tabResult.metadata.id;
-    const result: StopTabRecordingResult = {
-      replayId: tabReplayId,
-      duration: tabResult.metadata.duration,
-      eventCount: tabResult.metadata.eventCount,
-      replayUrl: `${this.baseUrl}/replay/${tabReplayId}`,
-      frameCount: tabFrameCount,
-      encodingStatus: tabResult.metadata.encodingStatus ?? 'none',
-      videoUrl: tabFrameCount > 0 ? `${this.baseUrl}/video/${tabReplayId}` : '',
-    };
 
     if (target) {
-      target.finalizedResult = result;
+      target.finalizedResult = {} as any; // mark as finalized
     }
-    return result;
   }
 
   // ─── Iframe CDP Event Handling ──────────────────────────────────────────
@@ -532,7 +617,7 @@ export class ReplaySession {
     // Network.requestWillBeSent → server-side rrweb network.request event
     if (msg.method === 'Network.requestWillBeSent') {
       const req = msg.params?.request;
-      this.sessionReplay.addTabEvents(this.sessionId, parentTargetId, [{
+      this.offerEvents(parentTargetId, [{
         type: 5, timestamp: Date.now(),
         data: {
           tag: 'network.request',
@@ -549,7 +634,7 @@ export class ReplaySession {
     // Network.responseReceived → server-side rrweb network.response event
     if (msg.method === 'Network.responseReceived') {
       const resp = msg.params?.response;
-      this.sessionReplay.addTabEvents(this.sessionId, parentTargetId, [{
+      this.offerEvents(parentTargetId, [{
         type: 5, timestamp: Date.now(),
         data: {
           tag: 'network.response',
@@ -576,7 +661,7 @@ export class ReplaySession {
         .map((f: { functionName?: string; url?: string; lineNumber?: number }) =>
           `${f.functionName || '(anonymous)'}@${f.url || ''}:${f.lineNumber ?? 0}`);
 
-      this.sessionReplay.addTabEvents(this.sessionId, parentTargetId, [{
+      this.offerEvents(parentTargetId, [{
         type: 6, timestamp: Date.now(),
         data: {
           plugin: 'rrweb/console@1',
@@ -658,7 +743,7 @@ export class ReplaySession {
         const events = batchExit.value;
         const targetId = this.targets.findTargetIdByCdpSession(cdpSessionId);
         if (targetId && events.length) {
-          this.sessionReplay.addTabEvents(this.sessionId, targetId, events as any[]);
+          this.offerEvents(targetId, events as any[]);
         }
       } catch (e) {
         this.log.debug(`rrweb push parse failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -682,8 +767,8 @@ export class ReplaySession {
       this.cloudflareSolver.onPageAttached(targetId, cdpSessionId, targetInfo.url)
         .catch((e: Error) => this.log.debug(`[${targetId}] onPageAttached skipped: ${e.message}`));
 
-      // Eagerly initialize tab event tracking
-      this.sessionReplay.addTabEvents(this.sessionId, targetId, []);
+      // Start per-tab replay pipeline (Queue + consumer fiber)
+      await this.startTabPipeline(targetId);
 
       // Extension handles rrweb injection via content_scripts (document_start, world: MAIN).
       // We only need: push binding, session ID, auto-attach for iframes, and resume.
@@ -798,21 +883,30 @@ export class ReplaySession {
     const target = this.targets.getByTarget(targetId);
     if (target) {
       tabDuration.observe((Date.now() - target.startTime) / 1000);
-      const result = await this.finalizeTab(targetId);
-      // Always fire callback — even when result is null (no events / stopTabReplay failed).
-      // Without this, pydoll's ReplayListener.wait() hangs for the full timeout.
+      await this.finalizeTab(targetId);
+
+      // End this tab's Queue — consumer fiber drains remaining events + writes file.
+      // Must come AFTER finalizeTab (which drains page buffer into Queue).
+      const tabQueue = this.tabQueues.get(targetId);
+      if (tabQueue) {
+        Queue.endUnsafe(tabQueue);
+        this.tabQueues.delete(targetId);
+      }
+
+      // Fire callback — pipeline writes the replay file after processing the sentinel.
+      // Callback provides the replayUrl so pydoll's ReplayListener can store it.
       if (this.onTabReplayComplete) {
         const tabReplayId = `${this.sessionId}--tab-${targetId}`;
         try {
           this.onTabReplayComplete({
             sessionId: this.sessionId,
             targetId,
-            duration: result?.duration ?? (Date.now() - target.startTime),
-            eventCount: result?.eventCount ?? 0,
-            frameCount: result?.frameCount ?? 0,
-            encodingStatus: result?.encodingStatus ?? 'none',
-            replayUrl: result?.replayUrl ?? `${this.baseUrl}/replay/${tabReplayId}`,
-            videoUrl: result?.videoUrl || undefined,
+            duration: Date.now() - target.startTime,
+            eventCount: this.eventCounts.get(targetId) ?? 0,
+            frameCount: 0,
+            encodingStatus: 'none',
+            replayUrl: `${this.baseUrl}/replay/${tabReplayId}`,
+            videoUrl: undefined,
           });
         } catch (e) {
           this.log.warn(`onTabReplayComplete callback failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -962,7 +1056,7 @@ export class ReplaySession {
   }
 
   private injectMarkerForTarget(targetId: TargetId, tag: string, payload?: object): void {
-    this.sessionReplay.addTabEvents(this.sessionId, targetId, [{
+    this.offerEvents(targetId, [{
       type: 5,
       timestamp: Date.now(),
       data: { tag, payload: payload || {} },

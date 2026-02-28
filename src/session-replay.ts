@@ -5,7 +5,7 @@ import {
 } from '@browserless.io/browserless';
 import { exec } from 'child_process';
 import { EventEmitter } from 'events';
-import { mkdir, readFile, readdir, rm, writeFile } from 'fs/promises';
+import { mkdir, readFile, readdir, rm } from 'fs/promises';
 import cron, { type ScheduledTask } from 'node-cron';
 import path from 'path';
 import { promisify } from 'util';
@@ -13,7 +13,7 @@ import { promisify } from 'util';
 const execAsync = promisify(exec);
 
 import { ReplayStore } from './replay-store.js';
-import { replayEventsTotal, replayOverflowsTotal } from './prom-metrics.js';
+import { replayEventsTotal } from './prom-metrics.js';
 import type { IReplayStore, ReplayMetadata } from './interfaces/replay-store.interface.js';
 
 // Re-export ReplayMetadata for backwards compatibility
@@ -40,24 +40,10 @@ export interface StopReplayResult {
 }
 
 export interface SessionReplayState {
-  events: ReplayEvent[];
   isReplaying: boolean;
-  /** Merged session events exceeded maxReplaySize — stop adding to merged array
-   *  but keep per-tab tracking alive for video metadata. */
-  sessionOverflow: boolean;
-  /** Running total of approximate JSON size (bytes) for merged events array */
-  estimatedBytes: number;
   sessionId: string;
   startedAt: number;
   trackingId?: string;
-  /** Functions to call for final event collection before stopping */
-  finalCollectors: Array<() => Promise<void>>;
-  /** Cleanup functions to call after replay stops (e.g., disconnect puppeteer) */
-  cleanupFns: Array<() => Promise<void>>;
-  /** Per-tab events, keyed by targetId */
-  tabEvents: Map<string, ReplayEvent[]>;
-  /** Per-tab metadata (start time, tracking info) */
-  tabMetadata: Map<string, { startedAt: number; trackingId?: string }>;
 }
 
 /**
@@ -75,7 +61,6 @@ export class SessionReplay extends EventEmitter {
   protected replaysDir: string;
   protected videosDir: string;
   protected enabled: boolean;
-  protected maxReplaySize: number;
   protected store: IReplayStore | null = null;
   protected ownsStore = false; // Track if we created the store (for cleanup)
   protected maxAgeMs: number;
@@ -89,7 +74,6 @@ export class SessionReplay extends EventEmitter {
     this.enabled = process.env.ENABLE_REPLAY !== 'false';
     this.replaysDir = process.env.REPLAY_DIR || '/tmp/browserless-replays';
     this.videosDir = process.env.VIDEO_DIR || '/tmp/browserless-videos';
-    this.maxReplaySize = +(process.env.REPLAY_MAX_SIZE || '52428800');
     // Default: 7 days (604800000ms)
     this.maxAgeMs = +(process.env.REPLAY_MAX_AGE_MS || '604800000');
 
@@ -239,40 +223,21 @@ export class SessionReplay extends EventEmitter {
     if (!this.enabled || this.replays.has(sessionId)) return;
 
     this.replays.set(sessionId, {
-      cleanupFns: [],
-      estimatedBytes: 0,
-      events: [],
-      finalCollectors: [],
       isReplaying: true,
-      sessionOverflow: false,
       sessionId,
       startedAt: Date.now(),
       trackingId,
-      tabEvents: new Map(),
-      tabMetadata: new Map(),
     });
     this.log.debug(`Started replay for session ${sessionId}`);
   }
 
-  public addEvent(sessionId: string, event: ReplayEvent): void {
+  /**
+   * Add a single event (safety net for non-tab callers).
+   * Tab events now flow through the Effect Stream pipeline.
+   */
+  public addEvent(sessionId: string, _event: ReplayEvent): void {
     const state = this.replays.get(sessionId);
     if (!state?.isReplaying) return;
-
-    // Stop adding to merged session events when max size exceeded,
-    // but do NOT call stopReplay — per-tab tracking must stay alive
-    // for video metadata on long-lived sessions.
-    if (state.sessionOverflow) return;
-
-    // O(1) per add: only stringify the single new event, not the entire array
-    const eventSize = JSON.stringify(event).length + 1; // +1 for comma delimiter
-    if (state.estimatedBytes + eventSize > this.maxReplaySize) {
-      this.log.warn(`Replay ${sessionId} exceeded max size (~${Math.round(state.estimatedBytes / 1048576)}MB), stopping merged event capture`);
-      state.sessionOverflow = true;
-      replayOverflowsTotal.inc();
-      return;
-    }
-    state.estimatedBytes += eventSize;
-    state.events.push(event);
     replayEventsTotal.inc();
   }
 
@@ -282,134 +247,9 @@ export class SessionReplay extends EventEmitter {
     }
   }
 
-  /**
-   * Add events for a specific tab (targetId).
-   * Stores in both the merged events array (for session-level replay)
-   * and the per-tab events map (for per-tab replay files).
-   */
-  public addTabEvents(sessionId: string, targetId: string, events: ReplayEvent[]): void {
-    const state = this.replays.get(sessionId);
-    if (!state?.isReplaying) return;
-
-    // Initialize tab tracking on first event
-    if (!state.tabEvents.has(targetId)) {
-      state.tabEvents.set(targetId, []);
-      state.tabMetadata.set(targetId, { startedAt: Date.now() });
-    }
-
-    const tabEventList = state.tabEvents.get(targetId)!;
-
-    for (const event of events) {
-      if (state.sessionOverflow) {
-        // Still add to per-tab (for per-tab replay files) even if merged overflowed
-        tabEventList.push(event);
-        replayEventsTotal.inc();
-        continue;
-      }
-      const eventSize = JSON.stringify(event).length + 1;
-      if (state.estimatedBytes + eventSize > this.maxReplaySize) {
-        this.log.warn(`Replay ${sessionId} exceeded max size (~${Math.round(state.estimatedBytes / 1048576)}MB), stopping merged event capture`);
-        state.sessionOverflow = true;
-        replayOverflowsTotal.inc();
-        tabEventList.push(event);
-        replayEventsTotal.inc();
-        continue;
-      }
-      state.estimatedBytes += eventSize;
-      state.events.push(event);
-      tabEventList.push(event);
-      replayEventsTotal.inc();
-    }
-  }
-
-  /**
-   * Finalize a tab's recording into a separate replay file.
-   * Called when a tab is destroyed (Target.targetDestroyed).
-   * Returns StopReplayResult with per-tab metadata.
-   */
-  public async stopTabReplay(
-    sessionId: string,
-    targetId: string,
-    metadata?: Partial<ReplayMetadata>,
-    frameCount?: number,
-  ): Promise<StopReplayResult | null> {
-    const state = this.replays.get(sessionId);
-    if (!state) return null;
-
-    const tabEventList = state.tabEvents.get(targetId);
-    const tabMeta = state.tabMetadata.get(targetId);
-    if (!tabEventList || !tabMeta) return null;
-
-    const endedAt = Date.now();
-    const tabReplayId = `${sessionId}--tab-${targetId}`;
-    const resolvedFrameCount = frameCount ?? 0;
-
-    const replayMetadata: ReplayMetadata = {
-      browserType: metadata?.browserType || 'unknown',
-      duration: endedAt - tabMeta.startedAt,
-      endedAt,
-      eventCount: tabEventList.length,
-      frameCount: resolvedFrameCount,
-      id: tabReplayId,
-      routePath: metadata?.routePath || 'unknown',
-      startedAt: tabMeta.startedAt,
-      trackingId: state.trackingId,
-      encodingStatus: resolvedFrameCount > 0 ? 'deferred' : 'none',
-      parentSessionId: sessionId,
-      targetId,
-    };
-
-    const replay: Replay = {
-      events: tabEventList,
-      metadata: replayMetadata,
-    };
-
-    const filepath = path.join(this.replaysDir, `${tabReplayId}.json`);
-
-    try {
-      await writeFile(filepath, JSON.stringify(replay), 'utf-8');
-
-      if (this.store) {
-        const result = this.store.insert(replayMetadata);
-        if (!result.ok) {
-          this.log.warn(`Failed to save tab replay metadata: ${result.error.message}`);
-        }
-      }
-
-      this.log.info(`Saved tab replay ${tabReplayId} with ${tabEventList.length} events`);
-    } catch (err) {
-      this.log.error(`Failed to save tab replay ${tabReplayId}: ${err}`);
-      return null;
-    }
-
-    // Clean up tab state (events stay in merged session array)
-    state.tabEvents.delete(targetId);
-    state.tabMetadata.delete(targetId);
-
-    return { filepath, metadata: replayMetadata };
-  }
-
-  /**
-   * Register a function to be called for final event collection before stopping.
-   * This ensures we don't lose events between the last poll and session close.
-   */
-  public registerFinalCollector(sessionId: string, collector: () => Promise<void>): void {
-    const state = this.replays.get(sessionId);
-    if (state) {
-      state.finalCollectors.push(collector);
-    }
-  }
-
-  /**
-   * Register a cleanup function to be called after replay stops.
-   * Use this for resources that need cleanup (e.g., disconnect puppeteer connections).
-   */
-  public registerCleanupFn(sessionId: string, cleanupFn: () => Promise<void>): void {
-    const state = this.replays.get(sessionId);
-    if (state) {
-      state.cleanupFns.push(cleanupFn);
-    }
-  }
+  // Tab events are now managed by the Effect Stream pipeline in replay-pipeline.ts.
+  // Events flow: WS handler → Queue.offerUnsafe → Stream.groupByKey → write JSON on stream end.
+  // No tab event methods needed here — the pipeline owns all per-tab state.
 
   public async stopReplay(
     sessionId: string,
@@ -418,24 +258,16 @@ export class SessionReplay extends EventEmitter {
     const state = this.replays.get(sessionId);
     if (!state) return null;
 
-    // Run all final collectors to gather any pending events before saving
-    // This prevents losing events between the last poll and session close
-    for (const collector of state.finalCollectors) {
-      try {
-        await collector();
-      } catch (e) {
-        this.log.warn(`Final collector failed: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
-
     state.isReplaying = false;
     const endedAt = Date.now();
 
+    // Per-tab replays are written by the Effect Stream pipeline.
+    // Session-level metadata is for the CDP replay-complete event only.
     const replayMetadata: ReplayMetadata = {
       browserType: metadata?.browserType || 'unknown',
       duration: endedAt - state.startedAt,
       endedAt,
-      eventCount: state.events.length,
+      eventCount: 0, // per-tab files have the real counts
       frameCount: metadata?.frameCount ?? 0,
       id: sessionId,
       routePath: metadata?.routePath || 'unknown',
@@ -445,42 +277,9 @@ export class SessionReplay extends EventEmitter {
       encodingStatus: metadata?.frameCount ? 'deferred' : 'none',
     };
 
-    const replay: Replay = {
-      events: state.events,
-      metadata: replayMetadata,
-    };
-
     const filepath = path.join(this.replaysDir, `${sessionId}.json`);
 
-    try {
-      // Save full replay to JSON (events + metadata for playback)
-      await writeFile(filepath, JSON.stringify(replay), 'utf-8');
-
-      // Save metadata to SQLite for fast queries
-      if (this.store) {
-        const result = this.store.insert(replay.metadata);
-        if (!result.ok) {
-          this.log.warn(`Failed to save replay metadata to store: ${result.error.message}`);
-        }
-      }
-
-      this.log.info(`Saved replay ${sessionId} with ${state.events.length} events`);
-    } catch (err) {
-      this.log.error(`Failed to save replay ${sessionId}: ${err}`);
-    }
-
-    // Run cleanup functions BEFORE deleting state — cleanup may call stopTabReplay()
-    // which needs this.replays.get(sessionId) to still exist.
-    this.log.info(`Running ${state.cleanupFns.length} cleanup functions for ${sessionId}`);
-    for (const cleanupFn of state.cleanupFns) {
-      try {
-        await cleanupFn();
-      } catch (e) {
-        this.log.warn(`Cleanup function failed for ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
-    this.log.info(`Cleanup complete for ${sessionId}`);
-
+    this.log.info(`Session ${sessionId} stopped (per-tab files written by pipeline)`);
     this.replays.delete(sessionId);
 
     return { filepath, metadata: replayMetadata };

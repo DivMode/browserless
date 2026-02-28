@@ -152,6 +152,7 @@ export class CloudflareSolver {
   /** Interrupt and stop the detection fiber for a target (e.g. on tab close). */
   stopTargetDetection(targetId: TargetId): void {
     this.stopDetectionFiber(targetId);
+    this.stateTracker.unregisterPage(targetId);
   }
 
   private startDetectionFiber(targetId: TargetId, cdpSessionId: CdpSessionId): void {

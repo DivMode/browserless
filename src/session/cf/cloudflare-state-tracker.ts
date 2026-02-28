@@ -493,6 +493,20 @@ export class CloudflareStateTracker {
     this.sessionToTarget.set(cdpSessionId, targetId);
   }
 
+  /** Clean up all state for a destroyed page target. */
+  unregisterPage(targetId: TargetId): void {
+    const cdpSessionId = this.knownPages.get(targetId);
+    if (cdpSessionId) {
+      this.sessionToTarget.delete(cdpSessionId);
+    }
+    this.knownPages.delete(targetId);
+    this.iframeToPage.delete(targetId);
+    this.bindingSolvedTargets.delete(targetId);
+    this.pendingIframes.delete(targetId);
+    this.pendingRechallengeCount.delete(targetId);
+    this.activeDetections.delete(targetId);
+  }
+
   findPageBySession(cdpSessionId: CdpSessionId): TargetId | undefined {
     return this.sessionToTarget.get(cdpSessionId);
   }
