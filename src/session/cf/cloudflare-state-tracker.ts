@@ -14,6 +14,7 @@ import {
 import type { ActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
 import { CdpSessionGone } from './cf-errors.js';
 import { DetectionRegistry } from './cf-detection-registry.js';
+import { OOPIFChecker } from './cf-services.js';
 
 /** CDP send command. Returns any because CDP response shapes vary per method — not worth validating every shape. */
 export type SendCommand = (method: string, params?: object, cdpSessionId?: CdpSessionId, timeoutMs?: number) => Promise<any>;
@@ -81,15 +82,10 @@ export class CloudflareStateTracker {
   config: Required<CloudflareConfig> = { maxAttempts: 3, attemptTimeout: 30000, recordingMarkers: true };
   destroyed = false;
 
-  /** Effect-returning OOPIF state check — wired by CloudflareSolver to strategies.checkOOPIFStateViaCDP. */
-  private checkOOPIFStateEffect: (iframeCdpSessionId: CdpSessionId) => Effect.Effect<'success' | 'fail' | 'expired' | 'timeout' | 'pending' | null>;
-
   constructor(
     private sendCommand: SendCommand,
     private events: CloudflareEventEmitter,
-    checkOOPIFStateEffect: (iframeCdpSessionId: CdpSessionId) => Effect.Effect<'success' | 'fail' | 'expired' | 'timeout' | 'pending' | null>,
   ) {
-    this.checkOOPIFStateEffect = checkOOPIFStateEffect;
     this.registry = new DetectionRegistry((active, signal) => {
       const duration = Date.now() - active.startTime;
       const attr = deriveSolveAttribution(signal, !!active.clickDelivered);
@@ -374,12 +370,14 @@ export class CloudflareStateTracker {
   /**
    * Shared OOPIF state check — used by both activity loop variants.
    * Safe for ALL types: uses the iframe CDP session, not the page session.
+   * Yields OOPIFChecker service — provided via Layer in the bridge.
    */
-  private checkOOPIFStateIteration(active: ActiveDetection): Effect.Effect<'aborted' | 'continue'> {
+  private checkOOPIFStateIteration(active: ActiveDetection): Effect.Effect<'aborted' | 'continue', never, typeof OOPIFChecker.Identifier> {
     const tracker = this;
     return Effect.fn('cf.state.checkOOPIF')(function*() {
       if (active.iframeCdpSessionId) {
-        const oopifState = yield* tracker.checkOOPIFStateEffect(active.iframeCdpSessionId).pipe(
+        const checker = yield* OOPIFChecker;
+        const oopifState = yield* checker.check(active.iframeCdpSessionId).pipe(
           Effect.orElseSucceed(() => null), // OOPIF gone — iframe may have been destroyed
         );
         if (oopifState && oopifState !== 'pending') {
@@ -396,7 +394,7 @@ export class CloudflareStateTracker {
    * Page is the EMBEDDING site — Runtime.evaluate is safe.
    * Checks: isSolved + OOPIF state + widget error
    */
-  activityLoopEmbedded(active: ActiveDetection): Effect.Effect<void> {
+  activityLoopEmbedded(active: ActiveDetection): Effect.Effect<void, never, typeof OOPIFChecker.Identifier> {
     const tracker = this;
 
     const activityIteration = (loopIter: number) =>
@@ -454,7 +452,7 @@ export class CloudflareStateTracker {
    * Page IS the CF challenge — Runtime.evaluate is FORBIDDEN.
    * Checks: OOPIF state only (uses iframe CDP session, not page session)
    */
-  activityLoopInterstitial(active: ActiveDetection): Effect.Effect<void> {
+  activityLoopInterstitial(active: ActiveDetection): Effect.Effect<void, never, typeof OOPIFChecker.Identifier> {
     const tracker = this;
 
     const activityIteration = (loopIter: number) =>

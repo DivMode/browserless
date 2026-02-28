@@ -1,21 +1,30 @@
-import { Effect, Fiber, Layer, ManagedRuntime } from 'effect';
+import { Effect, FiberMap, Layer, ManagedRuntime } from 'effect';
 import { CdpSessionId } from '../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareConfig } from '../shared/cloudflare-detection.js';
 import { CloudflareDetector } from './cf/cloudflare-detector.js';
 import { CloudflareSolveStrategies } from './cf/cloudflare-solve-strategies.js';
 import { CloudflareStateTracker } from './cf/cloudflare-state-tracker.js';
 import { CloudflareEventEmitter } from './cf/cloudflare-event-emitter.js';
-import type { EmitClientEvent, InjectMarker, ActiveDetection } from './cf/cloudflare-event-emitter.js';
+import type { EmitClientEvent, InjectMarker } from './cf/cloudflare-event-emitter.js';
 import type { SendCommand } from './cf/cloudflare-state-tracker.js';
-import { CdpSender, TokenChecker, SolverEvents, SolveDeps } from './cf/cf-services.js';
+import {
+  CdpSender, TokenChecker, SolverEvents, SolveDeps,
+  SolveDispatcher, DetectionLoopStarter, OOPIFChecker, SolverConfig,
+} from './cf/cf-services.js';
 import { CdpSessionGone } from './cf/cf-errors.js';
 import { solveDetection as solveDetectionEffect } from './cf/cloudflare-solver.effect.js';
-import type { SolveOutcome } from './cf/cloudflare-solve-strategies.js';
 import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
-import { Logger } from '@browserless.io/browserless';
 
 /** Service union type — the R channel of the Effect solver runtime. */
-type SolverR = typeof CdpSender.Identifier | typeof TokenChecker.Identifier | typeof SolverEvents.Identifier | typeof SolveDeps.Identifier;
+type SolverR =
+  | typeof CdpSender.Identifier
+  | typeof TokenChecker.Identifier
+  | typeof SolverEvents.Identifier
+  | typeof SolveDeps.Identifier
+  | typeof SolveDispatcher.Identifier
+  | typeof DetectionLoopStarter.Identifier
+  | typeof OOPIFChecker.Identifier
+  | typeof SolverConfig.Identifier;
 
 /**
  * Cloudflare detection and solving for a single browser session.
@@ -24,8 +33,8 @@ type SolverR = typeof CdpSender.Identifier | typeof TokenChecker.Identifier | ty
  * ReplayCoordinator, and BrowsersCDP depend on.
  *
  * Internal architecture: all modules are Effect-native. The ManagedRuntime
- * bridges Effect ↔ Promise at this boundary. Layer provides CdpSender,
- * TokenChecker, and SolverEvents. Layer finalizer handles cleanup on dispose.
+ * bridges Effect ↔ Promise at this boundary. Layer provides all services.
+ * FiberMap manages detection loop fibers with automatic cleanup on scope close.
  */
 export class CloudflareSolver {
   private detector: CloudflareDetector;
@@ -35,9 +44,9 @@ export class CloudflareSolver {
   private sendCommand: SendCommand;
   private sendViaProxy: SendCommand | null = null;
   private _setRealEmit: (fn: EmitClientEvent) => void;
-  private detectionFibers = new Map<TargetId, Fiber.Fiber<void>>();
-  private log = new Logger('cf-solver');
-  private runtime: ManagedRuntime.ManagedRuntime<SolverR, never> | null = null;
+  /** FiberMap for detection loop fibers — created inside the Layer scope. */
+  private _detectionFiberMap: FiberMap.FiberMap<TargetId> | null = null;
+  private runtime: ManagedRuntime.ManagedRuntime<SolverR, never>;
 
   constructor(sendCommand: SendCommand, injectMarker: InjectMarker, chromePort?: string) {
     this.sendCommand = sendCommand;
@@ -46,16 +55,9 @@ export class CloudflareSolver {
     this.events = new CloudflareEventEmitter(injectMarker, (...args) => realEmit(...args));
     this._setRealEmit = (fn) => { realEmit = fn; };
     this.strategies = new CloudflareSolveStrategies(sendCommand, this.events, chromePort);
-    this.stateTracker = new CloudflareStateTracker(sendCommand, this.events,
-      // OOPIF state check — activity loop calls this to check iframe widget state via CDP DOM walk
-      (iframeCdpSessionId) => this.strategies.checkOOPIFStateViaCDP(iframeCdpSessionId),
-    );
+    this.stateTracker = new CloudflareStateTracker(sendCommand, this.events);
     this.detector = new CloudflareDetector(
-      sendCommand, this.events, this.stateTracker, this.strategies,
-      // Solve dispatcher — routes through Effect runtime
-      (active: ActiveDetection) => this.solveViaEffect(active),
-      // Detection loop — starts a fiber-based Turnstile detection poll
-      (targetId, cdpSessionId) => this.startDetectionFiber(targetId, cdpSessionId),
+      this.events, this.stateTracker, this.strategies,
     );
 
     // Build the Effect runtime with service layers
@@ -71,6 +73,7 @@ export class CloudflareSolver {
     const sendCommand = this.sendCommand;
     const stateTracker = this.stateTracker;
     const events = this.events;
+    const strategies = this.strategies;
     const self = this;
 
     const cdpSenderLayer = Layer.succeed(CdpSender, CdpSender.of({
@@ -108,42 +111,83 @@ export class CloudflareSolver {
       marker: (targetId, tag, payload) => Effect.sync(() => events.marker(targetId, tag, payload)),
     }));
 
-    const strategies = this.strategies;
-    const solveDepsLayer = Layer.succeed(SolveDeps, SolveDeps.of({
-      findAndClickViaCDP: (active, attempt) => strategies.findAndClickViaCDP(active, attempt),
-      resolveAutoSolved: (active, signal) => stateTracker.resolveAutoSolved(active, signal),
-      simulatePresence: (active) =>
-        Effect.tryPromise({
-          try: () => simulateHumanPresence(sendCommand, active.pageCdpSessionId, 2.0 + Math.random() * 2.0),
-          catch: () => new Error('simulatePresence failed'),
-        }).pipe(Effect.asVoid, Effect.orElseSucceed(() => {})),
-      startActivityLoopEmbedded: (active) => stateTracker.activityLoopEmbedded(active),
-      startActivityLoopInterstitial: (active) => stateTracker.activityLoopInterstitial(active),
+    // SolveDeps needs OOPIFChecker for activity loops — use Layer.effect to yield it.
+    const solveDepsLayer = Layer.effect(SolveDeps, Effect.gen(function*() {
+      const oopifChecker = yield* OOPIFChecker;
+      return SolveDeps.of({
+        findAndClickViaCDP: (active, attempt) => strategies.findAndClickViaCDP(active, attempt),
+        resolveAutoSolved: (active, signal) => stateTracker.resolveAutoSolved(active, signal),
+        simulatePresence: (active) =>
+          Effect.tryPromise({
+            try: () => simulateHumanPresence(sendCommand, active.pageCdpSessionId, 2.0 + Math.random() * 2.0),
+            catch: () => new Error('simulatePresence failed'),
+          }).pipe(Effect.asVoid, Effect.orElseSucceed(() => {})),
+        startActivityLoopEmbedded: (active) => stateTracker.activityLoopEmbedded(active).pipe(
+          Effect.provideService(OOPIFChecker, oopifChecker),
+        ),
+        startActivityLoopInterstitial: (active) => stateTracker.activityLoopInterstitial(active).pipe(
+          Effect.provideService(OOPIFChecker, oopifChecker),
+        ),
+      });
     }));
 
-    // Layer finalizer — cleans up state tracker when runtime disposes.
-    // ManagedRuntime.dispose() closes its scope, triggering this finalizer.
-    // effectDiscard strips Scope from R, so acquireRelease works seamlessly.
+    // SolveDispatcher — routes solve attempts through the Effect solver.
+    // solveDetectionEffect requires TokenChecker/SolverEvents/SolveDeps in R,
+    // but those are provided by the same runtime. Use Effect.gen to yield them
+    // so the dispatch signature is Effect<SolveOutcome> (R = never).
+    const solveDispatcherLayer = Layer.effect(SolveDispatcher, Effect.gen(function*() {
+      const tokenChecker = yield* TokenChecker;
+      const solverEvents = yield* SolverEvents;
+      const solveDeps = yield* SolveDeps;
+      return SolveDispatcher.of({
+        dispatch: (active) => solveDetectionEffect(active).pipe(
+          Effect.provideService(TokenChecker, tokenChecker),
+          Effect.provideService(SolverEvents, solverEvents),
+          Effect.provideService(SolveDeps, solveDeps),
+        ),
+      });
+    }));
+
+    // DetectionLoopStarter — starts detection fibers via FiberMap
+    const detectionStarterLayer = Layer.succeed(DetectionLoopStarter, DetectionLoopStarter.of({
+      start: (targetId, cdpSessionId) => Effect.sync(() => self.startDetectionFiber(targetId, cdpSessionId)),
+    }));
+
+    // OOPIFChecker — wired to strategies.checkOOPIFStateViaCDP
+    const oopifCheckerLayer = Layer.succeed(OOPIFChecker, OOPIFChecker.of({
+      check: (iframeCdpSessionId) => strategies.checkOOPIFStateViaCDP(iframeCdpSessionId),
+    }));
+
+    // SolverConfig — defaults, overridden by enable() via stateTracker.config
+    const solverConfigLayer = Layer.succeed(SolverConfig, SolverConfig.of({
+      maxAttempts: 3, attemptTimeout: 30000, recordingMarkers: true,
+    }));
+
+    // Lifecycle layer — FiberMap creation + state tracker cleanup.
+    // ManagedRuntime.dispose() closes its scope, triggering finalizers.
     const lifecycleLayer = Layer.effectDiscard(
       Effect.acquireRelease(
-        Effect.void,
+        Effect.gen(function*() {
+          self._detectionFiberMap = yield* FiberMap.make<TargetId>();
+        }),
         () => Effect.gen(function*() {
           yield* stateTracker.destroy();
-          self.detectionFibers.clear();
+          self._detectionFiberMap = null;
         }),
       ),
     );
 
-    return Layer.mergeAll(cdpSenderLayer, tokenCheckerLayer, solverEventsLayer, solveDepsLayer, lifecycleLayer);
-  }
+    // Wire dependencies:
+    // - solveDepsLayer needs OOPIFChecker
+    // - solveDispatcherLayer needs TokenChecker + SolverEvents + SolveDeps
+    // Base layers (no deps) are merged first, then dependent layers are provided.
+    const baseLayers = Layer.mergeAll(
+      cdpSenderLayer, tokenCheckerLayer, solverEventsLayer,
+      oopifCheckerLayer, detectionStarterLayer, solverConfigLayer, lifecycleLayer,
+    );
 
-  /**
-   * Run Effect-based solveDetection via ManagedRuntime.
-   * Returns the same Promise<SolveOutcome> the detector expects.
-   */
-  private async solveViaEffect(active: ActiveDetection): Promise<SolveOutcome> {
-    if (!this.runtime) return 'aborted';
-    return this.runtime.runPromise(solveDetectionEffect(active));
+    const withSolveDeps = Layer.merge(baseLayers, Layer.provide(solveDepsLayer, oopifCheckerLayer));
+    return Layer.merge(withSolveDeps, Layer.provide(solveDispatcherLayer, withSolveDeps));
   }
 
   setEmitClientEvent(fn: EmitClientEvent): void {
@@ -153,38 +197,22 @@ export class CloudflareSolver {
   /** Interrupt and stop the detection fiber for a target (e.g. on tab close). */
   async stopTargetDetection(targetId: TargetId): Promise<void> {
     this.stopDetectionFiber(targetId);
-    if (this.runtime) {
-      await this.runtime.runPromise(this.stateTracker.unregisterPage(targetId));
-    } else {
-      await Effect.runPromise(this.stateTracker.unregisterPage(targetId));
-    }
+    await this.runtime.runPromise(this.stateTracker.unregisterPage(targetId));
   }
 
   private startDetectionFiber(targetId: TargetId, cdpSessionId: CdpSessionId): void {
-    if (!this.runtime) {
-      this.log.warn(`startDetectionFiber: no runtime, target=${targetId}`);
-      return;
-    }
-    const existing = this.detectionFibers.get(targetId);
-    if (existing) {
-      this.runtime.runPromise(Fiber.interrupt(existing)).catch(() => {});
-    }
-    // Use runFork (root fiber) — NOT runPromise(forkChild) which creates a scoped
-    // fiber that gets interrupted when runPromise's scope closes.
-    const fiber = this.runtime.runFork(
-      this.detector.detectTurnstileWidgetEffect(targetId, cdpSessionId)
+    if (!this._detectionFiberMap) return;
+    // FiberMap.run auto-interrupts existing fiber for same key
+    this.runtime.runFork(
+      FiberMap.run(this._detectionFiberMap, targetId,
+        this.detector.detectTurnstileWidgetEffect(targetId, cdpSessionId),
+      ),
     );
-    this.detectionFibers.set(targetId, fiber);
   }
 
   private stopDetectionFiber(targetId: TargetId): void {
-    const fiber = this.detectionFibers.get(targetId);
-    if (fiber) {
-      this.detectionFibers.delete(targetId);
-      if (this.runtime) {
-        this.runtime.runPromise(Fiber.interrupt(fiber)).catch(() => {});
-      }
-    }
+    if (!this._detectionFiberMap) return;
+    this.runtime.runFork(FiberMap.remove(this._detectionFiberMap, targetId));
   }
 
   setSendViaProxy(fn: SendCommand): void {
@@ -193,7 +221,7 @@ export class CloudflareSolver {
   }
 
   enable(config?: CloudflareConfig): void {
-    this.detector.enable(config);
+    this.detector.enable(config, (targetId, cdpSessionId) => this.startDetectionFiber(targetId, cdpSessionId));
   }
 
   isEnabled(): boolean {
@@ -201,14 +229,10 @@ export class CloudflareSolver {
   }
 
   async onPageAttached(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Promise<void> {
-    return this.detector.onPageAttached(targetId, cdpSessionId, url);
+    return this.runtime.runPromise(this.detector.onPageAttachedEffect(targetId, cdpSessionId, url));
   }
 
   async onPageNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Promise<void> {
-    if (!this.runtime) {
-      // Fallback: run directly if runtime already disposed
-      return Effect.runPromise(this.detector.onPageNavigatedEffect(targetId, cdpSessionId, url));
-    }
     return this.runtime.runPromise(this.detector.onPageNavigatedEffect(targetId, cdpSessionId, url));
   }
 
@@ -216,47 +240,38 @@ export class CloudflareSolver {
     iframeTargetId: TargetId, iframeCdpSessionId: CdpSessionId,
     url: string, parentCdpSessionId: CdpSessionId,
   ): Promise<void> {
-    return this.detector.onIframeAttached(iframeTargetId, iframeCdpSessionId, url, parentCdpSessionId);
+    return this.runtime.runPromise(
+      this.detector.onIframeAttachedEffect(iframeTargetId, iframeCdpSessionId, url, parentCdpSessionId),
+    );
   }
 
   async onIframeNavigated(
     iframeTargetId: TargetId, iframeCdpSessionId: CdpSessionId, url: string,
   ): Promise<void> {
-    return this.detector.onIframeNavigated(iframeTargetId, iframeCdpSessionId, url);
+    return this.runtime.runPromise(
+      this.detector.onIframeNavigatedEffect(iframeTargetId, iframeCdpSessionId, url),
+    );
   }
 
   async onAutoSolveBinding(cdpSessionId: CdpSessionId): Promise<void> {
-    if (!this.runtime) {
-      return Effect.runPromise(this.stateTracker.onAutoSolveBinding(cdpSessionId));
-    }
     return this.runtime.runPromise(this.stateTracker.onAutoSolveBinding(cdpSessionId));
   }
 
   async onBeaconSolved(targetId: TargetId, tokenLength: number): Promise<void> {
-    if (this.runtime) {
-      await this.runtime.runPromise(this.stateTracker.onBeaconSolved(targetId, tokenLength));
-    } else {
-      await Effect.runPromise(this.stateTracker.onBeaconSolved(targetId, tokenLength));
-    }
+    await this.runtime.runPromise(this.stateTracker.onBeaconSolved(targetId, tokenLength));
   }
 
   async emitUnresolvedDetections(): Promise<void> {
-    if (this.runtime) {
-      await this.runtime.runPromise(this.stateTracker.emitUnresolvedDetections());
-    } else {
-      await Effect.runPromise(this.stateTracker.emitUnresolvedDetections());
-    }
+    await this.runtime.runPromise(this.stateTracker.emitUnresolvedDetections());
   }
 
   /**
    * Destroy — disposes ManagedRuntime which:
    *   1. Interrupts all running fibers (detection loops, solve attempts)
-   *   2. Runs Layer finalizers (state tracker cleanup, detection fiber map clear)
+   *   2. Runs Layer finalizers (FiberMap cleanup, state tracker destroy)
+   * Disposed runtime rejects new runPromise calls — no need to null it.
    */
   destroy(): void {
-    if (this.runtime) {
-      this.runtime.dispose().catch(() => {});
-      this.runtime = null;
-    }
+    this.runtime.dispose().catch(() => {});
   }
 }

@@ -165,7 +165,7 @@ export class CloudflareEventEmitter {
       detectionMethod: active.info.detectionMethod,
       pollCount: active.info.pollCount || 1,
       targetId: active.pageTargetId,
-    }).catch(() => {});
+    }).catch((e) => this.log.debug(`emitDetected failed: ${e instanceof Error ? e.message : String(e)}`));
   }
 
   emitProgress(active: ActiveDetection, state: string, extra?: Record<string, any>): void {
@@ -176,7 +176,7 @@ export class CloudflareEventEmitter {
       attempt: active.attempt,
       targetId: active.pageTargetId,
       ...extra,
-    }).catch(() => {});
+    }).catch((e) => this.log.debug(`emitProgress failed: ${e instanceof Error ? e.message : String(e)}`));
     this.marker(active.pageTargetId, 'cf.state_change', { state, ...extra });
   }
 
@@ -187,7 +187,7 @@ export class CloudflareEventEmitter {
       token_length: result.token_length ?? result.token?.length ?? 0,
       targetId: active.pageTargetId,
       summary: active.tracker.snapshot(),
-    }).catch(() => {});
+    }).catch((e) => this.log.debug(`emitSolved failed: ${e instanceof Error ? e.message : String(e)}`));
     this.marker(active.pageTargetId, 'cf.solved', {
       type: result.type, method: result.method, duration_ms: result.duration_ms,
       phase_label: result.phase_label, signal: result.signal,
@@ -202,7 +202,7 @@ export class CloudflareEventEmitter {
       targetId: active.pageTargetId,
       summary: active.tracker.snapshot(),
       phase_label,
-    }).catch(() => {});
+    }).catch((e) => this.log.debug(`emitFailed failed: ${e instanceof Error ? e.message : String(e)}`));
     this.marker(active.pageTargetId, 'cf.failed', { reason, duration_ms: duration, phase_label });
   }
 
