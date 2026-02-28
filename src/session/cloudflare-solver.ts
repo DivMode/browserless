@@ -54,7 +54,7 @@ export class CloudflareSolver {
     let realEmit: EmitClientEvent = async () => {};
     this.events = new CloudflareEventEmitter(injectMarker, (...args) => realEmit(...args));
     this._setRealEmit = (fn) => { realEmit = fn; };
-    this.strategies = new CloudflareSolveStrategies(sendCommand, this.events, chromePort);
+    this.strategies = new CloudflareSolveStrategies(chromePort);
     this.stateTracker = new CloudflareStateTracker(sendCommand, this.events);
     this.detector = new CloudflareDetector(
       this.events, this.stateTracker, this.strategies,
@@ -111,11 +111,17 @@ export class CloudflareSolver {
       marker: (targetId, tag, payload) => Effect.sync(() => events.marker(targetId, tag, payload)),
     }));
 
-    // SolveDeps needs OOPIFChecker for activity loops — use Layer.effect to yield it.
+    // SolveDeps needs OOPIFChecker for activity loops and CdpSender/SolverEvents
+    // for findAndClickViaCDP — use Layer.effect to yield them from the runtime.
     const solveDepsLayer = Layer.effect(SolveDeps, Effect.gen(function*() {
       const oopifChecker = yield* OOPIFChecker;
+      const cdpSender = yield* CdpSender;
+      const solverEvents = yield* SolverEvents;
       return SolveDeps.of({
-        findAndClickViaCDP: (active, attempt) => strategies.findAndClickViaCDP(active, attempt),
+        findAndClickViaCDP: (active, attempt) => strategies.findAndClickViaCDP(active, attempt).pipe(
+          Effect.provideService(CdpSender, cdpSender),
+          Effect.provideService(SolverEvents, solverEvents),
+        ),
         resolveAutoSolved: (active, signal) => stateTracker.resolveAutoSolved(active, signal),
         simulatePresence: (active) =>
           Effect.tryPromise({
@@ -153,9 +159,15 @@ export class CloudflareSolver {
       start: (targetId, cdpSessionId) => Effect.sync(() => self.startDetectionFiber(targetId, cdpSessionId)),
     }));
 
-    // OOPIFChecker — wired to strategies.checkOOPIFStateViaCDP
-    const oopifCheckerLayer = Layer.succeed(OOPIFChecker, OOPIFChecker.of({
-      check: (iframeCdpSessionId) => strategies.checkOOPIFStateViaCDP(iframeCdpSessionId),
+    // OOPIFChecker — wired to strategies.checkOOPIFStateViaCDP.
+    // checkOOPIFStateViaCDP now yields CdpSender — provide it here.
+    const oopifCheckerLayer = Layer.effect(OOPIFChecker, Effect.gen(function*() {
+      const cdpSender = yield* CdpSender;
+      return OOPIFChecker.of({
+        check: (iframeCdpSessionId) => strategies.checkOOPIFStateViaCDP(iframeCdpSessionId).pipe(
+          Effect.provideService(CdpSender, cdpSender),
+        ),
+      });
     }));
 
     // SolverConfig — defaults, overridden by enable() via stateTracker.config
@@ -178,15 +190,19 @@ export class CloudflareSolver {
     );
 
     // Wire dependencies:
-    // - solveDepsLayer needs OOPIFChecker
+    // - oopifCheckerLayer needs CdpSender
+    // - solveDepsLayer needs OOPIFChecker + CdpSender + SolverEvents
     // - solveDispatcherLayer needs TokenChecker + SolverEvents + SolveDeps
     // Base layers (no deps) are merged first, then dependent layers are provided.
     const baseLayers = Layer.mergeAll(
       cdpSenderLayer, tokenCheckerLayer, solverEventsLayer,
-      oopifCheckerLayer, detectionStarterLayer, solverConfigLayer, lifecycleLayer,
+      detectionStarterLayer, solverConfigLayer, lifecycleLayer,
     );
 
-    const withSolveDeps = Layer.merge(baseLayers, Layer.provide(solveDepsLayer, oopifCheckerLayer));
+    // oopifCheckerLayer needs CdpSender
+    const withOOPIF = Layer.merge(baseLayers, Layer.provide(oopifCheckerLayer, cdpSenderLayer));
+    // solveDepsLayer needs OOPIFChecker + CdpSender + SolverEvents
+    const withSolveDeps = Layer.merge(withOOPIF, Layer.provide(solveDepsLayer, withOOPIF));
     return Layer.merge(withSolveDeps, Layer.provide(solveDispatcherLayer, withSolveDeps));
   }
 
@@ -217,7 +233,6 @@ export class CloudflareSolver {
 
   setSendViaProxy(fn: SendCommand): void {
     this.sendViaProxy = fn;
-    this.strategies.setSendViaProxy(fn);
   }
 
   enable(config?: CloudflareConfig): void {

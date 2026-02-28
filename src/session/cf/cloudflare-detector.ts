@@ -7,10 +7,10 @@ import type { ActiveDetection, CloudflareEventEmitter } from './cloudflare-event
 import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
 import type { CloudflareStateTracker } from './cloudflare-state-tracker.js';
 import type { CloudflareSolveStrategies } from './cloudflare-solve-strategies.js';
-import { SolveDispatcher, DetectionLoopStarter } from './cf-services.js';
+import { SolveDispatcher, DetectionLoopStarter, CdpSender } from './cf-services.js';
 
 /** R channel requirements for detector methods that yield services. */
-type DetectorR = typeof SolveDispatcher.Identifier | typeof DetectionLoopStarter.Identifier;
+type DetectorR = typeof SolveDispatcher.Identifier | typeof DetectionLoopStarter.Identifier | typeof CdpSender.Identifier;
 
 /**
  * Detection lifecycle for Cloudflare challenges.
