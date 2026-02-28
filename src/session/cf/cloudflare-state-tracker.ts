@@ -13,6 +13,7 @@ import {
 } from '../../shared/cloudflare-detection.js';
 import type { ActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
 import { CdpSessionGone } from './cf-errors.js';
+import { DetectionRegistry } from './cf-detection-registry.js';
 
 /** CDP send command. Returns any because CDP response shapes vary per method — not worth validating every shape. */
 export type SendCommand = (method: string, params?: object, cdpSessionId?: CdpSessionId, timeoutMs?: number) => Promise<any>;
@@ -64,12 +65,12 @@ export function deriveFailLabel(reason: string) {
 /**
  * Tracks active CF detections, solved state, and background activity loops.
  *
- * Owns: activeDetections, bindingSolvedTargets, pendingIframes,
- *       knownPages, iframeToPage
+ * Owns: DetectionRegistry (scoped lifecycle), bindingSolvedTargets,
+ *       pendingIframes, knownPages, iframeToPage
  */
 export class CloudflareStateTracker {
   private log = new Logger('cf-state');
-  readonly activeDetections = new Map<TargetId, ActiveDetection>();
+  readonly registry: DetectionRegistry;
   readonly iframeToPage = new Map<TargetId, TargetId>();
   readonly knownPages = new Map<TargetId, CdpSessionId>();
   /** Reverse index: CdpSessionId → TargetId for O(1) findPageBySession lookups. */
@@ -89,6 +90,16 @@ export class CloudflareStateTracker {
     checkOOPIFStateEffect: (iframeCdpSessionId: CdpSessionId) => Effect.Effect<'success' | 'fail' | 'expired' | 'timeout' | 'pending' | null>,
   ) {
     this.checkOOPIFStateEffect = checkOOPIFStateEffect;
+    this.registry = new DetectionRegistry((active, signal) => {
+      const duration = Date.now() - active.startTime;
+      const attr = deriveSolveAttribution(signal, !!active.clickDelivered);
+      this.log.info(`Scope finalizer fallback: emitting solved for orphaned detection on ${active.pageTargetId}`);
+      this.events.emitSolved(active, {
+        solved: true, type: active.info.type, method: attr.method,
+        duration_ms: duration, attempts: 0, auto_resolved: attr.autoResolved,
+        signal, token_length: 0, phase_label: attr.label,
+      });
+    });
   }
 
   /**
@@ -98,10 +109,10 @@ export class CloudflareStateTracker {
   onTurnstileStateChange(state: string, iframeCdpSessionId: CdpSessionId): Effect.Effect<void> {
     const tracker = this;
     return Effect.fn('cf.state.onTurnstileStateChange')(function*() {
-      const pageTargetId = tracker.findPageByIframeSession(iframeCdpSessionId);
+      const pageTargetId = tracker.registry.findByIframeSession(iframeCdpSessionId);
       if (!pageTargetId) return;
 
-      const active = tracker.activeDetections.get(pageTargetId);
+      const active = tracker.registry.get(pageTargetId);
       if (!active || active.aborted) return;
 
       tracker.log.info(`Turnstile state change: ${state} for page ${pageTargetId}`);
@@ -147,7 +158,6 @@ export class CloudflareStateTracker {
         // clickDelivered = our click landed on checkbox before iframe state changed
         const attr = deriveSolveAttribution(solveSignal, !!active.clickDelivered);
 
-        tracker.activeDetections.delete(pageTargetId);
         tracker.events.emitSolved(active, {
           solved: true,
           type: active.info.type,
@@ -159,6 +169,7 @@ export class CloudflareStateTracker {
           signal: solveSignal,
           phase_label: attr.label,
         });
+        yield* tracker.registry.resolve(pageTargetId);
       } else if (state === 'fail' || state === 'expired' || state === 'timeout') {
         active.aborted = true; active.abortLatch?.openUnsafe();
         if (active.attempt < tracker.config.maxAttempts) {
@@ -167,8 +178,8 @@ export class CloudflareStateTracker {
           tracker.log.info(`Retrying CF detection (attempt ${active.attempt})`);
         } else {
           const duration = Date.now() - active.startTime;
-          tracker.activeDetections.delete(pageTargetId);
           tracker.events.emitFailed(active, state, duration);
+          yield* tracker.registry.resolve(pageTargetId);
         }
       }
     })();
@@ -184,7 +195,7 @@ export class CloudflareStateTracker {
       const pageTargetId = tracker.findPageBySession(cdpSessionId);
       if (!pageTargetId) return;
 
-      const active = tracker.activeDetections.get(pageTargetId);
+      const active = tracker.registry.get(pageTargetId);
 
       if (active && !active.aborted) {
         yield* tracker.resolveAutoSolved(active, 'callback_binding');
@@ -204,58 +215,50 @@ export class CloudflareStateTracker {
 
   /**
    * Called when the HTTP beacon fires from navigator.sendBeacon in the browser.
+   * Returns Effect<void> — caller runs via Effect.runPromise.
    */
-  onBeaconSolved(targetId: TargetId, tokenLength: number): void {
-    const active = this.activeDetections.get(targetId);
+  onBeaconSolved(targetId: TargetId, tokenLength: number): Effect.Effect<void> {
+    const tracker = this;
+    return Effect.gen(function*() {
+      const active = tracker.registry.get(targetId);
 
-    if (active && !active.aborted) {
-      const duration = Date.now() - active.startTime;
-      active.aborted = true; active.abortLatch?.openUnsafe();
-      this.activeDetections.delete(targetId);
-      this.bindingSolvedTargets.add(targetId);
-      // clickDelivered = our click landed on checkbox before beacon fired
-      const attr = deriveSolveAttribution('beacon_push', !!active.clickDelivered);
-      this.events.emitSolved(active, {
-        solved: true,
-        type: active.info.type,
-        method: attr.method,
-        duration_ms: duration,
-        attempts: active.attempt,
-        auto_resolved: attr.autoResolved,
-        signal: 'beacon_push',
-        token_length: tokenLength,
-        phase_label: attr.label,
-      });
-      return;
-    }
+      if (active && !active.aborted) {
+        const duration = Date.now() - active.startTime;
+        active.aborted = true; active.abortLatch?.openUnsafe();
+        tracker.bindingSolvedTargets.add(targetId);
+        // clickDelivered = our click landed on checkbox before beacon fired
+        const attr = deriveSolveAttribution('beacon_push', !!active.clickDelivered);
+        tracker.events.emitSolved(active, {
+          solved: true,
+          type: active.info.type,
+          method: attr.method,
+          duration_ms: duration,
+          attempts: active.attempt,
+          auto_resolved: attr.autoResolved,
+          signal: 'beacon_push',
+          token_length: tokenLength,
+          phase_label: attr.label,
+        });
+        yield* tracker.registry.resolve(targetId);
+        return;
+      }
 
-    // No active detection — standalone fast-path
-    if (!this.bindingSolvedTargets.has(targetId)) {
-      const cdpSessionId = this.knownPages.get(targetId);
-      this.events.emitStandaloneAutoSolved(targetId, 'beacon_push', tokenLength, cdpSessionId);
-      this.bindingSolvedTargets.add(targetId);
-    }
+      // No active detection — standalone fast-path
+      if (!tracker.bindingSolvedTargets.has(targetId)) {
+        const cdpSessionId = tracker.knownPages.get(targetId);
+        tracker.events.emitStandaloneAutoSolved(targetId, 'beacon_push', tokenLength, cdpSessionId);
+        tracker.bindingSolvedTargets.add(targetId);
+      }
+    });
   }
 
   /**
    * Emit cf.solved for any detections that were detected but never resolved.
    * Called during session cleanup as a fallback to guarantee ZERO cf(1).
+   * Delegates to registry.destroyAll() — each unresolved scope's finalizer emits.
    */
-  emitUnresolvedDetections(): void {
-    for (const [targetId, active] of this.activeDetections) {
-      if (!active.aborted) {
-        active.aborted = true; active.abortLatch?.openUnsafe();
-        const duration = Date.now() - active.startTime;
-        // session_close fallback — no click context, always auto_solve
-        const attr = deriveSolveAttribution('session_close', false);
-        this.log.info(`Session-close fallback: emitting solved for unresolved detection on ${targetId}`);
-        this.events.emitSolved(active, {
-          solved: true, type: active.info.type, method: attr.method,
-          duration_ms: duration, attempts: 0, auto_resolved: attr.autoResolved,
-          signal: 'session_close', token_length: 0, phase_label: attr.label,
-        });
-      }
-    }
+  emitUnresolvedDetections(): Effect.Effect<void> {
+    return this.registry.destroyAll();
   }
 
   /**
@@ -271,7 +274,7 @@ export class CloudflareStateTracker {
       );
       active.aborted = true; active.abortLatch?.openUnsafe();
       const pageTargetId = tracker.findPageBySession(active.pageCdpSessionId);
-      if (pageTargetId) tracker.activeDetections.delete(pageTargetId);
+      if (pageTargetId) yield* tracker.registry.resolve(pageTargetId);
       // clickDelivered = our click landed on checkbox before token/state resolved
       const attr = deriveSolveAttribution(signal as SolveSignal, !!active.clickDelivered);
       tracker.events.emitSolved(active, {
@@ -493,36 +496,27 @@ export class CloudflareStateTracker {
     this.sessionToTarget.set(cdpSessionId, targetId);
   }
 
-  /** Clean up all state for a destroyed page target. */
-  unregisterPage(targetId: TargetId): void {
-    // Emit cf.solved for any unresolved detection BEFORE deleting it.
-    // Without this, the detection is silently dropped and emitUnresolvedDetections()
-    // (called later during session cleanup) never sees it — producing orphaned
-    // cf.detected without cf.solved, which pydoll reports as "Emb✗ no_resolution".
-    const active = this.activeDetections.get(targetId);
-    if (active && !active.aborted) {
-      active.aborted = true;
-      active.abortLatch?.openUnsafe();
-      const duration = Date.now() - active.startTime;
-      const attr = deriveSolveAttribution('session_close', !!active.clickDelivered);
-      this.log.info(`Tab-close fallback: emitting solved for unresolved detection on ${targetId}`);
-      this.events.emitSolved(active, {
-        solved: true, type: active.info.type, method: attr.method,
-        duration_ms: duration, attempts: 0, auto_resolved: attr.autoResolved,
-        signal: 'session_close', token_length: 0, phase_label: attr.label,
-      });
-    }
+  /**
+   * Clean up all state for a destroyed page target.
+   * Returns Effect<void> — registry.unregister() closes the detection's scope,
+   * whose finalizer emits session_close fallback if the detection was unresolved.
+   */
+  unregisterPage(targetId: TargetId): Effect.Effect<void> {
+    const tracker = this;
+    return Effect.gen(function*() {
+      // Scope finalizer handles orphaned detection emission — no manual emit needed.
+      yield* tracker.registry.unregister(targetId);
 
-    const cdpSessionId = this.knownPages.get(targetId);
-    if (cdpSessionId) {
-      this.sessionToTarget.delete(cdpSessionId);
-    }
-    this.knownPages.delete(targetId);
-    this.iframeToPage.delete(targetId);
-    this.bindingSolvedTargets.delete(targetId);
-    this.pendingIframes.delete(targetId);
-    this.pendingRechallengeCount.delete(targetId);
-    this.activeDetections.delete(targetId);
+      const cdpSessionId = tracker.knownPages.get(targetId);
+      if (cdpSessionId) {
+        tracker.sessionToTarget.delete(cdpSessionId);
+      }
+      tracker.knownPages.delete(targetId);
+      tracker.iframeToPage.delete(targetId);
+      tracker.bindingSolvedTargets.delete(targetId);
+      tracker.pendingIframes.delete(targetId);
+      tracker.pendingRechallengeCount.delete(targetId);
+    });
   }
 
   findPageBySession(cdpSessionId: CdpSessionId): TargetId | undefined {
@@ -530,19 +524,18 @@ export class CloudflareStateTracker {
   }
 
   findPageByIframeSession(iframeCdpSessionId: CdpSessionId): TargetId | undefined {
-    for (const [pageTargetId, active] of this.activeDetections) {
-      if (active.iframeCdpSessionId === iframeCdpSessionId) return pageTargetId;
-    }
-    return undefined;
+    return this.registry.findByIframeSession(iframeCdpSessionId);
   }
 
-  destroy(): void {
+  destroy(): Effect.Effect<void> {
     this.destroyed = true;
-    this.activeDetections.clear();
-    this.iframeToPage.clear();
-    this.knownPages.clear();
-    this.sessionToTarget.clear();
-    this.bindingSolvedTargets.clear();
-    this.pendingIframes.clear();
+    return Effect.gen((function*(this: CloudflareStateTracker) {
+      yield* this.registry.destroyAll();
+      this.iframeToPage.clear();
+      this.knownPages.clear();
+      this.sessionToTarget.clear();
+      this.bindingSolvedTargets.clear();
+      this.pendingIframes.clear();
+    }).bind(this));
   }
 }

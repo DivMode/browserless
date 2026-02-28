@@ -127,8 +127,8 @@ export class CloudflareSolver {
     const lifecycleLayer = Layer.effectDiscard(
       Effect.acquireRelease(
         Effect.void,
-        () => Effect.sync(() => {
-          stateTracker.destroy();
+        () => Effect.gen(function*() {
+          yield* stateTracker.destroy();
           self.detectionFibers.clear();
         }),
       ),
@@ -151,9 +151,13 @@ export class CloudflareSolver {
   }
 
   /** Interrupt and stop the detection fiber for a target (e.g. on tab close). */
-  stopTargetDetection(targetId: TargetId): void {
+  async stopTargetDetection(targetId: TargetId): Promise<void> {
     this.stopDetectionFiber(targetId);
-    this.stateTracker.unregisterPage(targetId);
+    if (this.runtime) {
+      await this.runtime.runPromise(this.stateTracker.unregisterPage(targetId));
+    } else {
+      await Effect.runPromise(this.stateTracker.unregisterPage(targetId));
+    }
   }
 
   private startDetectionFiber(targetId: TargetId, cdpSessionId: CdpSessionId): void {
@@ -228,12 +232,20 @@ export class CloudflareSolver {
     return this.runtime.runPromise(this.stateTracker.onAutoSolveBinding(cdpSessionId));
   }
 
-  onBeaconSolved(targetId: TargetId, tokenLength: number): void {
-    return this.stateTracker.onBeaconSolved(targetId, tokenLength);
+  async onBeaconSolved(targetId: TargetId, tokenLength: number): Promise<void> {
+    if (this.runtime) {
+      await this.runtime.runPromise(this.stateTracker.onBeaconSolved(targetId, tokenLength));
+    } else {
+      await Effect.runPromise(this.stateTracker.onBeaconSolved(targetId, tokenLength));
+    }
   }
 
-  emitUnresolvedDetections(): void {
-    return this.stateTracker.emitUnresolvedDetections();
+  async emitUnresolvedDetections(): Promise<void> {
+    if (this.runtime) {
+      await this.runtime.runPromise(this.stateTracker.emitUnresolvedDetections());
+    } else {
+      await Effect.runPromise(this.stateTracker.emitUnresolvedDetections());
+    }
   }
 
   /**

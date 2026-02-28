@@ -965,7 +965,7 @@ export class ReplaySession {
     }
 
     // Interrupt detection fiber for this target (replaces AbortController)
-    this.cloudflareSolver.stopTargetDetection(targetId);
+    await this.cloudflareSolver.stopTargetDetection(targetId);
     // Atomic cleanup — removes from all indices, closes per-page WS, cleans iframe refs
     this.targets.remove(targetId);
     this.targets.removeIframeTarget(targetId);
@@ -1031,7 +1031,7 @@ export class ReplaySession {
    *
    * Uses onPageAttached (detection-only, no resolution) instead of onPageNavigated
    * to avoid aborting detections that targetInfoChanged already started. The
-   * detector's internal guard (activeDetections.has) deduplicates automatically.
+   * detector's internal guard (registry.has) deduplicates automatically.
    */
   private handleFrameNavigated(msg: any): void {
     const frame = msg.params?.frame;
@@ -1057,7 +1057,7 @@ export class ReplaySession {
     if (!target) return;
 
     // Use onPageAttached (detection-only) — it calls triggerSolveFromUrl which has
-    // the activeDetections.has guard for deduplication. Unlike onPageNavigated, it
+    // the registry.has guard for deduplication. Unlike onPageNavigated, it
     // won't abort an existing detection that targetInfoChanged already started.
     this.cloudflareSolver.onPageAttached(target.targetId, frameCdpSessionId, url)
       .catch((e: Error) => this.log.debug(`[${target.targetId}] frameNavigated CF detection skipped: ${e.message}`));

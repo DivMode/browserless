@@ -87,11 +87,11 @@ export class CloudflareDetector {
     return Effect.fn('cf.detector.onPageNavigated')(function*() {
       self.state.registerPage(targetId, cdpSessionId);
 
-      const active = self.state.activeDetections.get(targetId);
+      const active = self.state.registry.get(targetId);
       if (active) {
         active.aborted = true;
         active.abortLatch?.openUnsafe();
-        self.state.activeDetections.delete(targetId);
+        yield* self.state.registry.resolve(targetId);
         const duration = Date.now() - active.startTime;
 
         // For click-based types (interstitial, turnstile, managed), check if the
@@ -281,7 +281,7 @@ export class CloudflareDetector {
 
     this.state.iframeToPage.set(iframeTargetId, pageTargetId);
 
-    const active = this.state.activeDetections.get(pageTargetId);
+    const active = this.state.registry.get(pageTargetId);
     if (active) {
       active.iframeCdpSessionId = iframeCdpSessionId;
       active.iframeTargetId = iframeTargetId;
@@ -304,7 +304,7 @@ export class CloudflareDetector {
     const pageTargetId = this.state.iframeToPage.get(iframeTargetId);
     if (!pageTargetId) return;
 
-    const active = this.state.activeDetections.get(pageTargetId);
+    const active = this.state.registry.get(pageTargetId);
     if (active && !active.iframeCdpSessionId) {
       active.iframeCdpSessionId = iframeCdpSessionId;
       active.iframeTargetId = iframeTargetId;
@@ -317,12 +317,12 @@ export class CloudflareDetector {
     }
   }
 
-  private emitSolveFailure(active: ActiveDetection, targetId: TargetId, reason: string): void {
-    if (active.aborted) return;
+  private emitSolveFailure(active: ActiveDetection, targetId: TargetId, reason: string): Effect.Effect<void> {
+    if (active.aborted) return Effect.void;
     this.events.emitFailed(active, reason, Date.now() - active.startTime);
     active.aborted = true;
     active.abortLatch?.openUnsafe();
-    this.state.activeDetections.delete(targetId);
+    return this.state.registry.resolve(targetId);
   }
 
   // ─── Private detection methods ──────────────────────────────────────
@@ -370,8 +370,8 @@ export class CloudflareDetector {
     url: string, cfType: CloudflareType,
   ): void {
     if (this.state.destroyed || !this.enabled) return;
-    if (this.state.activeDetections.has(targetId)) {
-      this.log.info(`triggerSolveFromUrl: SKIPPED — activeDetection already exists for ${targetId} (type=${this.state.activeDetections.get(targetId)!.info.type})`);
+    if (this.state.registry.has(targetId)) {
+      this.log.info(`triggerSolveFromUrl: SKIPPED — activeDetection already exists for ${targetId} (type=${this.state.registry.get(targetId)!.info.type})`);
       return;
     }
     if (this.state.bindingSolvedTargets.has(targetId)) return;
@@ -397,7 +397,7 @@ export class CloudflareDetector {
       abortLatch: Latch.makeUnsafe(false),
     };
 
-    this.state.activeDetections.set(targetId, active);
+    Effect.runSync(this.state.registry.register(targetId, active));
     const pending = this.state.pendingIframes.get(targetId);
     if (pending) {
       active.iframeCdpSessionId = pending.iframeCdpSessionId;
@@ -412,7 +412,7 @@ export class CloudflareDetector {
     // The runtime.runPromise in that bridge ensures the fiber is tracked.
     this.solveDetection(active).then((outcome) => {
       if (outcome === 'no_click') {
-        this.emitSolveFailure(active, targetId, 'widget_not_found');
+        Effect.runSync(this.emitSolveFailure(active, targetId, 'widget_not_found'));
       }
     }).catch((e) => {
       this.log.debug(`CF solve from URL failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -432,13 +432,13 @@ export class CloudflareDetector {
     const self = this;
     return Effect.fn('cf.detectTurnstileWidget')(function*() {
       if (self.state.destroyed || !self.enabled) return;
-      if (self.state.activeDetections.has(targetId)) return;
+      if (self.state.registry.has(targetId)) return;
 
       const startTime = Date.now();
 
       while (true) {
         if (self.state.destroyed || !self.enabled) return;
-        if (self.state.activeDetections.has(targetId)) return;
+        if (self.state.registry.has(targetId)) return;
         if (self.state.bindingSolvedTargets.has(targetId)) return;
 
         // detectTurnstileViaCDP now returns Effect — yield* directly
@@ -486,14 +486,14 @@ export class CloudflareDetector {
 
       // Guard: another detection path (e.g. triggerSolveFromUrl) may have
       // registered while we awaited the CDP call. Check before every async gap.
-      if (self.state.activeDetections.has(targetId)) return;
+      if (self.state.registry.has(targetId)) return;
 
       // NOTE: Do NOT call isSolved() here — it uses Runtime.evaluate on the
       // page session, which triggers CF's WASM V8 detection and causes
       // rechallenges. The bindingSolvedTargets check (above) already covers
       // auto-solve via the push-based binding mechanism.
 
-      self.state.activeDetections.set(targetId, active);
+      yield* self.state.registry.register(targetId, active);
       const pending = self.state.pendingIframes.get(targetId);
       if (pending) {
         active.iframeCdpSessionId = pending.iframeCdpSessionId;
@@ -508,7 +508,7 @@ export class CloudflareDetector {
         () => self.solveDetection(active),
       ).pipe(Effect.orElseSucceed(() => 'aborted' as const));
       if (outcome === 'no_click') {
-        self.emitSolveFailure(active, targetId, 'widget_not_found');
+        yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
       }
     })();
   }

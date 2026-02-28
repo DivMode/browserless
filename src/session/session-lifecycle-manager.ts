@@ -109,7 +109,7 @@ export class SessionLifecycleManager {
       if (this.replayCoordinator) {
         const solver = this.replayCoordinator.getCloudflareSolver(session.id);
         if (solver) {
-          solver.emitUnresolvedDetections();
+          await solver.emitUnresolvedDetections();
         }
       }
 
