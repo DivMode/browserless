@@ -117,7 +117,7 @@ export class SessionCoordinator {
     );
     this.cloudflareSolvers.set(sessionId, cloudflareSolver);
 
-    // CloudflareHooks adapter — thin wrapper over CloudflareSolver
+    // CloudflareHooks adapter — direct passthrough (solver methods now return Effect)
     const cloudflareHooks: CloudflareHooks = {
       onPageAttached: (tid, sid, url) => cloudflareSolver.onPageAttached(tid, sid, url),
       onPageNavigated: (tid, sid, url) => cloudflareSolver.onPageNavigated(tid, sid, url),
@@ -164,8 +164,9 @@ export class SessionCoordinator {
 
   /**
    * Stop replay capture — Effect pipeline.
+   * Public so SessionLifecycleManager can call it directly as Effect with its own timeout.
    */
-  private stopReplayEffect(
+  stopReplayEffect(
     sessionId: string,
     metadata?: {
       browserType?: string;
@@ -184,9 +185,13 @@ export class SessionCoordinator {
       ).pipe(Effect.orElseSucceed(() => 0));
 
       // Phase 2: Destroy the CdpSession — ends Queue, waits for pipeline to write files
+      // 8s timeout prevents hung CDP targets from blocking the entire pipeline
       const session = coordinator.cdpSessions.get(sessionId);
       if (session) {
-        yield* Effect.tryPromise(() => session.destroy('cleanup')).pipe(Effect.ignore);
+        yield* Effect.tryPromise(() => session.destroy('cleanup')).pipe(
+          Effect.timeout('8 seconds'),
+          Effect.ignore,
+        );
       }
 
       // Phase 3: Stop rrweb replay capture (session registry cleanup)
@@ -196,12 +201,34 @@ export class SessionCoordinator {
 
       return result;
     }).pipe(
-      // Guaranteed Map cleanup
+      // Guaranteed Map cleanup — runs even if Effect times out or fails
       Effect.ensuring(Effect.sync(() => {
         coordinator.cdpSessions.delete(sessionId);
+        const solver = coordinator.cloudflareSolvers.get(sessionId);
+        if (solver) solver.destroy();
         coordinator.cloudflareSolvers.delete(sessionId);
       })),
     );
+  }
+
+  /**
+   * Nuclear cleanup for watchdog — force-destroy a session's resources.
+   * Best-effort: catches all errors, guaranteed to clean up Maps.
+   */
+  async forceCleanup(sessionId: string): Promise<void> {
+    const cdpSession = this.cdpSessions.get(sessionId);
+    if (cdpSession) {
+      await Effect.runPromise(
+        Effect.tryPromise(() => cdpSession.destroy('error')).pipe(
+          Effect.timeout('5 seconds'),
+          Effect.ignore,
+        ),
+      ).catch(() => {});
+    }
+    this.cdpSessions.delete(sessionId);
+    const solver = this.cloudflareSolvers.get(sessionId);
+    if (solver) solver.destroy();
+    this.cloudflareSolvers.delete(sessionId);
   }
 
   /**

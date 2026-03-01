@@ -22,6 +22,7 @@
 import { Effect } from 'effect';
 import type WebSocket from 'ws';
 import { CdpSessionGone, CdpTimeout } from '../session/cf/cf-errors.js';
+export type { CdpSessionGone, CdpTimeout };
 import { CdpSessionId } from './cloudflare-detection.js';
 
 // ═══════════════════════════════════════════════════════════════════════

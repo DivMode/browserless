@@ -70,6 +70,10 @@ export class BrowserManager {
       this.registry,
       this.session
     );
+
+    // Start watchdog: force-close sessions that outlive TIMEOUT + 60s buffer
+    const timeout = +(process.env.TIMEOUT || '300000');
+    this.lifecycle.startWatchdog(timeout + 60_000);
   }
 
   /**
