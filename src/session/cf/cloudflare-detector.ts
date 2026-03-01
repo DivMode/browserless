@@ -6,7 +6,7 @@ import { CloudflareTracker } from './cloudflare-event-emitter.js';
 import type { ActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
 import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
 import type { CloudflareStateTracker } from './cloudflare-state-tracker.js';
-import type { CloudflareSolveStrategies } from './cloudflare-solve-strategies.js';
+import type { CloudflareSolveStrategies, CFDetected } from './cloudflare-solve-strategies.js';
 import { SolveDispatcher, DetectionLoopStarter, CdpSender } from './cf-services.js';
 
 /** R channel requirements for detector methods that yield services. */
@@ -443,11 +443,11 @@ export class CloudflareDetector {
 
       // Snapshot ALL current CF OOPIFs so post-navigation detection won't re-detect stale targets
       const postSolveSnapshot = yield* self.strategies.detectTurnstileViaCDP(cdpSessionId).pipe(
-        Effect.orElseSucceed(() => null),
+        Effect.orElseSucceed(() => ({ _tag: 'not_detected' as const })),
       );
-      if (postSolveSnapshot?.matchedTargetIds) {
-        for (const id of postSolveSnapshot.matchedTargetIds) {
-          self.state.solvedCFTargetIds.add(id);
+      if (postSolveSnapshot._tag === 'detected') {
+        for (const t of postSolveSnapshot.targets) {
+          self.state.solvedCFTargetIds.add(t.targetId);
         }
       }
     })();
@@ -476,18 +476,18 @@ export class CloudflareDetector {
         if (self.state.registry.has(targetId)) return;
         if (self.state.bindingSolvedTargets.has(targetId)) return;
 
-        // detectTurnstileViaCDP now returns Effect — yield* directly
+        // detectTurnstileViaCDP returns tagged union — pattern match on _tag
         // Pass solvedCFTargetIds to filter out stale OOPIFs from prior solves
         const detection = yield* self.strategies.detectTurnstileViaCDP(cdpSessionId, self.state.solvedCFTargetIds).pipe(
-          Effect.orElseSucceed(() => null),
+          Effect.orElseSucceed(() => ({ _tag: 'not_detected' as const })),
         );
 
-        if (detection?.present) {
+        if (detection._tag === 'detected') {
           yield* self.handleTurnstileDetection(targetId, cdpSessionId, detection, startTime);
           // After solve completes (success or failure), mark these CF OOPIFs as handled
           // so future detection polls on this session won't re-detect the stale targets
-          for (const id of detection.matchedTargetIds) {
-            self.state.solvedCFTargetIds.add(id);
+          for (const t of detection.targets) {
+            self.state.solvedCFTargetIds.add(t.targetId);
           }
           return;
         }
@@ -504,23 +504,22 @@ export class CloudflareDetector {
   private handleTurnstileDetection(
     targetId: TargetId,
     cdpSessionId: CdpSessionId,
-    detection: { present: boolean; cfType?: CloudflareType; cRay?: string },
+    detection: CFDetected,
     startTime: number,
   ): Effect.Effect<void, never, DetectorR> {
     const self = this;
     return Effect.fn('cf.handleTurnstileDetection')(function*() {
       yield* Effect.annotateCurrentSpan({
         'cf.target_id': targetId,
-        'cf.type': detection.cfType ?? 'turnstile',
+        'cf.type': 'turnstile',
         'cf.detection_method': 'cdp_dom_walk',
       });
       const rechallengeCount = self.state.pendingRechallengeCount.get(targetId) || 0;
       self.state.pendingRechallengeCount.delete(targetId);
 
-      const cfType = detection.cfType ?? 'turnstile';
+      // CDP detection is always turnstile — interstitials are caught by URL pattern
       const info: CloudflareInfo = {
-        type: cfType, url: '', detectionMethod: 'cdp_dom_walk',
-        cRay: detection.cRay,
+        type: 'turnstile', url: detection.targets[0]?.url ?? '', detectionMethod: 'cdp_dom_walk',
       };
       const active: ActiveDetection = {
         info, pageCdpSessionId: cdpSessionId, pageTargetId: targetId,
@@ -547,7 +546,7 @@ export class CloudflareDetector {
         self.state.pendingIframes.delete(targetId);
       }
       self.events.emitDetected(active);
-      self.events.marker(targetId, 'cf.detected', { type: cfType, method: 'cdp_dom_walk' });
+      self.events.marker(targetId, 'cf.detected', { type: 'turnstile', method: 'cdp_dom_walk' });
 
       // Dispatch solve via Effect service — no more Promise bridge
       const dispatcher = yield* SolveDispatcher;
