@@ -1183,13 +1183,32 @@ export class CloudflareSolveStrategies {
       );
       if (!result?.targetInfos?.length) return { _tag: 'not_detected' as const };
 
-      const matched = result.targetInfos.filter(
-        (t: { type: string; url?: string; targetId?: string }) =>
+      // Count CF-matching targets BEFORE filtering by solvedCFTargetIds
+      const cfTargets = result.targetInfos.filter(
+        (t: { type: string; url?: string }) =>
           (t.type === 'iframe' || t.type === 'page')
           && t.url?.includes('challenges.cloudflare.com')
-          && !isCFTestWidget(t.url)
-          && !(t.targetId && solvedCFTargetIds?.has(t.targetId)),
+          && !isCFTestWidget(t.url!),
       );
+      const filteredOut = cfTargets.filter(
+        (t: { targetId?: string }) => t.targetId && solvedCFTargetIds?.has(t.targetId),
+      );
+      const matched = cfTargets.filter(
+        (t: { targetId?: string }) => !(t.targetId && solvedCFTargetIds?.has(t.targetId)),
+      );
+
+      if (matched.length > 0 || filteredOut.length > 0) {
+        yield* Effect.annotateCurrentSpan({
+          'cf.detect.total_targets': result.targetInfos.length,
+          'cf.detect.cf_targets': cfTargets.length,
+          'cf.detect.filtered_stale': filteredOut.length,
+          'cf.detect.fresh': matched.length,
+          'cf.detect.solved_set_size': solvedCFTargetIds?.size ?? 0,
+          'cf.detect.matched_urls': matched.map((t: { url?: string; targetId?: string }) => `${t.targetId?.slice(0, 8)}=${t.url}`).join(' | '),
+          'cf.detect.filtered_ids': filteredOut.map((t: { targetId?: string }) => t.targetId?.slice(0, 8)).join(','),
+        });
+      }
+
       if (matched.length === 0) return { _tag: 'not_detected' as const };
 
       return {

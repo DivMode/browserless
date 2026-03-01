@@ -196,14 +196,15 @@ export class CloudflareEventEmitter {
 
   emitFailed(active: ActiveDetection, reason: string, duration: number, phaseLabel?: string): void {
     const phase_label = phaseLabel ?? `✗ ${reason}`;
-    this.log.warn(`CF failed: reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt}`);
+    this.log.warn(`CF failed: reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'}`);
     this.emitClientEvent('Browserless.cloudflareFailed', {
       reason, type: active.info.type, duration_ms: duration, attempts: active.attempt,
       targetId: active.pageTargetId,
+      oopif_url: active.info.url,
       summary: active.tracker.snapshot(),
       phase_label,
     }).catch((e) => this.log.debug(`emitFailed failed: ${e instanceof Error ? e.message : String(e)}`));
-    this.marker(active.pageTargetId, 'cf.failed', { reason, duration_ms: duration, phase_label });
+    this.marker(active.pageTargetId, 'cf.failed', { reason, duration_ms: duration, phase_label, oopif_url: active.info.url });
   }
 
   emitStandaloneAutoSolved(
