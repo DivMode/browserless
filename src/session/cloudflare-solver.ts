@@ -29,8 +29,8 @@ type SolverR =
 /**
  * Cloudflare detection and solving for a single browser session.
  *
- * Thin delegator — preserves the identical public interface that ReplaySession,
- * ReplayCoordinator, and BrowsersCDP depend on.
+ * Thin delegator — preserves the identical public interface that CdpSession,
+ * SessionCoordinator, and BrowsersCDP depend on.
  *
  * Internal architecture: all modules are Effect-native. The ManagedRuntime
  * bridges Effect ↔ Promise at this boundary. Layer provides all services.
@@ -50,7 +50,7 @@ export class CloudflareSolver {
 
   constructor(sendCommand: SendCommand, injectMarker: InjectMarker, chromePort?: string) {
     this.sendCommand = sendCommand;
-    // Mutable closure: emitClientEvent is set after construction by replay-session.ts
+    // Mutable closure: emitClientEvent is set after construction by session-coordinator.ts
     let realEmit: EmitClientEvent = async () => {};
     this.events = new CloudflareEventEmitter(injectMarker, (...args) => realEmit(...args));
     this._setRealEmit = (fn) => { realEmit = fn; };

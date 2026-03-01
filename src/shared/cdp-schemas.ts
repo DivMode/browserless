@@ -5,7 +5,7 @@
  * Validates the envelope (id/method/params/result/error) but does NOT
  * validate Chrome-internal field shapes — those are trusted.
  *
- * Used at JSON.parse boundaries in cdp-proxy.ts and replay-session.ts.
+ * Used at JSON.parse boundaries in cdp-proxy.ts and cdp-session.ts.
  */
 import { Schema } from 'effect';
 

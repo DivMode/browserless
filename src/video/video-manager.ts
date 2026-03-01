@@ -31,7 +31,7 @@ export class VideoManager {
   ) {}
 
   /**
-   * Set the video encoder reference (created by ReplayCoordinator).
+   * Set the video encoder reference (created by SessionCoordinator).
    */
   setVideoEncoder(encoder: VideoEncoder): void {
     this.encoder = encoder;

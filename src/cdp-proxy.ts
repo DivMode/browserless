@@ -272,13 +272,13 @@ export class CDPProxy {
           }
 
           // Reject Target.createTarget when tab count exceeds limit.
-          // Sync path: getTabCount callback (from ReplaySession target registry).
+          // Sync path: getTabCount callback (from CdpSession target registry).
           // Async path: queries Chrome's Target.getTargets, must intercept + defer forwarding.
           if (msg.method === 'Target.createTarget') {
             const limit = this.config.getMaxTabsPerSession();
             if (limit > 0) {
               if (this.getTabCount) {
-                // Sync check — fast path when ReplaySession is tracking targets
+                // Sync check — fast path when CdpSession is tracking targets
                 const count = this.getTabCount();
                 if (count >= limit) {
                   this.log.warn(`Tab limit reached (${count}/${limit}), rejecting Target.createTarget`);

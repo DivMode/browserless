@@ -18,7 +18,7 @@ export default class PromMetricsGetRoute extends HTTPRoute {
   browser = null;
   concurrency = false;
   contentTypes = [contentTypes.text];
-  description = `Returns Prometheus metrics for Node.js process internals (event loop lag, heap, active handles, GC) and custom replay-coordinator gauges.`;
+  description = `Returns Prometheus metrics for Node.js process internals (event loop lag, heap, active handles, GC) and custom session-coordinator gauges.`;
   method = Methods.get;
   path = HTTPManagementRoutes.promMetrics;
   tags = [APITags.management];

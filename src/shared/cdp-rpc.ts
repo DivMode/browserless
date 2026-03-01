@@ -1,7 +1,7 @@
 /**
  * Shared CDP-over-WebSocket RPC helper.
  *
- * Replaces 4 duplicated correlation-map patterns across replay-session.ts
+ * Replaces 4 duplicated correlation-map patterns across cdp-session.ts
  * and cdp-proxy.ts with a single Effect.callback-based implementation.
  *
  * Each CdpConnection manages one WebSocket and one correlation map.
@@ -36,11 +36,11 @@ interface PendingCommand {
 export interface CdpConnectionOptions {
   /** Starting command ID. Use distinct ranges to prevent collisions when
    *  multiple connections share the same browser. Existing conventions:
-   *    replay-session browser WS: 1
-   *    replay-session page WS:    100_000
-   *    cdp-proxy browser WS:      200_000
-   *    cdp-proxy isolated WS:     300_000
-   *    solve-strategies clean WS:  500_000 */
+   *    cdp-session browser WS:  1
+   *    cdp-session page WS:     100_000
+   *    cdp-proxy browser WS:    200_000
+   *    cdp-proxy isolated WS:   300_000
+   *    solve-strategies clean WS: 500_000 */
   startId?: number;
   /** Default timeout for commands (ms). Default: 30_000. */
   defaultTimeout?: number;

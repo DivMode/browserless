@@ -1,5 +1,5 @@
 import type { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
-import type { StopTabRecordingResult } from './replay-coordinator.js';
+import type { StopTabRecordingResult } from './cdp-session-types.js';
 
 /** All state for a single tracked CDP page target. */
 export class TargetState {
@@ -18,7 +18,7 @@ export class TargetState {
 }
 
 /**
- * Unified registry replacing 9 Maps/Sets in ReplaySession.
+ * Unified registry replacing 9 Maps/Sets from the original monolith.
  *
  * Dual-indexed by targetId and cdpSessionId — eliminates O(n) reverse lookups.
  * Single `remove()` call atomically cleans all references + closes per-page WS.

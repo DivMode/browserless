@@ -33,7 +33,7 @@ import micromatch from 'micromatch';
 import path from 'path';
 
 import { SessionRegistry } from '../session/session-registry.js';
-import { ReplayCoordinator } from '../session/replay-coordinator.js';
+import { SessionCoordinator } from '../session/session-coordinator.js';
 
 /**
  * BrowserLauncher handles browser launch logic and option parsing.
@@ -62,7 +62,7 @@ export class BrowserLauncher {
     private config: Config,
     private hooks: Hooks,
     private registry: SessionRegistry,
-    private replayCoordinator?: ReplayCoordinator
+    private sessionCoordinator?: SessionCoordinator
   ) {}
 
   /**
@@ -164,7 +164,7 @@ export class BrowserLauncher {
     this.handleDeprecatedOptions(launchOptions);
 
     // Create browser instance
-    const enableReplay = replay && !!this.replayCoordinator?.isEnabled();
+    const enableReplay = replay && !!this.sessionCoordinator?.isEnabled();
     const browser = new Browser({
       blockAds,
       config: this.config,
@@ -185,8 +185,8 @@ export class BrowserLauncher {
       isTempDataDir: !manualUserDataDir,
       launchOptions,
       numbConnected: 1,
-      replay: replay && this.replayCoordinator?.isEnabled(),
-      video: video && this.replayCoordinator?.isEnabled(),
+      replay: replay && this.sessionCoordinator?.isEnabled(),
+      video: video && this.sessionCoordinator?.isEnabled(),
       resolver: noop,
       routePath: router.path,
       startedOn: Date.now(),
@@ -225,10 +225,10 @@ export class BrowserLauncher {
 
     // Start replay if enabled — must await so auto-attach is registered
     // before browser is returned (otherwise new tabs race with setup)
-    if (session.replay && this.replayCoordinator) {
-      this.replayCoordinator.startReplay(sessionId, trackingId);
+    if (session.replay && this.sessionCoordinator) {
+      this.sessionCoordinator.startReplay(sessionId, trackingId);
       try {
-        await this.replayCoordinator.setupReplayForAllTabs(browser, sessionId, {
+        await this.sessionCoordinator.setupSession(browser, sessionId, {
           video: !!session.video,
           onTabReplayComplete: (metadata) => {
             if (isReplayCapable(browser)) {
@@ -243,19 +243,19 @@ export class BrowserLauncher {
       }
 
       // Wire monitor to browser for CDPProxy integration
-      const cloudflareSolver = this.replayCoordinator?.getCloudflareSolver(sessionId);
+      const cloudflareSolver = this.sessionCoordinator?.getCloudflareSolver(sessionId);
       if (cloudflareSolver && browser instanceof ChromiumCDP) {
         browser.setCloudflareSolver(cloudflareSolver);
       }
 
       // Wire replay marker callback for Browserless.addReplayMarker CDP command
-      const markerCallback = this.replayCoordinator?.getReplayMarkerCallback(sessionId);
+      const markerCallback = this.sessionCoordinator?.getReplayMarkerCallback(sessionId);
       if (markerCallback && browser instanceof ChromiumCDP) {
         browser.setReplayMarkerCallback(markerCallback);
       }
 
       // Wire tab count for CDPProxy tab limit enforcement
-      const tabCountCallback = this.replayCoordinator?.getTabCountCallback(sessionId);
+      const tabCountCallback = this.sessionCoordinator?.getTabCountCallback(sessionId);
       if (tabCountCallback && browser instanceof ChromiumCDP) {
         browser.setGetTabCount(tabCountCallback);
       }

@@ -16,7 +16,7 @@ import { ServiceContainer } from './container.js';
 import { BrowserManager } from '../browsers/index.js';
 import type { IReplayStore } from '../interfaces/replay-store.interface.js';
 import { SessionRegistry } from '../session/session-registry.js';
-import { ReplayCoordinator } from '../session/replay-coordinator.js';
+import { SessionCoordinator } from '../session/session-coordinator.js';
 import { VideoManager } from '../video/video-manager.js';
 
 /**
@@ -33,7 +33,7 @@ export const Services = {
   SessionReplay: 'sessionReplay',
   ReplayStore: 'replayStore',
   SessionRegistry: 'sessionRegistry',
-  ReplayCoordinator: 'replayCoordinator',
+  SessionCoordinator: 'sessionCoordinator',
   VideoManager: 'videoManager',
   BrowserManager: 'browserManager',
   Limiter: 'limiter',
@@ -58,7 +58,7 @@ export interface ContainerOptions {
   sessionReplay?: SessionReplay;
   replayStore?: IReplayStore;
   sessionRegistry?: SessionRegistry;
-  replayCoordinator?: ReplayCoordinator;
+  sessionCoordinator?: SessionCoordinator;
   videoManager?: VideoManager;
   browserManager?: BrowserManager;
   limiter?: Limiter;
@@ -153,10 +153,10 @@ export function createContainer(options: ContainerOptions = {}): ServiceContaine
     [Services.SessionReplay]
   );
 
-  // ReplayCoordinator - depends on sessionReplay and videoManager
+  // SessionCoordinator - depends on sessionReplay and videoManager
   container.registerSingleton(
-    Services.ReplayCoordinator,
-    (c) => options.replayCoordinator ?? new ReplayCoordinator(
+    Services.SessionCoordinator,
+    (c) => options.sessionCoordinator ?? new SessionCoordinator(
       c.resolve<SessionReplay>(Services.SessionReplay),
       c.resolve<VideoManager>(Services.VideoManager),
     ),

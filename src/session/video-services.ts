@@ -1,11 +1,11 @@
 /**
  * Video capture types, services, and hooks.
  *
- * This module defines the boundary between the session system (replay-session)
+ * This module defines the boundary between the session system (cdp-session)
  * and the video system (screencast-capture). The two are fully decoupled:
  *
- * - VideoHooks: the minimal contract replay-session calls at lifecycle points.
- *   replay-session doesn't know what implements these — could be screencast,
+ * - VideoHooks: the minimal contract cdp-session calls at lifecycle points.
+ *   cdp-session doesn't know what implements these — could be screencast,
  *   could be anything else.
  *
  * - ScreencastService: Effect service for consumers that yield* from within
@@ -29,7 +29,7 @@ export type SendCommand = (method: string, params: object, cdpSessionId?: string
 
 // ─── VideoHooks ──────────────────────────────────────────────────────
 // The contract between session management and video capture.
-// replay-session calls these at lifecycle points without knowing what
+// cdp-session calls these at lifecycle points without knowing what
 // implements them. The coordinator wires them to the screencast module.
 
 export interface VideoHooks {

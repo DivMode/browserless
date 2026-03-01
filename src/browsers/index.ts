@@ -25,7 +25,7 @@ import path from 'path';
 
 import { SessionRegistry } from '../session/session-registry.js';
 import { SessionLifecycleManager } from '../session/session-lifecycle-manager.js';
-import { ReplayCoordinator } from '../session/replay-coordinator.js';
+import { SessionCoordinator } from '../session/session-coordinator.js';
 import { BrowserLauncher } from './browser-launcher.js';
 import type { VideoManager } from '../video/video-manager.js';
 
@@ -35,7 +35,7 @@ import type { VideoManager } from '../video/video-manager.js';
  * After refactoring, it delegates to specialized components:
  * - SessionRegistry: Map bookkeeping, session lookup
  * - SessionLifecycleManager: TTL timers, cleanup, close
- * - ReplayCoordinator: CDP protocol, rrweb injection
+ * - SessionCoordinator: CDP protocol, replay, CF solver
  * - BrowserLauncher: Launch logic, option parsing
  *
  * This class was reduced from 1270 lines to ~200 lines.
@@ -47,7 +47,7 @@ export class BrowserManager {
   // Extracted components
   protected registry: SessionRegistry;
   protected lifecycle: SessionLifecycleManager;
-  protected replay: ReplayCoordinator;
+  protected session: SessionCoordinator;
   protected launcher: BrowserLauncher;
 
   constructor(
@@ -59,16 +59,16 @@ export class BrowserManager {
   ) {
     // Initialize extracted components
     this.registry = new SessionRegistry();
-    this.replay = new ReplayCoordinator(sessionReplay, videoMgr);
+    this.session = new SessionCoordinator(sessionReplay, videoMgr);
     this.lifecycle = new SessionLifecycleManager(
       this.registry,
-      this.replay,
+      this.session,
     );
     this.launcher = new BrowserLauncher(
       config,
       hooks,
       this.registry,
-      this.replay
+      this.session
     );
   }
 
@@ -410,8 +410,8 @@ export class BrowserManager {
     return this.lifecycle;
   }
 
-  public getReplayCoordinator(): ReplayCoordinator {
-    return this.replay;
+  public getSessionCoordinator(): SessionCoordinator {
+    return this.session;
   }
 
   public getLauncher(): BrowserLauncher {
