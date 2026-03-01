@@ -13,6 +13,7 @@
 import { ServiceMap } from 'effect';
 import type { Effect, FiberMap } from 'effect';
 import type { CdpSessionId } from '../shared/cloudflare-detection.js';
+import type { CdpSessionGone, CdpTimeout } from '../shared/cdp-rpc.js';
 import type { TargetRegistry } from './target-state.js';
 
 /** Send CDP commands via browser or per-page WebSocket. */
@@ -22,7 +23,7 @@ export const CdpSender = ServiceMap.Service<{
     params?: object,
     cdpSessionId?: CdpSessionId,
     timeoutMs?: number,
-  ) => Effect.Effect<any, Error>;
+  ) => Effect.Effect<any, CdpSessionGone | CdpTimeout>;
 }>('session/CdpSender');
 
 /** Session lifecycle resources — FiberMap + TargetRegistry. */

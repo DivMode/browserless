@@ -25,6 +25,7 @@ import { SessionRegistry } from './session-registry.js';
  */
 export class SessionLifecycleManager {
   private timers: Map<string, NodeJS.Timeout> = new Map();
+  private watchdogTimer: NodeJS.Timeout | null = null;
   private log = new Logger('session-lifecycle');
   private baseUrl = process.env.BROWSERLESS_BASE_URL ?? '';
 
@@ -67,7 +68,6 @@ export class SessionLifecycleManager {
     const connected = session.numbConnected;
     const hasKeepUntil = keepUntil > now;
     const keepOpen = (connected > 0 || hasKeepUntil) && !force;
-    const cleanupActions: Array<() => Promise<void>> = [];
     const priorTimer = this.timers.get(session.id);
 
     if (priorTimer) {
@@ -102,78 +102,99 @@ export class SessionLifecycleManager {
     if (!keepOpen) {
       this.log.info(`KILLING browser session ${session.id}: numbConnected=${connected} keepUntil=${keepUntil} force=${force}`);
 
+      // FIRST: Remove from registry immediately — prevents stale accumulation in /sessions
+      // This is the critical fix: registry removal must happen before any cleanup that can hang
+      this.registry.remove(browser);
+
       // Record session duration for Prometheus histogram (p50/p95 trend detection)
       const durationSec = (Date.now() - session.startedOn) / 1000;
       sessionDuration.observe(durationSec);
 
-      // Emit cf.solved for any unresolved CF detections (session-close fallback)
-      if (this.sessionCoordinator) {
-        const solver = this.sessionCoordinator.getCloudflareSolver(session.id);
-        if (solver) {
-          await solver.emitUnresolvedDetections();
-        }
-      }
+      // Effect pipeline: replay cleanup with layered timeouts
+      // If anything hangs, the fiber gets interrupted and Map cleanup runs via Effect.ensuring
+      const coordinator = this.sessionCoordinator;
+      const baseUrl = this.baseUrl;
+      const sessionId = session.id;
+      const log = this.log;
 
-      // Stop replay and save if replay was enabled
-      // Uses SessionCoordinator to ensure screencast frames are counted
-      if (session.replay && this.sessionCoordinator) {
-        const result = await this.sessionCoordinator.stopReplay(session.id, {
-          browserType: browser.constructor.name,
-          routePath: Array.isArray(session.routePath)
-            ? session.routePath[0]
-            : session.routePath,
-          trackingId: session.trackingId,
-        });
-
-        if (result) {
-          replayMetadata = {
-            id: result.metadata.id,
-            duration: result.metadata.duration,
-            eventCount: result.metadata.eventCount,
-            frameCount: result.metadata.frameCount,
-            encodingStatus: result.metadata.encodingStatus,
-            replayUrl: `${this.baseUrl}/replay/${result.metadata.id}`,
-            ...(session.trackingId ? { trackingId: session.trackingId } : {}),
-            ...(result.metadata.frameCount > 0 && {
-              videoUrl: `${this.baseUrl}/video/${result.metadata.id}`,
-            }),
-          };
-
-          // Send replay metadata via CDP event before browser closes
-          // Only attempt if a client is still connected — if they already
-          // disconnected, cdpProxy is null and there's nobody to receive the event
-          if (isReplayCapable(browser) && connected > 0) {
-            try {
-              const sent = await browser.sendReplayComplete(replayMetadata);
-              if (sent) {
-                this.log.info(`Injected replay complete event for ${session.id}`);
-              } else {
-                this.log.debug(`Replay complete not sent for ${session.id} (client disconnected)`);
-              }
-            } catch (e) {
-              this.log.debug(`Replay event send failed (client gone): ${e instanceof Error ? e.message : String(e)}`);
-            }
-          } else if (isReplayCapable(browser)) {
-            this.log.debug(`Skipping replay event for ${session.id} (no connected clients)`);
+      const cleanupEffect = Effect.gen(function*() {
+        // Emit cf.solved for any unresolved CF detections (session-close fallback)
+        if (coordinator) {
+          const solver = coordinator.getCloudflareSolver(sessionId);
+          if (solver) {
+            yield* Effect.tryPromise(() => solver.emitUnresolvedDetections()).pipe(Effect.ignore);
           }
         }
-      }
 
-      cleanupActions.push(() => browser.close());
+        // Stop replay and save if replay was enabled
+        if (session.replay && coordinator) {
+          const result = yield* coordinator.stopReplayEffect(sessionId, {
+            browserType: browser.constructor.name,
+            routePath: Array.isArray(session.routePath)
+              ? session.routePath[0]
+              : session.routePath,
+            trackingId: session.trackingId,
+          }).pipe(
+            Effect.timeout('12 seconds'),
+            Effect.orElseSucceed(() => null),
+          );
 
-      // Always delete session from registry
-      this.registry.remove(browser);
+          if (result) {
+            const metadata: ReplayCompleteParams = {
+              id: result.metadata.id,
+              duration: result.metadata.duration,
+              eventCount: result.metadata.eventCount,
+              frameCount: result.metadata.frameCount,
+              encodingStatus: result.metadata.encodingStatus,
+              replayUrl: `${baseUrl}/replay/${result.metadata.id}`,
+              ...(session.trackingId ? { trackingId: session.trackingId } : {}),
+              ...(result.metadata.frameCount > 0 && {
+                videoUrl: `${baseUrl}/video/${result.metadata.id}`,
+              }),
+            };
 
-      // Only delete temp user data directories
+            // Send replay metadata via CDP event before browser closes
+            if (isReplayCapable(browser) && connected > 0) {
+              yield* Effect.tryPromise(() => browser.sendReplayComplete(metadata)).pipe(
+                Effect.tap((sent) => Effect.sync(() => {
+                  if (sent) {
+                    log.info(`Injected replay complete event for ${sessionId}`);
+                  } else {
+                    log.debug(`Replay complete not sent for ${sessionId} (client disconnected)`);
+                  }
+                })),
+                Effect.ignore,
+              );
+            } else if (isReplayCapable(browser)) {
+              log.debug(`Skipping replay event for ${sessionId} (no connected clients)`);
+            }
+
+            return metadata;
+          }
+        }
+
+        return null;
+      }).pipe(
+        Effect.timeout('15 seconds'),
+        Effect.orElseSucceed(() => null),
+      );
+
+      replayMetadata = await Effect.runPromise(cleanupEffect).catch((e) => {
+        this.log.warn(`Cleanup Effect failed for ${session.id}: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      });
+
+      // Browser close — ALWAYS runs, even if Effect timed out
+      await browser.close().catch((e: unknown) => {
+        this.log.debug(`browser.close() failed for ${session.id}: ${e instanceof Error ? (e as Error).message : String(e)}`);
+      });
+
+      // Temp directory cleanup
       if (session.isTempDataDir) {
         this.log.debug(
           `Deleting "${session.userDataDir}" temp user-data-dir`,
         );
-        cleanupActions.push(() => this.removeUserDataDir(session.userDataDir));
-      }
-
-      for (const action of cleanupActions) {
-        await action();
+        await this.removeUserDataDir(session.userDataDir);
       }
     }
 
@@ -260,10 +281,35 @@ export class SessionLifecycleManager {
   }
 
   /**
+   * Start a watchdog that force-closes sessions older than maxSessionAgeMs.
+   * Safety net for unknown leak paths — catches sessions that survive normal cleanup.
+   */
+  startWatchdog(maxSessionAgeMs: number): void {
+    this.watchdogTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [browser, session] of this.registry.toArray()) {
+        if (now - session.startedOn > maxSessionAgeMs) {
+          this.log.warn(`Watchdog: force-closing stale session ${session.id} (age=${Math.round((now - session.startedOn) / 1000)}s)`);
+          this.registry.remove(browser);
+          this.sessionCoordinator?.forceCleanup(session.id).catch(() => {});
+          browser.close().catch(() => {});
+        }
+      }
+    }, 60_000);
+    this.watchdogTimer.unref();
+  }
+
+  /**
    * Shutdown: stop all replay sessions, close all browsers, clear timers.
    */
   async shutdown(): Promise<void> {
     this.log.info('Closing down browser sessions');
+
+    // Stop watchdog
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
 
     // Stop all replay sessions (screencast + rrweb + video encoder)
     if (this.sessionCoordinator) {

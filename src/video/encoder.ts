@@ -44,22 +44,23 @@ export class VideoEncoder {
   private progress = new Map<string, EncodingProgress>();
   private runtime = ManagedRuntime.make(Layer.empty);
   private effectQueue: Queue.Queue<EncodeJob> | null = null;
-  private ready: Promise<void>;
 
   constructor(private store: IReplayStore | null) {
-    // Initialize queue + consumer loop as a root fiber.
-    // Uses runFork (not runPromise + forkChild) because forkChild ties the
-    // fiber to its parent scope — when runPromise completes, the scope closes
-    // and interrupts the child. runFork creates an independent root fiber.
+    // Single runFork: queue creation + consumer loop inline — no .then() gap
     const encoder = this;
-    this.ready = this.runtime.runPromise(Effect.gen(function*() {
-      const queue = yield* Queue.unbounded<EncodeJob>();
-      encoder.effectQueue = queue;
-    })).then(() => {
-      if (encoder.effectQueue) {
-        encoder.runtime.runFork(encoder.consumerLoop(encoder.effectQueue));
-      }
-    }).catch((e: unknown) => encoder.log.error(`Encoder init failed: ${e}`));
+    this.runtime.runFork(
+      Effect.gen(function*() {
+        const queue = yield* Queue.unbounded<EncodeJob>();
+        encoder.effectQueue = queue;
+        // Consumer loop inline — takes jobs sequentially
+        while (true) {
+          const job = yield* Queue.take(queue);
+          yield* Effect.tryPromise(
+            () => encoder.encode(job.sessionId, job.videosDir, job.totalFrames),
+          ).pipe(Effect.orElseSucceed(() => undefined));
+        }
+      }),
+    );
   }
 
   /**
@@ -100,13 +101,10 @@ export class VideoEncoder {
       status: 'pending',
     });
 
-    const job: EncodeJob = { sessionId, videosDir, totalFrames };
-    // Ensure queue is ready before offering
-    this.ready.then(() => {
-      if (this.effectQueue) {
-        this.runtime.runPromise(Queue.offer(this.effectQueue, job)).catch(() => {});
-      }
-    });
+    // Offer directly — queue is created synchronously in the runFork fiber
+    if (this.effectQueue) {
+      this.runtime.runFork(Queue.offer(this.effectQueue, { sessionId, videosDir, totalFrames }));
+    }
   }
 
   /**
@@ -159,22 +157,6 @@ export class VideoEncoder {
   }
 
   // ─── Effect internals ─────────────────────────────────────────────────
-
-  /**
-   * Consumer loop — takes jobs sequentially from the queue.
-   * Runs as a child fiber of the ManagedRuntime scope.
-   */
-  private consumerLoop(queue: Queue.Queue<EncodeJob>): Effect.Effect<void> {
-    const encoder = this;
-    return Effect.gen(function*() {
-      while (true) {
-        const job = yield* Queue.take(queue);
-        yield* Effect.tryPromise(
-          () => encoder.encode(job.sessionId, job.videosDir, job.totalFrames),
-        ).pipe(Effect.orElseSucceed(() => undefined));
-      }
-    });
-  }
 
   /**
    * Encode PNG frames to HLS segments + playlist.
@@ -281,13 +263,21 @@ export class VideoEncoder {
       this.log.info(`Video encoded: ${sessionId} (${files.length} frames)`);
 
       // Schedule progress cleanup after 30s
-      setTimeout(() => { this.progress.delete(sessionId); }, 30_000);
+      this.runtime.runFork(
+        Effect.sleep('30 seconds').pipe(
+          Effect.andThen(Effect.sync(() => this.progress.delete(sessionId))),
+        ),
+      );
     } catch (e) {
       this.log.error(`Encoding failed for ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
       this.store?.updateEncodingStatus(sessionId, 'failed');
       this.updateProgress(sessionId, { status: 'failed' });
       // Clean up progress entry after 30s (same as success path) to unblock re-encode attempts
-      setTimeout(() => { this.progress.delete(sessionId); }, 30_000);
+      this.runtime.runFork(
+        Effect.sleep('30 seconds').pipe(
+          Effect.andThen(Effect.sync(() => this.progress.delete(sessionId))),
+        ),
+      );
       // Keep frames on failure for debugging
     }
   }

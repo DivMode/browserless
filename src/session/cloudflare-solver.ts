@@ -211,9 +211,11 @@ export class CloudflareSolver {
   }
 
   /** Interrupt and stop the detection fiber for a target (e.g. on tab close). */
-  async stopTargetDetection(targetId: TargetId): Promise<void> {
+  stopTargetDetection(targetId: TargetId): Effect.Effect<void> {
     this.stopDetectionFiber(targetId);
-    await this.runtime.runPromise(this.stateTracker.unregisterPage(targetId));
+    return Effect.promise(() => this.runtime.runPromise(
+      this.stateTracker.unregisterPage(targetId),
+    ));
   }
 
   private startDetectionFiber(targetId: TargetId, cdpSessionId: CdpSessionId): void {
@@ -243,33 +245,39 @@ export class CloudflareSolver {
     return this.detector.isEnabled();
   }
 
-  async onPageAttached(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Promise<void> {
-    return this.runtime.runPromise(this.detector.onPageAttachedEffect(targetId, cdpSessionId, url));
+  onPageAttached(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void> {
+    return Effect.promise(() => this.runtime.runPromise(
+      this.detector.onPageAttachedEffect(targetId, cdpSessionId, url),
+    ));
   }
 
-  async onPageNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Promise<void> {
-    return this.runtime.runPromise(this.detector.onPageNavigatedEffect(targetId, cdpSessionId, url));
+  onPageNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void> {
+    return Effect.promise(() => this.runtime.runPromise(
+      this.detector.onPageNavigatedEffect(targetId, cdpSessionId, url),
+    ));
   }
 
-  async onIframeAttached(
+  onIframeAttached(
     iframeTargetId: TargetId, iframeCdpSessionId: CdpSessionId,
     url: string, parentCdpSessionId: CdpSessionId,
-  ): Promise<void> {
-    return this.runtime.runPromise(
+  ): Effect.Effect<void> {
+    return Effect.promise(() => this.runtime.runPromise(
       this.detector.onIframeAttachedEffect(iframeTargetId, iframeCdpSessionId, url, parentCdpSessionId),
-    );
+    ));
   }
 
-  async onIframeNavigated(
+  onIframeNavigated(
     iframeTargetId: TargetId, iframeCdpSessionId: CdpSessionId, url: string,
-  ): Promise<void> {
-    return this.runtime.runPromise(
+  ): Effect.Effect<void> {
+    return Effect.promise(() => this.runtime.runPromise(
       this.detector.onIframeNavigatedEffect(iframeTargetId, iframeCdpSessionId, url),
-    );
+    ));
   }
 
-  async onAutoSolveBinding(cdpSessionId: CdpSessionId): Promise<void> {
-    return this.runtime.runPromise(this.stateTracker.onAutoSolveBinding(cdpSessionId));
+  onAutoSolveBinding(cdpSessionId: CdpSessionId): Effect.Effect<void> {
+    return Effect.promise(() => this.runtime.runPromise(
+      this.stateTracker.onAutoSolveBinding(cdpSessionId),
+    ));
   }
 
   async onBeaconSolved(targetId: TargetId, tokenLength: number): Promise<void> {

@@ -195,11 +195,10 @@ export const createScreencastCapture = () => {
       ).pipe(Effect.ignore);
 
       const queue = yield* Queue.unbounded<FrameEvent, Cause.Done>();
-      // Fork consumer as a top-level daemon fiber on the global runtime.
-      // forkChild would scope it to this addTarget fiber, causing interruption
-      // when addTarget completes. The consumer must outlive addTarget.
-      const fiber = Effect.runFork(
-        targetConsumer(queue, targetDir, cdpSessionId, sendCommand),
+      // forkDetach — outlives addTarget fiber but participates in runtime scope
+      // interruption (unlike Effect.runFork which creates a fully global daemon)
+      const fiber = yield* targetConsumer(queue, targetDir, cdpSessionId, sendCommand).pipe(
+        Effect.forkDetach,
       );
       session.targets.set(cdpSessionId, { queue, fiber, frameCount: 0 });
 
@@ -301,6 +300,12 @@ export const createScreencastCapture = () => {
     const target = session.targets.get(cdpSessionId);
     if (target) {
       Queue.endUnsafe(target.queue);
+      session.targets.delete(cdpSessionId);
+    }
+
+    // Auto-cleanup when no targets remain — prevents sessions Map leak
+    if (session.targets.size === 0) {
+      sessions.delete(sessionId);
     }
   };
 

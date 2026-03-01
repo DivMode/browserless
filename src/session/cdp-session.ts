@@ -19,6 +19,7 @@ import { Cause, Effect, Fiber, FiberMap, Layer, ManagedRuntime, Queue, Schedule 
 import { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 import { decodeCDPMessage, decodeRrwebEventBatch } from '../shared/cdp-schemas.js';
 import { CdpConnection } from '../shared/cdp-rpc.js';
+import { CdpSessionGone as CdpSessionGoneError, CdpTimeout as CdpTimeoutError } from './cf/cf-errors.js';
 import { registerSessionState, tabDuration, replayEventsTotal } from '../prom-metrics.js';
 import { TargetRegistry } from './target-state.js';
 import { SessionId } from '../shared/replay-schemas.js';
@@ -79,8 +80,8 @@ export class CdpSession {
   private WebSocket: any = null;
   private unregisterGauges: (() => void) | null = null;
 
-  // Declarative CDP message routing
-  private readonly messageHandlers = new Map<string, (msg: any) => Promise<void> | void>();
+  // Declarative CDP message routing — Effect-native handlers dispatched as tracked fibers
+  private readonly effectHandlers = new Map<string, (msg: any) => Effect.Effect<void>>();
 
   constructor(options: CdpSessionOptions) {
     this.sessionId = options.sessionId;
@@ -112,13 +113,10 @@ export class CdpSession {
     const replaysDir = this.sessionReplay.getReplaysDir();
     const sessionReplay = this.sessionReplay;
 
-    // CdpSenderLayer — wraps sendCommand as Effect
+    // CdpSenderLayer — uses Effect-native send() directly (no Promise bridge)
     const cdpSenderLayer = Layer.succeed(CdpSender, CdpSender.of({
       send: (method, params, cdpSessionId, timeoutMs) =>
-        Effect.tryPromise({
-          try: () => self.sendCommand(method, params, cdpSessionId, timeoutMs),
-          catch: (e) => e instanceof Error ? e : new Error(String(e)),
-        }),
+        self.send(method, params ?? {}, cdpSessionId, timeoutMs),
     }));
 
     // ReplayWriterLayer — file writes + SQLite
@@ -213,6 +211,9 @@ export class CdpSession {
     // Build the single runtime (replaces both cdpRuntime and sessionRuntime)
     this.runtime = ManagedRuntime.make(this.buildLayer());
 
+    // Force Layer evaluation — creates FiberMap before CDP messages arrive
+    await this.runtime.runPromise(Effect.void);
+
     const ws = new this.WebSocket(this.wsEndpoint);
     this.ws = ws;
 
@@ -302,12 +303,15 @@ export class CdpSession {
   // ─── CDP Command Transport ──────────────────────────────────────────────
 
   /**
-   * Send a CDP command and wait for response.
+   * Effect-native CDP command — stays in Effect, preserves typed errors.
    * Routes through per-page WS when available, falls back to browser WS.
    */
-  sendCommand(method: string, params: object = {}, cdpSessionId?: CdpSessionId, timeoutMs?: number): Promise<any> {
+  send(method: string, params: object = {}, cdpSessionId?: CdpSessionId, timeoutMs?: number): Effect.Effect<any, CdpSessionGoneError | CdpTimeoutError> {
     if (this.state === 'DESTROYED') {
-      return Promise.reject(new Error('Session destroyed'));
+      return Effect.fail(new CdpSessionGoneError({
+        sessionId: cdpSessionId ?? CdpSessionId.makeUnsafe(''),
+        method,
+      }));
     }
 
     const timeout = timeoutMs ?? 30_000;
@@ -318,10 +322,10 @@ export class CdpSession {
       const target = this.targets.getByCdpSession(cdpSessionId);
       if (target?.pageWebSocket) {
         const pageWs = target.pageWebSocket;
-        if (pageWs.readyState === this.WebSocket.OPEN) {
+        if (pageWs.readyState === this.WebSocket?.OPEN) {
           const pageConn = (pageWs as any).__cdpConn as CdpConnection | undefined;
           if (pageConn) {
-            return pageConn.sendPromise(method, params, undefined, timeout);
+            return pageConn.send(method, params, undefined, timeout);
           }
         } else {
           // Dead WS — remove and attempt reconnect via FiberMap (once per target)
@@ -339,9 +343,29 @@ export class CdpSession {
 
     // Fallback: browser-level WS with sessionId routing
     if (!this.browserConn) {
-      return Promise.reject(new Error('Browser connection not initialized'));
+      return Effect.fail(new CdpSessionGoneError({
+        sessionId: cdpSessionId ?? CdpSessionId.makeUnsafe(''),
+        method,
+      }));
     }
-    return this.browserConn.sendPromise(method, params, cdpSessionId ? CdpSessionId.makeUnsafe(cdpSessionId) : undefined, timeout);
+    return this.browserConn.send(method, params, cdpSessionId ? CdpSessionId.makeUnsafe(cdpSessionId) : undefined, timeout);
+  }
+
+  /**
+   * Promise bridge — external callers (browser-launcher, cdp-proxy) use this.
+   * Internal callers should prefer send() to stay in Effect.
+   */
+  sendCommand(method: string, params: object = {}, cdpSessionId?: CdpSessionId, timeoutMs?: number): Promise<any> {
+    return Effect.runPromise(
+      this.send(method, params, cdpSessionId, timeoutMs).pipe(
+        Effect.catchTag('CdpTimeout', (e) =>
+          Effect.fail(new Error(`CDP command ${e.method} timed out after ${e.timeoutMs}ms`)),
+        ),
+        Effect.catchTag('CdpSessionGone', (e) =>
+          Effect.fail(new Error(`CDP session gone during ${e.method} (session=${e.sessionId})`)),
+        ),
+      ),
+    );
   }
 
   // ─── Replay: Event Routing ───────────────────────────────────────────
@@ -361,13 +385,14 @@ export class CdpSession {
     this.eventCounts.set(targetId, (this.eventCounts.get(targetId) ?? 0) + events.length);
   }
 
-  /** Flush in-page rrweb buffer into the tab Queue via Runtime.evaluate. */
-  private async collectEvents(targetId: TargetId): Promise<void> {
-    const target = this.targets.getByTarget(targetId);
-    if (!target) return;
+  /** Flush in-page rrweb buffer into the tab Queue via Runtime.evaluate (Effect-native). */
+  private collectEventsEffect(targetId: TargetId, timeoutMs = 30_000): Effect.Effect<void> {
+    const session = this;
+    return Effect.gen(function*() {
+      const target = session.targets.getByTarget(targetId);
+      if (!target) return;
 
-    try {
-      const result = await this.sendCommand('Runtime.evaluate', {
+      const result = yield* session.send('Runtime.evaluate', {
         expression: `(function() {
           const recording = window.__browserlessRecording;
           if (!recording?.events?.length) return JSON.stringify({ events: [] });
@@ -376,30 +401,37 @@ export class CdpSession {
           return JSON.stringify({ events: collected });
         })()`,
         returnByValue: true,
-      }, target.cdpSessionId);
+      }, target.cdpSessionId, timeoutMs).pipe(Effect.orElseSucceed(() => null));
 
       if (result?.result?.value) {
         const { events } = JSON.parse(result.result.value);
         if (events?.length) {
-          this.offerEvents(targetId, events);
+          session.offerEvents(targetId, events);
         }
       }
-    } catch {
-      // Target may be closed
-    }
+    });
   }
 
-  /** Finalize a tab — flush buffer, mark as finalized. */
-  private async finalizeTab(targetId: TargetId): Promise<void> {
-    const target = this.targets.getByTarget(targetId);
-    if (target?.finalizedResult) return; // prevent double-finalization
-
-    await this.collectEvents(targetId);
-
-    if (target) {
-      target.finalizedResult = {} as any; // mark as finalized
-    }
+  /** Promise bridge for collectAllEvents (public API). */
+  private async collectEvents(targetId: TargetId, timeoutMs = 30_000): Promise<void> {
+    await Effect.runPromise(this.collectEventsEffect(targetId, timeoutMs)).catch(() => {});
   }
+
+  /** Finalize a tab — flush buffer, mark as finalized (Effect-native). */
+  private finalizeTabEffect(targetId: TargetId, timeoutMs = 30_000): Effect.Effect<void> {
+    const session = this;
+    return Effect.gen(function*() {
+      const target = session.targets.getByTarget(targetId);
+      if (target?.finalizedResult) return; // prevent double-finalization
+
+      yield* session.collectEventsEffect(targetId, timeoutMs);
+
+      if (target) {
+        target.finalizedResult = {} as any; // mark as finalized
+      }
+    });
+  }
+
 
   /** Flush all in-page push buffers then collect remaining events for all targets. */
   async collectAllEvents(): Promise<void> {
@@ -534,78 +566,81 @@ export class CdpSession {
     return this.destroyPromise;
   }
 
-  private async _doDestroy(source: 'cleanup' | 'ws_close' | 'error'): Promise<void> {
-    this.state = 'DRAINING';
-    this.log.info(`CdpSession destroying (${source}) for session ${this.sessionId}, targets=${this.targets.size}`);
+  private destroyEffect(source: 'cleanup' | 'ws_close' | 'error'): Effect.Effect<void> {
+    const session = this;
+    return Effect.gen(function*() {
+      session.state = 'DRAINING';
+      session.log.info(`CdpSession destroying (${source}) for session ${session.sessionId}, targets=${session.targets.size}`);
 
-    // Unregister Prometheus gauges
-    const hadGauges = !!this.unregisterGauges;
-    this.unregisterGauges?.();
-    this.log.info(`CdpSession gauges unregistered (had=${hadGauges}) for session ${this.sessionId}`);
+      // Unregister Prometheus gauges
+      const hadGauges = !!session.unregisterGauges;
+      session.unregisterGauges?.();
+      session.log.info(`CdpSession gauges unregistered (had=${hadGauges}) for session ${session.sessionId}`);
 
-    // 1. Clean up CF solver (fire-and-forget)
-    this.cloudflareHooks.destroy();
+      // 1. Clean up CF solver (sync — triggers ManagedRuntime.dispose on solver)
+      session.cloudflareHooks.destroy();
 
-    // 2. Finalize all tabs — flush page buffers into the Queue
-    for (const target of [...this.targets]) {
-      try {
-        if (source === 'cleanup') {
-          await this.finalizeTab(target.targetId);
+      // 2. Finalize all tabs — flush page buffers into the Queue (3s timeout per target)
+      if (source === 'cleanup') {
+        for (const target of [...session.targets]) {
+          yield* session.finalizeTabEffect(target.targetId, 3_000).pipe(Effect.ignore);
         }
-      } catch (e) {
-        this.log.warn(`destroy finalize failed for ${target.targetId}: ${e instanceof Error ? e.message : String(e)}`);
       }
-    }
 
-    // 3. End all tab Queues — triggers consumer fibers to drain + write files
-    for (const [, queue] of this.tabQueues) {
-      Queue.endUnsafe(queue);
-    }
-    this.tabQueues.clear();
+      // 3. End all tab Queues — triggers consumer fibers to drain + write files
+      for (const [, queue] of session.tabQueues) {
+        Queue.endUnsafe(queue);
+      }
+      session.tabQueues.clear();
 
-    // 4. Graceful drain — await tab consumer fibers (5s timeout each)
-    if (this._fiberMap) {
-      const targetIds = [...this.targets.targetIds];
-      const fiberMap = this._fiberMap;
-      const awaitConsumers = Effect.gen(function*() {
+      // 4. Graceful drain — await tab consumer fibers (5s timeout each)
+      if (session._fiberMap) {
+        const targetIds = [...session.targets.targetIds];
         for (const targetId of targetIds) {
-          const fiber = yield* FiberMap.get(fiberMap, `tab:${targetId}`);
+          const fiber = yield* FiberMap.get(session._fiberMap, `tab:${targetId}`);
           if (fiber) {
-            yield* Fiber.await(fiber).pipe(
-              Effect.timeout('5 seconds'),
-              Effect.ignore,
-            );
+            yield* Fiber.await(fiber).pipe(Effect.timeout('5 seconds'), Effect.ignore);
           }
         }
-      });
-      await Effect.runPromise(awaitConsumers).catch((e) => {
-        this.log.warn(`Fiber await error: ${e instanceof Error ? e.message : String(e)}`);
-      });
-    }
+      }
 
-    // 5. Fire tab-complete callbacks — replay files now exist on disk
-    if (this.onTabReplayComplete) {
-      for (const target of [...this.targets]) {
-        const tabReplayId = `${this.sessionId}--tab-${target.targetId}`;
-        try {
-          this.onTabReplayComplete({
-            sessionId: this.sessionId,
-            targetId: target.targetId,
-            duration: Date.now() - target.startTime,
-            eventCount: this.eventCounts.get(target.targetId) ?? 0,
-            frameCount: 0,
-            encodingStatus: 'none',
-            replayUrl: `${this.baseUrl}/replay/${tabReplayId}`,
-            videoUrl: undefined,
-          });
-        } catch (e) {
-          this.log.warn(`onTabReplayComplete callback failed: ${e instanceof Error ? e.message : String(e)}`);
+      // 5. Fire tab-complete callbacks — replay files now exist on disk
+      if (session.onTabReplayComplete) {
+        for (const target of [...session.targets]) {
+          const tabReplayId = `${session.sessionId}--tab-${target.targetId}`;
+          try {
+            session.onTabReplayComplete({
+              sessionId: session.sessionId,
+              targetId: target.targetId,
+              duration: Date.now() - target.startTime,
+              eventCount: session.eventCounts.get(target.targetId) ?? 0,
+              frameCount: 0,
+              encodingStatus: 'none',
+              replayUrl: `${session.baseUrl}/replay/${tabReplayId}`,
+              videoUrl: undefined,
+            });
+          } catch (e) {
+            session.log.warn(`onTabReplayComplete callback failed: ${e instanceof Error ? e.message : String(e)}`);
+          }
         }
       }
-    }
+    }).pipe(
+      // Guaranteed cleanup — runs even if Effect times out or fails
+      Effect.ensuring(Effect.sync(() => {
+        session.eventCounts.clear();
+        session.state = 'DESTROYED';
+      })),
+    );
+  }
 
-    // 6. Dispose unified runtime — interrupt all fibers, cleanup FiberMap,
-    //    targets.clear(), browserConn.dispose(), close per-page WS
+  private async _doDestroy(source: 'cleanup' | 'ws_close' | 'error'): Promise<void> {
+    // Run the Effect pipeline
+    await Effect.runPromise(this.destroyEffect(source)).catch((e) => {
+      this.log.warn(`destroyEffect error: ${e instanceof Error ? e.message : String(e)}`);
+    });
+
+    // Dispose unified runtime — interrupt all fibers, cleanup FiberMap,
+    // targets.clear(), browserConn.dispose(), close per-page WS
     if (this.runtime) {
       await this.runtime.dispose().catch((e) => {
         this.log.warn(`Runtime dispose error: ${e instanceof Error ? e.message : String(e)}`);
@@ -613,27 +648,25 @@ export class CdpSession {
       this.runtime = null;
     }
 
-    // 7. Close main WS (no-op if already closed via ws_close)
+    // Close main WS (no-op if already closed via ws_close)
     try { this.ws?.close(); } catch {}
     this.ws = null;
     this.unregisterGauges = null;
-    this.eventCounts.clear();
 
-    this.state = 'DESTROYED';
     this.log.info(`CdpSession destroyed (${source}) for session ${this.sessionId}`);
   }
 
   // ─── CDP Message Routing ───────────────────────────────────────────────
 
   private setupMessageRouting(): void {
-    this.messageHandlers.set('Target.attachedToTarget', (msg) => this.handleAttachedToTarget(msg));
-    this.messageHandlers.set('Target.targetCreated', (msg) => this.handleTargetCreated(msg));
-    this.messageHandlers.set('Target.targetDestroyed', (msg) => this.handleTargetDestroyed(msg));
-    this.messageHandlers.set('Target.targetInfoChanged', (msg) => this.handleTargetInfoChanged(msg));
-    this.messageHandlers.set('Page.frameNavigated', (msg) => this.handleFrameNavigated(msg));
+    this.effectHandlers.set('Target.attachedToTarget', (msg) => this.handleAttachedToTargetEffect(msg));
+    this.effectHandlers.set('Target.targetCreated', (msg) => this.handleTargetCreatedEffect(msg));
+    this.effectHandlers.set('Target.targetDestroyed', (msg) => this.handleTargetDestroyedEffect(msg));
+    this.effectHandlers.set('Target.targetInfoChanged', (msg) => this.handleTargetInfoChangedEffect(msg));
+    this.effectHandlers.set('Page.frameNavigated', (msg) => this.handleFrameNavigatedEffect(msg));
   }
 
-  private async handleCDPMessage(data: Buffer): Promise<void> {
+  private handleCDPMessage(data: Buffer): void {
     try {
       const msgExit = decodeCDPMessage(JSON.parse(data.toString()));
       if (msgExit._tag === 'Failure') return;
@@ -679,10 +712,16 @@ export class CdpSession {
         }
       }
 
-      // Routed CDP events
-      if (msg.method) {
-        const handler = this.messageHandlers.get(msg.method);
-        if (handler) await handler(msg);
+      // Routed CDP events — dispatched as tracked fibers
+      if (msg.method && this.runtime && this._fiberMap) {
+        const handler = this.effectHandlers.get(msg.method);
+        if (handler) {
+          const targetId = msg.params?.targetInfo?.targetId ?? msg.params?.targetId ?? '';
+          this.runtime.runFork(
+            FiberMap.run(this._fiberMap, `msg:${msg.method}:${targetId}`,
+              handler(msg).pipe(Effect.ignore)),
+          );
+        }
       }
     } catch (e) {
       this.log.debug(`Error processing CDP message: ${e}`);
@@ -707,8 +746,13 @@ export class CdpSession {
         this.log.debug(`rrweb push parse failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     } else if (name === '__turnstileSolvedBinding') {
-      this.cloudflareHooks.onAutoSolveBinding(cdpSessionId)
-        .catch((e: Error) => this.log.debug(`onAutoSolveBinding failed: ${e.message}`));
+      // Dispatch as tracked fiber instead of fire-and-forget
+      if (this.runtime && this._fiberMap) {
+        this.runtime.runFork(
+          FiberMap.run(this._fiberMap, `cf:binding:${cdpSessionId}`,
+            this.cloudflareHooks.onAutoSolveBinding(cdpSessionId).pipe(Effect.ignore)),
+        );
+      }
     }
   }
 
@@ -775,277 +819,249 @@ export class CdpSession {
 
   // ─── CDP Event Sub-handlers ─────────────────────────────────────────────
 
-  private async handleAttachedToTarget(msg: any): Promise<void> {
+  private handleAttachedToTargetEffect(msg: any): Effect.Effect<void> {
+    const session = this;
     const { sessionId, targetInfo, waitingForDebugger } = msg.params;
     const cdpSessionId = CdpSessionId.makeUnsafe(sessionId);
     const targetId = TargetId.makeUnsafe(targetInfo.targetId);
 
-    if (targetInfo.type === 'page') {
-      this.log.info(`Target attached (paused=${waitingForDebugger}): targetId=${targetId} url=${targetInfo.url} type=${targetInfo.type}`);
-      this.targets.add(targetId, cdpSessionId);
+    return Effect.gen(function*() {
+      if (targetInfo.type === 'page') {
+        session.log.info(`Target attached (paused=${waitingForDebugger}): targetId=${targetId} url=${targetInfo.url} type=${targetInfo.type}`);
+        session.targets.add(targetId, cdpSessionId);
 
-      // Notify CF solver
-      this.cloudflareHooks.onPageAttached(targetId, cdpSessionId, targetInfo.url)
-        .catch((e: Error) => this.log.debug(`[${targetId}] onPageAttached skipped: ${e.message}`));
+        // Notify CF solver — tracked fiber
+        if (session._fiberMap) {
+          yield* FiberMap.run(session._fiberMap, `cf:attach:${targetId}`,
+            session.cloudflareHooks.onPageAttached(targetId, cdpSessionId, targetInfo.url).pipe(Effect.ignore));
+        }
 
-      // Start per-tab replay pipeline (Queue + consumer fiber) — direct, no hooks
-      if (this.runtime && !this.tabQueues.has(targetId)) {
-        const runtime = this.runtime;
-        const sessionIdBranded = SessionId.makeUnsafe(this.sessionId);
-
-        // Create queue inside runtime scope
-        await runtime.runPromise(Effect.gen(function*() {
+        // Start per-tab replay pipeline — Queue creation + Map.set is atomic (no race)
+        if (!session.tabQueues.has(targetId) && session.runtime) {
           const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
-          return queue;
-        })).then((queue) => {
-          this.tabQueues.set(targetId, queue);
-        });
+          session.tabQueues.set(targetId, queue);
 
-        // Fork consumer fiber — runs until Queue is ended
-        const queue = this.tabQueues.get(targetId);
-        if (queue && this._fiberMap) {
-          runtime.runFork(
-            FiberMap.run(this._fiberMap, `tab:${targetId}`, tabConsumer(queue, sessionIdBranded, targetId)),
-          );
-        }
-
-        // Diagnostic probe: check rrweb state 2s after target resumes
-        if (this._fiberMap) {
-          const probeTargetId = targetId;
-          const probeCdpSessionId = cdpSessionId;
-          const self = this;
-          const probeEffect = Effect.gen(function*() {
-            yield* Effect.sleep('2 seconds');
-            const result = yield* Effect.tryPromise(() =>
-              self.sendCommand('Runtime.evaluate', {
-                expression: `JSON.stringify({
-                  recording: typeof window.__browserlessRecording,
-                  recValue: window.__browserlessRecording === true ? 'true(iframe)' : (window.__browserlessRecording ? 'object' : 'falsy'),
-                  stopFn: typeof window.__browserlessStopRecording,
-                  rrweb: typeof window.rrweb,
-                  rrwebRecord: typeof (window.rrweb && window.rrweb.record),
-                  error: (window.__browserlessRecording && window.__browserlessRecording._rrwebError) || null,
-                  eventCount: window.__browserlessRecording?.events?.length ?? -1,
-                  bufCount: window.__browserlessRecording?._buf?.length ?? -1,
-                  body: !!document.body,
-                  readyState: document.readyState,
-                })`,
-                returnByValue: true,
-              }, probeCdpSessionId),
+          const sessionIdBranded = SessionId.makeUnsafe(session.sessionId);
+          if (session._fiberMap) {
+            // Fork via runtime.runFork — tabConsumer requires ReplayWriter/ReplayMetrics in R
+            session.runtime.runFork(
+              FiberMap.run(session._fiberMap, `tab:${targetId}`,
+                tabConsumer(queue, sessionIdBranded, targetId)),
             );
-            self.log.info(`[rrweb-diag] target=${probeTargetId} ${result?.result?.value}`);
-          }).pipe(
-            Effect.catch((e) => {
-              self.log.info(`[rrweb-diag] target=${probeTargetId} probe-failed: ${e}`);
-              return Effect.void;
-            }),
-          );
-          runtime.runFork(
-            FiberMap.run(this._fiberMap, `probe:${targetId}`, probeEffect),
-          );
-        }
-      }
+          }
 
-      // CDP domain enables
-      try {
-        await this.sendCommand('Runtime.addBinding', { name: '__rrwebPush' }, cdpSessionId);
-        await this.sendCommand('Page.enable', {}, cdpSessionId);
-        await this.sendCommand('Runtime.enable', {}, cdpSessionId);
+          // Diagnostic probe: check rrweb state 2s after target resumes
+          if (session._fiberMap) {
+            session.runtime.runFork(
+              FiberMap.run(session._fiberMap, `probe:${targetId}`, Effect.gen(function*() {
+                yield* Effect.sleep('2 seconds');
+                const result = yield* session.send('Runtime.evaluate', {
+                  expression: `JSON.stringify({
+                    recording: typeof window.__browserlessRecording,
+                    recValue: window.__browserlessRecording === true ? 'true(iframe)' : (window.__browserlessRecording ? 'object' : 'falsy'),
+                    stopFn: typeof window.__browserlessStopRecording,
+                    rrweb: typeof window.rrweb,
+                    rrwebRecord: typeof (window.rrweb && window.rrweb.record),
+                    error: (window.__browserlessRecording && window.__browserlessRecording._rrwebError) || null,
+                    eventCount: window.__browserlessRecording?.events?.length ?? -1,
+                    bufCount: window.__browserlessRecording?._buf?.length ?? -1,
+                    body: !!document.body,
+                    readyState: document.readyState,
+                  })`,
+                  returnByValue: true,
+                }, cdpSessionId).pipe(Effect.orElseSucceed(() => null));
+                if (result) session.log.info(`[rrweb-diag] target=${targetId} ${result?.result?.value}`);
+              }).pipe(Effect.ignore)),
+            );
+          }
+        }
+
+        // CDP domain enables — Effect-native
+        yield* session.send('Runtime.addBinding', { name: '__rrwebPush' }, cdpSessionId).pipe(Effect.ignore);
+        yield* session.send('Page.enable', {}, cdpSessionId).pipe(Effect.ignore);
+        yield* session.send('Runtime.enable', {}, cdpSessionId).pipe(Effect.ignore);
 
         // Set session ID for extension
-        await this.sendCommand('Runtime.evaluate', {
-          expression: `if(window.__browserlessRecording && typeof window.__browserlessRecording === 'object') window.__browserlessRecording.sessionId = '${this.sessionId}';`,
+        yield* session.send('Runtime.evaluate', {
+          expression: `if(window.__browserlessRecording && typeof window.__browserlessRecording === 'object') window.__browserlessRecording.sessionId = '${session.sessionId}';`,
           returnByValue: true,
-        }, cdpSessionId).catch(() => {});
-        const target = this.targets.getByTarget(targetId);
+        }, cdpSessionId).pipe(Effect.ignore);
+        const target = session.targets.getByTarget(targetId);
         if (target) target.injected = true;
 
-        await this.sendCommand('Target.setAutoAttach', {
+        yield* session.send('Target.setAutoAttach', {
           autoAttach: true,
           waitForDebuggerOnStart: true,
           flatten: true,
-        }, cdpSessionId);
-      } catch (e) {
-        this.log.debug(`Target setup failed for ${targetId}: ${e instanceof Error ? e.message : String(e)}`);
-      }
+        }, cdpSessionId).pipe(Effect.ignore);
 
-      // Resume the target
-      if (waitingForDebugger) {
-        await this.sendCommand('Runtime.runIfWaitingForDebugger', {}, cdpSessionId)
-          .catch((e: Error) => this.log.debug(`[${targetId}] runIfWaitingForDebugger skipped: ${e.message}`));
-      }
+        // Resume the target
+        if (waitingForDebugger) {
+          yield* session.send('Runtime.runIfWaitingForDebugger', {}, cdpSessionId).pipe(Effect.ignore);
+        }
 
-      // Start screencast — fully decoupled via VideoHooks
-      if (this.video && this.videoHooks && this.runtime && this._fiberMap) {
-        this.runtime.runFork(
-          FiberMap.run(this._fiberMap, `screencast:${targetId}`,
-            this.videoHooks.onTargetAttached(this.sessionId, this.sendCommand.bind(this) as any, cdpSessionId, targetId).pipe(
-              Effect.catch((e) => {
-                this.log.debug(`[${targetId}] screencast addTarget skipped: ${e}`);
-                return Effect.void;
-              }),
+        // Start screencast — fully decoupled via VideoHooks
+        if (session.video && session.videoHooks && session._fiberMap) {
+          yield* FiberMap.run(session._fiberMap, `screencast:${targetId}`,
+            session.videoHooks.onTargetAttached(session.sessionId, session.sendCommand.bind(session) as any, cdpSessionId, targetId).pipe(
+              Effect.ignore,
             ),
-          ),
-        );
-      }
+          );
+        }
 
-      // Open per-page WebSocket for zero-contention
-      if (this.runtime && this._fiberMap) {
-        this.runtime.runFork(
-          FiberMap.run(this._fiberMap, `pageWs:${targetId}`, this.openPageWs(targetId)),
-        );
-      }
-    }
-
-    // Cross-origin iframes (e.g., Cloudflare Turnstile)
-    if (targetInfo.type === 'iframe') {
-      this.log.debug(`Iframe target attached (paused=${waitingForDebugger}): ${targetId} url=${targetInfo.url}`);
-      this.targets.addIframeTarget(targetId, cdpSessionId);
-
-      if (waitingForDebugger) {
-        await this.sendCommand('Runtime.runIfWaitingForDebugger', {}, cdpSessionId)
-          .catch((e: Error) => this.log.debug(`[${targetId}] iframe runIfWaitingForDebugger skipped: ${e.message}`));
-      }
-
-      const parentCdpSid = (msg.sessionId ? CdpSessionId.makeUnsafe(msg.sessionId) : undefined) || this.getLastPageCdpSession();
-      if (parentCdpSid) {
-        this.targets.addIframe(cdpSessionId, parentCdpSid);
-        this.cloudflareHooks.onIframeAttached(targetId, cdpSessionId, targetInfo.url, parentCdpSid)
-          .catch((e: Error) => this.log.debug(`[${targetId}] onIframeAttached skipped: ${e.message}`));
-      }
-    }
-  }
-
-  private async handleTargetCreated(msg: any): Promise<void> {
-    const { targetInfo } = msg.params;
-    if (targetInfo.type === 'page' && !this.targets.has(TargetId.makeUnsafe(targetInfo.targetId))) {
-      this.log.info(`Discovered external target ${targetInfo.targetId} (url=${targetInfo.url}), attaching...`);
-      try {
-        await this.sendCommand('Target.attachToTarget', {
-          targetId: targetInfo.targetId,
-          flatten: true,
-        });
-      } catch (e) {
-        this.log.warn(`Failed to attach to external target ${targetInfo.targetId}: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
-  }
-
-  private async handleTargetDestroyed(msg: any): Promise<void> {
-    const targetId = TargetId.makeUnsafe(msg.params.targetId);
-
-    const target = this.targets.getByTarget(targetId);
-    if (target) {
-      tabDuration.observe((Date.now() - target.startTime) / 1000);
-
-      // Replay: finalize + end Queue + await consumer + fire callback — direct, no hooks
-      await this.finalizeTab(targetId);
-
-      // End this tab's Queue — consumer fiber drains remaining events + writes file
-      const tabQueue = this.tabQueues.get(targetId);
-      if (tabQueue) {
-        Queue.endUnsafe(tabQueue);
-        this.tabQueues.delete(targetId);
-      }
-
-      // Await consumer fiber — guarantees replay file is written before callback fires
-      if (this._fiberMap) {
-        const fiberMap = this._fiberMap;
-        await Effect.runPromise(
-          Effect.gen(function*() {
-            const fiber = yield* FiberMap.get(fiberMap, `tab:${targetId}`);
-            if (fiber) {
-              yield* Fiber.await(fiber).pipe(Effect.timeout('5 seconds'), Effect.ignore);
-            }
-          }),
-        ).catch(() => {});
-      }
-
-      // Fire callback — replay file now exists on disk
-      if (this.onTabReplayComplete) {
-        const tabReplayId = `${this.sessionId}--tab-${target.targetId}`;
-        try {
-          this.onTabReplayComplete({
-            sessionId: this.sessionId,
-            targetId: target.targetId,
-            duration: Date.now() - target.startTime,
-            eventCount: this.eventCounts.get(target.targetId) ?? 0,
-            frameCount: 0,
-            encodingStatus: 'none',
-            replayUrl: `${this.baseUrl}/replay/${tabReplayId}`,
-            videoUrl: undefined,
-          });
-        } catch (e) {
-          this.log.warn(`onTabReplayComplete callback failed: ${e instanceof Error ? e.message : String(e)}`);
+        // Open per-page WebSocket for zero-contention
+        if (session._fiberMap) {
+          yield* FiberMap.run(session._fiberMap, `pageWs:${targetId}`, session.openPageWs(targetId));
         }
       }
 
-      // Video: clean up screencast
-      this.videoHooks?.onTargetDestroyed(this.sessionId, target.cdpSessionId);
-    }
+      // Cross-origin iframes (e.g., Cloudflare Turnstile)
+      if (targetInfo.type === 'iframe') {
+        session.log.debug(`Iframe target attached (paused=${waitingForDebugger}): ${targetId} url=${targetInfo.url}`);
+        session.targets.addIframeTarget(targetId, cdpSessionId);
 
-    // CF: interrupt detection fiber
-    await this.cloudflareHooks.onTargetDestroyed(targetId);
-    // Atomic cleanup — removes from all indices, closes per-page WS, cleans iframe refs
-    this.targets.remove(targetId);
-    this.targets.removeIframeTarget(targetId);
-  }
+        if (waitingForDebugger) {
+          yield* session.send('Runtime.runIfWaitingForDebugger', {}, cdpSessionId).pipe(Effect.ignore);
+        }
 
-  private async handleTargetInfoChanged(msg: any): Promise<void> {
-    const { targetInfo } = msg.params;
-    const changedTargetId = TargetId.makeUnsafe(targetInfo.targetId);
-
-    if (targetInfo.type === 'page') {
-      const target = this.targets.getByTarget(changedTargetId);
-      if (target) {
-        // Re-enable CDP domains that Chrome resets on same-target navigation
-        this.sendCommand('Runtime.addBinding', { name: '__rrwebPush' }, target.cdpSessionId)
-          .catch((e: Error) => this.log.debug(`[${changedTargetId}] addBinding skipped: ${e.message}`));
-        this.sendCommand('Runtime.enable', {}, target.cdpSessionId)
-          .catch((e: Error) => this.log.debug(`[${changedTargetId}] Runtime.enable skipped: ${e.message}`));
-        this.sendCommand('Page.enable', {}, target.cdpSessionId)
-          .catch((e: Error) => this.log.debug(`[${changedTargetId}] Page.enable skipped: ${e.message}`));
-        this.sendCommand('Target.setAutoAttach', {
-          autoAttach: true,
-          waitForDebuggerOnStart: true,
-          flatten: true,
-        }, target.cdpSessionId)
-          .catch((e: Error) => this.log.debug(`[${changedTargetId}] setAutoAttach skipped: ${e.message}`));
-
-        // Page navigated — no-op for replay (extension handles re-injection)
-
-        this.cloudflareHooks.onPageNavigated(changedTargetId, target.cdpSessionId, targetInfo.url)
-          .catch((e: Error) => this.log.debug(`[${changedTargetId}] onPageNavigated skipped: ${e.message}`));
-      }
-    }
-
-    // Handle iframe navigation
-    const iframeCdpSid = this.targets.getIframeCdpSession(changedTargetId);
-    if (iframeCdpSid && targetInfo.type === 'iframe') {
-      if (targetInfo.url?.includes('challenges.cloudflare.com')) {
-        if (!this.targets.isIframe(iframeCdpSid)) {
-          const fallbackParent = this.getLastPageCdpSession();
-          if (fallbackParent) {
-            this.targets.addIframe(iframeCdpSid, fallbackParent);
+        const parentCdpSid = (msg.sessionId ? CdpSessionId.makeUnsafe(msg.sessionId) : undefined) || session.getLastPageCdpSession();
+        if (parentCdpSid) {
+          session.targets.addIframe(cdpSessionId, parentCdpSid);
+          if (session._fiberMap) {
+            yield* FiberMap.run(session._fiberMap, `cf:iframe:${targetId}`,
+              session.cloudflareHooks.onIframeAttached(targetId, cdpSessionId, targetInfo.url, parentCdpSid).pipe(Effect.ignore));
           }
         }
       }
+    });
+  }
 
-      this.cloudflareHooks.onIframeNavigated(changedTargetId, iframeCdpSid, targetInfo.url)
-        .catch((e: Error) => this.log.debug(`[${changedTargetId}] onIframeNavigated skipped: ${e.message}`));
-    }
+  private handleTargetCreatedEffect(msg: any): Effect.Effect<void> {
+    const session = this;
+    const { targetInfo } = msg.params;
+    return Effect.gen(function*() {
+      if (targetInfo.type === 'page' && !session.targets.has(TargetId.makeUnsafe(targetInfo.targetId))) {
+        session.log.info(`Discovered external target ${targetInfo.targetId} (url=${targetInfo.url}), attaching...`);
+        yield* session.send('Target.attachToTarget', {
+          targetId: targetInfo.targetId,
+          flatten: true,
+        }).pipe(Effect.ignore);
+      }
+    });
+  }
+
+  private handleTargetDestroyedEffect(msg: any): Effect.Effect<void> {
+    const session = this;
+    const targetId = TargetId.makeUnsafe(msg.params.targetId);
+
+    return Effect.gen(function*() {
+      const target = session.targets.getByTarget(targetId);
+      if (target) {
+        tabDuration.observe((Date.now() - target.startTime) / 1000);
+
+        // Replay: finalize + end Queue + await consumer + fire callback
+        yield* session.finalizeTabEffect(targetId).pipe(Effect.ignore);
+
+        // End this tab's Queue — consumer fiber drains remaining events + writes file
+        const tabQueue = session.tabQueues.get(targetId);
+        if (tabQueue) {
+          Queue.endUnsafe(tabQueue);
+          session.tabQueues.delete(targetId);
+        }
+
+        // Await consumer fiber — guarantees replay file is written before callback fires
+        if (session._fiberMap) {
+          const fiber = yield* FiberMap.get(session._fiberMap, `tab:${targetId}`);
+          if (fiber) {
+            yield* Fiber.await(fiber).pipe(Effect.timeout('5 seconds'), Effect.ignore);
+          }
+        }
+
+        // Fire callback — replay file now exists on disk
+        if (session.onTabReplayComplete) {
+          const tabReplayId = `${session.sessionId}--tab-${target.targetId}`;
+          try {
+            session.onTabReplayComplete({
+              sessionId: session.sessionId,
+              targetId: target.targetId,
+              duration: Date.now() - target.startTime,
+              eventCount: session.eventCounts.get(target.targetId) ?? 0,
+              frameCount: 0,
+              encodingStatus: 'none',
+              replayUrl: `${session.baseUrl}/replay/${tabReplayId}`,
+              videoUrl: undefined,
+            });
+          } catch (e) {
+            session.log.warn(`onTabReplayComplete callback failed: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+
+        // Video: clean up screencast
+        session.videoHooks?.onTargetDestroyed(session.sessionId, target.cdpSessionId);
+      }
+
+      // CF: interrupt detection fiber (with timeout)
+      yield* session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
+        Effect.timeout('3 seconds'), Effect.ignore);
+      // Atomic cleanup — removes from all indices, closes per-page WS, cleans iframe refs
+      session.targets.remove(targetId);
+      session.targets.removeIframeTarget(targetId);
+    });
+  }
+
+  private handleTargetInfoChangedEffect(msg: any): Effect.Effect<void> {
+    const session = this;
+    const { targetInfo } = msg.params;
+    const changedTargetId = TargetId.makeUnsafe(targetInfo.targetId);
+
+    return Effect.gen(function*() {
+      if (targetInfo.type === 'page') {
+        const target = session.targets.getByTarget(changedTargetId);
+        if (target) {
+          // Re-enable CDP domains that Chrome resets on same-target navigation
+          yield* Effect.all([
+            session.send('Runtime.addBinding', { name: '__rrwebPush' }, target.cdpSessionId),
+            session.send('Runtime.enable', {}, target.cdpSessionId),
+            session.send('Page.enable', {}, target.cdpSessionId),
+            session.send('Target.setAutoAttach', {
+              autoAttach: true,
+              waitForDebuggerOnStart: true,
+              flatten: true,
+            }, target.cdpSessionId),
+          ], { concurrency: 'unbounded' }).pipe(Effect.ignore);
+
+          // Page navigated — no-op for replay (extension handles re-injection)
+          yield* session.cloudflareHooks.onPageNavigated(changedTargetId, target.cdpSessionId, targetInfo.url).pipe(Effect.ignore);
+        }
+      }
+
+      // Handle iframe navigation
+      const iframeCdpSid = session.targets.getIframeCdpSession(changedTargetId);
+      if (iframeCdpSid && targetInfo.type === 'iframe') {
+        if (targetInfo.url?.includes('challenges.cloudflare.com')) {
+          if (!session.targets.isIframe(iframeCdpSid)) {
+            const fallbackParent = session.getLastPageCdpSession();
+            if (fallbackParent) {
+              session.targets.addIframe(iframeCdpSid, fallbackParent);
+            }
+          }
+        }
+
+        yield* session.cloudflareHooks.onIframeNavigated(changedTargetId, iframeCdpSid, targetInfo.url).pipe(Effect.ignore);
+      }
+    });
   }
 
   /**
    * Backup CF detection path via Page.frameNavigated.
    */
-  private handleFrameNavigated(msg: any): void {
+  private handleFrameNavigatedEffect(msg: any): Effect.Effect<void> {
     const frame = msg.params?.frame;
-    if (!frame || !msg.sessionId) return;
-    if (frame.parentId) return;
+    if (!frame || !msg.sessionId) return Effect.void;
+    if (frame.parentId) return Effect.void;
 
     const url = frame.url;
-    if (!url || url.startsWith('about:') || url.startsWith('chrome:')) return;
+    if (!url || url.startsWith('about:') || url.startsWith('chrome:')) return Effect.void;
 
     const isCFUrl = url.includes('__cf_chl_rt_tk=')
       || url.includes('__cf_chl_f_tk=')
@@ -1053,14 +1069,13 @@ export class CdpSession {
       || url.includes('/cdn-cgi/challenge-platform/')
       || url.includes('challenges.cloudflare.com');
 
-    if (!isCFUrl) return;
+    if (!isCFUrl) return Effect.void;
 
     const frameCdpSessionId = CdpSessionId.makeUnsafe(msg.sessionId);
     const target = this.targets.getByCdpSession(frameCdpSessionId);
-    if (!target) return;
+    if (!target) return Effect.void;
 
-    this.cloudflareHooks.onPageAttached(target.targetId, frameCdpSessionId, url)
-      .catch((e: Error) => this.log.debug(`[${target.targetId}] frameNavigated CF detection skipped: ${e.message}`));
+    return this.cloudflareHooks.onPageAttached(target.targetId, frameCdpSessionId, url);
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────────
