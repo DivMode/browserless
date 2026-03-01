@@ -388,7 +388,7 @@ export class CdpSession {
   /** Flush in-page rrweb buffer into the tab Queue via Runtime.evaluate (Effect-native). */
   private collectEventsEffect(targetId: TargetId, timeoutMs = 30_000): Effect.Effect<void> {
     const session = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cdp.collectEvents')(function*() {
       const target = session.targets.getByTarget(targetId);
       if (!target) return;
 
@@ -409,18 +409,18 @@ export class CdpSession {
           session.offerEvents(targetId, events);
         }
       }
-    });
+    })();
   }
 
   /** Promise bridge for collectAllEvents (public API). */
   private async collectEvents(targetId: TargetId, timeoutMs = 30_000): Promise<void> {
-    await Effect.runPromise(this.collectEventsEffect(targetId, timeoutMs)).catch(() => {});
+    await Effect.runPromise(this.collectEventsEffect(targetId, timeoutMs).pipe(Effect.ignore));
   }
 
   /** Finalize a tab — flush buffer, mark as finalized (Effect-native). */
   private finalizeTabEffect(targetId: TargetId, timeoutMs = 30_000): Effect.Effect<void> {
     const session = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cdp.finalizeTab')(function*() {
       const target = session.targets.getByTarget(targetId);
       if (target?.finalizedResult) return; // prevent double-finalization
 
@@ -429,7 +429,7 @@ export class CdpSession {
       if (target) {
         target.finalizedResult = {} as any; // mark as finalized
       }
-    });
+    })();
   }
 
 
@@ -476,7 +476,7 @@ export class CdpSession {
     const WebSocket = this.WebSocket;
     const pageWsUrl = `ws://127.0.0.1:${this.chromePort}/devtools/page/${targetId}`;
 
-    return Effect.gen(function*() {
+    return Effect.fn('cdp.openPageWs')(function*() {
       const pageWs = new WebSocket(pageWsUrl);
 
       pageWs.on('message', (data: Buffer) => {
@@ -551,7 +551,7 @@ export class CdpSession {
           break;
         }
       }
-    }).pipe(Effect.ignore);
+    })().pipe(Effect.ignore);
   }
 
   // ─── Teardown ───────────────────────────────────────────────────────────
@@ -568,7 +568,7 @@ export class CdpSession {
 
   private destroyEffect(source: 'cleanup' | 'ws_close' | 'error'): Effect.Effect<void> {
     const session = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cdp.destroy')(function*() {
       session.state = 'DRAINING';
       session.log.info(`CdpSession destroying (${source}) for session ${session.sessionId}, targets=${session.targets.size}`);
 
@@ -624,7 +624,7 @@ export class CdpSession {
           }
         }
       }
-    }).pipe(
+    })().pipe(
       // Guaranteed cleanup — runs even if Effect times out or fails
       Effect.ensuring(Effect.sync(() => {
         session.eventCounts.clear();
@@ -825,7 +825,7 @@ export class CdpSession {
     const cdpSessionId = CdpSessionId.makeUnsafe(sessionId);
     const targetId = TargetId.makeUnsafe(targetInfo.targetId);
 
-    return Effect.gen(function*() {
+    return Effect.fn('cdp.onTargetAttached')(function*() {
       if (targetInfo.type === 'page') {
         session.log.info(`Target attached (paused=${waitingForDebugger}): targetId=${targetId} url=${targetInfo.url} type=${targetInfo.type}`);
         session.targets.add(targetId, cdpSessionId);
@@ -933,13 +933,13 @@ export class CdpSession {
           }
         }
       }
-    });
+    })();
   }
 
   private handleTargetCreatedEffect(msg: any): Effect.Effect<void> {
     const session = this;
     const { targetInfo } = msg.params;
-    return Effect.gen(function*() {
+    return Effect.fn('cdp.onTargetCreated')(function*() {
       if (targetInfo.type === 'page' && !session.targets.has(TargetId.makeUnsafe(targetInfo.targetId))) {
         session.log.info(`Discovered external target ${targetInfo.targetId} (url=${targetInfo.url}), attaching...`);
         yield* session.send('Target.attachToTarget', {
@@ -947,14 +947,14 @@ export class CdpSession {
           flatten: true,
         }).pipe(Effect.ignore);
       }
-    });
+    })();
   }
 
   private handleTargetDestroyedEffect(msg: any): Effect.Effect<void> {
     const session = this;
     const targetId = TargetId.makeUnsafe(msg.params.targetId);
 
-    return Effect.gen(function*() {
+    return Effect.fn('cdp.onTargetDestroyed')(function*() {
       const target = session.targets.getByTarget(targetId);
       if (target) {
         tabDuration.observe((Date.now() - target.startTime) / 1000);
@@ -1006,7 +1006,7 @@ export class CdpSession {
       // Atomic cleanup — removes from all indices, closes per-page WS, cleans iframe refs
       session.targets.remove(targetId);
       session.targets.removeIframeTarget(targetId);
-    });
+    })();
   }
 
   private handleTargetInfoChangedEffect(msg: any): Effect.Effect<void> {
@@ -1014,7 +1014,7 @@ export class CdpSession {
     const { targetInfo } = msg.params;
     const changedTargetId = TargetId.makeUnsafe(targetInfo.targetId);
 
-    return Effect.gen(function*() {
+    return Effect.fn('cdp.onTargetInfoChanged')(function*() {
       if (targetInfo.type === 'page') {
         const target = session.targets.getByTarget(changedTargetId);
         if (target) {
@@ -1049,7 +1049,7 @@ export class CdpSession {
 
         yield* session.cloudflareHooks.onIframeNavigated(changedTargetId, iframeCdpSid, targetInfo.url).pipe(Effect.ignore);
       }
-    });
+    })();
   }
 
   /**

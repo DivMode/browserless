@@ -47,7 +47,7 @@ export class DetectionRegistry {
    */
   register(targetId: TargetId, active: ActiveDetection): Effect.Effect<void> {
     const self = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.registry.register')(function*() {
       // If a detection already exists for this target, close its scope first
       const existing = self.entries.get(targetId);
       if (existing) {
@@ -71,7 +71,7 @@ export class DetectionRegistry {
           self.emitFallback(active, 'session_close');
         }
       }));
-    });
+    })();
   }
 
   /**
@@ -104,11 +104,11 @@ export class DetectionRegistry {
   destroyAll(): Effect.Effect<void> {
     // Snapshot entries before iteration — finalizers delete from map
     const entries = [...this.entries.values()];
-    return Effect.gen(function*() {
+    return Effect.fn('cf.registry.destroyAll')(function*() {
       for (const entry of entries) {
         yield* Scope.close(entry.scope, Exit.void);
       }
-    });
+    })();
   }
 
   // ═══════════════════════════════════════════════════════════════════════

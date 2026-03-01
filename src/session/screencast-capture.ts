@@ -234,7 +234,7 @@ export const createScreencastCapture = () => {
     sessionId: string,
     cdpSessionId: string,
   ): Effect.Effect<number> =>
-    Effect.gen(function*() {
+    Effect.fn('screencast.stopTargetCapture')(function*() {
       const session = sessions.get(sessionId);
       if (!session) return 0;
 
@@ -257,12 +257,12 @@ export const createScreencastCapture = () => {
 
       log.info(`Screencast stopped for target ${cdpSessionId}: ${count} frames`);
       return count;
-    });
+    })();
 
   // ── stopCapture (all targets) ────────────────────────────────────
 
   const stopCapture = (sessionId: string): Effect.Effect<number> =>
-    Effect.gen(function*() {
+    Effect.fn('screencast.stopCapture')(function*() {
       const session = sessions.get(sessionId);
       if (!session) return 0;
 
@@ -289,7 +289,7 @@ export const createScreencastCapture = () => {
 
       log.info(`Screencast stopped for session ${sessionId}: ${frameCount} frames`);
       return frameCount;
-    });
+    })();
 
   // ── handleTargetDestroyed (sync) ─────────────────────────────────
 

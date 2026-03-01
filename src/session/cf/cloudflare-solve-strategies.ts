@@ -1033,29 +1033,27 @@ export class CloudflareSolveStrategies {
   private openCleanPageWsScoped(targetId: TargetId): Effect.Effect<CdpConnection, CdpSessionGone, Scope.Scope> {
     const chromePort = this.chromePort;
     return Effect.acquireRelease(
-      Effect.tryPromise({
-        try: async () => {
-          const WebSocket = (await import('ws')).default;
-          const pageWsUrl = `ws://127.0.0.1:${chromePort}/devtools/page/${targetId}`;
-          const ws = new WebSocket(pageWsUrl);
+      Effect.gen(function*() {
+        const { default: WebSocket } = yield* Effect.promise(() => import('ws'));
+        const pageWsUrl = `ws://127.0.0.1:${chromePort}/devtools/page/${targetId}`;
+        const ws = new WebSocket(pageWsUrl);
 
-          await new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(() => { ws.terminate(); reject(new Error('Clean page WS timeout')); }, CLEAN_WS_OPEN_TIMEOUT_MS);
-            ws.on('open', () => { clearTimeout(timer); resolve(); });
-            ws.on('error', reject);
-          });
+        yield* Effect.callback<void, Error>((resume) => {
+          const timer = setTimeout(() => { ws.terminate(); resume(Effect.fail(new Error('Clean page WS timeout'))); }, CLEAN_WS_OPEN_TIMEOUT_MS);
+          ws.on('open', () => { clearTimeout(timer); resume(Effect.void); });
+          ws.on('error', (err) => { clearTimeout(timer); resume(Effect.fail(err)); });
+          return Effect.sync(() => { clearTimeout(timer); ws.terminate(); });
+        });
 
-          const conn = new CdpConnection(ws, { startId: 500_000, defaultTimeout: CLEAN_WS_CMD_TIMEOUT_MS });
+        const conn = new CdpConnection(ws, { startId: 500_000, defaultTimeout: CLEAN_WS_CMD_TIMEOUT_MS });
 
-          ws.on('message', (data: Buffer) => {
-            const msg = JSON.parse(data.toString());
-            conn.handleResponse(msg);
-          });
+        ws.on('message', (data: Buffer) => {
+          const msg = JSON.parse(data.toString());
+          conn.handleResponse(msg);
+        });
 
-          return conn;
-        },
-        catch: () => new CdpSessionGone({ sessionId: CdpSessionId.makeUnsafe(''), method: 'openCleanPageWs' }),
-      }),
+        return conn;
+      }).pipe(Effect.mapError(() => new CdpSessionGone({ sessionId: CdpSessionId.makeUnsafe(''), method: 'openCleanPageWs' }))),
       (conn) => Effect.sync(() => {
         conn.drainPending('cleanWs scope close');
         conn.dispose();

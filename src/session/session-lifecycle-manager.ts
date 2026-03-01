@@ -8,7 +8,7 @@ import {
 } from '@browserless.io/browserless';
 import { rm } from 'fs/promises';
 
-import { Effect } from 'effect';
+import { Duration, Effect, Fiber, Schedule } from 'effect';
 import { sessionDuration } from '../prom-metrics.js';
 import { SessionCoordinator } from './session-coordinator.js';
 import { SessionRegistry } from './session-registry.js';
@@ -24,8 +24,8 @@ import { SessionRegistry } from './session-registry.js';
  * This class is extracted from BrowserManager to reduce its complexity.
  */
 export class SessionLifecycleManager {
-  private timers: Map<string, NodeJS.Timeout> = new Map();
-  private watchdogTimer: NodeJS.Timeout | null = null;
+  private timerFibers: Map<string, Fiber.Fiber<void>> = new Map();
+  private watchdogFiber: Fiber.Fiber<unknown> | null = null;
   private log = new Logger('session-lifecycle');
   private baseUrl = process.env.BROWSERLESS_BASE_URL ?? '';
 
@@ -68,11 +68,11 @@ export class SessionLifecycleManager {
     const connected = session.numbConnected;
     const hasKeepUntil = keepUntil > now;
     const keepOpen = (connected > 0 || hasKeepUntil) && !force;
-    const priorTimer = this.timers.get(session.id);
+    const priorFiber = this.timerFibers.get(session.id);
 
-    if (priorTimer) {
+    if (priorFiber) {
       this.log.debug(`Deleting prior keep-until timer for "${session.id}"`);
-      global.clearTimeout(priorTimer);
+      Effect.runFork(Fiber.interrupt(priorFiber));
     }
 
     this.log.debug(
@@ -84,17 +84,19 @@ export class SessionLifecycleManager {
       this.log.trace(
         `Setting timer ${timeout.toLocaleString()} for "${session.id}"`,
       );
-      this.timers.set(
-        session.id,
-        global.setTimeout(() => {
-          this.timers.delete(session.id);
-          const currentSession = this.registry.get(browser);
-          if (currentSession) {
-            this.log.trace(`Timer hit for "${currentSession.id}"`);
-            this.close(browser, currentSession);
-          }
-        }, timeout),
+      const fiber = Effect.runFork(
+        Effect.sleep(Duration.millis(timeout)).pipe(
+          Effect.andThen(Effect.sync(() => {
+            this.timerFibers.delete(session.id);
+            const currentSession = this.registry.get(browser);
+            if (currentSession) {
+              this.log.trace(`Timer hit for "${currentSession.id}"`);
+              this.close(browser, currentSession);
+            }
+          })),
+        ),
       );
+      this.timerFibers.set(session.id, fiber);
     }
 
     let replayMetadata: ReplayCompleteParams | null = null;
@@ -263,21 +265,21 @@ export class SessionLifecycleManager {
   }
 
   /**
-   * Get the timers map.
+   * Get the timer fibers map.
    * Useful for testing.
    */
-  getTimers(): Map<string, NodeJS.Timeout> {
-    return this.timers;
+  getTimers(): Map<string, Fiber.Fiber<void>> {
+    return this.timerFibers;
   }
 
   /**
-   * Clear all timers.
+   * Clear all timers by interrupting their fibers.
    */
   clearTimers(): void {
-    for (const timer of this.timers.values()) {
-      clearTimeout(timer);
+    for (const fiber of this.timerFibers.values()) {
+      Effect.runFork(Fiber.interrupt(fiber));
     }
-    this.timers.clear();
+    this.timerFibers.clear();
   }
 
   /**
@@ -285,18 +287,25 @@ export class SessionLifecycleManager {
    * Safety net for unknown leak paths — catches sessions that survive normal cleanup.
    */
   startWatchdog(maxSessionAgeMs: number): void {
-    this.watchdogTimer = setInterval(() => {
-      const now = Date.now();
-      for (const [browser, session] of this.registry.toArray()) {
-        if (now - session.startedOn > maxSessionAgeMs) {
-          this.log.warn(`Watchdog: force-closing stale session ${session.id} (age=${Math.round((now - session.startedOn) / 1000)}s)`);
-          this.registry.remove(browser);
-          this.sessionCoordinator?.forceCleanup(session.id).catch(() => {});
-          browser.close().catch(() => {});
+    this.watchdogFiber = Effect.runFork(
+      Effect.sync(() => {
+        const now = Date.now();
+        for (const [browser, session] of this.registry.toArray()) {
+          if (now - session.startedOn > maxSessionAgeMs) {
+            this.log.warn(`Watchdog: force-closing stale session ${session.id} (age=${Math.round((now - session.startedOn) / 1000)}s)`);
+            this.registry.remove(browser);
+            this.sessionCoordinator?.forceCleanup(session.id).catch((e) => {
+              this.log.warn(`Watchdog forceCleanup failed: ${e instanceof Error ? e.message : String(e)}`);
+            });
+            browser.close().catch((e) => {
+              this.log.debug(`Watchdog browser.close() failed: ${e instanceof Error ? e.message : String(e)}`);
+            });
+          }
         }
-      }
-    }, 60_000);
-    this.watchdogTimer.unref();
+      }).pipe(
+        Effect.repeat(Schedule.fixed('60 seconds')),
+      ),
+    );
   }
 
   /**
@@ -306,9 +315,9 @@ export class SessionLifecycleManager {
     this.log.info('Closing down browser sessions');
 
     // Stop watchdog
-    if (this.watchdogTimer) {
-      clearInterval(this.watchdogTimer);
-      this.watchdogTimer = null;
+    if (this.watchdogFiber) {
+      await Effect.runPromise(Fiber.interrupt(this.watchdogFiber));
+      this.watchdogFiber = null;
     }
 
     // Stop all replay sessions (screencast + rrweb + video encoder)

@@ -65,77 +65,70 @@ export default class ChromiumDownloadPostRoute extends BrowserHTTPRoute {
     logger: Logger,
     browser: BrowserInstance,
   ): Promise<void> {
-    return new Promise(async (resolve, reject) => {
-      const config = this.config();
-      const downloadPath = path.join(
-        await config.getDownloadsDir(),
-        `.browserless.download.${id()}`,
-      );
+    const config = this.config();
+    const downloadPath = path.join(
+      await config.getDownloadsDir(),
+      `.browserless.download.${id()}`,
+    );
 
-      logger.info(`Generating a download directory at "${downloadPath}"`);
-      await mkdir(downloadPath);
-      const handler = functionHandler(config, logger, { downloadPath });
-      const response = await handler(req, browser).catch((e) => {
-        logger.error(`Error running download code handler: "${e}"`);
-        reject(e);
+    logger.info(`Generating a download directory at "${downloadPath}"`);
+    await mkdir(downloadPath);
+    const handler = functionHandler(config, logger, { downloadPath });
+    const response = await handler(req, browser);
+
+    const { page } = response;
+    logger.debug(`Download function has returned, finding downloads...`);
+    async function checkIfDownloadComplete(): Promise<string | null> {
+      if (res.headersSent) {
+        logger.trace(
+          `Request headers have been sent, terminating download watch.`,
+        );
         return null;
-      });
-
-      if (!response) {
-        return;
+      }
+      const [fileName] = await readdir(downloadPath);
+      if (!fileName || fileName.endsWith('.crdownload')) {
+        await sleep(500);
+        return checkIfDownloadComplete();
       }
 
-      const { page } = response;
-      logger.debug(`Download function has returned, finding downloads...`);
-      async function checkIfDownloadComplete(): Promise<string | null> {
-        if (res.headersSent) {
-          logger.trace(
-            `Request headers have been sent, terminating download watch.`,
-          );
-          return null;
-        }
-        const [fileName] = await readdir(downloadPath);
-        if (!fileName || fileName.endsWith('.crdownload')) {
-          await sleep(500);
-          return checkIfDownloadComplete();
-        }
+      logger.debug(`All files have finished downloading`);
 
-        logger.debug(`All files have finished downloading`);
+      return path.join(downloadPath, fileName);
+    }
 
-        return path.join(downloadPath, fileName);
-      }
+    const filePath = await checkIfDownloadComplete();
+    logger.debug(`Closing pages.`);
+    page.close();
+    page.removeAllListeners();
 
-      const filePath = await checkIfDownloadComplete();
-      logger.debug(`Closing pages.`);
-      page.close();
-      page.removeAllListeners();
+    const rmDownload = once(
+      () =>
+        filePath &&
+        deleteAsync(filePath, { force: true })
+          .then(() => {
+            logger.debug(
+              `Successfully deleted downloads from disk at "${filePath}"`,
+            );
+          })
+          .catch((err) => {
+            logger.error(
+              `Error cleaning up downloaded files: "${err}" at "${filePath}"`,
+            );
+          }),
+    );
 
-      const rmDownload = once(
-        () =>
-          filePath &&
-          deleteAsync(filePath, { force: true })
-            .then(() => {
-              logger.debug(
-                `Successfully deleted downloads from disk at "${filePath}"`,
-              );
-            })
-            .catch((err) => {
-              logger.error(
-                `Error cleaning up downloaded files: "${err}" at "${filePath}"`,
-              );
-            }),
-      );
+    if (res.headersSent || !filePath) {
+      rmDownload();
+      return;
+    }
+    const contentType = mimeTypes.get(path.extname(filePath));
+    if (contentType) {
+      res.setHeader('Content-Type', contentType);
+    }
 
-      if (res.headersSent || !filePath) {
-        rmDownload();
-        return;
-      }
-      const contentType = mimeTypes.get(path.extname(filePath));
-      if (contentType) {
-        res.setHeader('Content-Type', contentType);
-      }
-
-      return createReadStream(filePath)
+    // Stream the file — bridge to Promise for the createReadStream callback API
+    return new Promise<void>((resolve, reject) => {
+      createReadStream(filePath)
         .on('error', (error) => {
           if (error) {
             rmDownload();
