@@ -14,6 +14,7 @@ import {
 import { CdpSessionGone } from './cf/cf-errors.js';
 import { solveDetection as solveDetectionEffect } from './cf/cloudflare-solver.effect.js';
 import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
+import { OtelLayer } from '../otel-layer.js';
 
 /** Service union type — the R channel of the Effect solver runtime. */
 type SolverR =
@@ -197,6 +198,7 @@ export class CloudflareSolver {
     const baseLayers = Layer.mergeAll(
       cdpSenderLayer, tokenCheckerLayer, solverEventsLayer,
       detectionStarterLayer, solverConfigLayer, lifecycleLayer,
+      OtelLayer,
     );
 
     // oopifCheckerLayer needs CdpSender
