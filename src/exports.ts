@@ -36,7 +36,7 @@ export type {
 export { ok, err, isOk, isErr } from './interfaces/replay-store.interface.js';
 export * from './session/session-registry.js';
 export * from './session/session-lifecycle-manager.js';
-export * from './session/replay-coordinator.js';
+export * from './session/session-coordinator.js';
 export * from './browsers/browser-launcher.js';
 export * from './container/container.js';
 export * from './container/bootstrap.js';

@@ -10,7 +10,7 @@ import { rm } from 'fs/promises';
 
 import { Effect } from 'effect';
 import { sessionDuration } from '../prom-metrics.js';
-import { ReplayCoordinator } from './replay-coordinator.js';
+import { SessionCoordinator } from './session-coordinator.js';
 import { SessionRegistry } from './session-registry.js';
 
 /**
@@ -30,7 +30,7 @@ export class SessionLifecycleManager {
 
   constructor(
     private registry: SessionRegistry,
-    private replayCoordinator?: ReplayCoordinator,
+    private sessionCoordinator?: SessionCoordinator,
   ) {}
 
   /**
@@ -107,17 +107,17 @@ export class SessionLifecycleManager {
       sessionDuration.observe(durationSec);
 
       // Emit cf.solved for any unresolved CF detections (session-close fallback)
-      if (this.replayCoordinator) {
-        const solver = this.replayCoordinator.getCloudflareSolver(session.id);
+      if (this.sessionCoordinator) {
+        const solver = this.sessionCoordinator.getCloudflareSolver(session.id);
         if (solver) {
           await solver.emitUnresolvedDetections();
         }
       }
 
       // Stop replay and save if replay was enabled
-      // Uses ReplayCoordinator to ensure screencast frames are counted
-      if (session.replay && this.replayCoordinator) {
-        const result = await this.replayCoordinator.stopReplay(session.id, {
+      // Uses SessionCoordinator to ensure screencast frames are counted
+      if (session.replay && this.sessionCoordinator) {
+        const result = await this.sessionCoordinator.stopReplay(session.id, {
           browserType: browser.constructor.name,
           routePath: Array.isArray(session.routePath)
             ? session.routePath[0]
@@ -266,8 +266,8 @@ export class SessionLifecycleManager {
     this.log.info('Closing down browser sessions');
 
     // Stop all replay sessions (screencast + rrweb + video encoder)
-    if (this.replayCoordinator) {
-      await Effect.runPromise(this.replayCoordinator.shutdown()).catch((e) => {
+    if (this.sessionCoordinator) {
+      await Effect.runPromise(this.sessionCoordinator.shutdown()).catch((e) => {
         this.log.warn(`Replay coordinator shutdown failed: ${e instanceof Error ? e.message : String(e)}`);
       });
     }

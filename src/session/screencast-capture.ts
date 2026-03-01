@@ -1,7 +1,7 @@
 /**
  * CDP Screencast frame capture — fully independent from replay.
  *
- * This module knows nothing about replay-session, replay-coordinator, or
+ * This module knows nothing about cdp-session, session-coordinator, or
  * rrweb. It receives CDP lifecycle events via VideoHooks (defined in
  * video-services.ts) and manages video frame capture independently.
  *
@@ -145,7 +145,7 @@ const targetConsumer = (
 /**
  * Create an independent screencast capture system.
  *
- * Returns VideoHooks (for replay-session to call at lifecycle points)
+ * Returns VideoHooks (for cdp-session to call at lifecycle points)
  * plus stopCapture/getFrameCount for the coordinator to use directly.
  *
  * No class, no `this` — state is closure-scoped.
@@ -315,7 +315,7 @@ export const createScreencastCapture = () => {
   };
 
   return {
-    /** VideoHooks for replay-session — the decoupled interface */
+    /** VideoHooks for cdp-session — the decoupled interface */
     hooks,
     /** Direct access for coordinator: stop all targets, get frame count */
     stopCapture,

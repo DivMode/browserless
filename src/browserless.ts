@@ -462,7 +462,7 @@ export class Browserless extends EventEmitter {
     const store = this.sessionReplay.getStore();
     if (store) {
       this.videoManager.setStore(store);
-      const encoder = this.browserManager.getReplayCoordinator().getVideoEncoder();
+      const encoder = this.browserManager.getSessionCoordinator().getVideoEncoder();
       encoder.setStore(store);
       await encoder.cleanupOrphans(this.sessionReplay.getVideosDir());
     }

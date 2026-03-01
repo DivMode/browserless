@@ -368,7 +368,7 @@ export class CloudflareSolveStrategies {
       // ── Phase 1: Page-side DOM traversal (CLEAN page WS) ──────────────
       //
       // WHY A CLEAN WS IS CRITICAL:
-      // ReplaySession's WS has accumulated V8 state from recording setup:
+      // CdpSession's WS has accumulated V8 state from recording setup:
       //   - Page.addScriptToEvaluateOnNewDocument (rrweb injection)
       //   - Runtime.addBinding (__csrfp, __perf)
       // When ANY command — even safe ones like Runtime.callFunctionOn —
@@ -1021,7 +1021,7 @@ export class CloudflareSolveStrategies {
   /**
    * Open a fresh /devtools/page/{targetId} WS with zero V8 state.
    *
-   * WHY: ReplaySession's WS is tainted by rrweb's addScriptToEvaluateOnNewDocument
+   * WHY: CdpSession's WS is tainted by rrweb's addScriptToEvaluateOnNewDocument
    * and Runtime.addBinding calls. CF's WASM detects this accumulated V8 state and
    * rejects all subsequent clicks through the tainted connection. A fresh page WS
    * has zero state — matching how pydoll connects via /devtools/page/{targetId}.

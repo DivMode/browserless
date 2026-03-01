@@ -57,8 +57,8 @@ export default class CfSolvedPostRoute extends HTTPRoute {
       }
 
       const browserManager = this.browserManager();
-      const replayCoordinator = browserManager.getReplayCoordinator();
-      const handled = replayCoordinator.handleCfBeacon(sessionId ?? '', targetId, tokenLength);
+      const sessionCoordinator = browserManager.getSessionCoordinator();
+      const handled = sessionCoordinator.handleCfBeacon(sessionId ?? '', targetId, tokenLength);
 
       if (handled) {
         this.log.info(`Beacon: session=${sessionId ? sessionId.slice(0, 8) : 'broadcast'} target=${targetId.slice(0, 8)} len=${tokenLength}`);

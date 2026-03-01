@@ -7,7 +7,7 @@
  *
  * Video capture (ScreencastService) lives in video-services.ts.
  *
- * Concrete implementations are provided via Layer in replay-session.ts.
+ * Concrete implementations are provided via Layer in cdp-session.ts buildLayer().
  * Tests use Layer.succeed with mocks (same pattern as cf-services.ts).
  */
 import type { Effect } from 'effect';
