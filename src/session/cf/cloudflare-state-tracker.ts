@@ -105,6 +105,7 @@ export class CloudflareStateTracker {
   onTurnstileStateChange(state: string, iframeCdpSessionId: CdpSessionId): Effect.Effect<void> {
     const tracker = this;
     return Effect.fn('cf.state.onTurnstileStateChange')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cf.target_id': iframeCdpSessionId, 'cf.state': state });
       const pageTargetId = tracker.registry.findByIframeSession(iframeCdpSessionId);
       if (!pageTargetId) return;
 
@@ -188,6 +189,7 @@ export class CloudflareStateTracker {
   onAutoSolveBinding(cdpSessionId: CdpSessionId): Effect.Effect<void> {
     const tracker = this;
     return Effect.fn('cf.state.onAutoSolveBinding')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cf.target_id': cdpSessionId });
       const pageTargetId = tracker.findPageBySession(cdpSessionId);
       if (!pageTargetId) return;
 
@@ -203,6 +205,7 @@ export class CloudflareStateTracker {
         const token = yield* tracker.getTokenEffect(cdpSessionId).pipe(
           Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
         );
+        yield* Effect.annotateCurrentSpan({ 'cf.token_length': token?.length || 0 });
         tracker.events.emitStandaloneAutoSolved(pageTargetId, 'callback_binding', token?.length || 0, cdpSessionId);
         tracker.bindingSolvedTargets.add(pageTargetId);
       }
@@ -216,6 +219,10 @@ export class CloudflareStateTracker {
   onBeaconSolved(targetId: TargetId, tokenLength: number): Effect.Effect<void> {
     const tracker = this;
     return Effect.fn('cf.state.onBeaconSolved')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cf.target_id': targetId,
+        'cf.token_length': tokenLength,
+      });
       const active = tracker.registry.get(targetId);
 
       if (active && !active.aborted) {
@@ -264,6 +271,11 @@ export class CloudflareStateTracker {
   resolveAutoSolved(active: ActiveDetection, signal: string): Effect.Effect<void> {
     const tracker = this;
     return Effect.fn('cf.state.resolveAutoSolved')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cf.target_id': active.pageTargetId,
+        'cf.type': active.info.type,
+        'cf.signal': signal,
+      });
       const duration = Date.now() - active.startTime;
       const token = yield* tracker.getTokenEffect(active.pageCdpSessionId).pipe(
         Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
@@ -375,6 +387,7 @@ export class CloudflareStateTracker {
   private checkOOPIFStateIteration(active: ActiveDetection): Effect.Effect<'aborted' | 'continue', never, typeof OOPIFChecker.Identifier> {
     const tracker = this;
     return Effect.fn('cf.state.checkOOPIF')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cf.target_id': active.pageTargetId });
       if (active.iframeCdpSessionId) {
         const checker = yield* OOPIFChecker;
         const oopifState = yield* checker.check(active.iframeCdpSessionId).pipe(
@@ -399,6 +412,7 @@ export class CloudflareStateTracker {
 
     const activityIteration = (loopIter: number) =>
       Effect.fn('cf.state.activityIterationEmbedded')(function*() {
+        yield* Effect.annotateCurrentSpan({ 'cf.target_id': active.pageTargetId });
         // Check if solved via Runtime.evaluate — safe because page is the embedding site
         const solved = yield* tracker.isSolvedEffect(active.pageCdpSessionId).pipe(
           Effect.catchTag('CdpSessionGone', () => Effect.succeed(false)),
@@ -457,6 +471,7 @@ export class CloudflareStateTracker {
 
     const activityIteration = (loopIter: number) =>
       Effect.fn('cf.state.activityIterationInterstitial')(function*() {
+        yield* Effect.annotateCurrentSpan({ 'cf.target_id': active.pageTargetId });
         // NO isSolvedEffect — that uses Runtime.evaluate on the page session.
         // For interstitials, solving is detected via page navigation (onPageNavigated).
 
@@ -502,6 +517,7 @@ export class CloudflareStateTracker {
   unregisterPage(targetId: TargetId): Effect.Effect<void> {
     const tracker = this;
     return Effect.fn('cf.state.unregisterPage')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cf.target_id': targetId });
       // Scope finalizer handles orphaned detection emission — no manual emit needed.
       yield* tracker.registry.unregister(targetId);
 

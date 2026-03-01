@@ -22,6 +22,7 @@ export const tabConsumer = (
   targetId: TargetId,
 ): Effect.Effect<void, never, typeof ReplayWriter.Identifier | typeof ReplayMetrics.Identifier> =>
   Effect.fn('replay.tab')(function*() {
+    yield* Effect.annotateCurrentSpan({ 'replay.target_id': targetId });
     const writer = yield* ReplayWriter;
     const metrics = yield* ReplayMetrics;
     const startedAt = Date.now();
@@ -34,6 +35,7 @@ export const tabConsumer = (
     );
 
     // Queue ended (tab closed or session teardown) — write replay file
+    yield* Effect.annotateCurrentSpan({ 'replay.event_count': accumulated.length });
     if (accumulated.length === 0) return;
 
     yield* metrics.incEvents(accumulated.length);
@@ -56,8 +58,11 @@ export const tabConsumer = (
     };
 
     yield* writer.writeTabReplay(tabReplayId, accumulated, metadata).pipe(
+      Effect.tap(() => Effect.annotateCurrentSpan({ 'replay.write_success': true })),
       Effect.catchTag('ReplayStoreError', (err) =>
-        Effect.logWarning(`Failed to write tab replay ${tabReplayId}: ${err.message}`)),
+        Effect.annotateCurrentSpan({ 'replay.write_success': false }).pipe(
+          Effect.andThen(Effect.logWarning(`Failed to write tab replay ${tabReplayId}: ${err.message}`)),
+        )),
     );
 
     yield* metrics.observeTabDuration((endedAt - startedAt) / 1000);

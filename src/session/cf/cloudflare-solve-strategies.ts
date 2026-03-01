@@ -13,6 +13,7 @@ import {
   CLEAN_WS_OPEN_TIMEOUT_MS,
   CLEAN_WS_CMD_TIMEOUT_MS,
   TARGET_GET_TIMEOUT_MS,
+  CDP_CALL_TIMEOUT_MS,
 } from './cf-schedules.js';
 
 /** Result from detectTurnstileViaCDP — includes type info when available. */
@@ -93,33 +94,40 @@ export class CloudflareSolveStrategies {
     oopifSessionId: CdpSessionId,
   ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
     const strategies = this;
+    /** Wrap a CDP call with a timeout to prevent 30s hangs when OOPIF navigates away. */
+    const cdpCall = <T>(promise: () => Promise<T>) =>
+      Effect.tryPromise(promise).pipe(
+        Effect.timeout(`${CDP_CALL_TIMEOUT_MS} millis`),
+        Effect.orElseSucceed(() => null as T | null),
+      );
     return Effect.fn('cf.findCheckboxViaRuntime')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId, 'cf.via': 'runtime' });
       // Step 1: Get document node
-      const doc = yield* Effect.tryPromise(() => send('DOM.getDocument', {
+      const doc = yield* cdpCall(() => send('DOM.getDocument', {
         depth: 0,
-      }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+      }, oopifSessionId));
       if (!doc?.root) return null;
 
       // Step 2: Resolve document to get its objectId
-      const resolved = yield* Effect.tryPromise(() => send('DOM.resolveNode', {
+      const resolved = yield* cdpCall(() => send('DOM.resolveNode', {
         nodeId: doc.root.nodeId,
-      }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+      }, oopifSessionId));
       if (!resolved?.object?.objectId) return null;
 
       // Step 3: Find body element via Runtime.callFunctionOn
-      const bodyResult = yield* Effect.tryPromise(() => send('Runtime.callFunctionOn', {
+      const bodyResult = yield* cdpCall(() => send('Runtime.callFunctionOn', {
         objectId: resolved.object.objectId,
         functionDeclaration: `function() { return this.querySelector('body'); }`,
         returnByValue: false,
-      }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+      }, oopifSessionId));
       if (!bodyResult?.result?.objectId) return null;
 
       // Step 4: Describe body node with pierce=true to get shadow root
-      const bodyDesc = yield* Effect.tryPromise(() => send('DOM.describeNode', {
+      const bodyDesc = yield* cdpCall(() => send('DOM.describeNode', {
         objectId: bodyResult.result.objectId,
         pierce: true,
         depth: 1,
-      }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+      }, oopifSessionId));
 
       // The Turnstile checkbox is inside a shadow root on the body or a child.
       // Walk shadow roots to find the one containing span.cb-i.
@@ -138,11 +146,11 @@ export class CloudflareSolveStrategies {
       const children = bodyDesc?.node?.children;
       if (children?.length) {
         for (const child of children) {
-          const childDesc = yield* Effect.tryPromise(() => send('DOM.describeNode', {
+          const childDesc = yield* cdpCall(() => send('DOM.describeNode', {
             backendNodeId: child.backendNodeId,
             pierce: true,
             depth: 1,
-          }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+          }, oopifSessionId));
           if (childDesc?.node?.shadowRoots?.length) {
             for (const sr of childDesc.node.shadowRoots) {
               const found = yield* strategies.queryCheckboxInShadowUsing(send, oopifSessionId, sr.backendNodeId);
@@ -177,29 +185,36 @@ export class CloudflareSolveStrategies {
     contextId: number,
   ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
     const strategies = this;
+    /** Wrap a CDP call with a timeout to prevent 30s hangs when OOPIF navigates away. */
+    const cdpCall = <T>(promise: () => Promise<T>) =>
+      Effect.tryPromise(promise).pipe(
+        Effect.timeout(`${CDP_CALL_TIMEOUT_MS} millis`),
+        Effect.orElseSucceed(() => null as T | null),
+      );
     return Effect.fn('cf.findCheckboxViaIsolatedWorld')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId, 'cf.via': 'isolated_world' });
       // Get document root in the isolated world (pydoll: Runtime.evaluate('document.documentElement'))
-      const docResult = yield* Effect.tryPromise(() => send('Runtime.evaluate', {
+      const docResult = yield* cdpCall(() => send('Runtime.evaluate', {
         expression: 'document.documentElement',
         contextId,
         returnByValue: false,
-      }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+      }, oopifSessionId));
       if (!docResult?.result?.objectId) return null;
 
       // Find body (pydoll: iframe.find(tag_name='body'))
-      const bodyResult = yield* Effect.tryPromise(() => send('Runtime.callFunctionOn', {
+      const bodyResult = yield* cdpCall(() => send('Runtime.callFunctionOn', {
         objectId: docResult.result.objectId,
         functionDeclaration: `function() { return this.querySelector('body'); }`,
         returnByValue: false,
-      }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+      }, oopifSessionId));
       if (!bodyResult?.result?.objectId) return null;
 
       // Describe body with pierce to get shadow roots (pydoll: body.get_shadow_root())
-      const bodyDesc = yield* Effect.tryPromise(() => send('DOM.describeNode', {
+      const bodyDesc = yield* cdpCall(() => send('DOM.describeNode', {
         objectId: bodyResult.result.objectId,
         pierce: true,
         depth: 1,
-      }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+      }, oopifSessionId));
 
       const shadowRoots = bodyDesc?.node?.shadowRoots;
       if (shadowRoots?.length) {
@@ -213,11 +228,11 @@ export class CloudflareSolveStrategies {
       const children = bodyDesc?.node?.children;
       if (children?.length) {
         for (const child of children) {
-          const childDesc = yield* Effect.tryPromise(() => send('DOM.describeNode', {
+          const childDesc = yield* cdpCall(() => send('DOM.describeNode', {
             backendNodeId: child.backendNodeId,
             pierce: true,
             depth: 1,
-          }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+          }, oopifSessionId));
           if (childDesc?.node?.shadowRoots?.length) {
             for (const sr of childDesc.node.shadowRoots) {
               const found = yield* strategies.queryCheckboxInShadowUsing(send, oopifSessionId, sr.backendNodeId);
@@ -238,26 +253,33 @@ export class CloudflareSolveStrategies {
     oopifSessionId: CdpSessionId,
     shadowBackendNodeId: number,
   ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
+    /** Wrap a CDP call with a timeout to prevent hangs when OOPIF navigates away. */
+    const cdpCall = <T>(promise: () => Promise<T>) =>
+      Effect.tryPromise(promise).pipe(
+        Effect.timeout(`${CDP_CALL_TIMEOUT_MS} millis`),
+        Effect.orElseSucceed(() => null as T | null),
+      );
     return Effect.fn('cf.queryCheckboxInShadow')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId });
       // Resolve shadow root to objectId
-      const shadowResolved = yield* Effect.tryPromise(() => send('DOM.resolveNode', {
+      const shadowResolved = yield* cdpCall(() => send('DOM.resolveNode', {
         backendNodeId: shadowBackendNodeId,
-      }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+      }, oopifSessionId));
       if (!shadowResolved?.object?.objectId) return null;
 
       // Try span.cb-i first (Turnstile's primary checkbox indicator)
-      const cbResult = yield* Effect.tryPromise(() => send('Runtime.callFunctionOn', {
+      const cbResult = yield* cdpCall(() => send('Runtime.callFunctionOn', {
         objectId: shadowResolved.object.objectId,
         functionDeclaration: `function() { return this.querySelector('span.cb-i') || this.querySelector('input[type="checkbox"]'); }`,
         returnByValue: false,
-      }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+      }, oopifSessionId));
 
       if (!cbResult?.result?.objectId || cbResult.result.subtype === 'null') return null;
 
       // Get the backendNodeId for the checkbox (needed for getBoxModel)
-      const cbDesc = yield* Effect.tryPromise(() => send('DOM.describeNode', {
+      const cbDesc = yield* cdpCall(() => send('DOM.describeNode', {
         objectId: cbResult.result.objectId,
-      }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+      }, oopifSessionId));
 
       if (!cbDesc?.node?.backendNodeId) return null;
 
@@ -297,6 +319,11 @@ export class CloudflareSolveStrategies {
   ): Effect.Effect<boolean, never, StrategiesR> {
     const strategies = this;
     return Effect.fn('cf.findAndClickViaCDP')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cf.type': active.info.type,
+        'cf.target_id': active.pageTargetId,
+        'cf.attempt': attempt,
+      });
       const cdp = yield* CdpSender;
       const events = yield* SolverEvents;
       const { pageCdpSessionId, pageTargetId } = active;
@@ -468,6 +495,7 @@ export class CloudflareSolveStrategies {
   ): Effect.Effect<{ backendNodeId: number | null; frameId: string | null }> {
     const strategies = this;
     return Effect.fn('cf.phase1PageDomTraversal')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cf.target_id': pageTargetId });
       let backendNodeId: number | null = null;
       let frameId: string | null = null;
 
@@ -507,6 +535,11 @@ export class CloudflareSolveStrategies {
     via: string,
   ): Effect.Effect<CdpSessionId | null, never, typeof SolverEvents.Identifier> {
     return Effect.fn('cf.phase2OOPIFResolution')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cf.target_id': pageTargetId,
+        'cf.via': via,
+        'cf.has_iframe_frame_id': !!iframeFrameId,
+      });
       const events = yield* SolverEvents;
       const targetsResult = yield* Effect.tryPromise(() => send('Target.getTargets')).pipe(
         Effect.orElseSucceed(() => ({ targetInfos: [] as any[] })),
@@ -665,6 +698,7 @@ export class CloudflareSolveStrategies {
         }
       }
 
+      yield* Effect.annotateCurrentSpan({ 'cf.oopif_found': !!oopifSessionId });
       return oopifSessionId;
     })();
   }
@@ -682,6 +716,7 @@ export class CloudflareSolveStrategies {
     isolatedContextId: number | null,
   ): Effect.Effect<Record<string, unknown>> {
     return Effect.fn('cf.diagnoseShadowDOM')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId });
       const result: Record<string, unknown> = { alive: false };
 
       // Check if OOPIF session is alive via body innerHTML length
@@ -738,6 +773,11 @@ export class CloudflareSolveStrategies {
     const strategies = this;
     const pageTargetId = active.pageTargetId;
     return Effect.fn('cf.phase3CheckboxFind')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cf.type': active.info.type,
+        'cf.target_id': pageTargetId,
+        'cf.via': via,
+      });
       const events = yield* SolverEvents;
       // Create isolated world
       let isolatedContextId: number | null = null;
@@ -810,12 +850,14 @@ export class CloudflareSolveStrategies {
       }
 
       if (!checkbox) {
+        yield* Effect.annotateCurrentSpan({ 'cf.checkbox_found': false, 'cf.poll_count': pollCount });
         // Snapshot shadow DOM state for diagnostics — tells us WHY the checkbox wasn't found
         const diag = yield* strategies.diagnoseShadowDOM(send, oopifSessionId, isolatedContextId);
         yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox', { via, polls: pollCount, diag });
         return null;
       }
 
+      yield* Effect.annotateCurrentSpan({ 'cf.checkbox_found': true, 'cf.poll_count': pollCount, 'cf.checkbox_method': method });
       const checkboxFoundAt = Date.now();
       yield* events.marker(pageTargetId, 'cf.cdp_checkbox_found', {
         method, backendNodeId: checkbox.backendNodeId,
@@ -844,6 +886,13 @@ export class CloudflareSolveStrategies {
     const strategies = this;
     const pageTargetId = active.pageTargetId;
     return Effect.fn('cf.phase4Click')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cf.type': active.info.type,
+        'cf.target_id': pageTargetId,
+        'cf.via': via,
+        'cf.attempt': attempt,
+        'cf.checkbox_method': method,
+      });
       const events = yield* SolverEvents;
       // Pydoll does a visibility check (getBoundingClientRect + getComputedStyle)
       // before clicking. This confirms the element is rendered and interactive.
@@ -969,6 +1018,7 @@ export class CloudflareSolveStrategies {
       // Track click delivery for solve attribution
       active.clickDelivered = true;
       active.clickDeliveredAt = Date.now();
+      yield* Effect.annotateCurrentSpan({ 'cf.click_delivered': true });
       yield* events.emitProgress(active, 'clicked', { x: clickX, y: clickY });
 
       yield* events.marker(pageTargetId, 'cf.oopif_click', {
@@ -997,6 +1047,7 @@ export class CloudflareSolveStrategies {
   ): Effect.Effect<{ x: number | null; y: number | null }> {
     const strategies = this;
     return Effect.fn('cf.getIframePageCoords')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cf.target_id': pageTargetId });
       // acquireRelease guarantees WS cleanup even on fiber interruption
       const conn = yield* strategies.openCleanPageWsScoped(pageTargetId).pipe(
         Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
@@ -1111,6 +1162,7 @@ export class CloudflareSolveStrategies {
    */
   detectTurnstileViaCDP(_pageCdpSessionId: CdpSessionId): Effect.Effect<CFDetectionResult | null, never, typeof CdpSender.Identifier> {
     return Effect.fn('cf.detectTurnstileViaCDP')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cf.target_id': _pageCdpSessionId });
       const cdp = yield* CdpSender;
       const result = yield* cdp.sendViaProxy('Target.getTargets', {}, undefined, TARGET_GET_TIMEOUT_MS).pipe(
         Effect.orElseSucceed(() => null),
@@ -1147,6 +1199,7 @@ export class CloudflareSolveStrategies {
   > {
     const strategies = this;
     return Effect.fn('cf.checkOOPIFStateViaCDP')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cf.target_id': iframeCdpSessionId });
       const cdp = yield* CdpSender;
       const doc = yield* cdp.send('DOM.getDocument', { depth: -1, pierce: true }, iframeCdpSessionId).pipe(
         Effect.orElseSucceed(() => null),

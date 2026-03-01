@@ -181,6 +181,7 @@ export class SessionCoordinator {
     if (!sessionReplay) return Effect.succeed(null);
 
     return Effect.fn('coordinator.stopReplay')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'session.id': sessionId });
       // Phase 1: Stop screencast capture → frame count
       const frameCount = yield* Effect.tryPromise(
         () => Effect.runPromise(coordinator.screencast.stopCapture(sessionId)),
@@ -254,6 +255,7 @@ export class SessionCoordinator {
     const coordinator = this;
     return Effect.fn('coordinator.shutdown')(function*() {
       const sessionIds = [...coordinator.cdpSessions.keys()];
+      yield* Effect.annotateCurrentSpan({ 'session.target_count': sessionIds.length });
       coordinator.log.info(`Shutting down ${sessionIds.length} session(s)...`);
 
       for (const sessionId of sessionIds) {

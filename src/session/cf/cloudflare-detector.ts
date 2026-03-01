@@ -68,6 +68,10 @@ export class CloudflareDetector {
   onPageAttachedEffect(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void, never, DetectorR> {
     const self = this;
     return Effect.fn('cf.detector.onPageAttached')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cf.target_id': targetId,
+        'cf.url': url?.substring(0, 200) ?? '',
+      });
       self.state.registerPage(targetId, cdpSessionId);
       if (!self.enabled || !url || url.startsWith('about:')) return;
 
@@ -89,6 +93,10 @@ export class CloudflareDetector {
   onPageNavigatedEffect(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void, never, DetectorR> {
     const self = this;
     return Effect.fn('cf.detector.onPageNavigated')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cf.target_id': targetId,
+        'cf.url': url?.substring(0, 200) ?? '',
+      });
       self.state.registerPage(targetId, cdpSessionId);
 
       const active = self.state.registry.get(targetId);
@@ -380,6 +388,12 @@ export class CloudflareDetector {
   ): Effect.Effect<void, never, DetectorR> {
     const self = this;
     return Effect.fn('cf.triggerSolveFromUrl')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cf.target_id': targetId,
+        'cf.type': cfType,
+        'cf.url': url.substring(0, 200),
+        'cf.detection_method': 'url_pattern',
+      });
       if (self.state.destroyed || !self.enabled) return;
       if (self.state.registry.has(targetId)) {
         self.log.info(`triggerSolveFromUrl: SKIPPED — activeDetection already exists for ${targetId} (type=${self.state.registry.get(targetId)!.info.type})`);
@@ -441,6 +455,7 @@ export class CloudflareDetector {
   detectTurnstileWidgetEffect(targetId: TargetId, cdpSessionId: CdpSessionId): Effect.Effect<void, never, DetectorR> {
     const self = this;
     return Effect.fn('cf.detectTurnstileWidget')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cf.target_id': targetId });
       if (self.state.destroyed || !self.enabled) return;
       if (self.state.registry.has(targetId)) return;
 
@@ -478,6 +493,11 @@ export class CloudflareDetector {
   ): Effect.Effect<void, never, DetectorR> {
     const self = this;
     return Effect.fn('cf.handleTurnstileDetection')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cf.target_id': targetId,
+        'cf.type': detection.cfType ?? 'turnstile',
+        'cf.detection_method': 'cdp_dom_walk',
+      });
       const rechallengeCount = self.state.pendingRechallengeCount.get(targetId) || 0;
       self.state.pendingRechallengeCount.delete(targetId);
 

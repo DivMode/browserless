@@ -48,6 +48,11 @@ export class DetectionRegistry {
   register(targetId: TargetId, active: ActiveDetection): Effect.Effect<void> {
     const self = this;
     return Effect.fn('cf.registry.register')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cf.target_id': targetId,
+        'cf.type': active.info.type,
+        'cf.detection_method': active.info.detectionMethod ?? 'unknown',
+      });
       // If a detection already exists for this target, close its scope first
       const existing = self.entries.get(targetId);
       if (existing) {
@@ -104,7 +109,9 @@ export class DetectionRegistry {
   destroyAll(): Effect.Effect<void> {
     // Snapshot entries before iteration — finalizers delete from map
     const entries = [...this.entries.values()];
+    const count = entries.length;
     return Effect.fn('cf.registry.destroyAll')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cf.count': count });
       for (const entry of entries) {
         yield* Scope.close(entry.scope, Exit.void);
       }

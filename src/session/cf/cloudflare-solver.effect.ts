@@ -13,6 +13,15 @@ import type { SolveOutcome } from './cloudflare-solve-strategies.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
 import { TokenChecker, SolverEvents, SolveDeps } from './cf-services.js';
 
+/** Annotate the current span with ActiveDetection context for Tempo filtering. */
+const annotateActive = (active: ActiveDetection) =>
+  Effect.annotateCurrentSpan({
+    'cf.type': active.info.type,
+    'cf.target_id': active.pageTargetId,
+    'cf.detection_method': active.info.detectionMethod ?? 'unknown',
+    ...(active.info.url ? { 'cf.url': active.info.url.substring(0, 200) } : {}),
+  });
+
 /** Yielded type of the SolveDeps service. */
 type SolveDepsI = typeof SolveDeps.Service;
 
@@ -42,6 +51,7 @@ export const solveDetection = (
   active: ActiveDetection,
 ) =>
   Effect.fn('cf.solveDetection')(function*() {
+    yield* annotateActive(active);
     if (active.aborted) return 'aborted' as SolveOutcome;
 
     const events = yield* SolverEvents;
@@ -127,6 +137,7 @@ const solveByClicking = (
   deps: SolveDepsI,
 ) =>
   Effect.fn('cf.solveByClicking')(function*() {
+    yield* annotateActive(active);
     // Phase 1: Try to click the checkbox
     if (active.aborted) return false;
 
@@ -163,6 +174,7 @@ const solveTurnstile = (
   deps: SolveDepsI,
 ) =>
   Effect.fn('cf.solveTurnstile')(function*() {
+    yield* annotateActive(active);
     if (active.aborted) return false;
 
     const { pageCdpSessionId, pageTargetId } = active;
@@ -252,6 +264,7 @@ const postClickWait = (
   deps: SolveDepsI,
 ) =>
   Effect.fn('cf.postClickWait')(function*() {
+    yield* annotateActive(active);
     const { pageCdpSessionId, pageTargetId } = active;
     const events = yield* SolverEvents;
     const tokens = yield* TokenChecker;
@@ -265,7 +278,10 @@ const postClickWait = (
     }
 
     // If navigation happened (interstitial), we're done — don't token-poll
-    if (active.aborted) return true;
+    if (active.aborted) {
+      yield* Effect.annotateCurrentSpan({ 'cf.resolved': true, 'cf.resolution_signal': 'navigation' });
+      return true;
+    }
 
     // Phase B: No navigation — this is an embedded widget. Poll for token.
     // Runtime.evaluate is safe here: the page is NOT a CF challenge page,
@@ -275,12 +291,14 @@ const postClickWait = (
         Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
       );
       if (token) {
+        yield* Effect.annotateCurrentSpan({ 'cf.resolved': true, 'cf.resolution_signal': 'token_poll', 'cf.token_length': token.length });
         yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: token.length });
         yield* deps.resolveAutoSolved(active, 'token_poll');
         return true;
       }
       yield* Effect.sleep(TOKEN_POLL_DELAY);
     }
+    yield* Effect.annotateCurrentSpan({ 'cf.resolved': false });
     return true;
   })();
 
@@ -294,6 +312,7 @@ const pollForAutoSolveToken = (
   deps: SolveDepsI,
 ) =>
   Effect.fn('cf.pollForAutoSolveToken')(function*() {
+    yield* annotateActive(active);
     const { pageCdpSessionId, pageTargetId } = active;
     const events = yield* SolverEvents;
     const tokens = yield* TokenChecker;
@@ -307,6 +326,7 @@ const pollForAutoSolveToken = (
         Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
       );
       if (token) {
+        yield* Effect.annotateCurrentSpan({ 'cf.token_found': true, 'cf.token_length': token.length });
         yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: token.length });
         yield* deps.resolveAutoSolved(active, 'token_poll');
         return true;
@@ -315,6 +335,7 @@ const pollForAutoSolveToken = (
       if (active.aborted) return false;
     }
 
+    yield* Effect.annotateCurrentSpan({ 'cf.token_found': false });
     return false;
   })();
 
@@ -324,6 +345,7 @@ const pollForAutoSolveToken = (
 
 const waitForAutoNav = (active: ActiveDetection) =>
   Effect.fn('cf.waitForAutoNav')(function*() {
+    yield* annotateActive(active);
     if (active.aborted) return;
 
     // If Latch is available, block until abort signal (zero CPU) with timeout.
@@ -350,6 +372,7 @@ const solveAutomatic = (
   deps: SolveDepsI,
 ) =>
   Effect.fn('cf.solveAutomatic')(function*() {
+    yield* annotateActive(active);
     if (active.aborted) return;
     const events = yield* SolverEvents;
     yield* events.marker(active.pageTargetId, 'cf.presence_start', { type: active.info.type });

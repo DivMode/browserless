@@ -75,6 +75,7 @@ const targetConsumer = (
   sendCommand: SendCommand,
 ): Effect.Effect<number> =>
   Effect.fn('screencast.target')(function*() {
+    yield* Effect.annotateCurrentSpan({ 'screencast.target_id': cdpSessionId });
     let frameCount = 0;
 
     // Ref holds the current fallback fiber so we can interrupt+restart it
@@ -137,6 +138,7 @@ const targetConsumer = (
     const fb = yield* Ref.get(fallbackRef);
     if (fb) yield* Fiber.interrupt(fb).pipe(Effect.ignore);
 
+    yield* Effect.annotateCurrentSpan({ 'screencast.frame_count': frameCount });
     return frameCount;
   })();
 
@@ -179,6 +181,7 @@ export const createScreencastCapture = () => {
     targetId: string,
   ): Effect.Effect<void> =>
     Effect.fn('screencast.addTarget')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'screencast.target_id': targetId });
       const session = sessions.get(sessionId);
       if (!session) return;
 
@@ -235,6 +238,7 @@ export const createScreencastCapture = () => {
     cdpSessionId: string,
   ): Effect.Effect<number> =>
     Effect.fn('screencast.stopTargetCapture')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'screencast.target_id': cdpSessionId });
       const session = sessions.get(sessionId);
       if (!session) return 0;
 
@@ -264,6 +268,7 @@ export const createScreencastCapture = () => {
   const stopCapture = (sessionId: string): Effect.Effect<number> =>
     Effect.fn('screencast.stopCapture')(function*() {
       const session = sessions.get(sessionId);
+      yield* Effect.annotateCurrentSpan({ 'screencast.target_count': session?.targets.size ?? 0 });
       if (!session) return 0;
 
       for (const [, target] of session.targets) {
