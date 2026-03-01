@@ -546,7 +546,13 @@ export class CloudflareDetector {
         self.state.pendingIframes.delete(targetId);
       }
       self.events.emitDetected(active);
-      self.events.marker(targetId, 'cf.detected', { type: 'turnstile', method: 'cdp_dom_walk' });
+      self.events.marker(targetId, 'cf.detected', {
+        type: 'turnstile', method: 'cdp_dom_walk',
+        oopif_count: detection.targets.length,
+        oopif_urls: detection.targets.map(t => t.url).join(' | '),
+        oopif_ids: detection.targets.map(t => t.targetId.slice(0, 8)).join(','),
+        solved_set_size: self.state.solvedCFTargetIds.size,
+      });
 
       // Dispatch solve via Effect service — no more Promise bridge
       const dispatcher = yield* SolveDispatcher;
