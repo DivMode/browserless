@@ -392,6 +392,10 @@ export class CdpSession {
     const session = this;
     return Effect.fn('cdp.collectEvents')(function*() {
       const target = session.targets.getByTarget(targetId);
+      yield* Effect.annotateCurrentSpan({
+        'cdp.target_id': targetId,
+        'cdp.session_id': target?.cdpSessionId ?? 'unknown',
+      });
       if (!target) return;
 
       const result = yield* session.send('Runtime.evaluate', {
@@ -423,6 +427,7 @@ export class CdpSession {
   private finalizeTabEffect(targetId: TargetId, timeoutMs = 30_000): Effect.Effect<void> {
     const session = this;
     return Effect.fn('cdp.finalizeTab')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cdp.target_id': targetId });
       const target = session.targets.getByTarget(targetId);
       if (target?.finalizedResult) return; // prevent double-finalization
 
@@ -479,6 +484,7 @@ export class CdpSession {
     const pageWsUrl = `ws://127.0.0.1:${this.chromePort}/devtools/page/${targetId}`;
 
     return Effect.fn('cdp.openPageWs')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cdp.target_id': targetId });
       const pageWs = new WebSocket(pageWsUrl);
 
       pageWs.on('message', (data: Buffer) => {
@@ -488,7 +494,7 @@ export class CdpSession {
           conn?.handleResponse(msg);
         } catch {}
       });
-      pageWs.on('error', () => { /* silent — fallback to browser WS */ });
+      pageWs.on('error', (err: Error) => { session.log.warn(`Per-page WS error for ${targetId}: ${err.message}`); });
       pageWs.on('close', () => {
         const target = session.targets.getByTarget(targetId);
         if (target && target.pageWebSocket === pageWs) {
@@ -548,7 +554,7 @@ export class CdpSession {
           });
         });
         if (!gotPong) {
-          session.log.debug(`Per-page WS for ${targetId} missed pong — closing (fallback to browser WS)`);
+          session.log.warn(`Per-page WS for ${targetId} missed pong — closing (fallback to browser WS)`);
           pageWs.terminate();
           break;
         }
@@ -571,6 +577,10 @@ export class CdpSession {
   private destroyEffect(source: 'cleanup' | 'ws_close' | 'error'): Effect.Effect<void> {
     const session = this;
     return Effect.fn('cdp.destroy')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cdp.session_id': session.sessionId,
+        'cdp.destroy_source': source,
+      });
       session.state = 'DRAINING';
       session.log.info(`CdpSession destroying (${source}) for session ${session.sessionId}, targets=${session.targets.size}`);
 
@@ -638,7 +648,7 @@ export class CdpSession {
   private async _doDestroy(source: 'cleanup' | 'ws_close' | 'error'): Promise<void> {
     // Run the Effect pipeline
     await Effect.runPromise(this.destroyEffect(source)).catch((e) => {
-      this.log.warn(`destroyEffect error: ${e instanceof Error ? e.message : String(e)}`);
+      this.log.warn(`destroyEffect error: session_id=${this.sessionId} source=${source} error=${e instanceof Error ? e.message : String(e)}`);
     });
 
     // Dispose unified runtime — interrupt all fibers, cleanup FiberMap,
@@ -721,7 +731,9 @@ export class CdpSession {
           const targetId = msg.params?.targetInfo?.targetId ?? msg.params?.targetId ?? '';
           this.runtime.runFork(
             FiberMap.run(this._fiberMap, `msg:${msg.method}:${targetId}`,
-              handler(msg).pipe(Effect.ignore)),
+              handler(msg).pipe(
+                Effect.tapError((e) => Effect.logWarning(`CDP handler error: method=${msg.method} target=${targetId} error=${e}`)),
+                Effect.ignore)),
           );
         }
       }
@@ -828,6 +840,12 @@ export class CdpSession {
     const targetId = TargetId.makeUnsafe(targetInfo.targetId);
 
     return Effect.fn('cdp.onTargetAttached')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cdp.target_id': targetId,
+        'cdp.target_type': targetInfo.type,
+        'cdp.url': targetInfo.url?.substring(0, 200) ?? '',
+        'cdp.session_id': session.sessionId,
+      });
       if (targetInfo.type === 'page') {
         session.log.info(`Target attached (paused=${waitingForDebugger}): targetId=${targetId} url=${targetInfo.url} type=${targetInfo.type}`);
         session.targets.add(targetId, cdpSessionId);
@@ -942,6 +960,11 @@ export class CdpSession {
     const session = this;
     const { targetInfo } = msg.params;
     return Effect.fn('cdp.onTargetCreated')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cdp.target_id': targetInfo.targetId,
+        'cdp.target_type': targetInfo.type,
+        'cdp.url': targetInfo.url?.substring(0, 200) ?? '',
+      });
       if (targetInfo.type === 'page' && !session.targets.has(TargetId.makeUnsafe(targetInfo.targetId))) {
         session.log.info(`Discovered external target ${targetInfo.targetId} (url=${targetInfo.url}), attaching...`);
         yield* session.send('Target.attachToTarget', {
@@ -957,6 +980,7 @@ export class CdpSession {
     const targetId = TargetId.makeUnsafe(msg.params.targetId);
 
     return Effect.fn('cdp.onTargetDestroyed')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'cdp.target_id': targetId });
       const target = session.targets.getByTarget(targetId);
       if (target) {
         tabDuration.observe((Date.now() - target.startTime) / 1000);
@@ -1017,6 +1041,11 @@ export class CdpSession {
     const changedTargetId = TargetId.makeUnsafe(targetInfo.targetId);
 
     return Effect.fn('cdp.onTargetInfoChanged')(function*() {
+      yield* Effect.annotateCurrentSpan({
+        'cdp.target_id': changedTargetId,
+        'cdp.target_type': targetInfo.type,
+        'cdp.url': targetInfo.url?.substring(0, 200) ?? '',
+      });
       if (targetInfo.type === 'page') {
         const target = session.targets.getByTarget(changedTargetId);
         if (target) {

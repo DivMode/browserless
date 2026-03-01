@@ -78,3 +78,6 @@ export const EMBEDDED_SUCCESS_WAIT_MS = 1_000;
 
 /** State tracker: poll interval for post-success state checks (ms). */
 export const STATE_POLL_INTERVAL_MS = 500;
+
+/** Individual CDP call timeout within checkbox-finding methods (ms). */
+export const CDP_CALL_TIMEOUT_MS = 5_000;
