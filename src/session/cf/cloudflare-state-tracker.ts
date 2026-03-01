@@ -77,6 +77,8 @@ export class CloudflareStateTracker {
   /** Reverse index: CdpSessionId → TargetId for O(1) findPageBySession lookups. */
   private readonly sessionToTarget = new Map<CdpSessionId, TargetId>();
   readonly bindingSolvedTargets = new Set<TargetId>();
+  /** CF OOPIF targetIds from completed solves — filtered out of future detection polls to prevent phantom re-detection of stale OOPIFs. */
+  readonly solvedCFTargetIds = new Set<string>();
   readonly pendingIframes = new Map<TargetId, { iframeCdpSessionId: CdpSessionId; iframeTargetId: TargetId }>();
   readonly pendingRechallengeCount = new Map<TargetId, number>();
   config: Required<CloudflareConfig> = { maxAttempts: 3, attemptTimeout: 30000, recordingMarkers: true };
@@ -549,6 +551,7 @@ export class CloudflareStateTracker {
       this.knownPages.clear();
       this.sessionToTarget.clear();
       this.bindingSolvedTargets.clear();
+      this.solvedCFTargetIds.clear();
       this.pendingIframes.clear();
     }).bind(this));
   }

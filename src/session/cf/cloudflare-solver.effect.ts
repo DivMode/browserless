@@ -8,7 +8,7 @@
  * The CloudflareSolver bridge (cloudflare-solver.ts) provides the services
  * via ManagedRuntime and calls these via runtime.runPromise().
  */
-import { Effect } from 'effect';
+import { Effect, Fiber } from 'effect';
 import type { SolveOutcome } from './cloudflare-solve-strategies.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
 import { TokenChecker, SolverEvents, SolveDeps } from './cf-services.js';
@@ -199,34 +199,70 @@ const solveTurnstile = (
 
     let clicked = false;
 
+    // Concurrent token poll — runs alongside each findAndClickViaCDP attempt.
+    // Non-interactive widgets (Ahrefs) auto-solve in ~3-5s. Without this,
+    // the token arrives DURING the 4s checkbox polling loop but nobody checks.
+    // This fiber polls every 500ms and, if a token appears, sets a flag.
+    // The main loop checks the flag between operations.
+    //
+    // SAFE because turnstile type = always EMBEDDED — Runtime.evaluate targets
+    // the embedding page (e.g. ahrefs.com), NOT the CF OOPIF.
+    const tokenFound = { value: false };
+    yield* events.marker(pageTargetId, 'cf.concurrent_poll_start', { deadline_ms: SOLVE_DEADLINE_MS });
+    const tokenPollFiber = yield* Effect.forkChild(
+      Effect.gen(function*() {
+        let pollCount = 0;
+        while (!active.aborted && Date.now() < deadline && !tokenFound.value) {
+          yield* Effect.sleep(AUTO_SOLVE_POLL_DELAY);
+          if (active.aborted || tokenFound.value) return;
+          pollCount++;
+          const token = yield* tokens.getToken(pageCdpSessionId).pipe(
+            Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
+          );
+          if (token) {
+            tokenFound.value = true;
+            yield* events.marker(pageTargetId, 'cf.token_polled', {
+              token_length: token.length,
+              concurrent: true,
+              concurrent_polls: pollCount,
+            });
+            yield* deps.resolveAutoSolved(active, 'token_poll');
+          }
+        }
+      }).pipe(Effect.ignore),
+    );
+
     for (let attempt = 0; attempt < MAX_CLICK_ATTEMPTS; attempt++) {
-      if (active.aborted || Date.now() > deadline) return false;
+      if (active.aborted || Date.now() > deadline || tokenFound.value) break;
 
       if (attempt > 0) {
         yield* Effect.sleep(CLICK_RETRY_DELAY);
       }
 
-      // Token check every attempt — safe for embedded turnstile (see above).
-      // Non-interactive widgets may auto-solve mid-loop; catch them before
-      // wasting another 4s on checkbox polling.
-      const token = yield* tokens.getToken(pageCdpSessionId).pipe(
-        Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
-      );
-      if (token) {
-        yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: token.length });
-        yield* deps.resolveAutoSolved(active, 'token_poll');
-        return true;
-      }
+      // Quick sync check — concurrent fiber may have found token during sleep
+      if (tokenFound.value) break;
 
       const result = yield* deps.findAndClickViaCDP(active, attempt).pipe(
         Effect.catch(() => Effect.succeed(false)),
       );
+
+      // Check again after findAndClickViaCDP — token may have arrived during
+      // the ~5s checkbox polling loop
+      if (tokenFound.value) break;
 
       if (result) {
         yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
         clicked = true;
         break;
       }
+    }
+
+    // Stop the concurrent token poll fiber
+    yield* Fiber.interrupt(tokenPollFiber).pipe(Effect.ignore);
+
+    // Token found by concurrent poll — already resolved, just return
+    if (tokenFound.value) {
+      return true;
     }
 
     if (!clicked) {
