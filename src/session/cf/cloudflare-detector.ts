@@ -440,6 +440,16 @@ export class CloudflareDetector {
       if (outcome === 'no_click') {
         yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
       }
+
+      // Snapshot ALL current CF OOPIFs so post-navigation detection won't re-detect stale targets
+      const postSolveSnapshot = yield* self.strategies.detectTurnstileViaCDP(cdpSessionId).pipe(
+        Effect.orElseSucceed(() => null),
+      );
+      if (postSolveSnapshot?.matchedTargetIds) {
+        for (const id of postSolveSnapshot.matchedTargetIds) {
+          self.state.solvedCFTargetIds.add(id);
+        }
+      }
     })();
   }
 
@@ -467,12 +477,18 @@ export class CloudflareDetector {
         if (self.state.bindingSolvedTargets.has(targetId)) return;
 
         // detectTurnstileViaCDP now returns Effect — yield* directly
-        const detection = yield* self.strategies.detectTurnstileViaCDP(cdpSessionId).pipe(
+        // Pass solvedCFTargetIds to filter out stale OOPIFs from prior solves
+        const detection = yield* self.strategies.detectTurnstileViaCDP(cdpSessionId, self.state.solvedCFTargetIds).pipe(
           Effect.orElseSucceed(() => null),
         );
 
         if (detection?.present) {
           yield* self.handleTurnstileDetection(targetId, cdpSessionId, detection, startTime);
+          // After solve completes (success or failure), mark these CF OOPIFs as handled
+          // so future detection polls on this session won't re-detect the stale targets
+          for (const id of detection.matchedTargetIds) {
+            self.state.solvedCFTargetIds.add(id);
+          }
           return;
         }
 

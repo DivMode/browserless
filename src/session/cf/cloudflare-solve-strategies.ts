@@ -21,6 +21,8 @@ export interface CFDetectionResult {
   present: boolean;
   cfType?: CloudflareType;
   cRay?: string;
+  /** Target IDs of CF-matching OOPIFs found in this detection poll. Used by the detector to mark them as solved after the solve completes, preventing stale OOPIF re-detection. */
+  matchedTargetIds: string[];
 }
 
 export type SolveOutcome =
@@ -1160,22 +1162,23 @@ export class CloudflareSolveStrategies {
    * Runtime.evaluate = rechallenge. Target.getTargets is browser-level and
    * completely invisible to the page.
    */
-  detectTurnstileViaCDP(_pageCdpSessionId: CdpSessionId): Effect.Effect<CFDetectionResult | null, never, typeof CdpSender.Identifier> {
+  detectTurnstileViaCDP(_pageCdpSessionId: CdpSessionId, solvedCFTargetIds?: ReadonlySet<string>): Effect.Effect<CFDetectionResult | null, never, typeof CdpSender.Identifier> {
     return Effect.fn('cf.detectTurnstileViaCDP')(function*() {
       yield* Effect.annotateCurrentSpan({ 'cf.target_id': _pageCdpSessionId });
       const cdp = yield* CdpSender;
       const result = yield* cdp.sendViaProxy('Target.getTargets', {}, undefined, TARGET_GET_TIMEOUT_MS).pipe(
         Effect.orElseSucceed(() => null),
       );
-      if (!result?.targetInfos?.length) return { present: false };
+      if (!result?.targetInfos?.length) return { present: false, matchedTargetIds: [] };
 
-      const hasCFIframe = result.targetInfos.some(
-        (t: { type: string; url?: string }) =>
+      const matched = result.targetInfos.filter(
+        (t: { type: string; url?: string; targetId?: string }) =>
           (t.type === 'iframe' || t.type === 'page')
           && t.url?.includes('challenges.cloudflare.com')
-          && !isCFTestWidget(t.url),
+          && !isCFTestWidget(t.url)
+          && !(t.targetId && solvedCFTargetIds?.has(t.targetId)),
       );
-      return { present: hasCFIframe };
+      return { present: matched.length > 0, matchedTargetIds: matched.map((t: { targetId?: string }) => t.targetId).filter(Boolean) as string[] };
     })();
   }
 
