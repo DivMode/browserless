@@ -31,6 +31,7 @@ import { tabConsumer } from './replay-pipeline.js';
 import type { CdpSessionOptions } from './cdp-session-types.js';
 import type { CloudflareHooks } from './cloudflare-hooks.js';
 import type { VideoHooks } from './video-services.js';
+import { OtelLayer } from '../otel-layer.js';
 
 type CdpSessionState = 'INITIALIZING' | 'ACTIVE' | 'DRAINING' | 'DESTROYED';
 
@@ -196,6 +197,7 @@ export class CdpSession {
       writerLayer,
       metricsLayer,
       Layer.merge(lifecycleLayer, Layer.provide(sessionLifecycleLayer, lifecycleLayer)),
+      OtelLayer,
     );
   }
 

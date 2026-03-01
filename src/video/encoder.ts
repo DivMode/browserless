@@ -2,13 +2,14 @@ import { spawn } from 'child_process';
 import { readdir, rename, rm, writeFile } from 'fs/promises';
 import path from 'path';
 
-import { Duration, Effect, Layer, ManagedRuntime, Queue } from 'effect';
+import { Duration, Effect, ManagedRuntime, Queue } from 'effect';
 import {
   Logger,
   exists,
 } from '@browserless.io/browserless';
 
 import type { IReplayStore } from '../interfaces/replay-store.interface.js';
+import { OtelLayer } from '../otel-layer.js';
 
 export interface EncodingProgress {
   framesProcessed: number;
@@ -42,7 +43,7 @@ export class VideoEncoder {
   private static readonly SEGMENT_DURATION = 10;
   private log = new Logger('video-encoder');
   private progress = new Map<string, EncodingProgress>();
-  private runtime = ManagedRuntime.make(Layer.empty);
+  private runtime = ManagedRuntime.make(OtelLayer);
   private effectQueue: Queue.Queue<EncodeJob> | null = null;
 
   constructor(private store: IReplayStore | null) {
