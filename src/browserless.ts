@@ -36,6 +36,7 @@ import {
   safeParse,
 } from '@browserless.io/browserless';
 import { EventEmitter } from 'events';
+import { Duration, Effect, Fiber, Schedule } from 'effect';
 import { readFile } from 'fs/promises';
 import { userInfo } from 'os';
 
@@ -81,7 +82,7 @@ export class Browserless extends EventEmitter {
   httpRouteFiles: string[] = [];
   server?: HTTPServer;
   metricsSaveInterval: number = 5 * 60 * 1000;
-  metricsSaveIntervalID?: NodeJS.Timer;
+  private metricsFiber: Fiber.Fiber<unknown> | null = null;
 
   constructor({
     browserManager,
@@ -221,11 +222,15 @@ export class Browserless extends EventEmitter {
       );
     }
 
-    clearInterval(this.metricsSaveInterval);
+    if (this.metricsFiber) {
+      Effect.runFork(Fiber.interrupt(this.metricsFiber));
+    }
     this.metricsSaveInterval = interval;
-    this.metricsSaveIntervalID = setInterval(
-      this.saveMetrics,
-      this.metricsSaveInterval,
+    this.metricsFiber = Effect.runFork(
+      Effect.tryPromise(() => this.saveMetrics()).pipe(
+        Effect.ignore,
+        Effect.repeat(Schedule.fixed(Duration.millis(interval))),
+      ),
     );
   }
 
@@ -259,7 +264,10 @@ export class Browserless extends EventEmitter {
   }
 
   public async stop() {
-    clearInterval(this.metricsSaveIntervalID as unknown as number);
+    if (this.metricsFiber) {
+      await Effect.runPromise(Fiber.interrupt(this.metricsFiber));
+      this.metricsFiber = null;
+    }
     return Promise.all([
       this.server?.shutdown(),
       this.browserManager.shutdown(),
@@ -469,9 +477,11 @@ export class Browserless extends EventEmitter {
 
     await this.server.start();
     this.logger.debug(`Starting metrics collection.`);
-    this.metricsSaveIntervalID = setInterval(
-      () => this.saveMetrics(),
-      this.metricsSaveInterval,
+    this.metricsFiber = Effect.runFork(
+      Effect.tryPromise(() => this.saveMetrics()).pipe(
+        Effect.ignore,
+        Effect.repeat(Schedule.fixed(Duration.millis(this.metricsSaveInterval))),
+      ),
     );
   }
 

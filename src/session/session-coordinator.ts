@@ -111,7 +111,7 @@ export class SessionCoordinator {
             Effect.flatMap((s) => Effect.sync(() => s.injectMarkerByTargetId(targetId, tag, payload))),
             Effect.ignore,
           ),
-        ).catch(() => {});
+        );
       },
       chromePort,
     );
@@ -144,10 +144,12 @@ export class SessionCoordinator {
       await cdpSession.initialize();
       await Effect.runPromise(Deferred.succeed(sessionDeferred, cdpSession));
     } catch (e) {
-      await Effect.runPromise(Deferred.fail(sessionDeferred, e instanceof Error ? e : new Error(String(e)))).catch(() => {});
+      await Effect.runPromise(Deferred.fail(sessionDeferred, e instanceof Error ? e : new Error(String(e))).pipe(Effect.ignore));
       this.log.warn(`Failed to setup session: ${e instanceof Error ? e.message : String(e)}`);
       this.cloudflareSolvers.delete(sessionId);
-      await cdpSession.destroy('error').catch(() => {});
+      await cdpSession.destroy('error').catch((e) => {
+        this.log.warn(`destroy after init failure: ${e instanceof Error ? e.message : String(e)}`);
+      });
       return;
     }
 
@@ -178,7 +180,7 @@ export class SessionCoordinator {
     const sessionReplay = this.sessionReplay;
     if (!sessionReplay) return Effect.succeed(null);
 
-    return Effect.gen(function*() {
+    return Effect.fn('coordinator.stopReplay')(function*() {
       // Phase 1: Stop screencast capture → frame count
       const frameCount = yield* Effect.tryPromise(
         () => Effect.runPromise(coordinator.screencast.stopCapture(sessionId)),
@@ -200,7 +202,7 @@ export class SessionCoordinator {
       ).pipe(Effect.orElseSucceed(() => null));
 
       return result;
-    }).pipe(
+    })().pipe(
       // Guaranteed Map cleanup — runs even if Effect times out or fails
       Effect.ensuring(Effect.sync(() => {
         coordinator.cdpSessions.delete(sessionId);
@@ -223,7 +225,7 @@ export class SessionCoordinator {
           Effect.timeout('5 seconds'),
           Effect.ignore,
         ),
-      ).catch(() => {});
+      );
     }
     this.cdpSessions.delete(sessionId);
     const solver = this.cloudflareSolvers.get(sessionId);
@@ -250,7 +252,7 @@ export class SessionCoordinator {
    */
   shutdown(): Effect.Effect<void> {
     const coordinator = this;
-    return Effect.gen(function*() {
+    return Effect.fn('coordinator.shutdown')(function*() {
       const sessionIds = [...coordinator.cdpSessions.keys()];
       coordinator.log.info(`Shutting down ${sessionIds.length} session(s)...`);
 
@@ -264,7 +266,7 @@ export class SessionCoordinator {
 
       coordinator.videoEncoder.dispose();
       coordinator.log.info('Session coordinator shutdown complete');
-    });
+    })();
   }
 
   /**

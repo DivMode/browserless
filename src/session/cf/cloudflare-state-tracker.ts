@@ -215,7 +215,7 @@ export class CloudflareStateTracker {
    */
   onBeaconSolved(targetId: TargetId, tokenLength: number): Effect.Effect<void> {
     const tracker = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.state.onBeaconSolved')(function*() {
       const active = tracker.registry.get(targetId);
 
       if (active && !active.aborted) {
@@ -245,7 +245,7 @@ export class CloudflareStateTracker {
         tracker.events.emitStandaloneAutoSolved(targetId, 'beacon_push', tokenLength, cdpSessionId);
         tracker.bindingSolvedTargets.add(targetId);
       }
-    });
+    })();
   }
 
   /**
@@ -501,7 +501,7 @@ export class CloudflareStateTracker {
    */
   unregisterPage(targetId: TargetId): Effect.Effect<void> {
     const tracker = this;
-    return Effect.gen(function*() {
+    return Effect.fn('cf.state.unregisterPage')(function*() {
       // Scope finalizer handles orphaned detection emission — no manual emit needed.
       yield* tracker.registry.unregister(targetId);
 
@@ -514,7 +514,7 @@ export class CloudflareStateTracker {
       tracker.bindingSolvedTargets.delete(targetId);
       tracker.pendingIframes.delete(targetId);
       tracker.pendingRechallengeCount.delete(targetId);
-    });
+    })();
   }
 
   findPageBySession(cdpSessionId: CdpSessionId): TargetId | undefined {

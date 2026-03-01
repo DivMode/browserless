@@ -295,6 +295,8 @@ export class CloudflareSolver {
    * Disposed runtime rejects new runPromise calls — no need to null it.
    */
   destroy(): void {
-    this.runtime.dispose().catch(() => {});
+    this.runtime.dispose().catch((e) => {
+      console.error(JSON.stringify({ message: 'CloudflareSolver runtime dispose error', error: String(e) }));
+    });
   }
 }

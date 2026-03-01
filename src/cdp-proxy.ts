@@ -4,7 +4,7 @@ const WebSocketServer = (WebSocket as any).Server as typeof import('ws').WebSock
 import { Duplex } from 'stream';
 import { IncomingMessage } from 'http';
 import { Config, Logger } from '@browserless.io/browserless';
-import { Schema } from 'effect';
+import { Duration, Effect, Schema } from 'effect';
 
 import { CloudflareConfig } from './shared/cloudflare-detection.js';
 import { CdpSessionId, TargetId } from './shared/cloudflare-detection.js';
@@ -160,7 +160,9 @@ export class CDPProxy {
           // Emit session info to client so they can construct deterministic replay URLs
           const sessionId = this.browserWsEndpoint.split('/').pop() || '';
           if (sessionId) {
-            this.emitClientEvent('Browserless.sessionInfo', { sessionId }).catch(() => {});
+            this.emitClientEvent('Browserless.sessionInfo', { sessionId }).catch((e) => {
+              this.log.debug(`Failed to emit sessionInfo: ${e instanceof Error ? e.message : String(e)}`);
+            });
           }
 
           clientWs.on('error', (err: Error) => {
@@ -254,11 +256,15 @@ export class CDPProxy {
 
           // Delay Page.close to flush pending screencast frames + event collection
           if (msg.method === 'Page.close') {
-            setTimeout(() => {
-              if (this.browserWs?.readyState === WebSocket.OPEN) {
-                this.browserWs.send(data, { binary: isBinary });
-              }
-            }, 250);
+            Effect.runFork(
+              Effect.sleep('250 millis').pipe(
+                Effect.andThen(Effect.sync(() => {
+                  if (this.browserWs?.readyState === WebSocket.OPEN) {
+                    this.browserWs.send(data, { binary: isBinary });
+                  }
+                })),
+              ),
+            );
             return;
           }
 
@@ -359,24 +365,14 @@ export class CDPProxy {
     clientMsgId?: number,
   ): Promise<void> {
     if (this.onBeforeClose) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          this.onBeforeClose(),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(
-              () => reject(new Error('onBeforeClose timeout')),
-              ON_BEFORE_CLOSE_TIMEOUT_MS,
-            );
-          }),
-        ]);
-      } catch (e) {
-        this.log.warn(
-          `onBeforeClose failed: ${e instanceof Error ? e.message : String(e)}`,
-        );
-      } finally {
-        clearTimeout(timer);
-      }
+      await Effect.runPromise(
+        Effect.tryPromise(() => this.onBeforeClose!()).pipe(
+          Effect.timeout(Duration.millis(ON_BEFORE_CLOSE_TIMEOUT_MS)),
+          Effect.catch((e) => Effect.sync(() => {
+            this.log.warn(`onBeforeClose failed: ${e instanceof Error ? e.message : String(e)}`);
+          })),
+        ),
+      );
     }
 
     // Send Browser.close response AFTER onBeforeClose (replay events already sent)
