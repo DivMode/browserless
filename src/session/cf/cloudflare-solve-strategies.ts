@@ -1,6 +1,6 @@
 import { Effect, Scope } from 'effect';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
-import type { TargetId, CloudflareType } from '../../shared/cloudflare-detection.js';
+import type { TargetId } from '../../shared/cloudflare-detection.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
 import type { SendCommand } from './cloudflare-state-tracker.js';
 import { CdpConnection } from '../../shared/cdp-rpc.js';
@@ -16,14 +16,26 @@ import {
   CDP_CALL_TIMEOUT_MS,
 } from './cf-schedules.js';
 
-/** Result from detectTurnstileViaCDP — includes type info when available. */
-export interface CFDetectionResult {
-  present: boolean;
-  cfType?: CloudflareType;
-  cRay?: string;
-  /** Target IDs of CF-matching OOPIFs found in this detection poll. Used by the detector to mark them as solved after the solve completes, preventing stale OOPIF re-detection. */
-  matchedTargetIds: string[];
+/** Individual CF OOPIF target found by Target.getTargets. */
+export interface CFTargetMatch {
+  readonly targetId: string;
+  readonly url: string;
+  readonly type: 'iframe' | 'page';
 }
+
+/** No CF OOPIF found (or all were filtered as stale). */
+export interface CFNotDetected {
+  readonly _tag: 'not_detected';
+}
+
+/** Fresh CF OOPIF(s) found — not in solvedCFTargetIds. */
+export interface CFDetected {
+  readonly _tag: 'detected';
+  readonly targets: readonly CFTargetMatch[];
+}
+
+/** Discriminated union for CF detection — forces callers to pattern match on _tag. */
+export type CFDetectionResult = CFNotDetected | CFDetected;
 
 export type SolveOutcome =
   | 'click_dispatched'
@@ -1162,14 +1174,14 @@ export class CloudflareSolveStrategies {
    * Runtime.evaluate = rechallenge. Target.getTargets is browser-level and
    * completely invisible to the page.
    */
-  detectTurnstileViaCDP(_pageCdpSessionId: CdpSessionId, solvedCFTargetIds?: ReadonlySet<string>): Effect.Effect<CFDetectionResult | null, never, typeof CdpSender.Identifier> {
+  detectTurnstileViaCDP(_pageCdpSessionId: CdpSessionId, solvedCFTargetIds?: ReadonlySet<string>): Effect.Effect<CFDetectionResult, never, typeof CdpSender.Identifier> {
     return Effect.fn('cf.detectTurnstileViaCDP')(function*() {
       yield* Effect.annotateCurrentSpan({ 'cf.target_id': _pageCdpSessionId });
       const cdp = yield* CdpSender;
       const result = yield* cdp.sendViaProxy('Target.getTargets', {}, undefined, TARGET_GET_TIMEOUT_MS).pipe(
         Effect.orElseSucceed(() => null),
       );
-      if (!result?.targetInfos?.length) return { present: false, matchedTargetIds: [] };
+      if (!result?.targetInfos?.length) return { _tag: 'not_detected' as const };
 
       const matched = result.targetInfos.filter(
         (t: { type: string; url?: string; targetId?: string }) =>
@@ -1178,7 +1190,16 @@ export class CloudflareSolveStrategies {
           && !isCFTestWidget(t.url)
           && !(t.targetId && solvedCFTargetIds?.has(t.targetId)),
       );
-      return { present: matched.length > 0, matchedTargetIds: matched.map((t: { targetId?: string }) => t.targetId).filter(Boolean) as string[] };
+      if (matched.length === 0) return { _tag: 'not_detected' as const };
+
+      return {
+        _tag: 'detected' as const,
+        targets: matched.map((t: { type: string; url?: string; targetId?: string }) => ({
+          targetId: t.targetId!,
+          url: t.url ?? '',
+          type: t.type as 'iframe' | 'page',
+        })),
+      };
     })();
   }
 

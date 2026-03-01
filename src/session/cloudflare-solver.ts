@@ -215,6 +215,9 @@ export class CloudflareSolver {
   /** Interrupt and stop the detection fiber for a target (e.g. on tab close). */
   stopTargetDetection(targetId: TargetId): Effect.Effect<void> {
     this.stopDetectionFiber(targetId);
+    // Record destroyed target — prevents stale OOPIF re-detection if Chrome
+    // fires targetDestroyed after our detection poll but before cleanup
+    this.stateTracker.solvedCFTargetIds.add(targetId as unknown as string);
     return Effect.promise(() => this.runtime.runPromise(
       this.stateTracker.unregisterPage(targetId),
     ));
