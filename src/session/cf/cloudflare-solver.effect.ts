@@ -12,6 +12,8 @@ import { Effect } from 'effect';
 import type { SolveOutcome } from './cloudflare-solve-strategies.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
 import { TokenChecker, SolverEvents, SolveDeps } from './cf-services.js';
+import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
+import type { SolveSignal } from './cloudflare-state-tracker.js';
 
 /** Annotate the current span with ActiveDetection context for Tempo filtering. */
 const annotateActive = (active: ActiveDetection) =>
@@ -34,6 +36,43 @@ import {
   NAV_WAIT_MS,
   MAX_CLICK_ATTEMPTS,
 } from './cf-schedules.js';
+
+// ═══════════════════════════════════════════════════════════════════════
+// resolveTokenFound — build CloudflareResult and complete Resolution
+//
+// Called when the solver finds a token via polling. Constructs the result,
+// opens abortLatch for fiber cancellation, and completes the Resolution
+// gateway directly — no indirection through SolveDeps.
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * Build CloudflareResult and complete Resolution gateway directly.
+ *
+ * Does NOT set active.aborted or open abortLatch — those are for external
+ * abort signals (page navigated, session destroyed). The solver's raceFirst
+ * handles fiber cancellation; the Resolution gateway signals the external
+ * consumer (handleTurnstileDetection) that a result is ready.
+ */
+const resolveTokenFound = (active: ActiveDetection, signal: SolveSignal, token: string | null) =>
+  Effect.gen(function*() {
+    const attr = deriveSolveAttribution(signal, !!active.clickDelivered);
+    const result = {
+      solved: true as const, type: active.info.type, method: attr.method,
+      token: token || undefined, duration_ms: Date.now() - active.startTime,
+      attempts: active.attempt, auto_resolved: attr.autoResolved, signal,
+      phase_label: attr.label,
+    };
+    const won = active.resolution
+      ? yield* active.resolution.solve(result)
+      : true;
+    // Only emit marker if we won the race — avoids duplicate cf.auto_solved
+    // markers when multiple resolution paths (solver + activity loop) complete
+    // concurrently. Deferred.succeed returns false for second+ callers.
+    if (won) {
+      const events = yield* SolverEvents;
+      yield* events.marker(active.pageTargetId, 'cf.auto_solved', { signal, method: attr.method });
+    }
+  });
 
 // ═══════════════════════════════════════════════════════════════════════
 // solveDetection — top-level dispatcher
@@ -176,7 +215,7 @@ const solveByClicking = (
 // ═══════════════════════════════════════════════════════════════════════
 
 type TurnstileResult =
-  | { _tag: 'token_found'; pollCount: number; tokenLength: number }
+  | { _tag: 'token_found'; pollCount: number; tokenLength: number; token: string }
   | { _tag: 'clicked'; attempt: number }
   | { _tag: 'click_no_token'; attempt: number }
   | { _tag: 'no_click' }
@@ -224,8 +263,8 @@ const solveTurnstile = (
     );
     if (earlyToken) {
       yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: earlyToken.length, early: true });
-      yield* deps.resolveAutoSolved(active, 'token_poll');
-      return { _tag: 'token_found', pollCount: 0, tokenLength: earlyToken.length } as TurnstileResult;
+      yield* resolveTokenFound(active, 'token_poll', earlyToken);
+      return { _tag: 'token_found', pollCount: 0, tokenLength: earlyToken.length, token: earlyToken } as TurnstileResult;
     }
 
     yield* events.marker(pageTargetId, 'cf.concurrent_poll_start', { deadline_ms: SOLVE_DEADLINE_MS });
@@ -276,9 +315,9 @@ const solveTurnstile = (
     // auto-solve in ~3-5s. SAFE because turnstile = EMBEDDED — Runtime.evaluate
     // targets the embedding page (e.g. ahrefs.com), NOT the CF OOPIF.
     //
-    // IMPORTANT: Do NOT call resolveAutoSolved() inside the race. resolveAutoSolved
-    // opens the abortLatch, which triggers the abort racer in the outer raceFirst —
-    // causing the tokenPoll fiber to be interrupted before emitSolved completes.
+    // IMPORTANT: Do NOT call resolveTokenFound() inside the race. It opens the
+    // abortLatch, which triggers the abort racer in the outer raceFirst —
+    // causing the tokenPoll fiber to be interrupted before completion.
     // Side effects that modify shared state belong AFTER the race resolves.
     const tokenPoll = Effect.fn('cf.tokenPoll')(function*() {
       let pollCount = 0;
@@ -294,7 +333,7 @@ const solveTurnstile = (
             concurrent: true,
             concurrent_polls: pollCount,
           });
-          return { _tag: 'token_found' as const, pollCount, tokenLength: token.length };
+          return { _tag: 'token_found' as const, pollCount, tokenLength: token.length, token };
         }
       }
     })();
@@ -326,9 +365,9 @@ const solveTurnstile = (
     }
 
     if (raceResult._tag === 'token_found') {
-      // Resolve AFTER race completes — resolveAutoSolved opens abortLatch,
+      // Resolve AFTER race completes — resolveTokenFound opens abortLatch,
       // which would self-interrupt the tokenPoll fiber if called inside the race.
-      yield* deps.resolveAutoSolved(active, 'token_poll');
+      yield* resolveTokenFound(active, 'token_poll', raceResult.token);
       return raceResult as TurnstileResult;
     }
 
@@ -342,7 +381,7 @@ const solveTurnstile = (
       // Pass Date.now() as clickTime so postClickWait anchors its Phase B
       // deadline to when the click actually happened, not detection start.
       const clickTime = Date.now();
-      const postResult = yield* postClickWait(active, deps, clickTime);
+      const postResult = yield* postClickWait(active, clickTime);
       if (postResult) {
         return raceResult as TurnstileResult;  // clicked + token found or navigation
       }
@@ -359,7 +398,7 @@ const solveTurnstile = (
     // Apply remaining deadline as timeout to prevent unbounded polling.
     // Without this, pollToken runs until abortLatch opens (session close) —
     // potentially 300s. This bounds total solve time to ~SOLVE_DEADLINE_MS.
-    const tokenResult = yield* pollToken(active, deps, AUTO_SOLVE_POLL_DELAY, 'cf.pollForAutoSolveToken').pipe(
+    const tokenResult = yield* pollToken(active, AUTO_SOLVE_POLL_DELAY, 'cf.pollForAutoSolveToken').pipe(
       Effect.timeout(remainingDeadline),
       Effect.orElseSucceed(() => null),
     );
@@ -380,7 +419,6 @@ const solveTurnstile = (
 
 const pollToken = (
   active: ActiveDetection,
-  deps: SolveDepsI,
   pollDelay: typeof TOKEN_POLL_DELAY | typeof AUTO_SOLVE_POLL_DELAY,
   spanName: string,
 ) =>
@@ -391,9 +429,9 @@ const pollToken = (
     const tokens = yield* TokenChecker;
 
     // Poll loop as an Effect — runs until token found (never terminates on its own).
-    // IMPORTANT: Do NOT call resolveAutoSolved inside the race — it opens the
+    // IMPORTANT: Do NOT call resolveTokenFound inside the race — it opens the
     // abortLatch, which would trigger the abort racer and interrupt this fiber
-    // before emitSolved completes.
+    // before the marker emission completes.
     const poll = Effect.fn(`${spanName}.loop`)(function*() {
       let pollCount = 0;
       while (true) {
@@ -405,7 +443,7 @@ const pollToken = (
         if (token) {
           yield* Effect.annotateCurrentSpan({ 'cf.token_found': true, 'cf.token_length': token.length });
           yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: token.length });
-          return { _tag: 'token_found' as const, pollCount, tokenLength: token.length };
+          return { _tag: 'token_found' as const, pollCount, tokenLength: token.length, token };
         }
       }
     })();
@@ -416,13 +454,14 @@ const pollToken = (
       active.abortLatch.await.pipe(Effect.map(() => null)),
     );
 
-    // Resolve AFTER the race — side effects that open abortLatch belong outside
+    // Resolve AFTER the race — resolveTokenFound opens abortLatch, so it
+    // must run outside the raceFirst to avoid self-interruption.
     if (result && result._tag === 'token_found') {
-      yield* deps.resolveAutoSolved(active, 'token_poll');
+      yield* resolveTokenFound(active, 'token_poll', result.token);
     }
 
     return result;
-  })() as Effect.Effect<TurnstileResult | null, never, typeof TokenChecker.Identifier | typeof SolverEvents.Identifier | typeof SolveDeps.Identifier>;
+  })() as Effect.Effect<TurnstileResult | null, never, typeof TokenChecker.Identifier | typeof SolverEvents.Identifier>;
 
 // ═══════════════════════════════════════════════════════════════════════
 // postClickWait — wait for navigation (interstitial) or token (embedded)
@@ -433,7 +472,6 @@ const pollToken = (
 
 const postClickWait = (
   active: ActiveDetection,
-  deps: SolveDepsI,
   clickTime: number,
 ) =>
   Effect.fn('cf.postClickWait')(function*() {
@@ -486,7 +524,7 @@ const postClickWait = (
       remaining_ms: remainingMs,
     });
 
-    const result = yield* pollToken(active, deps, TOKEN_POLL_DELAY, 'cf.postClickWait.tokenPoll').pipe(
+    const result = yield* pollToken(active, TOKEN_POLL_DELAY, 'cf.postClickWait.tokenPoll').pipe(
       Effect.timeout(remainingMs),
       Effect.orElseSucceed(() => null),
     );

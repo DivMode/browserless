@@ -76,7 +76,6 @@ export const SolverEvents = ServiceMap.Service<{
 
 export const SolveDeps = ServiceMap.Service<{
   readonly findAndClickViaCDP: (active: ActiveDetection, attempt: number) => Effect.Effect<boolean>;
-  readonly resolveAutoSolved: (active: ActiveDetection, signal: string) => Effect.Effect<void>;
   readonly simulatePresence: (active: ActiveDetection) => Effect.Effect<void>;
   /** Activity loop for embedded types (turnstile/non_interactive/invisible). Runtime.evaluate is safe. */
   readonly startActivityLoopEmbedded: (active: ActiveDetection) => Effect.Effect<void>;

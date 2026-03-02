@@ -11,7 +11,7 @@
  *   4. Race condition regressions (5 tests)
  */
 import { describe, expect, it } from '@effect/vitest';
-import { Deferred, Effect, Fiber, Latch, Layer } from 'effect';
+import { Effect, Fiber, Latch, Layer } from 'effect';
 import * as TestClock from 'effect/testing/TestClock';
 import { CdpSessionId, TargetId } from '../../shared/cloudflare-detection.js';
 import type { CloudflareInfo, CloudflareResult } from '../../shared/cloudflare-detection.js';
@@ -36,6 +36,7 @@ const makeActive = (overrides?: Partial<ActiveDetection>): ActiveDetection => {
     aborted: false,
     tracker: new CloudflareTracker(info),
     abortLatch: Latch.makeUnsafe(false),
+    resolution: Resolution.makeUnsafe(),
     ...overrides,
   };
 };
@@ -52,7 +53,6 @@ interface TestLayerConfig {
 interface TestCaptures {
   markers: Array<{ tag: string; payload?: object }>;
   emissions: Array<{ type: 'solved' | 'failed'; result?: CloudflareResult; reason?: string }>;
-  resolveAutoSolvedCalls: Array<{ signal: string }>;
   clickAttempts: number;
   pollCount: number;
 }
@@ -61,7 +61,6 @@ const makeTestLayer = (config: TestLayerConfig = {}) => {
   const captures: TestCaptures = {
     markers: [],
     emissions: [],
-    resolveAutoSolvedCalls: [],
     clickAttempts: 0,
     pollCount: 0,
   };
@@ -104,10 +103,6 @@ const makeTestLayer = (config: TestLayerConfig = {}) => {
       }
       return Effect.succeed(config.clickSuccess ?? false);
     },
-    resolveAutoSolved: (_active, signal) => {
-      captures.resolveAutoSolvedCalls.push({ signal });
-      return Effect.void;
-    },
     simulatePresence: () => Effect.void,
     startActivityLoopEmbedded: () => Effect.void,
     startActivityLoopInterstitial: () => Effect.void,
@@ -128,20 +123,19 @@ describe('solveTurnstile', () => {
   it.effect('1. early token found — resolves immediately', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      const { layer, captures } = makeTestLayer({ token: 'early-token-xyz' });
+      const { layer } = makeTestLayer({ token: 'early-token-xyz' });
       const active = makeActive();
 
       const outcome = yield* solveDetection(active).pipe(Effect.provide(layer));
 
       expect(outcome).toBe('click_dispatched');
-      expect(captures.resolveAutoSolvedCalls).toHaveLength(1);
-      expect(captures.resolveAutoSolvedCalls[0].signal).toBe('token_poll');
+      expect(active.resolution!.isDone).toBe(true);
     }));
 
   it.effect('2. token during click loop — token poll wins race', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      const { layer, captures } = makeTestLayer({
+      const { layer } = makeTestLayer({
         clickSuccess: false,
         tokenAfterPolls: 3,
         token: 'concurrent-token',
@@ -156,8 +150,7 @@ describe('solveTurnstile', () => {
       const outcome = yield* Fiber.join(fiber);
 
       expect(outcome).toBe('click_dispatched');
-      expect(captures.resolveAutoSolvedCalls.length).toBeGreaterThanOrEqual(1);
-      expect(captures.resolveAutoSolvedCalls[0].signal).toBe('token_poll');
+      expect(active.resolution!.isDone).toBe(true);
     }));
 
   it.effect('3. click succeeds OR token found — either concurrent path resolves', () =>
@@ -166,7 +159,7 @@ describe('solveTurnstile', () => {
       // Both click (attempt 1) and token (after poll 3) can succeed.
       // Under raceFirst, whichever fiber resolves first wins.
       // With TestClock, both fibers advance together — either outcome is valid.
-      const { layer, captures } = makeTestLayer({
+      const { layer } = makeTestLayer({
         clickSuccessOnAttempt: 1,
         tokenAfterPolls: 3,
         token: 'concurrent-token',
@@ -182,8 +175,8 @@ describe('solveTurnstile', () => {
 
       // Either the click or the token poll resolves first — both map to 'click_dispatched'
       expect(outcome).toBe('click_dispatched');
-      // At least one path must have executed: either click or token poll
-      expect(captures.clickAttempts + captures.resolveAutoSolvedCalls.length).toBeGreaterThanOrEqual(1);
+      // Resolution gateway must be completed
+      expect(active.resolution!.isDone).toBe(true);
     }));
 
   it.effect('4. no click, no token → returns no_click after deadline', () =>
@@ -253,7 +246,7 @@ describe('pollToken', () => {
       const { solveDetection } = yield* Effect.promise(importSolver);
       // tokenAfterPolls: 2 — early check (poll 1) returns null, concurrent
       // tokenPoll (poll 2+) finds token. Click always fails.
-      const { layer, captures } = makeTestLayer({
+      const { layer } = makeTestLayer({
         clickSuccess: false,
         tokenAfterPolls: 2,
         token: 'delayed-token',
@@ -269,9 +262,8 @@ describe('pollToken', () => {
 
       // Token found via either early check retry or concurrent poll
       expect(outcome).toBe('click_dispatched');
-      // resolveAutoSolved must have been called (token_poll signal)
-      expect(captures.resolveAutoSolvedCalls.length).toBeGreaterThanOrEqual(1);
-      expect(captures.resolveAutoSolvedCalls[0].signal).toBe('token_poll');
+      // Resolution must be completed via resolveTokenFound
+      expect(active.resolution!.isDone).toBe(true);
     }));
 
   it.effect('8. abort during poll — returns gracefully', () =>
@@ -325,7 +317,6 @@ describe('pollToken', () => {
 
       const depsLayer = Layer.succeed(SolveDeps, SolveDeps.of({
         findAndClickViaCDP: () => Effect.succeed(false),
-        resolveAutoSolved: () => Effect.void,
         simulatePresence: () => Effect.void,
         startActivityLoopEmbedded: () => Effect.void,
         startActivityLoopInterstitial: () => Effect.void,
@@ -399,9 +390,9 @@ describe('postClickWait', () => {
       const { solveDetection } = yield* Effect.promise(importSolver);
       // Both click (attempt 1) and token (poll 2) can succeed.
       // The concurrent raceFirst in solveTurnstile means either path wins.
-      // If token wins: resolveAutoSolved called, outcome = click_dispatched.
+      // If token wins: resolveTokenFound completes Resolution, outcome = click_dispatched.
       // If click wins: postClickWait runs, Phase B finds token.
-      const { layer, captures } = makeTestLayer({
+      const { layer } = makeTestLayer({
         clickSuccessOnAttempt: 1,
         tokenAfterPolls: 2,
         token: 'phase-b-token',
@@ -417,10 +408,8 @@ describe('postClickWait', () => {
 
       // Either concurrent path resolves — both map to click_dispatched
       expect(outcome).toBe('click_dispatched');
-      // At least one resolution mechanism must fire
-      expect(
-        captures.clickAttempts > 0 || captures.resolveAutoSolvedCalls.length > 0,
-      ).toBe(true);
+      // Resolution gateway must be completed
+      expect(active.resolution!.isDone).toBe(true);
     }));
 
   it.effect('12. Phase B timeout — no token within POST_CLICK_DEADLINE', () =>

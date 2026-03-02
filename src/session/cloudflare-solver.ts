@@ -123,7 +123,6 @@ export class CloudflareSolver {
           Effect.provideService(CdpSender, cdpSender),
           Effect.provideService(SolverEvents, solverEvents),
         ),
-        resolveAutoSolved: (active, signal) => stateTracker.resolveAutoSolved(active, signal),
         simulatePresence: (active) =>
           Effect.tryPromise({
             try: () => simulateHumanPresence(sendCommand, active.pageCdpSessionId, 2.0 + Math.random() * 2.0),
