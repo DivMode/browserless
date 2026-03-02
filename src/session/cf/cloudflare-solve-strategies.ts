@@ -1153,10 +1153,11 @@ export class CloudflareSolveStrategies {
         return false;
       }
 
-      // ── Phase 4b post-click: Verify renderer received the mousedown ──
+      // ── Phase 4b post-click: Verify the click actually landed ─────────
       // Give renderer 100ms to process the event, then check the flag.
       yield* Effect.sleep('100 millis');
-      let rendererConfirmed: boolean | 'session_gone' | 'unknown' = 'unknown';
+      let clickVerified = false;
+      let sessionGone = false;
 
       const verifyResult = yield* verifySend('Runtime.evaluate', {
         expression: 'window.__bClkV',
@@ -1167,15 +1168,14 @@ export class CloudflareSolveStrategies {
       );
 
       if (verifyResult === true) {
-        rendererConfirmed = true;           // CONFIRMED: renderer saw the mousedown
+        clickVerified = true;           // Click landed — mousedown listener fired
       } else if (verifyResult === '__session_gone__') {
-        rendererConfirmed = 'session_gone'; // Session died (page navigated = likely success)
-      } else {
-        rendererConfirmed = false;          // FAILED: renderer alive but never saw mousedown
+        sessionGone = true;             // OOPIF died after click (nav? crash?)
       }
+      // else: click silently dropped — renderer alive but never saw mousedown
 
-      // Only mark click as delivered if renderer actually confirmed it
-      if (rendererConfirmed === true || rendererConfirmed === 'session_gone') {
+      // Only mark click as delivered if the mousedown listener actually fired
+      if (clickVerified) {
         active.clickDelivered = true;
         active.clickDeliveredAt = Date.now();
       }
@@ -1183,8 +1183,9 @@ export class CloudflareSolveStrategies {
       yield* events.emitProgress(active, 'clicked', { x: clickX, y: clickY });
 
       yield* events.marker(pageTargetId, 'cf.oopif_click', {
-        ok: rendererConfirmed === true || rendererConfirmed === 'session_gone',
-        renderer_confirmed: rendererConfirmed,
+        ok: clickVerified,
+        click_verified: clickVerified,
+        session_gone: sessionGone,
         cdp_accepted: !!pressResponse && !!releaseResponse,
         method: 'cdp_oopif_session', via, attempt,
         x: clickX, y: clickY,
@@ -1197,7 +1198,7 @@ export class CloudflareSolveStrategies {
         elapsed_since_solve_start_ms: Date.now() - solveStart,
         checkbox_to_click_ms: Date.now() - solveStart,
       });
-      return rendererConfirmed === true || rendererConfirmed === 'session_gone';
+      return clickVerified === true;
     })().pipe(
       Effect.catch(() => Effect.succeed(false)),
     );
