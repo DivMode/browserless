@@ -563,6 +563,19 @@ export class CloudflareDetector {
         oopif_mode: meta?.mode ?? null,
       });
 
+      // Rechallenge OOPIFs (/rch/ in URL) are futile to solve — CF invalidated
+      // the token and the widget will never auto-resolve. Skip the full 10-30s
+      // solve cycle and emit failure immediately. The initial solve already
+      // succeeded (data extracted), so this is purely cosmetic noise.
+      if (meta?.isRechallenge) {
+        self.events.marker(targetId, 'cf.rechallenge_skipped', {
+          sitekey: meta.sitekey,
+          oopif_url: firstTarget?.url,
+        });
+        yield* self.emitSolveFailure(active, targetId, 'rechallenge_skipped');
+        return;
+      }
+
       // Dispatch solve via Effect service — no more Promise bridge
       const dispatcher = yield* SolveDispatcher;
       const outcome = yield* dispatcher.dispatch(active).pipe(
