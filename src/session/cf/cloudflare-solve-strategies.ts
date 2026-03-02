@@ -10,6 +10,28 @@ type EffectSend = (
   sessionId?: CdpSessionId,
   timeoutMs?: number,
 ) => Effect.Effect<any>;
+
+/**
+ * Click-phase CDP sender — compile-time blocks Runtime.evaluate on OOPIF.
+ *
+ * CF's WASM monitors V8 evaluation events in the challenge iframe's MAIN world.
+ * Runtime.evaluate without an isolated world contextId runs in the main world
+ * → triggers CF detection → rechallenge. This type makes that a compile error.
+ *
+ * Runtime.callFunctionOn with an objectId is allowed — it operates on a specific
+ * JS object (e.g., the checkbox element) without creating a new evaluation context
+ * in the main world. This is already used safely for visibility checks and bounds.
+ *
+ * Phases 2-3 (checkbox finding) use EffectSend because they need Runtime.evaluate
+ * in ISOLATED worlds (via Page.createIsolatedWorld + contextId) which CF can't observe.
+ * Phase 4 (click dispatch) uses this restricted type — no Runtime.evaluate allowed.
+ */
+type ClickPhaseSend = <M extends string>(
+  method: M extends 'Runtime.evaluate' ? never : M,
+  params?: object,
+  sessionId?: CdpSessionId,
+  timeoutMs?: number,
+) => Effect.Effect<any>;
 import { CdpConnection } from '../../shared/cdp-rpc.js';
 import { CdpSessionGone } from './cf-errors.js';
 import { CdpSender, SolverEvents } from './cf-services.js';
@@ -405,7 +427,7 @@ export class CloudflareSolveStrategies {
           const p = params ? JSON.stringify(params).substring(0, 150) : '{}';
           console.log(`  [SOLVE #${seq}] +${t0}ms ${method} ${sid} ${p}`);
         }
-        return cdp.sendViaProxy(method, params, sessionId, timeoutMs ?? CDP_CALL_TIMEOUT_MS).pipe(
+        return cdp.sendViaProxy(method, params, sessionId, timeoutMs).pipe(
           Effect.orElseSucceed(() => null),
           Effect.tap((result) =>
             Effect.sync(() => {
@@ -428,7 +450,7 @@ export class CloudflareSolveStrategies {
           const p = params ? JSON.stringify(params).substring(0, 150) : '{}';
           console.log(`  [PAGE  #${seq}] +${t0}ms ${method} [page-session] ${p}`);
         }
-        return cdp.send(method, params, sessionId, timeoutMs ?? CDP_CALL_TIMEOUT_MS).pipe(
+        return cdp.send(method, params, sessionId, timeoutMs).pipe(
           Effect.orElseSucceed(() => null),
           Effect.tap((result) =>
             Effect.sync(() => {
@@ -970,7 +992,7 @@ export class CloudflareSolveStrategies {
   // ── Phase 4: Click dispatch ───────────────────────────────────────
 
   private phase4Click(
-    send: EffectSend,
+    send: ClickPhaseSend,
     oopifSessionId: CdpSessionId,
     active: ActiveDetection,
     checkbox: { objectId: string; backendNodeId: number },
@@ -1109,6 +1131,17 @@ export class CloudflareSolveStrategies {
         x: clickX, y: clickY,
         button: 'left', clickCount: 1,
       }, oopifSessionId);
+
+      // Validate click delivery — if press/release returned null, CDP call failed
+      if (!pressResponse || !releaseResponse) {
+        yield* events.marker(pageTargetId, 'cf.click_failed', {
+          press_null: !pressResponse,
+          release_null: !releaseResponse,
+          via, attempt,
+          oopif_session_id: oopifSessionId.substring(0, 16),
+        });
+        return false;
+      }
 
       // Track click delivery for solve attribution
       active.clickDelivered = true;
