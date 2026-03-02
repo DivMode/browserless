@@ -152,7 +152,7 @@ export class CloudflareStateTracker {
         }
 
         const duration = Date.now() - active.startTime;
-        active.aborted = true; active.abortLatch?.openUnsafe();
+        active.aborted = true; active.abortLatch.openUnsafe();
         const solveSignal: SolveSignal = token ? 'token_poll' : 'state_change';
         // clickDelivered = our click landed on checkbox before iframe state changed
         const attr = deriveSolveAttribution(solveSignal, !!active.clickDelivered);
@@ -170,7 +170,7 @@ export class CloudflareStateTracker {
         });
         yield* tracker.registry.resolve(pageTargetId);
       } else if (state === 'fail' || state === 'expired' || state === 'timeout') {
-        active.aborted = true; active.abortLatch?.openUnsafe();
+        active.aborted = true; active.abortLatch.openUnsafe();
         if (active.attempt < tracker.config.maxAttempts) {
           active.attempt++;
           active.aborted = false;
@@ -229,7 +229,7 @@ export class CloudflareStateTracker {
 
       if (active && !active.aborted) {
         const duration = Date.now() - active.startTime;
-        active.aborted = true; active.abortLatch?.openUnsafe();
+        active.aborted = true; active.abortLatch.openUnsafe();
         tracker.bindingSolvedTargets.add(targetId);
         // clickDelivered = our click landed on checkbox before beacon fired
         const attr = deriveSolveAttribution('beacon_push', !!active.clickDelivered);
@@ -282,7 +282,7 @@ export class CloudflareStateTracker {
       const token = yield* tracker.getTokenEffect(active.pageCdpSessionId).pipe(
         Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
       );
-      active.aborted = true; active.abortLatch?.openUnsafe();
+      active.aborted = true; active.abortLatch.openUnsafe();
       const pageTargetId = tracker.findPageBySession(active.pageCdpSessionId);
       if (pageTargetId) yield* tracker.registry.resolve(pageTargetId);
       // clickDelivered = our click landed on checkbox before token/state resolved

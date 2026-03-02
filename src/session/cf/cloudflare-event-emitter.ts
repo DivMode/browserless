@@ -1,5 +1,5 @@
 import { Logger } from '@browserless.io/browserless';
-import type { Latch } from 'effect';
+import { Latch } from 'effect';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot } from '../../shared/cloudflare-detection.js';
 import type { TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
@@ -144,7 +144,7 @@ export interface ActiveDetection {
    * Allows Effect fibers to block on `latch.await` instead of polling `aborted`.
    * Initialized closed (not aborted). Open = aborted.
    */
-  abortLatch?: Latch.Latch;
+  abortLatch: Latch.Latch;
   /** Parsed metadata from the Turnstile OOPIF URL (sitekey, rechallenge, mode). */
   oopifMeta?: TurnstileOOPIFMeta;
 }
@@ -199,15 +199,17 @@ export class CloudflareEventEmitter {
 
   emitFailed(active: ActiveDetection, reason: string, duration: number, phaseLabel?: string): void {
     const phase_label = phaseLabel ?? `✗ ${reason}`;
-    this.log.warn(`CF failed: reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'}`);
+    const snap = active.tracker.snapshot();
+    const isRechallenge = active.oopifMeta?.isRechallenge ?? false;
+    this.log.warn(`CF failed: reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'} rechallenge=${isRechallenge} widget_error_count=${snap.widget_error_count} widget_error_type=${snap.widget_error_type ?? 'none'} click_count=${snap.click_count} false_positives=${snap.false_positive_count}`);
     this.emitClientEvent('Browserless.cloudflareFailed', {
       reason, type: active.info.type, duration_ms: duration, attempts: active.attempt,
       targetId: active.pageTargetId,
       oopif_url: active.info.url,
-      summary: active.tracker.snapshot(),
+      summary: snap,
       phase_label,
     }).catch((e) => this.log.debug(`emitFailed failed: ${e instanceof Error ? e.message : String(e)}`));
-    this.marker(active.pageTargetId, 'cf.failed', { reason, duration_ms: duration, phase_label, oopif_url: active.info.url });
+    this.marker(active.pageTargetId, 'cf.failed', { reason, duration_ms: duration, phase_label, oopif_url: active.info.url, rechallenge: isRechallenge });
   }
 
   emitStandaloneAutoSolved(
@@ -219,10 +221,13 @@ export class CloudflareEventEmitter {
     const info: CloudflareInfo = {
       type: 'turnstile', url: '', detectionMethod: signal,
     };
+    const abortLatch = Latch.makeUnsafe(false);
+    abortLatch.openUnsafe();
     const active: ActiveDetection = {
       info, pageCdpSessionId: cdpSessionId || CdpSessionId.makeUnsafe(''), pageTargetId: targetId,
       startTime: Date.now(), attempt: 0, aborted: true,
       tracker: new CloudflareTracker(info),
+      abortLatch,
     };
 
     this.emitDetected(active);
