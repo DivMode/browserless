@@ -547,7 +547,7 @@ export class CloudflareSolveStrategies {
       // checkbox. The retry loop in solveByClicking polls every 500ms which
       // naturally gives CF's WASM time to arm.
       return yield* strategies.phase4Click(
-        send, oopifSessionId, active,
+        send, send, oopifSessionId, active,
         checkbox, cbMethod, iframeBackendNodeId, via, attempt, solveStart,
       );
     })().pipe(
@@ -993,6 +993,7 @@ export class CloudflareSolveStrategies {
 
   private phase4Click(
     send: ClickPhaseSend,
+    verifySend: EffectSend,
     oopifSessionId: CdpSessionId,
     active: ActiveDetection,
     checkbox: { objectId: string; backendNodeId: number },
@@ -1106,6 +1107,15 @@ export class CloudflareSolveStrategies {
         had_phase1_iframe: !!iframeBackendNodeId,
       });
 
+      // ── Phase 4b pre-click: Install click verification listener ──────
+      // Adds a one-shot mousedown listener in the OOPIF. If Chrome delivers
+      // the mouse events to the renderer, this listener fires and sets __bClkV=true.
+      // Runtime.evaluate on OOPIF session is safe (separate V8 isolate from CF page).
+      yield* verifySend('Runtime.evaluate', {
+        expression: `window.__bClkV=false;document.addEventListener('mousedown',function(){window.__bClkV=true},{once:true,capture:true});true`,
+        returnByValue: true,
+      }, oopifSessionId).pipe(Effect.orElseSucceed(() => null));
+
       // ── Phase 4b: Dispatch click with mouseMoved + response capture ──
       // Send a mouseMoved BEFORE the press/release. Without this, Chrome receives
       // a bare mousePressed at coordinates it hasn't seen the cursor move to —
@@ -1143,14 +1153,40 @@ export class CloudflareSolveStrategies {
         return false;
       }
 
-      // Track click delivery for solve attribution
-      active.clickDelivered = true;
-      active.clickDeliveredAt = Date.now();
-      yield* Effect.annotateCurrentSpan({ 'cf.click_delivered': true });
+      // ── Phase 4b post-click: Verify renderer received the mousedown ──
+      // Give renderer 100ms to process the event, then check the flag.
+      yield* Effect.sleep('100 millis');
+      let rendererConfirmed: boolean | 'session_gone' | 'unknown' = 'unknown';
+
+      const verifyResult = yield* verifySend('Runtime.evaluate', {
+        expression: 'window.__bClkV',
+        returnByValue: true,
+      }, oopifSessionId).pipe(
+        Effect.map((r: any) => r?.result?.value),
+        Effect.catch(() => Effect.succeed('__session_gone__' as const)),
+      );
+
+      if (verifyResult === true) {
+        rendererConfirmed = true;           // CONFIRMED: renderer saw the mousedown
+      } else if (verifyResult === '__session_gone__') {
+        rendererConfirmed = 'session_gone'; // Session died (page navigated = likely success)
+      } else {
+        rendererConfirmed = false;          // FAILED: renderer alive but never saw mousedown
+      }
+
+      // Only mark click as delivered if renderer actually confirmed it
+      if (rendererConfirmed === true || rendererConfirmed === 'session_gone') {
+        active.clickDelivered = true;
+        active.clickDeliveredAt = Date.now();
+      }
+      yield* Effect.annotateCurrentSpan({ 'cf.click_delivered': active.clickDelivered ?? false });
       yield* events.emitProgress(active, 'clicked', { x: clickX, y: clickY });
 
       yield* events.marker(pageTargetId, 'cf.oopif_click', {
-        ok: true, method: 'cdp_oopif_session', via, attempt,
+        ok: rendererConfirmed === true || rendererConfirmed === 'session_gone',
+        renderer_confirmed: rendererConfirmed,
+        cdp_accepted: !!pressResponse && !!releaseResponse,
+        method: 'cdp_oopif_session', via, attempt,
         x: clickX, y: clickY,
         page_x: pageAbsX,
         page_y: pageAbsY,
@@ -1161,7 +1197,7 @@ export class CloudflareSolveStrategies {
         elapsed_since_solve_start_ms: Date.now() - solveStart,
         checkbox_to_click_ms: Date.now() - solveStart,
       });
-      return true;
+      return rendererConfirmed === true || rendererConfirmed === 'session_gone';
     })().pipe(
       Effect.catch(() => Effect.succeed(false)),
     );

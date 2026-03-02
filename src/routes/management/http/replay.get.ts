@@ -104,6 +104,40 @@ html, body {
 #app {
   height: 100%;
 }
+
+/* Click ripple — expanding red ring at cursor tip on mousedown.
+   Defined here (not in Svelte) because Svelte's keyframe scoping
+   breaks -global- prefix when compiled by Vite. */
+.replayer-mouse::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  border-radius: 50%;
+  border: 3px solid transparent;
+  background: transparent;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.replayer-mouse.active::before {
+  animation: click-ripple 0.6s ease-out forwards;
+}
+@keyframes click-ripple {
+  0% {
+    width: 10px;
+    height: 10px;
+    border-color: rgba(239, 68, 68, 1);
+    background: rgba(239, 68, 68, 0.4);
+  }
+  100% {
+    width: 80px;
+    height: 80px;
+    border-color: rgba(239, 68, 68, 0);
+    background: rgba(239, 68, 68, 0);
+  }
+}
   </style>
 </head>
 <body>
