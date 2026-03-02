@@ -8,6 +8,7 @@ import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
 import type { CloudflareStateTracker } from './cloudflare-state-tracker.js';
 import type { CloudflareSolveStrategies, CFDetected, TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
 import { SolveDispatcher, DetectionLoopStarter, CdpSender } from './cf-services.js';
+import { Resolution } from './cf-resolution.js';
 
 /** R channel requirements for detector methods that yield services. */
 type DetectorR = typeof SolveDispatcher.Identifier | typeof DetectionLoopStarter.Identifier | typeof CdpSender.Identifier;
@@ -131,12 +132,17 @@ export class CloudflareDetector {
               // Keep type as 'turnstile' to match the original detection — pydoll tracks
               // phases by type, so mismatch causes no_resolution.
               const attr = deriveSolveAttribution('page_navigated', !!active.clickDelivered);
-              self.events.emitSolved(active, {
-                solved: true, type: 'turnstile', method: attr.method,
+              const result = {
+                solved: true as const, type: 'turnstile' as const, method: attr.method,
                 signal: 'page_navigated', duration_ms: duration,
                 attempts: active.attempt, auto_resolved: attr.autoResolved,
                 phase_label: attr.label,
-              });
+              };
+              if (active.resolution) {
+                yield* active.resolution.solve(result);
+              } else {
+                self.events.emitSolved(active, result);
+              }
               if (attr.method === 'click_navigation' && active.clickDeliveredAt) {
                 self.events.marker(targetId, 'cf.click_to_nav', {
                   click_to_nav_ms: Date.now() - active.clickDeliveredAt, type: 'turnstile',
@@ -160,12 +166,20 @@ export class CloudflareDetector {
 
               if (rechallengeCount >= MAX_RECHALLENGES) {
                 self.log.info(`Rechallenge limit reached (${rechallengeCount}) for ${active.info.type} — emitting cf.failed`);
-                self.events.emitFailed(active, 'rechallenge_limit', duration);
+                if (active.resolution) {
+                  yield* active.resolution.fail('rechallenge_limit', duration);
+                } else {
+                  self.events.emitFailed(active, 'rechallenge_limit', duration);
+                }
                 self.state.bindingSolvedTargets.add(targetId);
                 return;
               }
 
-              self.events.emitFailed(active, 'rechallenge', duration, rechallengeAttr.label);
+              if (active.resolution) {
+                yield* active.resolution.fail('rechallenge', duration);
+              } else {
+                self.events.emitFailed(active, 'rechallenge', duration, rechallengeAttr.label);
+              }
               self.log.info(`Navigation from ${active.info.type} landed on another CF challenge (rechallenge ${rechallengeCount}/${MAX_RECHALLENGES}) — suppressing cf.solved`);
               self.state.pendingRechallengeCount.set(targetId, rechallengeCount);
             } else {
@@ -176,12 +190,17 @@ export class CloudflareDetector {
                 : null;
               const emitType = active.info.type;
 
-              self.events.emitSolved(active, {
-                solved: true, type: emitType, method: attr.method,
+              const result = {
+                solved: true as const, type: emitType, method: attr.method,
                 signal: 'page_navigated', duration_ms: duration,
                 attempts: active.attempt, auto_resolved: attr.autoResolved,
                 phase_label: attr.label,
-              });
+              };
+              if (active.resolution) {
+                yield* active.resolution.solve(result);
+              } else {
+                self.events.emitSolved(active, result);
+              }
 
               if (attr.method === 'click_navigation' && clickToNavMs !== null) {
                 self.events.marker(targetId, 'cf.click_to_nav', {
@@ -192,7 +211,11 @@ export class CloudflareDetector {
           }
         } else {
           // Non-interactive, invisible — navigation means something else happened
-          self.events.emitFailed(active, 'page_navigated', duration);
+          if (active.resolution) {
+            yield* active.resolution.fail('page_navigated', duration);
+          } else {
+            self.events.emitFailed(active, 'page_navigated', duration);
+          }
         }
       }
 
@@ -275,9 +298,14 @@ export class CloudflareDetector {
 
   private emitSolveFailure(active: ActiveDetection, targetId: TargetId, reason: string): Effect.Effect<void> {
     if (active.aborted) return Effect.void;
-    this.events.emitFailed(active, reason, Date.now() - active.startTime);
+    const duration = Date.now() - active.startTime;
     active.aborted = true;
     active.abortLatch.openUnsafe();
+    if (active.resolution) {
+      return active.resolution.fail(reason, duration);
+      // Don't resolve registry — single consumer handles it
+    }
+    this.events.emitFailed(active, reason, duration);
     return this.state.registry.resolve(targetId);
   }
 
@@ -359,6 +387,7 @@ export class CloudflareDetector {
         tracker: new CloudflareTracker(info),
         rechallengeCount,
         abortLatch: Latch.makeUnsafe(false),
+        resolution: Resolution.makeUnsafe(),
       };
 
       yield* self.state.registry.register(targetId, active);
@@ -376,10 +405,38 @@ export class CloudflareDetector {
       const outcome = yield* dispatcher.dispatch(active).pipe(
         Effect.catch(() => Effect.succeed('aborted' as const)),
       );
+      // Complete Resolution for immediate failures — these are known outcomes
+      // that don't require waiting for async signals.
       if (outcome === 'no_click') {
         yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
       } else if (outcome === 'click_no_token') {
         yield* self.emitSolveFailure(active, targetId, 'timeout');
+      }
+
+      // Await Resolution — the single emission consumer.
+      // For click_dispatched: onPageNavigated completes it ~1.5-2s after click.
+      // For no_click/click_no_token: emitSolveFailure already completed it above.
+      // For aborted: onPageNavigated/resolveAutoSolved already completed it.
+      // 10s timeout is generous fallback for any path that never completes.
+      if (active.resolution) {
+        const maybeResolved = yield* active.resolution.await.pipe(
+          Effect.timeoutOption('10 seconds'),
+        );
+        if (maybeResolved._tag === 'Some') {
+          const resolved = maybeResolved.value;
+          if (resolved._tag === 'solved') {
+            self.events.emitSolved(active, resolved.result);
+          } else {
+            self.events.emitFailed(active, resolved.reason, resolved.duration_ms);
+          }
+        } else {
+          // Timeout — no path completed the Resolution within 10s
+          const duration = Date.now() - active.startTime;
+          self.events.emitFailed(active, 'solver_exit', duration);
+        }
+        if (self.state.registry.has(targetId)) {
+          yield* self.state.registry.resolve(targetId);
+        }
       }
 
       // Snapshot ALL current CF OOPIFs so post-navigation detection won't re-detect stale targets
@@ -472,6 +529,7 @@ export class CloudflareDetector {
         rechallengeCount,
         abortLatch: Latch.makeUnsafe(false),
         oopifMeta: meta,
+        resolution: Resolution.makeUnsafe(),
       };
 
       // Guard: another detection path (e.g. triggerSolveFromUrl) may have
@@ -520,35 +578,33 @@ export class CloudflareDetector {
       const outcome = yield* dispatcher.dispatch(active).pipe(
         Effect.catch(() => Effect.succeed('aborted' as const)),
       );
+      // Complete Resolution for immediate failures
       if (outcome === 'no_click') {
         yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
       } else if (outcome === 'click_no_token') {
         yield* self.emitSolveFailure(active, targetId, 'timeout');
-      } else if (outcome === 'click_dispatched' || outcome === 'aborted') {
-        // Click was dispatched and the detection was resolved externally
-        // (navigation, token poll, activity loop, beacon). Normally the
-        // resolver (onPageNavigated, resolveAutoSolved, etc.) emits cf.solved.
-        //
-        // But there's a race: if the resolver's fiber is interrupted before
-        // emitting (e.g. pydoll closes tab), the detection is orphaned.
-        // The registry scope finalizer emits session_close fallback, but only
-        // if the detection was NOT resolved. If it WAS resolved (by the
-        // activity loop's resolveAutoSolved), the finalizer skips emission.
-        //
-        // Fallback: if aborted but no solved/failed was emitted yet (registry
-        // still has the entry = not yet resolved), emit cf.solved from here.
-        if (active.aborted && self.state.registry.has(targetId)) {
+      }
+
+      // Await Resolution — single emission consumer.
+      // For turnstile: token poll, beacon, or state change completes it.
+      // For no_click/click_no_token: emitSolveFailure already completed it.
+      // 10s timeout is generous fallback.
+      if (active.resolution) {
+        const maybeResolved = yield* active.resolution.await.pipe(
+          Effect.timeoutOption('10 seconds'),
+        );
+        if (maybeResolved._tag === 'Some') {
+          const resolved = maybeResolved.value;
+          if (resolved._tag === 'solved') {
+            self.events.emitSolved(active, resolved.result);
+          } else {
+            self.events.emitFailed(active, resolved.reason, resolved.duration_ms);
+          }
+        } else {
           const duration = Date.now() - active.startTime;
-          const attr = deriveSolveAttribution(
-            'page_navigated',
-            !!active.clickDelivered,
-          );
-          self.events.emitSolved(active, {
-            solved: true, type: 'turnstile', method: attr.method,
-            signal: 'solver_fallback', duration_ms: duration,
-            attempts: active.attempt, auto_resolved: attr.autoResolved,
-            phase_label: attr.label,
-          });
+          self.events.emitFailed(active, 'solver_exit', duration);
+        }
+        if (self.state.registry.has(targetId)) {
           yield* self.state.registry.resolve(targetId);
         }
       }

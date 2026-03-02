@@ -3,6 +3,7 @@ import { Latch } from 'effect';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot } from '../../shared/cloudflare-detection.js';
 import type { TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
+import type { Resolution } from './cf-resolution.js';
 
 export type EmitClientEvent = (method: string, params: object) => Promise<void>;
 export type InjectMarker = (targetId: TargetId, tag: string, payload?: object) => void;
@@ -147,6 +148,13 @@ export interface ActiveDetection {
   abortLatch: Latch.Latch;
   /** Parsed metadata from the Turnstile OOPIF URL (sitekey, rechallenge, mode). */
   oopifMeta?: TurnstileOOPIFMeta;
+  /**
+   * Resolution gateway — exactly-once emission for CF solve/fail outcomes.
+   * Multiple concurrent fibers race to complete it via Deferred.succeed (idempotent).
+   * The single consumer (handleTurnstileDetection / triggerSolveFromUrl) awaits
+   * the result and performs the actual emission.
+   */
+  resolution?: Resolution;
 }
 
 /** Handles all CDP event emission for Cloudflare detection/solving. */

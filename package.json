@@ -195,7 +195,9 @@
     "printWidth": 80
   },
   "devDependencies": {
+    "@effect/vitest": "file:../../../effect-smol/packages/vitest",
     "env-cmd": "^11.0.0",
-    "husky": "^9.1.7"
+    "husky": "^9.1.7",
+    "vitest": "^4.0.18"
   }
 }
