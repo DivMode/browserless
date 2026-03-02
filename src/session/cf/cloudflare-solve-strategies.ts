@@ -73,6 +73,7 @@ export type CFDetectionResult = CFNotDetected | CFDetected;
 
 export type SolveOutcome =
   | 'click_dispatched'
+  | 'click_no_token'
   | 'no_click'
   | 'auto_handled'
   | 'aborted';

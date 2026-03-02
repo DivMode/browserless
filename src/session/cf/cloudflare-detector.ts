@@ -102,7 +102,7 @@ export class CloudflareDetector {
       const active = self.state.registry.get(targetId);
       if (active) {
         active.aborted = true;
-        active.abortLatch?.openUnsafe();
+        active.abortLatch.openUnsafe();
         yield* self.state.registry.resolve(targetId);
         const duration = Date.now() - active.startTime;
 
@@ -338,7 +338,7 @@ export class CloudflareDetector {
     if (active.aborted) return Effect.void;
     this.events.emitFailed(active, reason, Date.now() - active.startTime);
     active.aborted = true;
-    active.abortLatch?.openUnsafe();
+    active.abortLatch.openUnsafe();
     return this.state.registry.resolve(targetId);
   }
 
@@ -439,6 +439,8 @@ export class CloudflareDetector {
       );
       if (outcome === 'no_click') {
         yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
+      } else if (outcome === 'click_no_token') {
+        yield* self.emitSolveFailure(active, targetId, 'timeout');
       }
 
       // Snapshot ALL current CF OOPIFs so post-navigation detection won't re-detect stale targets
@@ -568,6 +570,8 @@ export class CloudflareDetector {
       );
       if (outcome === 'no_click') {
         yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
+      } else if (outcome === 'click_no_token') {
+        yield* self.emitSolveFailure(active, targetId, 'timeout');
       }
     })();
   }
