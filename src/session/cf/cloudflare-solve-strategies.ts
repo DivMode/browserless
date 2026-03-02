@@ -19,7 +19,6 @@ import {
 /** Parsed metadata from a CF Turnstile OOPIF URL. */
 export interface TurnstileOOPIFMeta {
   readonly sitekey: string | null;
-  readonly isRechallenge: boolean;
   readonly mode: string | null;       // 'normal', 'compact', etc.
   readonly theme: string | null;      // 'light', 'dark', 'auto'
   readonly appearance: string | null; // 'always', 'execute', 'interaction-only'
@@ -28,16 +27,14 @@ export interface TurnstileOOPIFMeta {
 /** Extract Turnstile metadata from an OOPIF URL path. */
 export function parseTurnstileOOPIFUrl(url: string): TurnstileOOPIFMeta {
   let sitekey: string | null = null;
-  let isRechallenge = false;
   let mode: string | null = null;
   let theme: string | null = null;
   let appearance: string | null = null;
   try {
     const u = new URL(url);
     const segments = u.pathname.split('/').filter(Boolean);
-    // Find sitekey: starts with 0x and 20+ hex chars
-    sitekey = segments.find(s => /^0x[0-9a-fA-F]{20,}$/i.test(s)) ?? null;
-    isRechallenge = segments.includes('rch');
+    // Find sitekey: starts with 0x and 20+ alphanumeric chars (NOT hex — sitekeys use base62)
+    sitekey = segments.find(s => /^0x[0-9a-zA-Z-]{20,}$/.test(s)) ?? null;
     // Mode is typically the last non-query segment
     const modeIdx = segments.length - 1;
     if (modeIdx > 0) mode = segments[modeIdx] ?? null;
@@ -46,7 +43,7 @@ export function parseTurnstileOOPIFUrl(url: string): TurnstileOOPIFMeta {
     // Appearance: 'always', 'execute', 'interaction-only'
     appearance = segments.find(s => ['always', 'execute', 'interaction-only'].includes(s)) ?? null;
   } catch { /* malformed URL — return defaults */ }
-  return { sitekey, isRechallenge, mode, theme, appearance };
+  return { sitekey, mode, theme, appearance };
 }
 
 /** Individual CF OOPIF target found by Target.getTargets. */
