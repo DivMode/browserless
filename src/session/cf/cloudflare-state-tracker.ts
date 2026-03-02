@@ -152,37 +152,31 @@ export class CloudflareStateTracker {
         }
 
         const duration = Date.now() - active.startTime;
-        active.aborted = true; active.abortLatch.openUnsafe();
         const solveSignal: SolveSignal = token ? 'token_poll' : 'state_change';
         // clickDelivered = our click landed on checkbox before iframe state changed
         const attr = deriveSolveAttribution(solveSignal, !!active.clickDelivered);
+        const solveResult = {
+          solved: true as const,
+          type: active.info.type,
+          method: attr.method,
+          token: token || undefined,
+          duration_ms: duration,
+          attempts: active.attempt,
+          auto_resolved: attr.autoResolved,
+          signal: solveSignal,
+          phase_label: attr.label,
+        };
 
         // Complete via Resolution gateway if available — exactly-one emission
         if (active.resolution) {
-          yield* active.resolution.solve({
-            solved: true,
-            type: active.info.type,
-            method: attr.method,
-            token: token || undefined,
-            duration_ms: duration,
-            attempts: active.attempt,
-            auto_resolved: attr.autoResolved,
-            signal: solveSignal,
-            phase_label: attr.label,
-          });
+          const won = yield* active.resolution.solve(solveResult);
+          if (won) {
+            active.aborted = true; active.abortLatch.openUnsafe();
+          }
         } else {
           // Fallback for detections without Resolution (should not happen after full wiring)
-          tracker.events.emitSolved(active, {
-            solved: true,
-            type: active.info.type,
-            method: attr.method,
-            token: token || undefined,
-            duration_ms: duration,
-            attempts: active.attempt,
-            auto_resolved: attr.autoResolved,
-            signal: solveSignal,
-            phase_label: attr.label,
-          });
+          active.aborted = true; active.abortLatch.openUnsafe();
+          tracker.events.emitSolved(active, solveResult);
           yield* tracker.registry.resolve(pageTargetId);
         }
       } else if (state === 'fail' || state === 'expired' || state === 'timeout') {
@@ -249,7 +243,6 @@ export class CloudflareStateTracker {
 
       if (active && !active.aborted) {
         const duration = Date.now() - active.startTime;
-        active.aborted = true; active.abortLatch.openUnsafe();
         tracker.bindingSolvedTargets.add(targetId);
         // clickDelivered = our click landed on checkbox before beacon fired
         const attr = deriveSolveAttribution('beacon_push', !!active.clickDelivered);
@@ -265,8 +258,12 @@ export class CloudflareStateTracker {
           phase_label: attr.label,
         };
         if (active.resolution) {
-          yield* active.resolution.solve(result);
+          const won = yield* active.resolution.solve(result);
+          if (won) {
+            active.aborted = true; active.abortLatch.openUnsafe();
+          }
         } else {
+          active.aborted = true; active.abortLatch.openUnsafe();
           tracker.events.emitSolved(active, result);
           yield* tracker.registry.resolve(targetId);
         }
@@ -307,7 +304,6 @@ export class CloudflareStateTracker {
       const token = yield* tracker.getTokenEffect(active.pageCdpSessionId).pipe(
         Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
       );
-      active.aborted = true; active.abortLatch.openUnsafe();
       // clickDelivered = our click landed on checkbox before token/state resolved
       const attr = deriveSolveAttribution(signal as SolveSignal, !!active.clickDelivered);
       const result = {
@@ -317,15 +313,21 @@ export class CloudflareStateTracker {
         phase_label: attr.label,
       };
       if (active.resolution) {
-        yield* active.resolution.solve(result);
-        // Don't resolve registry here — the single consumer (handleTurnstileDetection/
-        // triggerSolveFromUrl) awaits resolution.await and handles registry + emission.
+        const won = yield* active.resolution.solve(result);
+        // Only abort + emit marker if we actually won the race.
+        // Losers (won=false) must not mutate active state or emit —
+        // the winner already resolved and the detector handles emission.
+        if (won) {
+          active.aborted = true; active.abortLatch.openUnsafe();
+          tracker.events.marker(active.pageTargetId, 'cf.auto_solved', { signal, method: attr.method });
+        }
       } else {
+        active.aborted = true; active.abortLatch.openUnsafe();
         const pageTargetId = tracker.findPageBySession(active.pageCdpSessionId);
         if (pageTargetId) yield* tracker.registry.resolve(pageTargetId);
         tracker.events.emitSolved(active, result);
+        tracker.events.marker(active.pageTargetId, 'cf.auto_solved', { signal, method: attr.method });
       }
-      tracker.events.marker(active.pageTargetId, 'cf.auto_solved', { signal, method: attr.method });
     })();
   }
 
