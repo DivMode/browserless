@@ -341,13 +341,24 @@ const solveTurnstile = (
     // raceFirst: both run concurrently, loser auto-interrupted via fiber cancellation.
     // abortLatch.await races alongside — if the detection is aborted externally
     // (page navigated, session destroyed), both fibers are interrupted immediately.
+    const raceStart = Date.now();
     const raceResult = yield* Effect.raceFirst(
       Effect.raceFirst(clickLoop, tokenPoll),
-      active.abortLatch.await.pipe(Effect.map(() => ({ _tag: 'aborted' as const }))),
+      active.abortLatch.await.pipe(Effect.map(() => ({ _tag: 'aborted' as const, timedOut: false as const }))),
     ).pipe(
+      Effect.map(result => ({ ...result, timedOut: false as const })),
       Effect.timeout(SOLVE_DEADLINE_MS),
-      Effect.orElseSucceed(() => ({ _tag: 'no_click' as const })),
+      Effect.orElseSucceed(() => ({ _tag: 'no_click' as const, timedOut: true as const })),
     );
+
+    // Emit timeout-specific marker — answers: did the 30s deadline fire?
+    if (raceResult.timedOut) {
+      yield* events.marker(pageTargetId, 'cf.solve_deadline_fired', {
+        deadline_ms: SOLVE_DEADLINE_MS,
+        total_elapsed_ms: Date.now() - solveEntryMs,
+        race_elapsed_ms: Date.now() - raceStart,
+      });
+    }
 
     // Handle post-race outcomes
     const raceElapsedMs = Date.now() - solveEntryMs;

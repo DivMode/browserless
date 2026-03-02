@@ -36,12 +36,6 @@ npm run dev
 # Start without rebuilding
 npm start
 
-# Run tests (builds test artifacts first)
-npm run test
-
-# Run single test file
-npx mocha build/path/to/file.spec.js
-
 # Lint and fix
 npm run lint
 
@@ -51,6 +45,14 @@ npm run prettier
 # Install browsers locally for development
 npm run install:browsers
 ```
+
+### DO NOT run mocha tests
+
+**NEVER run `npm test`, `npx mocha`, or any mocha commands.** The mocha suite is upstream browserless's HTTP/screenshot integration tests. They are irrelevant to our CF solver work, require infrastructure we don't have, and take forever.
+
+**Verification for our code changes:**
+1. `npx tsc --noEmit` — typecheck
+2. `cf-test` via pydoll — live solver verification
 
 ## Architecture
 
@@ -137,18 +139,6 @@ Key environment variables (see `src/config.ts`):
 - `CONCURRENT` - Max concurrent sessions
 - `QUEUED` - Max queued requests
 - `TIMEOUT` - Request timeout in ms
-
-## Testing
-
-Tests use Mocha with Chai assertions. Test files are colocated with routes in `tests/` directories.
-
-```bash
-# Run all tests
-npm test
-
-# Run specific test file
-npx mocha build/src/routes/chromium/tests/pdf.spec.js
-```
 
 ## Code Style
 

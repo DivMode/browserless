@@ -603,12 +603,21 @@ export class CloudflareSolveStrategies {
 
       let oopifSessionId: CdpSessionId | null = null;
 
+      // ── Instrumentation: Phase 2 timing ─────────────────────────────
+      const phase2Start = Date.now();
+      yield* events.marker(pageTargetId, 'cf.phase2_start', {
+        candidate_count: candidates.length,
+        has_iframe_frame_id: !!iframeFrameId,
+        via,
+      });
+
       // Primary: match by frameId from page-side DOM.describeNode
       // The iframe element's frameId (from page session) matches the target's
       // frame tree root frame ID. frameId is a global Chrome identifier (unlike
       // backendNodeId which is per-connection).
       if (iframeFrameId && candidates.length > 0) {
         for (const target of candidates) {
+          const attachStart = Date.now();
           const trySessionId = yield* Effect.tryPromise(async () => {
             const { sessionId } = await send('Target.attachToTarget', {
               targetId: target.targetId,
@@ -616,6 +625,14 @@ export class CloudflareSolveStrategies {
             });
             return sessionId;
           }).pipe(Effect.orElseSucceed(() => null));
+
+          yield* events.marker(pageTargetId, 'cf.phase2_attach', {
+            targetId: target.targetId.substring(0, 20),
+            success: !!trySessionId,
+            elapsed_ms: Date.now() - attachStart,
+            loop: 'primary',
+          });
+
           if (!trySessionId) continue; // This target didn't match — try next
 
           const ft = yield* Effect.tryPromise(() => send('Page.getFrameTree', {}, trySessionId)).pipe(
@@ -659,6 +676,7 @@ export class CloudflareSolveStrategies {
             );
             // Try frameId_match on refreshed targets
             for (const target of refreshedCandidates) {
+              const attachStart = Date.now();
               const trySessionId = yield* Effect.tryPromise(async () => {
                 const { sessionId } = await send('Target.attachToTarget', {
                   targetId: target.targetId,
@@ -666,6 +684,15 @@ export class CloudflareSolveStrategies {
                 });
                 return sessionId;
               }).pipe(Effect.orElseSucceed(() => null));
+
+              yield* events.marker(pageTargetId, 'cf.phase2_attach', {
+                targetId: target.targetId.substring(0, 20),
+                success: !!trySessionId,
+                elapsed_ms: Date.now() - attachStart,
+                loop: 'fallback_retry',
+                poll: oopifPoll,
+              });
+
               if (!trySessionId) continue;
               const ft = yield* Effect.tryPromise(() => send('Page.getFrameTree', {}, trySessionId)).pipe(
                 Effect.orElseSucceed(() => null),
@@ -705,6 +732,7 @@ export class CloudflareSolveStrategies {
 
           if (cfTargets.length > 0) {
             const target = cfTargets[0];
+            const attachStart = Date.now();
             const sessionId = yield* Effect.tryPromise(async () => {
               const { sessionId } = await send('Target.attachToTarget', {
                 targetId: target.targetId,
@@ -712,6 +740,14 @@ export class CloudflareSolveStrategies {
               });
               return sessionId;
             }).pipe(Effect.orElseSucceed(() => null));
+
+            yield* events.marker(pageTargetId, 'cf.phase2_attach', {
+              targetId: target.targetId.substring(0, 20),
+              success: !!sessionId,
+              elapsed_ms: Date.now() - attachStart,
+              loop: 'fallback_first',
+            });
+
             if (sessionId) {
               // If we have iframeFrameId, verify this OOPIF matches before committing
               if (iframeFrameId) {
@@ -745,6 +781,11 @@ export class CloudflareSolveStrategies {
       }
 
       yield* Effect.annotateCurrentSpan({ 'cf.oopif_found': !!oopifSessionId });
+      yield* events.marker(pageTargetId, 'cf.phase2_end', {
+        found: !!oopifSessionId,
+        elapsed_ms: Date.now() - phase2Start,
+        candidates_tried: candidates.length,
+      });
       return oopifSessionId;
     })();
   }
@@ -825,6 +866,12 @@ export class CloudflareSolveStrategies {
         'cf.via': via,
       });
       const events = yield* SolverEvents;
+
+      const phase3Start = Date.now();
+      yield* events.marker(pageTargetId, 'cf.phase3_start', {
+        via, oopif_session: oopifSessionId.substring(0, 20),
+      });
+
       // Create isolated world
       let isolatedContextId: number | null = null;
       let oopifFrameId: string | null = null;
@@ -909,6 +956,7 @@ export class CloudflareSolveStrategies {
           diag_cbI: diag.cbI,
           diag_inp: diag.inp,
         });
+        yield* events.marker(pageTargetId, 'cf.phase3_end', { found: false, elapsed_ms: Date.now() - phase3Start });
         return null;
       }
 
@@ -920,6 +968,7 @@ export class CloudflareSolveStrategies {
         checkbox_found_ms: checkboxFoundAt - solveStart,
       });
       yield* events.emitProgress(active, 'widget_found', { method, x: 0, y: 0 });
+      yield* events.marker(pageTargetId, 'cf.phase3_end', { found: true, elapsed_ms: Date.now() - phase3Start });
 
       return { checkbox, method };
     })();
@@ -949,6 +998,9 @@ export class CloudflareSolveStrategies {
         'cf.checkbox_method': method,
       });
       const events = yield* SolverEvents;
+
+      yield* events.marker(pageTargetId, 'cf.phase4_start', { via, attempt });
+
       // Pydoll does a visibility check (getBoundingClientRect + getComputedStyle)
       // before clicking. This confirms the element is rendered and interactive.
       if (checkbox.objectId) {
