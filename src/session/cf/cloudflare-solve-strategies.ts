@@ -2,7 +2,14 @@ import { Effect, Scope } from 'effect';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
 import type { TargetId } from '../../shared/cloudflare-detection.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
-import type { SendCommand } from './cloudflare-state-tracker.js';
+
+/** Effect-returning CDP sender — eliminates the Promise bridge. */
+type EffectSend = (
+  method: string,
+  params?: object,
+  sessionId?: CdpSessionId,
+  timeoutMs?: number,
+) => Effect.Effect<any>;
 import { CdpConnection } from '../../shared/cdp-rpc.js';
 import { CdpSessionGone } from './cf-errors.js';
 import { CdpSender, SolverEvents } from './cf-services.js';
@@ -136,32 +143,32 @@ export class CloudflareSolveStrategies {
    * Returns Effect to compose with the calling Effect chain.
    */
   private findCheckboxViaRuntimeUsing(
-    send: SendCommand,
+    send: EffectSend,
     oopifSessionId: CdpSessionId,
   ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
     const strategies = this;
-    /** Wrap a CDP call with a timeout to prevent 30s hangs when OOPIF navigates away. */
-    const cdpCall = <T>(promise: () => Promise<T>) =>
-      Effect.tryPromise(promise).pipe(
+    /** Wrap an Effect-returning CDP call with a timeout to prevent hangs when OOPIF navigates away. */
+    const cdpCall = <T>(effect: Effect.Effect<T>) =>
+      effect.pipe(
         Effect.timeout(`${CDP_CALL_TIMEOUT_MS} millis`),
         Effect.orElseSucceed(() => null as T | null),
       );
     return Effect.fn('cf.findCheckboxViaRuntime')(function*() {
       yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId, 'cf.via': 'runtime' });
       // Step 1: Get document node
-      const doc = yield* cdpCall(() => send('DOM.getDocument', {
+      const doc = yield* cdpCall(send('DOM.getDocument', {
         depth: 0,
       }, oopifSessionId));
       if (!doc?.root) return null;
 
       // Step 2: Resolve document to get its objectId
-      const resolved = yield* cdpCall(() => send('DOM.resolveNode', {
+      const resolved = yield* cdpCall(send('DOM.resolveNode', {
         nodeId: doc.root.nodeId,
       }, oopifSessionId));
       if (!resolved?.object?.objectId) return null;
 
       // Step 3: Find body element via Runtime.callFunctionOn
-      const bodyResult = yield* cdpCall(() => send('Runtime.callFunctionOn', {
+      const bodyResult = yield* cdpCall(send('Runtime.callFunctionOn', {
         objectId: resolved.object.objectId,
         functionDeclaration: `function() { return this.querySelector('body'); }`,
         returnByValue: false,
@@ -169,7 +176,7 @@ export class CloudflareSolveStrategies {
       if (!bodyResult?.result?.objectId) return null;
 
       // Step 4: Describe body node with pierce=true to get shadow root
-      const bodyDesc = yield* cdpCall(() => send('DOM.describeNode', {
+      const bodyDesc = yield* cdpCall(send('DOM.describeNode', {
         objectId: bodyResult.result.objectId,
         pierce: true,
         depth: 1,
@@ -192,7 +199,7 @@ export class CloudflareSolveStrategies {
       const children = bodyDesc?.node?.children;
       if (children?.length) {
         for (const child of children) {
-          const childDesc = yield* cdpCall(() => send('DOM.describeNode', {
+          const childDesc = yield* cdpCall(send('DOM.describeNode', {
             backendNodeId: child.backendNodeId,
             pierce: true,
             depth: 1,
@@ -226,21 +233,21 @@ export class CloudflareSolveStrategies {
    * CF's WASM in the main world cannot observe execution in isolated worlds.
    */
   private findCheckboxViaIsolatedWorld(
-    send: SendCommand,
+    send: EffectSend,
     oopifSessionId: CdpSessionId,
     contextId: number,
   ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
     const strategies = this;
-    /** Wrap a CDP call with a timeout to prevent 30s hangs when OOPIF navigates away. */
-    const cdpCall = <T>(promise: () => Promise<T>) =>
-      Effect.tryPromise(promise).pipe(
+    /** Wrap an Effect-returning CDP call with a timeout to prevent hangs when OOPIF navigates away. */
+    const cdpCall = <T>(effect: Effect.Effect<T>) =>
+      effect.pipe(
         Effect.timeout(`${CDP_CALL_TIMEOUT_MS} millis`),
         Effect.orElseSucceed(() => null as T | null),
       );
     return Effect.fn('cf.findCheckboxViaIsolatedWorld')(function*() {
       yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId, 'cf.via': 'isolated_world' });
       // Get document root in the isolated world (pydoll: Runtime.evaluate('document.documentElement'))
-      const docResult = yield* cdpCall(() => send('Runtime.evaluate', {
+      const docResult = yield* cdpCall(send('Runtime.evaluate', {
         expression: 'document.documentElement',
         contextId,
         returnByValue: false,
@@ -248,7 +255,7 @@ export class CloudflareSolveStrategies {
       if (!docResult?.result?.objectId) return null;
 
       // Find body (pydoll: iframe.find(tag_name='body'))
-      const bodyResult = yield* cdpCall(() => send('Runtime.callFunctionOn', {
+      const bodyResult = yield* cdpCall(send('Runtime.callFunctionOn', {
         objectId: docResult.result.objectId,
         functionDeclaration: `function() { return this.querySelector('body'); }`,
         returnByValue: false,
@@ -256,7 +263,7 @@ export class CloudflareSolveStrategies {
       if (!bodyResult?.result?.objectId) return null;
 
       // Describe body with pierce to get shadow roots (pydoll: body.get_shadow_root())
-      const bodyDesc = yield* cdpCall(() => send('DOM.describeNode', {
+      const bodyDesc = yield* cdpCall(send('DOM.describeNode', {
         objectId: bodyResult.result.objectId,
         pierce: true,
         depth: 1,
@@ -274,7 +281,7 @@ export class CloudflareSolveStrategies {
       const children = bodyDesc?.node?.children;
       if (children?.length) {
         for (const child of children) {
-          const childDesc = yield* cdpCall(() => send('DOM.describeNode', {
+          const childDesc = yield* cdpCall(send('DOM.describeNode', {
             backendNodeId: child.backendNodeId,
             pierce: true,
             depth: 1,
@@ -295,26 +302,26 @@ export class CloudflareSolveStrategies {
   }
 
   private queryCheckboxInShadowUsing(
-    send: SendCommand,
+    send: EffectSend,
     oopifSessionId: CdpSessionId,
     shadowBackendNodeId: number,
   ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
-    /** Wrap a CDP call with a timeout to prevent hangs when OOPIF navigates away. */
-    const cdpCall = <T>(promise: () => Promise<T>) =>
-      Effect.tryPromise(promise).pipe(
+    /** Wrap an Effect-returning CDP call with a timeout to prevent hangs when OOPIF navigates away. */
+    const cdpCall = <T>(effect: Effect.Effect<T>) =>
+      effect.pipe(
         Effect.timeout(`${CDP_CALL_TIMEOUT_MS} millis`),
         Effect.orElseSucceed(() => null as T | null),
       );
     return Effect.fn('cf.queryCheckboxInShadow')(function*() {
       yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId });
       // Resolve shadow root to objectId
-      const shadowResolved = yield* cdpCall(() => send('DOM.resolveNode', {
+      const shadowResolved = yield* cdpCall(send('DOM.resolveNode', {
         backendNodeId: shadowBackendNodeId,
       }, oopifSessionId));
       if (!shadowResolved?.object?.objectId) return null;
 
       // Try span.cb-i first (Turnstile's primary checkbox indicator)
-      const cbResult = yield* cdpCall(() => send('Runtime.callFunctionOn', {
+      const cbResult = yield* cdpCall(send('Runtime.callFunctionOn', {
         objectId: shadowResolved.object.objectId,
         functionDeclaration: `function() { return this.querySelector('span.cb-i') || this.querySelector('input[type="checkbox"]'); }`,
         returnByValue: false,
@@ -323,7 +330,7 @@ export class CloudflareSolveStrategies {
       if (!cbResult?.result?.objectId || cbResult.result.subtype === 'null') return null;
 
       // Get the backendNodeId for the checkbox (needed for getBoxModel)
-      const cbDesc = yield* cdpCall(() => send('DOM.describeNode', {
+      const cbDesc = yield* cdpCall(send('DOM.describeNode', {
         objectId: cbResult.result.objectId,
       }, oopifSessionId));
 
@@ -384,50 +391,55 @@ export class CloudflareSolveStrategies {
       // zero CDP state would be cleaner. But pydoll succeeds through CDPProxy and
       // we failed through isolated WS — the isolated WS is not the advantage.
 
-      // Materialize CdpSender into a SendCommand closure for inner methods
-      // that still accept SendCommand (phase2/3/4, checkbox finders).
-      // This preserves debug logging and proxy routing in one place.
+      // Materialize CdpSender into EffectSend closures for inner methods.
+      // Returns Effect directly — no Promise bridge, fully interruptible.
       const debugEnabled = !!process.env.BROWSERLESS_CDP_DEBUG;
       const solveStart = Date.now();
       let cmdSeq = 0;
 
-      const send: SendCommand = async (method, params, sessionId, timeoutMs) => {
+      const send: EffectSend = (method, params, sessionId, timeoutMs) => {
         const seq = cmdSeq++;
-        const sid = sessionId ? `[sid=${sessionId.substring(0, 16)}]` : '[no-sid]';
         const t0 = Date.now() - solveStart;
         if (debugEnabled) {
+          const sid = sessionId ? `[sid=${sessionId.substring(0, 16)}]` : '[no-sid]';
           const p = params ? JSON.stringify(params).substring(0, 150) : '{}';
           console.log(`  [SOLVE #${seq}] +${t0}ms ${method} ${sid} ${p}`);
         }
-        const result = await Effect.runPromise(cdp.sendViaProxy(method, params, sessionId, timeoutMs).pipe(
+        return cdp.sendViaProxy(method, params, sessionId, timeoutMs ?? CDP_CALL_TIMEOUT_MS).pipe(
           Effect.orElseSucceed(() => null),
-        ));
-        if (debugEnabled) {
-          const t1 = Date.now() - solveStart;
-          const summary = result ? JSON.stringify(result).substring(0, 120) : 'null';
-          console.log(`  [SOLVE #${seq}] +${t1}ms → ${summary}`);
-        }
-        return result;
+          Effect.tap((result) =>
+            Effect.sync(() => {
+              if (debugEnabled) {
+                const t1 = Date.now() - solveStart;
+                const summary = result ? JSON.stringify(result).substring(0, 120) : 'null';
+                console.log(`  [SOLVE #${seq}] +${t1}ms → ${summary}`);
+              }
+            }),
+          ),
+        );
       };
       const via = 'proxy_ws';
 
       // Wrap page-session commands with debug logging too
-      const pageSend: SendCommand = async (method, params, sessionId, timeoutMs) => {
+      const pageSend: EffectSend = (method, params, sessionId, timeoutMs) => {
         const seq = cmdSeq++;
         const t0 = Date.now() - solveStart;
         if (debugEnabled) {
           const p = params ? JSON.stringify(params).substring(0, 150) : '{}';
           console.log(`  [PAGE  #${seq}] +${t0}ms ${method} [page-session] ${p}`);
         }
-        const result = await Effect.runPromise(cdp.send(method, params, sessionId, timeoutMs).pipe(
+        return cdp.send(method, params, sessionId, timeoutMs ?? CDP_CALL_TIMEOUT_MS).pipe(
           Effect.orElseSucceed(() => null),
-        ));
-        if (debugEnabled) {
-          const t1 = Date.now() - solveStart;
-          const summary = result ? JSON.stringify(result).substring(0, 120) : 'null';
-          console.log(`  [PAGE  #${seq}] +${t1}ms → ${summary}`);
-        }
-        return result;
+          Effect.tap((result) =>
+            Effect.sync(() => {
+              if (debugEnabled) {
+                const t1 = Date.now() - solveStart;
+                const summary = result ? JSON.stringify(result).substring(0, 120) : 'null';
+                console.log(`  [PAGE  #${seq}] +${t1}ms → ${summary}`);
+              }
+            }),
+          ),
+        );
       };
 
       // ──────────────────────────────────────────────────────────────────
@@ -484,8 +496,8 @@ export class CloudflareSolveStrategies {
       );
 
       if (!oopifSessionId) {
-        const targetInfos = yield* Effect.tryPromise(() => send('Target.getTargets')).pipe(
-          Effect.map(r => r?.targetInfos),
+        const targetInfos = yield* send('Target.getTargets').pipe(
+          Effect.map((r: any) => r?.targetInfos),
           Effect.orElseSucceed(() => []),
         );
         yield* events.marker(pageTargetId, 'cf.cdp_no_oopif', {
@@ -573,8 +585,8 @@ export class CloudflareSolveStrategies {
   // ── Phase 2: OOPIF resolution ─────────────────────────────────────
 
   private phase2OOPIFResolution(
-    send: SendCommand,
-    pageSend: SendCommand,
+    send: EffectSend,
+    pageSend: EffectSend,
     pageCdpSessionId: CdpSessionId,
     pageTargetId: TargetId,
     iframeFrameId: string | null,
@@ -587,7 +599,7 @@ export class CloudflareSolveStrategies {
         'cf.has_iframe_frame_id': !!iframeFrameId,
       });
       const events = yield* SolverEvents;
-      const targetsResult = yield* Effect.tryPromise(() => send('Target.getTargets')).pipe(
+      const targetsResult = yield* send('Target.getTargets').pipe(
         Effect.orElseSucceed(() => ({ targetInfos: [] as any[] })),
       );
       const targetInfos = targetsResult?.targetInfos;
@@ -618,13 +630,10 @@ export class CloudflareSolveStrategies {
       if (iframeFrameId && candidates.length > 0) {
         for (const target of candidates) {
           const attachStart = Date.now();
-          const trySessionId = yield* Effect.tryPromise(async () => {
-            const { sessionId } = await send('Target.attachToTarget', {
-              targetId: target.targetId,
-              flatten: true,
-            });
-            return sessionId;
-          }).pipe(Effect.orElseSucceed(() => null));
+          const trySessionId = yield* send('Target.attachToTarget', {
+            targetId: target.targetId,
+            flatten: true,
+          }).pipe(Effect.map((r: any) => r?.sessionId ?? null));
 
           yield* events.marker(pageTargetId, 'cf.phase2_attach', {
             targetId: target.targetId.substring(0, 20),
@@ -635,9 +644,7 @@ export class CloudflareSolveStrategies {
 
           if (!trySessionId) continue; // This target didn't match — try next
 
-          const ft = yield* Effect.tryPromise(() => send('Page.getFrameTree', {}, trySessionId)).pipe(
-            Effect.orElseSucceed(() => null),
-          );
+          const ft = yield* send('Page.getFrameTree', {}, trySessionId);
           const frameId = ft?.frameTree?.frame?.id;
           if (!frameId) continue; // This target didn't match — try next
 
@@ -665,7 +672,7 @@ export class CloudflareSolveStrategies {
           if (oopifPoll > 0) {
             yield* Effect.sleep('500 millis');
             // Re-fetch targets — the correct OOPIF may have appeared
-            const refreshed = yield* Effect.tryPromise(() => send('Target.getTargets')).pipe(
+            const refreshed = yield* send('Target.getTargets').pipe(
               Effect.orElseSucceed(() => ({ targetInfos: [] as any[] })),
             );
             const refreshedCandidates = (refreshed.targetInfos ?? []).filter(
@@ -677,13 +684,10 @@ export class CloudflareSolveStrategies {
             // Try frameId_match on refreshed targets
             for (const target of refreshedCandidates) {
               const attachStart = Date.now();
-              const trySessionId = yield* Effect.tryPromise(async () => {
-                const { sessionId } = await send('Target.attachToTarget', {
-                  targetId: target.targetId,
-                  flatten: true,
-                });
-                return sessionId;
-              }).pipe(Effect.orElseSucceed(() => null));
+              const trySessionId = yield* send('Target.attachToTarget', {
+                targetId: target.targetId,
+                flatten: true,
+              }).pipe(Effect.map((r: any) => r?.sessionId ?? null));
 
               yield* events.marker(pageTargetId, 'cf.phase2_attach', {
                 targetId: target.targetId.substring(0, 20),
@@ -694,9 +698,7 @@ export class CloudflareSolveStrategies {
               });
 
               if (!trySessionId) continue;
-              const ft = yield* Effect.tryPromise(() => send('Page.getFrameTree', {}, trySessionId)).pipe(
-                Effect.orElseSucceed(() => null),
-              );
+              const ft = yield* send('Page.getFrameTree', {}, trySessionId);
               const frameId = ft?.frameTree?.frame?.id;
               if (frameId && (frameId === iframeFrameId || target.targetId === iframeFrameId)) {
                 oopifSessionId = trySessionId;
@@ -717,9 +719,7 @@ export class CloudflareSolveStrategies {
 
           // First poll (oopifPoll === 0): use parentFrameId filter on existing candidates
           let pageFrameId: string | null = null;
-          const frameTree = yield* Effect.tryPromise(() => pageSend('Page.getFrameTree', {}, pageCdpSessionId)).pipe(
-            Effect.orElseSucceed(() => null),
-          );
+          const frameTree = yield* pageSend('Page.getFrameTree', {}, pageCdpSessionId);
           pageFrameId = frameTree?.frameTree?.frame?.id ?? null;
 
           let cfTargets = pageFrameId
@@ -733,13 +733,10 @@ export class CloudflareSolveStrategies {
           if (cfTargets.length > 0) {
             const target = cfTargets[0];
             const attachStart = Date.now();
-            const sessionId = yield* Effect.tryPromise(async () => {
-              const { sessionId } = await send('Target.attachToTarget', {
-                targetId: target.targetId,
-                flatten: true,
-              });
-              return sessionId;
-            }).pipe(Effect.orElseSucceed(() => null));
+            const sessionId = yield* send('Target.attachToTarget', {
+              targetId: target.targetId,
+              flatten: true,
+            }).pipe(Effect.map((r: any) => r?.sessionId ?? null));
 
             yield* events.marker(pageTargetId, 'cf.phase2_attach', {
               targetId: target.targetId.substring(0, 20),
@@ -751,9 +748,7 @@ export class CloudflareSolveStrategies {
             if (sessionId) {
               // If we have iframeFrameId, verify this OOPIF matches before committing
               if (iframeFrameId) {
-                const ft = yield* Effect.tryPromise(() => send('Page.getFrameTree', {}, sessionId)).pipe(
-                  Effect.orElseSucceed(() => null),
-                );
+                const ft = yield* send('Page.getFrameTree', {}, sessionId);
                 const frameId = ft?.frameTree?.frame?.id;
                 if (frameId && frameId !== iframeFrameId && target.targetId !== iframeFrameId) {
                   // Stale OOPIF — doesn't match our Phase 1 iframe. Keep polling.
@@ -798,7 +793,7 @@ export class CloudflareSolveStrategies {
    * Returns compact summary: { alive, bodyLength, tags, shadow, cbI, inp }.
    */
   private diagnoseShadowDOM(
-    send: SendCommand,
+    send: EffectSend,
     oopifSessionId: CdpSessionId,
     isolatedContextId: number | null,
   ): Effect.Effect<Record<string, unknown>> {
@@ -811,11 +806,11 @@ export class CloudflareSolveStrategies {
         ? { contextId: isolatedContextId }
         : {};
 
-      const docResult = yield* Effect.tryPromise(() => send('Runtime.evaluate', {
+      const docResult = yield* send('Runtime.evaluate', {
         expression: 'document.body ? document.body.innerHTML.length : -1',
         returnByValue: true,
         ...evalOpts,
-      }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+      }, oopifSessionId);
 
       if (docResult?.result?.value != null) {
         result.alive = true;
@@ -825,7 +820,7 @@ export class CloudflareSolveStrategies {
       }
 
       // Get compact tag summary + shadow root count + checkbox selector matches
-      const tagsResult = yield* Effect.tryPromise(() => send('Runtime.evaluate', {
+      const tagsResult = yield* send('Runtime.evaluate', {
         expression: `(function() {
           var b = document.body;
           if (!b) return { tags: [], shadow: 0 };
@@ -838,7 +833,7 @@ export class CloudflareSolveStrategies {
         })()`,
         returnByValue: true,
         ...evalOpts,
-      }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+      }, oopifSessionId);
 
       if (tagsResult?.result?.value) {
         Object.assign(result, tagsResult.result.value);
@@ -851,7 +846,7 @@ export class CloudflareSolveStrategies {
   // ── Phase 3: Checkbox finding (OOPIF session) ─────────────────────
 
   private phase3CheckboxFind(
-    send: SendCommand,
+    send: EffectSend,
     oopifSessionId: CdpSessionId,
     active: ActiveDetection,
     via: string,
@@ -875,19 +870,17 @@ export class CloudflareSolveStrategies {
       // Create isolated world
       let isolatedContextId: number | null = null;
       let oopifFrameId: string | null = null;
-      const frameTreeResult = yield* Effect.tryPromise(() => send('Page.getFrameTree', {}, oopifSessionId)).pipe(
-        Effect.orElseSucceed(() => null),
-      );
+      const frameTreeResult = yield* send('Page.getFrameTree', {}, oopifSessionId);
       oopifFrameId = frameTreeResult?.frameTree?.frame?.id ?? null;
 
       if (oopifFrameId) {
         // NOTE: pydoll has a typo "grantUniveralAccess" (missing 's') which
         // Chrome ignores, so pydoll's isolated world does NOT have universal access.
         // We intentionally omit grantUniversalAccess to match pydoll's actual behavior.
-        const isolatedWorld = yield* Effect.tryPromise(() => send('Page.createIsolatedWorld', {
+        const isolatedWorld = yield* send('Page.createIsolatedWorld', {
           frameId: oopifFrameId,
           worldName: `browserless::cf::${oopifFrameId}`,
-        }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+        }, oopifSessionId);
         isolatedContextId = isolatedWorld?.executionContextId ?? null;
         // Isolated world creation failed — fall through to non-isolated path
       }
@@ -925,9 +918,9 @@ export class CloudflareSolveStrategies {
         }
 
         if (!checkbox) {
-          const doc = yield* Effect.tryPromise(() => send('DOM.getDocument', {
+          const doc = yield* send('DOM.getDocument', {
             depth: -1, pierce: true,
-          }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+          }, oopifSessionId);
           if (doc?.root) {
             const node = strategies.findCheckboxInTree(doc.root);
             if (node) {
@@ -977,7 +970,7 @@ export class CloudflareSolveStrategies {
   // ── Phase 4: Click dispatch ───────────────────────────────────────
 
   private phase4Click(
-    send: SendCommand,
+    send: EffectSend,
     oopifSessionId: CdpSessionId,
     active: ActiveDetection,
     checkbox: { objectId: string; backendNodeId: number },
@@ -1004,8 +997,7 @@ export class CloudflareSolveStrategies {
       // Pydoll does a visibility check (getBoundingClientRect + getComputedStyle)
       // before clicking. This confirms the element is rendered and interactive.
       if (checkbox.objectId) {
-        const visible = yield* Effect.tryPromise(() => send('Runtime.callFunctionOn', {
-
+        const visible = yield* send('Runtime.callFunctionOn', {
           objectId: checkbox.objectId,
           functionDeclaration: `function() {
             const rect = this.getBoundingClientRect();
@@ -1014,7 +1006,7 @@ export class CloudflareSolveStrategies {
               && getComputedStyle(this).display !== 'none');
           }`,
           returnByValue: true,
-        }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+        }, oopifSessionId);
 
         if (visible?.result?.value === false) {
           yield* events.marker(pageTargetId, 'cf.checkbox_not_visible', { via, polls: 0 });
@@ -1026,17 +1018,13 @@ export class CloudflareSolveStrategies {
       const scrollParams = checkbox.objectId
         ? { objectId: checkbox.objectId }
         : { backendNodeId: checkbox.backendNodeId };
-      yield* Effect.tryPromise(() => send('DOM.scrollIntoViewIfNeeded', scrollParams, oopifSessionId)).pipe(
-        Effect.orElseSucceed(() => undefined),
-      );
+      yield* send('DOM.scrollIntoViewIfNeeded', scrollParams, oopifSessionId);
 
       // DOM.getBoxModel with getBoundingClientRect fallback
       const boxParams = checkbox.objectId
         ? { objectId: checkbox.objectId }
         : { backendNodeId: checkbox.backendNodeId };
-      const box = yield* Effect.tryPromise(() => send('DOM.getBoxModel', boxParams, oopifSessionId)).pipe(
-        Effect.orElseSucceed(() => null),
-      );
+      const box = yield* send('DOM.getBoxModel', boxParams, oopifSessionId);
 
       let x: number, y: number;
       let coordSource = 'getBoxModel';
@@ -1046,14 +1034,14 @@ export class CloudflareSolveStrategies {
         x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4;
         y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4;
       } else if (checkbox.objectId) {
-        const boundsResult = yield* Effect.tryPromise(() => send('Runtime.callFunctionOn', {
+        const boundsResult = yield* send('Runtime.callFunctionOn', {
           objectId: checkbox.objectId,
           functionDeclaration: `function() {
             const r = this.getBoundingClientRect();
             return JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height });
           }`,
           returnByValue: true,
-        }, oopifSessionId)).pipe(Effect.orElseSucceed(() => null));
+        }, oopifSessionId);
         const bounds = JSON.parse(boundsResult?.result?.value || '{}');
         if (!bounds.width) {
           yield* events.marker(pageTargetId, 'cf.cdp_no_box_model', { method, via });
@@ -1102,25 +1090,25 @@ export class CloudflareSolveStrategies {
       // the compositor may not route the event to the correct renderer process.
       // This also makes the click visible in rrweb recordings (the extension inside
       // the OOPIF captures mousemove DOM events, so the replay shows cursor movement).
-      yield* Effect.tryPromise(() => send('Input.dispatchMouseEvent', {
+      yield* send('Input.dispatchMouseEvent', {
         type: 'mouseMoved',
         x: clickX, y: clickY,
         button: 'none',
-      }, oopifSessionId));
+      }, oopifSessionId);
       yield* Effect.sleep(`${20 + Math.random() * 30} millis`);
 
-      const pressResponse = yield* Effect.tryPromise(() => send('Input.dispatchMouseEvent', {
+      const pressResponse = yield* send('Input.dispatchMouseEvent', {
         type: 'mousePressed',
         x: clickX, y: clickY,
         button: 'left', clickCount: 1,
-      }, oopifSessionId));
+      }, oopifSessionId);
       const holdMs = 50 + Math.random() * 100;
       yield* Effect.sleep(`${holdMs} millis`);
-      const releaseResponse = yield* Effect.tryPromise(() => send('Input.dispatchMouseEvent', {
+      const releaseResponse = yield* send('Input.dispatchMouseEvent', {
         type: 'mouseReleased',
         x: clickX, y: clickY,
         button: 'left', clickCount: 1,
-      }, oopifSessionId));
+      }, oopifSessionId);
 
       // Track click delivery for solve attribution
       active.clickDelivered = true;
