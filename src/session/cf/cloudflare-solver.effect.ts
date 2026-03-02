@@ -212,10 +212,8 @@ const solveTurnstile = (
     // CF OOPIF, so it doesn't trigger CF's WASM V8 detection.
     // Non-interactive widgets auto-solve within ~1-3s — catch them immediately
     // instead of wasting 27s on checkbox polling that will always fail.
-    const isRechallenge = active.oopifMeta?.isRechallenge ?? false;
     const solveEntryMs = Date.now();
     yield* Effect.annotateCurrentSpan({
-      'cf.rechallenge': isRechallenge,
       'cf.sitekey': active.oopifMeta?.sitekey ?? 'none',
       'cf.oopif_mode': active.oopifMeta?.mode ?? 'none',
       'cf.elapsed_since_detection_ms': solveEntryMs - active.startTime,
@@ -313,9 +311,14 @@ const solveTurnstile = (
     );
 
     // Handle post-race outcomes
+    const raceElapsedMs = Date.now() - solveEntryMs;
     yield* Effect.annotateCurrentSpan({
       'cf.race_result': raceResult._tag,
-      'cf.race_duration_ms': Date.now() - solveEntryMs,
+      'cf.race_duration_ms': raceElapsedMs,
+    });
+    yield* events.marker(pageTargetId, 'cf.race_winner', {
+      winner: raceResult._tag,
+      elapsed_ms: raceElapsedMs,
     });
 
     if (raceResult._tag === 'aborted') {
@@ -336,7 +339,10 @@ const solveTurnstile = (
       //   2. Token appears in turnstile.getResponse()
       //
       // Wait for navigation first; only start token polling if no navigation.
-      const postResult = yield* postClickWait(active, deps);
+      // Pass Date.now() as clickTime so postClickWait anchors its Phase B
+      // deadline to when the click actually happened, not detection start.
+      const clickTime = Date.now();
+      const postResult = yield* postClickWait(active, deps, clickTime);
       if (postResult) {
         return raceResult as TurnstileResult;  // clicked + token found or navigation
       }
@@ -428,9 +434,18 @@ const pollToken = (
 const postClickWait = (
   active: ActiveDetection,
   deps: SolveDepsI,
+  clickTime: number,
 ) =>
   Effect.fn('cf.postClickWait')(function*() {
     yield* annotateActive(active);
+    const entryTime = Date.now();
+    const events = yield* SolverEvents;
+
+    yield* events.marker(active.pageTargetId, 'cf.postclick_entry', {
+      elapsed_since_detection_ms: entryTime - active.startTime,
+      elapsed_since_click_ms: entryTime - clickTime,
+      post_click_deadline_ms: POST_CLICK_DEADLINE_MS,
+    });
 
     // Phase A: Wait up to NAV_WAIT_MS for page navigation (interstitial signal).
     // Uses Latch.await — blocks until abort signal (zero CPU), with timeout.
@@ -439,23 +454,52 @@ const postClickWait = (
       Effect.ignore,
     );
 
+    const phaseAMs = Date.now() - entryTime;
+    yield* events.marker(active.pageTargetId, 'cf.postclick_phase_a', {
+      aborted: active.aborted,
+      phase_a_ms: phaseAMs,
+    });
+
     // If navigation happened (interstitial), we're done — don't token-poll
     if (active.aborted) {
       yield* Effect.annotateCurrentSpan({ 'cf.resolved': true, 'cf.resolution_signal': 'navigation' });
+      yield* events.marker(active.pageTargetId, 'cf.postclick_result', {
+        resolved: true,
+        signal: 'navigation',
+        total_ms: Date.now() - entryTime,
+      });
       return true;
     }
 
     // Phase B: No navigation — this is an embedded widget. Poll for token.
     // Runtime.evaluate is safe here: the page is NOT a CF challenge page,
     // it's the embedding page (e.g. nopecha.com, peet.ws).
-    const remainingMs = Math.max(0, active.startTime + POST_CLICK_DEADLINE_MS - Date.now());
+    //
+    // BUG FIX: Use clickTime as baseline instead of active.startTime.
+    // In the concurrent raceFirst design, the click loop can consume ~5-8s
+    // before postClickWait starts. Using active.startTime left Phase B with
+    // only ~0-2s — not enough to poll for the token. Using clickTime gives
+    // Phase B the full POST_CLICK_DEADLINE_MS minus Phase A duration (~7s).
+    const remainingMs = Math.max(0, clickTime + POST_CLICK_DEADLINE_MS - Date.now());
+
+    yield* events.marker(active.pageTargetId, 'cf.postclick_phase_b', {
+      remaining_ms: remainingMs,
+    });
+
     const result = yield* pollToken(active, deps, TOKEN_POLL_DELAY, 'cf.postClickWait.tokenPoll').pipe(
       Effect.timeout(remainingMs),
       Effect.orElseSucceed(() => null),
     );
 
-    if (result && result._tag === 'token_found') {
-      yield* Effect.annotateCurrentSpan({ 'cf.resolved': true, 'cf.resolution_signal': 'token_poll', 'cf.token_length': result.tokenLength });
+    const resolved = result != null && result._tag === 'token_found';
+    yield* events.marker(active.pageTargetId, 'cf.postclick_result', {
+      resolved,
+      signal: resolved ? 'token_poll' : 'timeout',
+      total_ms: Date.now() - entryTime,
+    });
+
+    if (resolved) {
+      yield* Effect.annotateCurrentSpan({ 'cf.resolved': true, 'cf.resolution_signal': 'token_poll', 'cf.token_length': result!.tokenLength });
       return true;
     }
 

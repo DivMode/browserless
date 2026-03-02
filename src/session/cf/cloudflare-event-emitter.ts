@@ -200,7 +200,7 @@ export class CloudflareEventEmitter {
   emitFailed(active: ActiveDetection, reason: string, duration: number, phaseLabel?: string): void {
     const phase_label = phaseLabel ?? `✗ ${reason}`;
     const snap = active.tracker.snapshot();
-    const isRechallenge = active.oopifMeta?.isRechallenge ?? false;
+    const isRechallenge = (active.rechallengeCount ?? 0) > 0;
     this.log.warn(`CF failed: reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'} rechallenge=${isRechallenge} widget_error_count=${snap.widget_error_count} widget_error_type=${snap.widget_error_type ?? 'none'} click_count=${snap.click_count} false_positives=${snap.false_positive_count}`);
     this.emitClientEvent('Browserless.cloudflareFailed', {
       reason, type: active.info.type, duration_ms: duration, attempts: active.attempt,
