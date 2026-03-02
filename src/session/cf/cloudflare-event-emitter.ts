@@ -2,6 +2,7 @@ import { Logger } from '@browserless.io/browserless';
 import type { Latch } from 'effect';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot } from '../../shared/cloudflare-detection.js';
+import type { TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
 
 export type EmitClientEvent = (method: string, params: object) => Promise<void>;
 export type InjectMarker = (targetId: TargetId, tag: string, payload?: object) => void;
@@ -144,6 +145,8 @@ export interface ActiveDetection {
    * Initialized closed (not aborted). Open = aborted.
    */
   abortLatch?: Latch.Latch;
+  /** Parsed metadata from the Turnstile OOPIF URL (sitekey, rechallenge, mode). */
+  oopifMeta?: TurnstileOOPIFMeta;
 }
 
 /** Handles all CDP event emission for Cloudflare detection/solving. */

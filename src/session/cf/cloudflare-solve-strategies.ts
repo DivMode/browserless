@@ -16,11 +16,45 @@ import {
   CDP_CALL_TIMEOUT_MS,
 } from './cf-schedules.js';
 
+/** Parsed metadata from a CF Turnstile OOPIF URL. */
+export interface TurnstileOOPIFMeta {
+  readonly sitekey: string | null;
+  readonly isRechallenge: boolean;
+  readonly mode: string | null;       // 'normal', 'compact', etc.
+  readonly theme: string | null;      // 'light', 'dark', 'auto'
+  readonly appearance: string | null; // 'always', 'execute', 'interaction-only'
+}
+
+/** Extract Turnstile metadata from an OOPIF URL path. */
+export function parseTurnstileOOPIFUrl(url: string): TurnstileOOPIFMeta {
+  let sitekey: string | null = null;
+  let isRechallenge = false;
+  let mode: string | null = null;
+  let theme: string | null = null;
+  let appearance: string | null = null;
+  try {
+    const u = new URL(url);
+    const segments = u.pathname.split('/').filter(Boolean);
+    // Find sitekey: starts with 0x and 20+ hex chars
+    sitekey = segments.find(s => /^0x[0-9a-fA-F]{20,}$/i.test(s)) ?? null;
+    isRechallenge = segments.includes('rch');
+    // Mode is typically the last non-query segment
+    const modeIdx = segments.length - 1;
+    if (modeIdx > 0) mode = segments[modeIdx] ?? null;
+    // Theme: 'light', 'dark', 'auto'
+    theme = segments.find(s => ['light', 'dark', 'auto'].includes(s)) ?? null;
+    // Appearance: 'always', 'execute', 'interaction-only'
+    appearance = segments.find(s => ['always', 'execute', 'interaction-only'].includes(s)) ?? null;
+  } catch { /* malformed URL — return defaults */ }
+  return { sitekey, isRechallenge, mode, theme, appearance };
+}
+
 /** Individual CF OOPIF target found by Target.getTargets. */
 export interface CFTargetMatch {
   readonly targetId: string;
   readonly url: string;
   readonly type: 'iframe' | 'page';
+  readonly meta: TurnstileOOPIFMeta;
 }
 
 /** No CF OOPIF found (or all were filtered as stale). */
@@ -868,6 +902,15 @@ export class CloudflareSolveStrategies {
         // Snapshot shadow DOM state for diagnostics — tells us WHY the checkbox wasn't found
         const diag = yield* strategies.diagnoseShadowDOM(send, oopifSessionId, isolatedContextId);
         yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox', { via, polls: pollCount, diag });
+        // Feed diag data to tracker so it appears in cf.failed summary via snapshot()
+        yield* events.emitProgress(active, 'widget_error', {
+          error_type: 'no_checkbox',
+          diag_alive: diag.alive,
+          diag_body_len: diag.bodyLen,
+          diag_shadow: diag.shadow,
+          diag_cbI: diag.cbI,
+          diag_inp: diag.inp,
+        });
         return null;
       }
 
@@ -1217,6 +1260,7 @@ export class CloudflareSolveStrategies {
           targetId: t.targetId!,
           url: t.url ?? '',
           type: t.type as 'iframe' | 'page',
+          meta: parseTurnstileOOPIFUrl(t.url ?? ''),
         })),
       };
     })();
