@@ -6,7 +6,7 @@ import { CloudflareTracker } from './cloudflare-event-emitter.js';
 import type { ActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
 import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
 import type { CloudflareStateTracker } from './cloudflare-state-tracker.js';
-import type { CloudflareSolveStrategies, CFDetected } from './cloudflare-solve-strategies.js';
+import type { CloudflareSolveStrategies, CFDetected, TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
 import { SolveDispatcher, DetectionLoopStarter, CdpSender } from './cf-services.js';
 
 /** R channel requirements for detector methods that yield services. */
@@ -518,8 +518,11 @@ export class CloudflareDetector {
       self.state.pendingRechallengeCount.delete(targetId);
 
       // CDP detection is always turnstile — interstitials are caught by URL pattern
+      const firstTarget = detection.targets[0];
+      const meta: TurnstileOOPIFMeta | undefined = firstTarget?.meta;
       const info: CloudflareInfo = {
-        type: 'turnstile', url: detection.targets[0]?.url ?? '', detectionMethod: 'cdp_dom_walk',
+        type: 'turnstile', url: firstTarget?.url ?? '', detectionMethod: 'cdp_dom_walk',
+        iframeUrl: firstTarget?.url,
       };
       const active: ActiveDetection = {
         info, pageCdpSessionId: cdpSessionId, pageTargetId: targetId,
@@ -527,6 +530,7 @@ export class CloudflareDetector {
         tracker: new CloudflareTracker(info),
         rechallengeCount,
         abortLatch: Latch.makeUnsafe(false),
+        oopifMeta: meta,
       };
 
       // Guard: another detection path (e.g. triggerSolveFromUrl) may have
@@ -552,6 +556,9 @@ export class CloudflareDetector {
         oopif_urls: detection.targets.map(t => t.url).join(' | '),
         oopif_ids: detection.targets.map(t => t.targetId.slice(0, 8)).join(','),
         solved_set_size: self.state.solvedCFTargetIds.size,
+        sitekey: meta?.sitekey ?? null,
+        is_rechallenge: meta?.isRechallenge ?? false,
+        oopif_mode: meta?.mode ?? null,
       });
 
       // Dispatch solve via Effect service — no more Promise bridge

@@ -232,7 +232,9 @@ const solveTurnstile = (
       }).pipe(Effect.ignore),
     );
 
-    for (let attempt = 0; attempt < MAX_CLICK_ATTEMPTS; attempt++) {
+    let maxAttempts = MAX_CLICK_ATTEMPTS; // starts at 6
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       if (active.aborted || Date.now() > deadline || tokenFound.value) break;
 
       if (attempt > 0) {
@@ -255,6 +257,20 @@ const solveTurnstile = (
         clicked = true;
         break;
       }
+
+      // After first failed attempt: reduce remaining attempts.
+      // Non-interactive widgets never render a checkbox — burning 4s × 6 attempts
+      // wastes 24s of the 30s deadline. 2 total attempts (initial + 1 retry) gives
+      // the checkbox ~8s to appear while preserving ~22s for token polling.
+      if (attempt === 0 && maxAttempts > 2) {
+        maxAttempts = 2;
+        yield* events.marker(pageTargetId, 'cf.reduced_attempts', {
+          reason: 'first_attempt_no_checkbox',
+          original: MAX_CLICK_ATTEMPTS,
+          reduced_to: maxAttempts,
+          remaining_deadline_ms: deadline - Date.now(),
+        });
+      }
     }
 
     // Stop the concurrent token poll fiber
@@ -266,7 +282,7 @@ const solveTurnstile = (
     }
 
     if (!clicked) {
-      yield* events.emitProgress(active, 'cdp_click_complete', { success: false, attempts: MAX_CLICK_ATTEMPTS });
+      yield* events.emitProgress(active, 'cdp_click_complete', { success: false, attempts: maxAttempts });
       yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox');
       // Widget not found — CF managed challenges may auto-pass without a widget.
       // Keep the detection alive so onPageNavigated() can emit cf.solved(auto_navigation).
