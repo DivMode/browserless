@@ -712,15 +712,13 @@ export class CdpSession {
         this.handleBindingCalled(msg);
       }
 
-      // Console API calls from page targets — log diagnostics
-      if (msg.method === 'Runtime.consoleAPICalled' && msg.sessionId && !this.targets.isIframe(CdpSessionId.makeUnsafe(msg.sessionId))) {
-        const args: string[] = (msg.params?.args || [])
-          .map((a: { value?: string; description?: string; type?: string }) =>
-            a.value ?? a.description ?? String(a.type))
-          .slice(0, 10);
-        const text = args.join(' ');
-        if (text.includes('[browserless-ext]') || text.includes('[rrweb-diag]')) {
-          this.log.info(`[page-console] ${text}`);
+      // Page-level CDP events → server-side rrweb events
+      // (Same pattern as handleIframeCDPEvent but for page sessions)
+      if (msg.method && msg.sessionId && !this.targets.isIframe(CdpSessionId.makeUnsafe(msg.sessionId))) {
+        const pageCdpSid = CdpSessionId.makeUnsafe(msg.sessionId);
+        const pageTargetId = this.targets.findTargetIdByCdpSession(pageCdpSid);
+        if (pageTargetId) {
+          this.handlePageCDPEvent(pageTargetId, msg.method, msg.params);
         }
       }
 
@@ -831,6 +829,74 @@ export class CdpSession {
     }
   }
 
+  /** Convert page-level CDP events to server-side rrweb events. */
+  private handlePageCDPEvent(pageTargetId: TargetId, method: string, params: unknown): void {
+    const p = params as any;
+
+    // Network.requestWillBeSent → rrweb network.request
+    if (method === 'Network.requestWillBeSent') {
+      const req = p?.request;
+      if (req?.url) {
+        this.offerEvents(pageTargetId, [{
+          type: 5, timestamp: Date.now(),
+          data: {
+            tag: 'network.request',
+            payload: {
+              id: p?.requestId || '', url: req.url, method: req.method || 'GET',
+              type: 'page', timestamp: Date.now(), headers: null, body: null,
+            },
+          },
+        }]);
+      }
+    }
+
+    // Network.responseReceived → rrweb network.response
+    if (method === 'Network.responseReceived') {
+      const resp = p?.response;
+      if (resp?.url) {
+        this.offerEvents(pageTargetId, [{
+          type: 5, timestamp: Date.now(),
+          data: {
+            tag: 'network.response',
+            payload: {
+              id: p?.requestId || '', url: resp.url, method: '', status: resp.status || 0,
+              statusText: resp.statusText || '', duration: 0,
+              type: 'page', headers: null, body: null,
+              contentType: resp.mimeType || null,
+            },
+          },
+        }]);
+      }
+    }
+
+    // Runtime.consoleAPICalled → rrweb console plugin event
+    if (method === 'Runtime.consoleAPICalled') {
+      const level: string = p?.type || 'log';
+      const args: string[] = (p?.args || [])
+        .map((a: { value?: string; description?: string; type?: string }) =>
+          a.value ?? a.description ?? String(a.type))
+        .slice(0, 5);
+      const trace: string[] = (p?.stackTrace?.callFrames || [])
+        .slice(0, 3)
+        .map((f: { functionName?: string; url?: string; lineNumber?: number }) =>
+          `${f.functionName || '(anonymous)'}@${f.url || ''}:${f.lineNumber ?? 0}`);
+
+      // Also log diagnostics to server for specific tags
+      const text = args.join(' ');
+      if (text.includes('[browserless-ext]') || text.includes('[rrweb-diag]')) {
+        this.log.info(`[page-console] ${text}`);
+      }
+
+      this.offerEvents(pageTargetId, [{
+        type: 6, timestamp: Date.now(),
+        data: {
+          plugin: 'rrweb/console@1',
+          payload: { level, payload: args, trace, source: 'page' },
+        },
+      }]);
+    }
+  }
+
   // ─── CDP Event Sub-handlers ─────────────────────────────────────────────
 
   private handleAttachedToTargetEffect(msg: any): Effect.Effect<void> {
@@ -900,6 +966,7 @@ export class CdpSession {
         yield* session.send('Runtime.addBinding', { name: '__rrwebPush' }, cdpSessionId).pipe(Effect.ignore);
         yield* session.send('Page.enable', {}, cdpSessionId).pipe(Effect.ignore);
         yield* session.send('Runtime.enable', {}, cdpSessionId).pipe(Effect.ignore);
+        yield* session.send('Network.enable', {}, cdpSessionId).pipe(Effect.ignore);
 
         // Set session ID for extension
         yield* session.send('Runtime.evaluate', {
@@ -1054,6 +1121,7 @@ export class CdpSession {
             session.send('Runtime.addBinding', { name: '__rrwebPush' }, target.cdpSessionId),
             session.send('Runtime.enable', {}, target.cdpSessionId),
             session.send('Page.enable', {}, target.cdpSessionId),
+            session.send('Network.enable', {}, target.cdpSessionId),
             session.send('Target.setAutoAttach', {
               autoAttach: true,
               waitForDebuggerOnStart: true,
