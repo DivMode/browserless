@@ -1157,24 +1157,23 @@ export class CloudflareSolveStrategies {
       // Give renderer 100ms to process the event, then check the flag.
       yield* Effect.sleep('100 millis');
       let clickVerified = false;
-      let sessionGone = false;
+      let verifyError: string | null = null;
 
-      const verifyResult = yield* verifySend('Runtime.evaluate', {
+      const verifyResult: true | string = yield* verifySend('Runtime.evaluate', {
         expression: 'window.__bClkV',
         returnByValue: true,
       }, oopifSessionId).pipe(
-        Effect.map((r: any) => r?.result?.value),
-        Effect.catch(() => Effect.succeed('__session_gone__' as const)),
+        Effect.map((r: any) => (r?.result?.value === true ? true as const : 'not_confirmed')),
+        Effect.catch(() => Effect.succeed('oopif_gone' as const)),
       );
 
       if (verifyResult === true) {
-        clickVerified = true;           // Click landed — mousedown listener fired
-      } else if (verifyResult === '__session_gone__') {
-        sessionGone = true;             // OOPIF died after click (nav? crash?)
+        clickVerified = true;
+      } else if (typeof verifyResult === 'string') {
+        verifyError = verifyResult;     // OOPIF session died or errored during check
       }
-      // else: click silently dropped — renderer alive but never saw mousedown
+      // else verifyResult === false: click silently dropped
 
-      // Only mark click as delivered if the mousedown listener actually fired
       if (clickVerified) {
         active.clickDelivered = true;
         active.clickDeliveredAt = Date.now();
@@ -1185,7 +1184,7 @@ export class CloudflareSolveStrategies {
       yield* events.marker(pageTargetId, 'cf.oopif_click', {
         ok: clickVerified,
         click_verified: clickVerified,
-        session_gone: sessionGone,
+        verify_error: verifyError,
         cdp_accepted: !!pressResponse && !!releaseResponse,
         method: 'cdp_oopif_session', via, attempt,
         x: clickX, y: clickY,
