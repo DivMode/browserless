@@ -20,6 +20,7 @@ import type { ActiveDetection } from './cloudflare-event-emitter.js';
 import { Resolution } from './cf-resolution.js';
 import { TokenChecker, SolverEvents, SolveDeps } from './cf-services.js';
 import { ClickResult } from './cloudflare-solve-strategies.js';
+import { MAX_CLICK_ATTEMPTS } from './cf-schedules.js';
 import { CdpSessionGone } from './cf-errors.js';
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -49,6 +50,8 @@ interface TestLayerConfig {
   clickSuccessOnAttempt?: number;
   isSolved?: boolean;
   isStillDetected?: boolean;
+  /** Override ClickResult per attempt. Default: Verified/NoCheckbox based on clickSuccess. */
+  clickResultFn?: (attempt: number) => ClickResult;
 }
 
 interface TestCaptures {
@@ -69,8 +72,13 @@ const makeTestLayer = (config: TestLayerConfig = {}) => {
   const tokenLayer = Layer.succeed(TokenChecker, TokenChecker.of({
     getToken: () => {
       captures.pollCount++;
-      if (config.tokenAfterPolls && captures.pollCount >= config.tokenAfterPolls) {
-        return Effect.succeed(config.token ?? 'mock-token-abc123');
+      if (config.tokenAfterPolls) {
+        // When tokenAfterPolls is set, return null until threshold, then return token
+        return Effect.succeed(
+          captures.pollCount >= config.tokenAfterPolls
+            ? (config.token ?? 'mock-token-abc123')
+            : null,
+        );
       }
       return Effect.succeed(config.token ?? null);
     },
@@ -97,8 +105,11 @@ const makeTestLayer = (config: TestLayerConfig = {}) => {
   }));
 
   const depsLayer = Layer.succeed(SolveDeps, SolveDeps.of({
-    findAndClickViaCDP: () => {
+    findAndClickViaCDP: (_active, attempt) => {
       captures.clickAttempts++;
+      if (config.clickResultFn) {
+        return Effect.succeed(config.clickResultFn(attempt));
+      }
       if (config.clickSuccessOnAttempt && captures.clickAttempts >= config.clickSuccessOnAttempt) {
         return Effect.succeed(ClickResult.Verified());
       }
@@ -556,5 +567,144 @@ describe('Race condition regressions', () => {
         expect(outcome.reason).toBe('widget_not_found');
         expect(outcome.duration_ms).toBe(30000);
       }
+    }));
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// Group 5: Exhaustive ClickResult variant handling
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('Exhaustive ClickResult handling', () => {
+  it.effect('18. ClickFailed on first attempt reduces maxAttempts to 2', () =>
+    Effect.gen(function*() {
+      const { solveDetection } = yield* Effect.promise(importSolver);
+      const { layer, captures } = makeTestLayer({
+        token: null,
+        clickResultFn: () => ClickResult.ClickFailed(),
+      });
+      const active = makeActive();
+
+      const fiber = yield* solveDetection(active).pipe(
+        Effect.provide(layer),
+        Effect.forkChild,
+      );
+      yield* TestClock.adjust('35 seconds');
+      const outcome = yield* Fiber.join(fiber);
+
+      // ClickFailed reduces maxAttempts from 6 to 2 on first attempt
+      expect(captures.clickAttempts).toBe(2);
+      expect(outcome).toBe('no_click');
+      // Verify the cf.reduced_attempts marker was emitted with cdp_error reason
+      const reducedMarker = captures.markers.find(m => m.tag === 'cf.reduced_attempts');
+      expect(reducedMarker).toBeDefined();
+      expect(reducedMarker!.payload).toMatchObject({
+        reason: 'first_attempt_cdp_error',
+        original: MAX_CLICK_ATTEMPTS,
+        reduced_to: 2,
+      });
+    }));
+
+  it.effect('19. OopifDead exits clickLoop immediately', () =>
+    Effect.gen(function*() {
+      const { solveDetection } = yield* Effect.promise(importSolver);
+      const { layer, captures } = makeTestLayer({
+        token: null,
+        clickResultFn: () => ClickResult.NotVerified({ reason: 'oopif_gone' }),
+      });
+      const active = makeActive();
+
+      const fiber = yield* solveDetection(active).pipe(
+        Effect.provide(layer),
+        Effect.forkChild,
+      );
+      yield* TestClock.adjust('35 seconds');
+      const outcome = yield* Fiber.join(fiber);
+
+      // OopifDead exits on first attempt — no retries
+      expect(captures.clickAttempts).toBe(1);
+      expect(outcome).toBe('no_click');
+      // Verify oopif_dead marker
+      const oopifMarker = captures.markers.find(m => m.tag === 'cf.oopif_dead_on_verify');
+      expect(oopifMarker).toBeDefined();
+    }));
+
+  it.effect('20. NotVerified(not_confirmed) retries full attempts', () =>
+    Effect.gen(function*() {
+      const { solveDetection } = yield* Effect.promise(importSolver);
+      const { layer, captures } = makeTestLayer({
+        token: null,
+        clickResultFn: () => ClickResult.NotVerified({ reason: 'not_confirmed' }),
+      });
+      const active = makeActive();
+
+      const fiber = yield* solveDetection(active).pipe(
+        Effect.provide(layer),
+        Effect.forkChild,
+      );
+      yield* TestClock.adjust('35 seconds');
+      const outcome = yield* Fiber.join(fiber);
+
+      // not_confirmed retries all MAX_CLICK_ATTEMPTS — it doesn't reduce
+      expect(captures.clickAttempts).toBe(MAX_CLICK_ATTEMPTS);
+      expect(outcome).toBe('no_click');
+    }));
+
+  it.effect('21. ClickFailed then Verified on attempt 2', () =>
+    Effect.gen(function*() {
+      const { solveDetection } = yield* Effect.promise(importSolver);
+      const { layer, captures } = makeTestLayer({
+        tokenAfterPolls: 3,
+        token: 'post-click-token',
+        clickResultFn: (attempt) =>
+          attempt === 0 ? ClickResult.ClickFailed() : ClickResult.Verified(),
+      });
+      const active = makeActive();
+
+      const fiber = yield* solveDetection(active).pipe(
+        Effect.provide(layer),
+        Effect.forkChild,
+      );
+      // Click succeeds on attempt 1 → postClickWait runs → token poll finds token
+      yield* TestClock.adjust('45 seconds');
+      const outcome = yield* Fiber.join(fiber);
+
+      // Attempt 0 → ClickFailed (reduces to 2), attempt 1 → Verified
+      expect(captures.clickAttempts).toBe(2);
+      expect(outcome).toBe('click_dispatched');
+    }));
+
+  it.effect('22. NoCheckbox and ClickFailed both reduce attempts equally', () =>
+    Effect.gen(function*() {
+      const { solveDetection } = yield* Effect.promise(importSolver);
+
+      // Run 1: NoCheckbox
+      const noCheckbox = makeTestLayer({
+        token: null,
+        clickResultFn: () => ClickResult.NoCheckbox(),
+      });
+      const active1 = makeActive();
+      const fiber1 = yield* solveDetection(active1).pipe(
+        Effect.provide(noCheckbox.layer),
+        Effect.forkChild,
+      );
+      yield* TestClock.adjust('35 seconds');
+      yield* Fiber.join(fiber1);
+
+      // Run 2: ClickFailed
+      const clickFailed = makeTestLayer({
+        token: null,
+        clickResultFn: () => ClickResult.ClickFailed(),
+      });
+      const active2 = makeActive();
+      const fiber2 = yield* solveDetection(active2).pipe(
+        Effect.provide(clickFailed.layer),
+        Effect.forkChild,
+      );
+      yield* TestClock.adjust('35 seconds');
+      yield* Fiber.join(fiber2);
+
+      // Both should reduce to exactly 2 attempts
+      expect(noCheckbox.captures.clickAttempts).toBe(2);
+      expect(clickFailed.captures.clickAttempts).toBe(2);
     }));
 });
