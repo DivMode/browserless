@@ -8,7 +8,7 @@
  * The CloudflareSolver bridge (cloudflare-solver.ts) provides the services
  * via ManagedRuntime and calls these via runtime.runPromise().
  */
-import { Data, Effect } from 'effect';
+import { Cause, Data, Effect } from 'effect';
 import type { SolveOutcome } from './cloudflare-solve-strategies.js';
 import { ClickResult } from './cloudflare-solve-strategies.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
@@ -158,8 +158,9 @@ export const solveDetection = (
       }
     }
   })().pipe(
-    Effect.catch((err) => {
-      console.error(`[cf.solveDetection] Caught error:`, err);
+    Effect.catchCause((cause) => {
+      const err = Cause.squash(cause);
+      console.error(JSON.stringify({ message: 'cf.solveDetection defect', error: String(err), type: active.info.type }));
       return Effect.fn('cf.solveDetection.errorFallback')(function*() {
         if (!active.aborted) {
           const events = yield* SolverEvents;

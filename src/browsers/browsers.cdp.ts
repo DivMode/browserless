@@ -581,6 +581,10 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
             (method, params, sessionId, timeoutMs) =>
               this.cdpProxy!.sendViaBrowserWs(method, params || {}, sessionId, timeoutMs),
           );
+          // Per-solve isolated WS: each solve creates its own WS to Chrome
+          this.cloudflareSolver.setCreateIsolatedConnection(
+            () => this.cdpProxy!.createIsolatedConnection(),
+          );
         }
       };
 
