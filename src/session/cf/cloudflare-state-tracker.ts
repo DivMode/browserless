@@ -79,6 +79,29 @@ export class CloudflareStateTracker {
   readonly bindingSolvedTargets = new Set<TargetId>();
   /** CF OOPIF targetIds from completed solves — filtered out of future detection polls to prevent phantom re-detection of stale OOPIFs. */
   readonly solvedCFTargetIds = new Set<string>();
+  /**
+   * Page targetIds that have successfully solved CF.
+   *
+   * CRITICAL: After a successful solve, Ahrefs/CF spawns NEW OOPIFs with different
+   * /rch/ URLs. Without this guard, the detection loop picks them up as fresh
+   * challenges, wastes 30s waiting for a checkbox that never appears, and emits
+   * "CF failed: widget_not_found" — a phantom failure on an already-solved page.
+   *
+   * Proven in replay 38B2528D:
+   *   1. Turnstile detected (/rch/9bcl9/) → clicked → solved in 7.6s
+   *   2. ahrefs.complete: success=true with 39 backlinks
+   *   3. 33s later: NEW OOPIF (/rch/xnvae/) → phantom "CF failed: widget_not_found"
+   *
+   * Root cause: solvedCFTargetIds tracks OOPIF targetIds, not page targetIds.
+   * New OOPIFs get unique targetIds and pass the filter. No per-page guard existed.
+   *
+   * Tracks at PAGE level (not OOPIF level) because new OOPIFs get unique targetIds
+   * but share the same parent page. Checked in detectTurnstileWidgetEffect and
+   * onPageNavigatedEffect; set in triggerSolveFromUrlEffect and handleTurnstileDetection.
+   *
+   * DO NOT REMOVE — phantom widget_not_found failures will return.
+   */
+  readonly solvedPages = new Set<TargetId>();
   readonly pendingIframes = new Map<TargetId, { iframeCdpSessionId: CdpSessionId; iframeTargetId: TargetId }>();
   readonly pendingRechallengeCount = new Map<TargetId, number>();
   config: Required<CloudflareConfig> = { maxAttempts: 3, attemptTimeout: 30000, recordingMarkers: true };
@@ -564,6 +587,7 @@ export class CloudflareStateTracker {
       tracker.knownPages.delete(targetId);
       tracker.iframeToPage.delete(targetId);
       tracker.bindingSolvedTargets.delete(targetId);
+      tracker.solvedPages.delete(targetId);
       tracker.pendingIframes.delete(targetId);
       tracker.pendingRechallengeCount.delete(targetId);
     })();
@@ -586,6 +610,7 @@ export class CloudflareStateTracker {
       this.sessionToTarget.clear();
       this.bindingSolvedTargets.clear();
       this.solvedCFTargetIds.clear();
+      this.solvedPages.clear();
       this.pendingIframes.clear();
     }).bind(this));
   }
