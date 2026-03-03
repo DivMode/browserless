@@ -6,12 +6,32 @@ import { CloudflareTracker } from './cloudflare-event-emitter.js';
 import type { ActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
 import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
 import type { CloudflareStateTracker } from './cloudflare-state-tracker.js';
-import type { CloudflareSolveStrategies, CFDetected, TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
+import type { CloudflareSolveStrategies, CFDetected, CFTargetMatch, TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
 import { SolveDispatcher, DetectionLoopStarter, CdpSender } from './cf-services.js';
 import { Resolution } from './cf-resolution.js';
 
 /** R channel requirements for detector methods that yield services. */
 type DetectorR = typeof SolveDispatcher.Identifier | typeof DetectionLoopStarter.Identifier | typeof CdpSender.Identifier;
+
+/**
+ * Filter detection targets to only those owned by the given page.
+ * Pure function — no side effects, no CDP calls.
+ *
+ * Ownership logic:
+ * - owned by us → keep
+ * - owned by another page → skip (cross-tab phantom)
+ * - not yet registered → keep (conservative, might be ours)
+ */
+export function filterOwnedTargets(
+  targets: readonly CFTargetMatch[],
+  pageTargetId: TargetId,
+  iframeToPage: ReadonlyMap<TargetId, TargetId>,
+): CFTargetMatch[] {
+  return targets.filter(t => {
+    const owner = iframeToPage.get(t.targetId as TargetId);
+    return !owner || owner === pageTargetId;
+  });
+}
 
 /**
  * Detection lifecycle for Cloudflare challenges.
@@ -506,11 +526,7 @@ export class CloudflareDetector {
           // CROSS-TAB GUARD: Filter out OOPIFs owned by other pages.
           // Target.getTargets is browser-global — returns OOPIFs from ALL tabs.
           // Use iframeToPage ownership map to keep only our OOPIFs.
-          const ownedTargets = detection.targets.filter(t => {
-            const owner = self.state.iframeToPage.get(t.targetId as TargetId);
-            // Keep: owned by us, or not registered yet (might be ours)
-            return !owner || owner === targetId;
-          });
+          const ownedTargets = filterOwnedTargets(detection.targets, targetId, self.state.iframeToPage);
 
           if (ownedTargets.length === 0) {
             // All detected targets belong to other pages — not our challenge
