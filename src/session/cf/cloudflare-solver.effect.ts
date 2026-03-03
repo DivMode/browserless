@@ -8,8 +8,9 @@
  * The CloudflareSolver bridge (cloudflare-solver.ts) provides the services
  * via ManagedRuntime and calls these via runtime.runPromise().
  */
-import { Effect } from 'effect';
+import { Data, Effect } from 'effect';
 import type { SolveOutcome } from './cloudflare-solve-strategies.js';
+import { ClickResult } from './cloudflare-solve-strategies.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
 import { TokenChecker, SolverEvents, SolveDeps } from './cf-services.js';
 import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
@@ -127,11 +128,12 @@ export const solveDetection = (
         const result = yield* solveTurnstile(active, deps);
         if (active.aborted) return 'aborted' as SolveOutcome;
         switch (result._tag) {
-          case 'token_found': return 'click_dispatched' as SolveOutcome;
-          case 'clicked': return 'click_dispatched' as SolveOutcome;
-          case 'click_no_token': return 'click_no_token' as SolveOutcome;
-          case 'no_click': return 'no_click' as SolveOutcome;
-          case 'aborted': return 'aborted' as SolveOutcome;
+          case 'TokenFound': return 'click_dispatched' as SolveOutcome;
+          case 'Clicked': return 'click_dispatched' as SolveOutcome;
+          case 'ClickNoToken': return 'click_no_token' as SolveOutcome;
+          case 'NoClick': return 'no_click' as SolveOutcome;
+          case 'OopifDead': return 'no_click' as SolveOutcome;
+          case 'Aborted': return 'aborted' as SolveOutcome;
         }
       }
 
@@ -192,12 +194,11 @@ const solveByClicking = (
 
       if (attempt > 0) yield* Effect.sleep(CLICK_RETRY_DELAY);
 
-      // Call findAndClickViaCDP directly — it returns Effect<boolean>
       const result = yield* deps.findAndClickViaCDP(active, attempt).pipe(
-        Effect.catch(() => Effect.succeed(false)),
+        Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
       );
 
-      if (result) {
+      if (result._tag === 'Verified') {
         yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
         return true;
       }
@@ -214,12 +215,15 @@ const solveByClicking = (
 // caller exactly which path resolved — no guessing, no side-channel state.
 // ═══════════════════════════════════════════════════════════════════════
 
-type TurnstileResult =
-  | { _tag: 'token_found'; pollCount: number; tokenLength: number; token: string }
-  | { _tag: 'clicked'; attempt: number }
-  | { _tag: 'click_no_token'; attempt: number }
-  | { _tag: 'no_click' }
-  | { _tag: 'aborted' };
+type TurnstileResult = Data.TaggedEnum<{
+  TokenFound: { readonly pollCount: number; readonly tokenLength: number; readonly token: string }
+  Clicked: { readonly attempt: number }
+  ClickNoToken: { readonly attempt: number }
+  NoClick: {}
+  OopifDead: { readonly attempt: number }
+  Aborted: {}
+}>;
+const TR = Data.taggedEnum<TurnstileResult>();
 
 // ═══════════════════════════════════════════════════════════════════════
 // solveTurnstile — embedded Turnstile widget solve
@@ -239,7 +243,7 @@ const solveTurnstile = (
 ) =>
   Effect.fn('cf.solveTurnstile')(function*() {
     yield* annotateActive(active);
-    if (active.aborted) return { _tag: 'aborted' } as TurnstileResult;
+    if (active.aborted) return TR.Aborted();
 
     const { pageCdpSessionId, pageTargetId } = active;
     const events = yield* SolverEvents;
@@ -264,7 +268,7 @@ const solveTurnstile = (
     if (earlyToken) {
       yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: earlyToken.length, early: true });
       yield* resolveTokenFound(active, 'token_poll', earlyToken);
-      return { _tag: 'token_found', pollCount: 0, tokenLength: earlyToken.length, token: earlyToken } as TurnstileResult;
+      return TR.TokenFound({ pollCount: 0, tokenLength: earlyToken.length, token: earlyToken });
     }
 
     yield* events.marker(pageTargetId, 'cf.concurrent_poll_start', { deadline_ms: SOLVE_DEADLINE_MS });
@@ -281,19 +285,22 @@ const solveTurnstile = (
         if (attempt > 0) yield* Effect.sleep(CLICK_RETRY_DELAY);
 
         const result = yield* deps.findAndClickViaCDP(active, attempt).pipe(
-          Effect.catch(() => Effect.succeed(false)),
+          Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
         );
 
-        if (result) {
+        if (result._tag === 'Verified') {
           yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
-          return { _tag: 'clicked' as const, attempt };
+          return TR.Clicked({ attempt });
         }
 
-        // After first failed attempt: reduce remaining attempts.
-        // Non-interactive widgets never render a checkbox — burning 4s × 6 attempts
-        // wastes 24s of the 30s deadline. 2 total attempts (initial + 1 retry) gives
-        // the checkbox ~8s to appear while preserving ~22s for token polling.
-        if (attempt === 0 && maxAttempts > 2) {
+        // OOPIF died during verification — exit immediately, no retry
+        if (result._tag === 'NotVerified' && result.reason === 'oopif_gone') {
+          yield* events.marker(pageTargetId, 'cf.oopif_dead_on_verify', { attempt });
+          return TR.OopifDead({ attempt });
+        }
+
+        // Only reduce attempts on genuine no-checkbox (not verify failure)
+        if (attempt === 0 && maxAttempts > 2 && result._tag === 'NoCheckbox') {
           maxAttempts = 2;
           yield* events.marker(pageTargetId, 'cf.reduced_attempts', {
             reason: 'first_attempt_no_checkbox',
@@ -307,7 +314,7 @@ const solveTurnstile = (
         'cf.max_attempts': maxAttempts,
       });
       yield* events.emitProgress(active, 'cdp_click_complete', { success: false, attempts: maxAttempts });
-      return { _tag: 'no_click' as const };
+      return TR.NoClick();
     })();
 
     // Strategy 2: Concurrent token poll — catches auto-solves that complete
@@ -333,7 +340,7 @@ const solveTurnstile = (
             concurrent: true,
             concurrent_polls: pollCount,
           });
-          return { _tag: 'token_found' as const, pollCount, tokenLength: token.length, token };
+          return TR.TokenFound({ pollCount, tokenLength: token.length, token });
         }
       }
     })();
@@ -342,17 +349,17 @@ const solveTurnstile = (
     // abortLatch.await races alongside — if the detection is aborted externally
     // (page navigated, session destroyed), both fibers are interrupted immediately.
     const raceStart = Date.now();
+    let timedOut = false;
     const raceResult = yield* Effect.raceFirst(
       Effect.raceFirst(clickLoop, tokenPoll),
-      active.abortLatch.await.pipe(Effect.map(() => ({ _tag: 'aborted' as const, timedOut: false as const }))),
+      active.abortLatch.await.pipe(Effect.map(() => TR.Aborted())),
     ).pipe(
-      Effect.map(result => ({ ...result, timedOut: false as const })),
       Effect.timeout(SOLVE_DEADLINE_MS),
-      Effect.orElseSucceed(() => ({ _tag: 'no_click' as const, timedOut: true as const })),
+      Effect.orElseSucceed(() => { timedOut = true; return TR.NoClick(); }),
     );
 
     // Emit timeout-specific marker — answers: did the 30s deadline fire?
-    if (raceResult.timedOut) {
+    if (timedOut) {
       yield* events.marker(pageTargetId, 'cf.solve_deadline_fired', {
         deadline_ms: SOLVE_DEADLINE_MS,
         total_elapsed_ms: Date.now() - solveEntryMs,
@@ -371,18 +378,18 @@ const solveTurnstile = (
       elapsed_ms: raceElapsedMs,
     });
 
-    if (raceResult._tag === 'aborted') {
-      return { _tag: 'aborted' } as TurnstileResult;
+    if (raceResult._tag === 'Aborted') {
+      return TR.Aborted();
     }
 
-    if (raceResult._tag === 'token_found') {
+    if (raceResult._tag === 'TokenFound') {
       // Resolve AFTER race completes — resolveTokenFound opens abortLatch,
       // which would self-interrupt the tokenPoll fiber if called inside the race.
       yield* resolveTokenFound(active, 'token_poll', raceResult.token);
-      return raceResult as TurnstileResult;
+      return raceResult;
     }
 
-    if (raceResult._tag === 'clicked') {
+    if (raceResult._tag === 'Clicked') {
       // Click dispatched — wait for resolution.
       // Two possible outcomes:
       //   1. Page navigates → active.aborted set by onPageNavigated()
@@ -394,13 +401,19 @@ const solveTurnstile = (
       const clickTime = Date.now();
       const postResult = yield* postClickWait(active, clickTime);
       if (postResult) {
-        return raceResult as TurnstileResult;  // clicked + token found or navigation
+        return raceResult;  // clicked + token found or navigation
       }
       // Click landed but token never arrived during post-click polling
-      return { _tag: 'click_no_token', attempt: raceResult.attempt } as TurnstileResult;
+      return TR.ClickNoToken({ attempt: raceResult.attempt });
     }
 
-    // no_click — widget not found. May be non-interactive (auto-solves without click).
+    // OopifDead — OOPIF died during verify, exit immediately (no auto-solve poll)
+    if (raceResult._tag === 'OopifDead') {
+      yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox', { oopif_dead: true });
+      return raceResult;
+    }
+
+    // NoClick — widget not found. May be non-interactive (auto-solves without click).
     yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox');
     // Poll for token using remaining deadline
     const remainingDeadline = Math.max(0, active.startTime + SOLVE_DEADLINE_MS - Date.now());
@@ -415,9 +428,9 @@ const solveTurnstile = (
     );
     yield* Effect.annotateCurrentSpan({
       'cf.solve_total_ms': Date.now() - solveEntryMs,
-      'cf.post_race_result': tokenResult?._tag ?? 'no_click',
+      'cf.post_race_result': tokenResult?._tag ?? 'NoClick',
     });
-    return tokenResult ?? ({ _tag: 'no_click' } as TurnstileResult);
+    return tokenResult ?? TR.NoClick();
   })();
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -454,7 +467,7 @@ const pollToken = (
         if (token) {
           yield* Effect.annotateCurrentSpan({ 'cf.token_found': true, 'cf.token_length': token.length });
           yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: token.length });
-          return { _tag: 'token_found' as const, pollCount, tokenLength: token.length, token };
+          return TR.TokenFound({ pollCount, tokenLength: token.length, token });
         }
       }
     })();
@@ -467,7 +480,7 @@ const pollToken = (
 
     // Resolve AFTER the race — resolveTokenFound opens abortLatch, so it
     // must run outside the raceFirst to avoid self-interruption.
-    if (result && result._tag === 'token_found') {
+    if (result && result._tag === 'TokenFound') {
       yield* resolveTokenFound(active, 'token_poll', result.token);
     }
 
@@ -540,7 +553,7 @@ const postClickWait = (
       Effect.orElseSucceed(() => null),
     );
 
-    const resolved = result != null && result._tag === 'token_found';
+    const resolved = result != null && result._tag === 'TokenFound';
     yield* events.marker(active.pageTargetId, 'cf.postclick_result', {
       resolved,
       signal: resolved ? 'token_poll' : 'timeout',
