@@ -198,9 +198,27 @@ const solveByClicking = (
         Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
       );
 
-      if (result._tag === 'Verified') {
-        yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
-        return true;
+      switch (result._tag) {
+        case 'Verified':
+          yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
+          return true;
+
+        case 'NotVerified':
+          if (result.reason === 'oopif_gone') {
+            yield* events.marker(active.pageTargetId, 'cf.oopif_dead_interstitial', { attempt });
+            // OOPIF dead — break loop, fall through to waitForAutoNav
+            return false;
+          }
+          continue;
+
+        case 'NoCheckbox':
+        case 'ClickFailed':
+          continue;
+
+        default: {
+          const _exhaustive: never = result;
+          throw new Error(`Unhandled ClickResult: ${(_exhaustive as any)._tag}`);
+        }
       }
     }
 
@@ -288,25 +306,39 @@ const solveTurnstile = (
           Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
         );
 
-        if (result._tag === 'Verified') {
-          yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
-          return TR.Clicked({ attempt });
-        }
+        switch (result._tag) {
+          case 'Verified':
+            yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
+            return TR.Clicked({ attempt });
 
-        // OOPIF died during verification — exit immediately, no retry
-        if (result._tag === 'NotVerified' && result.reason === 'oopif_gone') {
-          yield* events.marker(pageTargetId, 'cf.oopif_dead_on_verify', { attempt });
-          return TR.OopifDead({ attempt });
-        }
+          case 'NotVerified':
+            if (result.reason === 'oopif_gone') {
+              yield* events.marker(pageTargetId, 'cf.oopif_dead_on_verify', { attempt });
+              return TR.OopifDead({ attempt });
+            }
+            // not_confirmed — click dispatched but verify flag not set.
+            // Worth retrying (OOPIF may rerender, timing window).
+            continue;
 
-        // Only reduce attempts on genuine no-checkbox (not verify failure)
-        if (attempt === 0 && maxAttempts > 2 && result._tag === 'NoCheckbox') {
-          maxAttempts = 2;
-          yield* events.marker(pageTargetId, 'cf.reduced_attempts', {
-            reason: 'first_attempt_no_checkbox',
-            original: MAX_CLICK_ATTEMPTS,
-            reduced_to: maxAttempts,
-          });
+          case 'NoCheckbox':
+          case 'ClickFailed':
+            // No checkbox or CDP error — reduce attempts on first failure
+            if (attempt === 0 && maxAttempts > 2) {
+              maxAttempts = 2;
+              yield* events.marker(pageTargetId, 'cf.reduced_attempts', {
+                reason: result._tag === 'NoCheckbox'
+                  ? 'first_attempt_no_checkbox'
+                  : 'first_attempt_cdp_error',
+                original: MAX_CLICK_ATTEMPTS,
+                reduced_to: maxAttempts,
+              });
+            }
+            continue;
+
+          default: {
+            const _exhaustive: never = result;
+            throw new Error(`Unhandled ClickResult: ${(_exhaustive as any)._tag}`);
+          }
         }
       }
       yield* Effect.annotateCurrentSpan({
