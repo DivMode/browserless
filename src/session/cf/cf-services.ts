@@ -13,7 +13,7 @@ import { ServiceMap } from 'effect';
 import type { CdpSessionId, TargetId, CloudflareResult, CloudflareConfig } from '../../shared/cloudflare-detection.js';
 import type { CdpSessionGone, CdpTimeout } from './cf-errors.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
-import type { SolveOutcome } from './cloudflare-solve-strategies.js';
+import type { SolveOutcome, ClickResult } from './cloudflare-solve-strategies.js';
 
 // ═══════════════════════════════════════════════════════════════════════
 // CdpSender — send CDP commands to browser/page/OOPIF sessions
@@ -75,7 +75,7 @@ export const SolverEvents = ServiceMap.Service<{
 // ═══════════════════════════════════════════════════════════════════════
 
 export const SolveDeps = ServiceMap.Service<{
-  readonly findAndClickViaCDP: (active: ActiveDetection, attempt: number) => Effect.Effect<boolean>;
+  readonly findAndClickViaCDP: (active: ActiveDetection, attempt: number) => Effect.Effect<ClickResult>;
   readonly simulatePresence: (active: ActiveDetection) => Effect.Effect<void>;
   /** Activity loop for embedded types (turnstile/non_interactive/invisible). Runtime.evaluate is safe. */
   readonly startActivityLoopEmbedded: (active: ActiveDetection) => Effect.Effect<void>;

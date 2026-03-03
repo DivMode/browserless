@@ -19,6 +19,7 @@ import { CloudflareTracker } from './cloudflare-event-emitter.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
 import { Resolution } from './cf-resolution.js';
 import { TokenChecker, SolverEvents, SolveDeps } from './cf-services.js';
+import { ClickResult } from './cloudflare-solve-strategies.js';
 import { CdpSessionGone } from './cf-errors.js';
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -99,9 +100,9 @@ const makeTestLayer = (config: TestLayerConfig = {}) => {
     findAndClickViaCDP: () => {
       captures.clickAttempts++;
       if (config.clickSuccessOnAttempt && captures.clickAttempts >= config.clickSuccessOnAttempt) {
-        return Effect.succeed(true);
+        return Effect.succeed(ClickResult.Verified());
       }
-      return Effect.succeed(config.clickSuccess ?? false);
+      return Effect.succeed(config.clickSuccess ? ClickResult.Verified() : ClickResult.NoCheckbox());
     },
     simulatePresence: () => Effect.void,
     startActivityLoopEmbedded: () => Effect.void,
@@ -316,7 +317,7 @@ describe('pollToken', () => {
       }));
 
       const depsLayer = Layer.succeed(SolveDeps, SolveDeps.of({
-        findAndClickViaCDP: () => Effect.succeed(false),
+        findAndClickViaCDP: () => Effect.succeed(ClickResult.NoCheckbox()),
         simulatePresence: () => Effect.void,
         startActivityLoopEmbedded: () => Effect.void,
         startActivityLoopInterstitial: () => Effect.void,

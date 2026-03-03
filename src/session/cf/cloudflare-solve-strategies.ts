@@ -1,4 +1,4 @@
-import { Effect, Scope } from 'effect';
+import { Data, Effect, Scope } from 'effect';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
 import type { TargetId } from '../../shared/cloudflare-detection.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
@@ -103,6 +103,20 @@ export type SolveOutcome =
   | 'no_click'
   | 'auto_handled'
   | 'aborted';
+
+/**
+ * Structured result from findAndClickViaCDP — replaces boolean return.
+ *
+ * Lets callers distinguish "no checkbox found" (retryable) from "OOPIF died
+ * during verify" (fatal — don't waste 23s polling a dead iframe).
+ */
+export type ClickResult = Data.TaggedEnum<{
+  Verified: {}
+  NotVerified: { readonly reason: string }
+  NoCheckbox: {}
+  ClickFailed: {}
+}>;
+export const ClickResult = Data.taggedEnum<ClickResult>();
 
 /**
  * Cloudflare's well-known test sitekey prefixes.
@@ -384,14 +398,14 @@ export class CloudflareSolveStrategies {
   findAndClickViaCDP(
     active: ActiveDetection,
     attempt = 0,
-  ): Effect.Effect<boolean, never, StrategiesR> {
+  ): Effect.Effect<ClickResult, never, StrategiesR> {
     return this._findAndClickViaCDP(active, attempt);
   }
 
   private _findAndClickViaCDP(
     active: ActiveDetection,
     attempt = 0,
-  ): Effect.Effect<boolean, never, StrategiesR> {
+  ): Effect.Effect<ClickResult, never, StrategiesR> {
     const strategies = this;
     return Effect.fn('cf.findAndClickViaCDP')(function*() {
       yield* Effect.annotateCurrentSpan({
@@ -528,7 +542,7 @@ export class CloudflareSolveStrategies {
           total_targets: targetInfos?.length ?? 0,
           elapsed_ms: Date.now() - solveStart,
         });
-        return false;
+        return ClickResult.NoCheckbox();
       }
 
       // ── Phase 3: Isolated world + checkbox find (OOPIF session) ──────
@@ -538,7 +552,7 @@ export class CloudflareSolveStrategies {
       const checkboxResult = yield* strategies.phase3CheckboxFind(
         send, oopifSessionId, active, via, solveStart,
       );
-      if (!checkboxResult) return false;
+      if (!checkboxResult) return ClickResult.NoCheckbox();
 
       const { checkbox, method: cbMethod } = checkboxResult;
 
@@ -558,7 +572,7 @@ export class CloudflareSolveStrategies {
             error: err instanceof Error ? err.message : 'unknown',
             via: 'proxy_ws', attempt,
           });
-          return false;
+          return ClickResult.ClickFailed();
         }),
       ),
     );
@@ -1002,7 +1016,7 @@ export class CloudflareSolveStrategies {
     via: string,
     attempt: number,
     solveStart: number,
-  ): Effect.Effect<boolean, never, typeof SolverEvents.Identifier> {
+  ): Effect.Effect<ClickResult, never, typeof SolverEvents.Identifier> {
     const strategies = this;
     const pageTargetId = active.pageTargetId;
     return Effect.fn('cf.phase4Click')(function*() {
@@ -1033,7 +1047,7 @@ export class CloudflareSolveStrategies {
 
         if (visible?.result?.value === false) {
           yield* events.marker(pageTargetId, 'cf.checkbox_not_visible', { via, polls: 0 });
-          return false;
+          return ClickResult.NoCheckbox();
         }
       }
 
@@ -1068,14 +1082,14 @@ export class CloudflareSolveStrategies {
         const bounds = JSON.parse(boundsResult?.result?.value || '{}');
         if (!bounds.width) {
           yield* events.marker(pageTargetId, 'cf.cdp_no_box_model', { method, via });
-          return false;
+          return ClickResult.ClickFailed();
         }
         x = bounds.x + bounds.width / 2;
         y = bounds.y + bounds.height / 2;
         coordSource = 'getBoundingClientRect';
       } else {
         yield* events.marker(pageTargetId, 'cf.cdp_no_box_model', { method, via });
-        return false;
+        return ClickResult.ClickFailed();
       }
 
       // ── Phase 4a: Get iframe page-space position for debugging ────────
@@ -1150,7 +1164,7 @@ export class CloudflareSolveStrategies {
           via, attempt,
           oopif_session_id: oopifSessionId.substring(0, 16),
         });
-        return false;
+        return ClickResult.ClickFailed();
       }
 
       // ── Phase 4b post-click: Verify the click actually landed ─────────
@@ -1197,9 +1211,11 @@ export class CloudflareSolveStrategies {
         elapsed_since_solve_start_ms: Date.now() - solveStart,
         checkbox_to_click_ms: Date.now() - solveStart,
       });
-      return clickVerified === true;
+      if (clickVerified) return ClickResult.Verified();
+      if (verifyError) return ClickResult.NotVerified({ reason: verifyError });
+      return ClickResult.ClickFailed();
     })().pipe(
-      Effect.catch(() => Effect.succeed(false)),
+      Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
     );
   }
 
