@@ -503,10 +503,33 @@ export class CloudflareDetector {
         );
 
         if (detection._tag === 'detected') {
-          yield* self.handleTurnstileDetection(targetId, cdpSessionId, detection, startTime);
+          // CROSS-TAB GUARD: Filter out OOPIFs owned by other pages.
+          // Target.getTargets is browser-global — returns OOPIFs from ALL tabs.
+          // Use iframeToPage ownership map to keep only our OOPIFs.
+          const ownedTargets = detection.targets.filter(t => {
+            const owner = self.state.iframeToPage.get(t.targetId as TargetId);
+            // Keep: owned by us, or not registered yet (might be ours)
+            return !owner || owner === targetId;
+          });
+
+          if (ownedTargets.length === 0) {
+            // All detected targets belong to other pages — not our challenge
+            self.events.marker(targetId, 'cf.cross_tab_filtered', {
+              page: targetId.slice(0, 8),
+              filtered: detection.targets.map(t => ({
+                id: t.targetId.slice(0, 8),
+                owner: self.state.iframeToPage.get(t.targetId as TargetId)?.slice(0, 8) ?? 'unknown',
+              })),
+            });
+            yield* Effect.sleep(DETECTION_POLL_DELAY);
+            continue;
+          }
+
+          const filteredDetection = { ...detection, targets: ownedTargets };
+          yield* self.handleTurnstileDetection(targetId, cdpSessionId, filteredDetection, startTime);
           // After solve completes (success or failure), mark these CF OOPIFs as handled
           // so future detection polls on this session won't re-detect the stale targets
-          for (const t of detection.targets) {
+          for (const t of filteredDetection.targets) {
             self.state.solvedCFTargetIds.add(t.targetId);
           }
           return;

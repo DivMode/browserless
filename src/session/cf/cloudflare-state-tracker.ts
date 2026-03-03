@@ -593,6 +593,10 @@ export class CloudflareStateTracker {
       }
       tracker.knownPages.delete(targetId);
       tracker.iframeToPage.delete(targetId);
+      // Clean up iframeToPage entries pointing TO this page (iframes owned by this page)
+      for (const [iframeId, pageId] of tracker.iframeToPage) {
+        if (pageId === targetId) tracker.iframeToPage.delete(iframeId);
+      }
       tracker.bindingSolvedTargets.delete(targetId);
       tracker.solvedPages.delete(targetId);
       tracker.pendingIframes.delete(targetId);
