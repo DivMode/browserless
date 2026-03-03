@@ -1,4 +1,4 @@
-import { Effect, Latch } from 'effect';
+import { Cause, Effect, Latch } from 'effect';
 import { Logger } from '@browserless.io/browserless';
 import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, CloudflareType } from '../../shared/cloudflare-detection.js';
 import { DETECTION_POLL_DELAY, MAX_RECHALLENGES, RECHALLENGE_DELAY_MS } from './cf-schedules.js';
@@ -435,7 +435,11 @@ export class CloudflareDetector {
       // Dispatch solve via Effect service — no more fire-and-forget Promise
       const dispatcher = yield* SolveDispatcher;
       const outcome = yield* dispatcher.dispatch(active).pipe(
-        Effect.catch(() => Effect.succeed('aborted' as const)),
+        Effect.catchCause((cause) => {
+          const err = Cause.squash(cause);
+          console.error(JSON.stringify({ message: 'cf.triggerSolve dispatch defect', error: String(err) }));
+          return Effect.succeed('aborted' as const);
+        }),
       );
       // Complete Resolution for immediate failures — these are known outcomes
       // that don't require waiting for async signals.
@@ -637,7 +641,11 @@ export class CloudflareDetector {
       // Dispatch solve via Effect service — no more Promise bridge
       const dispatcher = yield* SolveDispatcher;
       const outcome = yield* dispatcher.dispatch(active).pipe(
-        Effect.catch(() => Effect.succeed('aborted' as const)),
+        Effect.catchCause((cause) => {
+          const err = Cause.squash(cause);
+          console.error(JSON.stringify({ message: 'cf.handleTurnstile dispatch defect', error: String(err) }));
+          return Effect.succeed('aborted' as const);
+        }),
       );
       // Complete Resolution for immediate failures
       if (outcome === 'no_click') {

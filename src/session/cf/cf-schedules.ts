@@ -81,3 +81,7 @@ export const STATE_POLL_INTERVAL_MS = 500;
 
 /** Individual CDP call timeout within checkbox-finding methods (ms). */
 export const CDP_CALL_TIMEOUT_MS = 5_000;
+
+/** Max concurrent CF solve attempts per browser session.
+ * Limits WS saturation when 15+ tabs solve simultaneously. */
+export const MAX_CONCURRENT_SOLVES = 3;

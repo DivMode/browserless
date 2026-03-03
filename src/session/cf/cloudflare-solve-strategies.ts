@@ -1,4 +1,4 @@
-import { Data, Effect, Scope } from 'effect';
+import { Data, Effect } from 'effect';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
 import type { TargetId } from '../../shared/cloudflare-detection.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
@@ -32,18 +32,13 @@ type ClickPhaseSend = <M extends string>(
   sessionId?: CdpSessionId,
   timeoutMs?: number,
 ) => Effect.Effect<any>;
-import { CdpConnection } from '../../shared/cdp-rpc.js';
-import { CdpSessionGone } from './cf-errors.js';
 import { CdpSender, SolverEvents } from './cf-services.js';
-import {
-  MAX_OOPIF_POLLS,
-  MAX_CHECKBOX_POLLS,
-  CHECKBOX_POLL_INTERVAL_MS,
-  CLEAN_WS_OPEN_TIMEOUT_MS,
-  CLEAN_WS_CMD_TIMEOUT_MS,
-  TARGET_GET_TIMEOUT_MS,
-  CDP_CALL_TIMEOUT_MS,
-} from './cf-schedules.js';
+import { TARGET_GET_TIMEOUT_MS } from './cf-schedules.js';
+
+// Extracted modules
+import { phase2OOPIFResolution } from './cf-phase-oopif.js';
+import { phase3CheckboxFind, getAttr } from './cf-phase-checkbox.js';
+import { getIframePageCoords, openCleanPageWsScoped } from './cf-coords.js';
 
 /** Parsed metadata from a CF Turnstile OOPIF URL. */
 export interface TurnstileOOPIFMeta {
@@ -168,216 +163,11 @@ interface CDPNode {
 export type StrategiesR = typeof CdpSender.Identifier | typeof SolverEvents.Identifier;
 
 export class CloudflareSolveStrategies {
+  /** Shared Target.getTargets cache — reduces 15×5/sec → ~5/sec. Single-threaded Node.js = no races. */
+  private targetCache: { targets: any[]; timestamp: number } | null = null;
+  private static readonly TARGET_CACHE_TTL_MS = 200;
+
   constructor(private chromePort?: string) {}
-
-  // ── Runtime.callFunctionOn Element Finding (matches pydoll) ─────────
-
-  /**
-   * Find the Turnstile checkbox using a specific sendCommand function.
-   * This allows routing ALL commands through the same WS connection
-   * (critical because CDP session IDs are per-connection).
-   * Returns Effect to compose with the calling Effect chain.
-   */
-  private findCheckboxViaRuntimeUsing(
-    send: EffectSend,
-    oopifSessionId: CdpSessionId,
-  ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
-    const strategies = this;
-    /** Wrap an Effect-returning CDP call with a timeout to prevent hangs when OOPIF navigates away. */
-    const cdpCall = <T>(effect: Effect.Effect<T>) =>
-      effect.pipe(
-        Effect.timeout(`${CDP_CALL_TIMEOUT_MS} millis`),
-        Effect.orElseSucceed(() => null as T | null),
-      );
-    return Effect.fn('cf.findCheckboxViaRuntime')(function*() {
-      yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId, 'cf.via': 'runtime' });
-      // Step 1: Get document node
-      const doc = yield* cdpCall(send('DOM.getDocument', {
-        depth: 0,
-      }, oopifSessionId));
-      if (!doc?.root) return null;
-
-      // Step 2: Resolve document to get its objectId
-      const resolved = yield* cdpCall(send('DOM.resolveNode', {
-        nodeId: doc.root.nodeId,
-      }, oopifSessionId));
-      if (!resolved?.object?.objectId) return null;
-
-      // Step 3: Find body element via Runtime.callFunctionOn
-      const bodyResult = yield* cdpCall(send('Runtime.callFunctionOn', {
-        objectId: resolved.object.objectId,
-        functionDeclaration: `function() { return this.querySelector('body'); }`,
-        returnByValue: false,
-      }, oopifSessionId));
-      if (!bodyResult?.result?.objectId) return null;
-
-      // Step 4: Describe body node with pierce=true to get shadow root
-      const bodyDesc = yield* cdpCall(send('DOM.describeNode', {
-        objectId: bodyResult.result.objectId,
-        pierce: true,
-        depth: 1,
-      }, oopifSessionId));
-
-      // The Turnstile checkbox is inside a shadow root on the body or a child.
-      // Walk shadow roots to find the one containing span.cb-i.
-      const shadowRoots = bodyDesc?.node?.shadowRoots;
-
-      if (shadowRoots?.length) {
-        // Try each shadow root
-        for (const sr of shadowRoots) {
-          const found = yield* strategies.queryCheckboxInShadowUsing(send, oopifSessionId, sr.backendNodeId);
-          if (found) return found;
-        }
-      }
-
-      // If no shadow roots on body, search children for shadow hosts
-      // (Turnstile might nest the shadow root one level deeper)
-      const children = bodyDesc?.node?.children;
-      if (children?.length) {
-        for (const child of children) {
-          const childDesc = yield* cdpCall(send('DOM.describeNode', {
-            backendNodeId: child.backendNodeId,
-            pierce: true,
-            depth: 1,
-          }, oopifSessionId));
-          if (childDesc?.node?.shadowRoots?.length) {
-            for (const sr of childDesc.node.shadowRoots) {
-              const found = yield* strategies.queryCheckboxInShadowUsing(send, oopifSessionId, sr.backendNodeId);
-              if (found) return found;
-            }
-          }
-        }
-      }
-
-      return null;
-    })().pipe(
-      Effect.catch(() => Effect.succeed(null)),
-    );
-  }
-
-  /**
-   * Find checkbox using an isolated JS world — matches pydoll's exact approach.
-   *
-   * Pydoll's IFrameContextResolver creates an isolated world via
-   * Page.createIsolatedWorld(frameId, worldName, grantUniversalAccess=True),
-   * then all DOM queries run in that isolated context:
-   *   Runtime.evaluate('document.documentElement', contextId=isolated)
-   *   → iframe.find(tag_name='body') via Runtime.callFunctionOn
-   *   → body.get_shadow_root() via DOM.describeNode(pierce=true) + DOM.resolveNode
-   *   → inner_shadow.query('span.cb-i') via Runtime.callFunctionOn
-   *
-   * CF's WASM in the main world cannot observe execution in isolated worlds.
-   */
-  private findCheckboxViaIsolatedWorld(
-    send: EffectSend,
-    oopifSessionId: CdpSessionId,
-    contextId: number,
-  ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
-    const strategies = this;
-    /** Wrap an Effect-returning CDP call with a timeout to prevent hangs when OOPIF navigates away. */
-    const cdpCall = <T>(effect: Effect.Effect<T>) =>
-      effect.pipe(
-        Effect.timeout(`${CDP_CALL_TIMEOUT_MS} millis`),
-        Effect.orElseSucceed(() => null as T | null),
-      );
-    return Effect.fn('cf.findCheckboxViaIsolatedWorld')(function*() {
-      yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId, 'cf.via': 'isolated_world' });
-      // Get document root in the isolated world (pydoll: Runtime.evaluate('document.documentElement'))
-      const docResult = yield* cdpCall(send('Runtime.evaluate', {
-        expression: 'document.documentElement',
-        contextId,
-        returnByValue: false,
-      }, oopifSessionId));
-      if (!docResult?.result?.objectId) return null;
-
-      // Find body (pydoll: iframe.find(tag_name='body'))
-      const bodyResult = yield* cdpCall(send('Runtime.callFunctionOn', {
-        objectId: docResult.result.objectId,
-        functionDeclaration: `function() { return this.querySelector('body'); }`,
-        returnByValue: false,
-      }, oopifSessionId));
-      if (!bodyResult?.result?.objectId) return null;
-
-      // Describe body with pierce to get shadow roots (pydoll: body.get_shadow_root())
-      const bodyDesc = yield* cdpCall(send('DOM.describeNode', {
-        objectId: bodyResult.result.objectId,
-        pierce: true,
-        depth: 1,
-      }, oopifSessionId));
-
-      const shadowRoots = bodyDesc?.node?.shadowRoots;
-      if (shadowRoots?.length) {
-        for (const sr of shadowRoots) {
-          const found = yield* strategies.queryCheckboxInShadowUsing(send, oopifSessionId, sr.backendNodeId);
-          if (found) return found;
-        }
-      }
-
-      // Search children for shadow hosts (one level deeper)
-      const children = bodyDesc?.node?.children;
-      if (children?.length) {
-        for (const child of children) {
-          const childDesc = yield* cdpCall(send('DOM.describeNode', {
-            backendNodeId: child.backendNodeId,
-            pierce: true,
-            depth: 1,
-          }, oopifSessionId));
-          if (childDesc?.node?.shadowRoots?.length) {
-            for (const sr of childDesc.node.shadowRoots) {
-              const found = yield* strategies.queryCheckboxInShadowUsing(send, oopifSessionId, sr.backendNodeId);
-              if (found) return found;
-            }
-          }
-        }
-      }
-
-      return null;
-    })().pipe(
-      Effect.catch(() => Effect.succeed(null)),
-    );
-  }
-
-  private queryCheckboxInShadowUsing(
-    send: EffectSend,
-    oopifSessionId: CdpSessionId,
-    shadowBackendNodeId: number,
-  ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
-    /** Wrap an Effect-returning CDP call with a timeout to prevent hangs when OOPIF navigates away. */
-    const cdpCall = <T>(effect: Effect.Effect<T>) =>
-      effect.pipe(
-        Effect.timeout(`${CDP_CALL_TIMEOUT_MS} millis`),
-        Effect.orElseSucceed(() => null as T | null),
-      );
-    return Effect.fn('cf.queryCheckboxInShadow')(function*() {
-      yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId });
-      // Resolve shadow root to objectId
-      const shadowResolved = yield* cdpCall(send('DOM.resolveNode', {
-        backendNodeId: shadowBackendNodeId,
-      }, oopifSessionId));
-      if (!shadowResolved?.object?.objectId) return null;
-
-      // Try span.cb-i first (Turnstile's primary checkbox indicator)
-      const cbResult = yield* cdpCall(send('Runtime.callFunctionOn', {
-        objectId: shadowResolved.object.objectId,
-        functionDeclaration: `function() { return this.querySelector('span.cb-i') || this.querySelector('input[type="checkbox"]'); }`,
-        returnByValue: false,
-      }, oopifSessionId));
-
-      if (!cbResult?.result?.objectId || cbResult.result.subtype === 'null') return null;
-
-      // Get the backendNodeId for the checkbox (needed for getBoxModel)
-      const cbDesc = yield* cdpCall(send('DOM.describeNode', {
-        objectId: cbResult.result.objectId,
-      }, oopifSessionId));
-
-      if (!cbDesc?.node?.backendNodeId) return null;
-
-      return {
-        objectId: cbResult.result.objectId,
-        backendNodeId: cbDesc.node.backendNodeId,
-      };
-    })();
-  }
 
   // ── CDP-based Shadow DOM Discovery + Trusted Click ──────────────────
 
@@ -524,10 +314,7 @@ export class CloudflareSolveStrategies {
       });
 
       // ── Phase 2: OOPIF resolution (isolated WS) ─────────────────────
-      // Pydoll creates a new ConnectionHandler, calls Target.getTargets,
-      // then for each target: attachToTarget → Page.getFrameTree → DOM.getFrameOwner
-      // → match backendNodeId from Phase 1.
-      const oopifSessionId = yield* strategies.phase2OOPIFResolution(
+      const oopifSessionId = yield* phase2OOPIFResolution(
         send, pageSend, pageCdpSessionId, pageTargetId, iframeFrameId, via,
       );
 
@@ -546,10 +333,7 @@ export class CloudflareSolveStrategies {
       }
 
       // ── Phase 3: Isolated world + checkbox find (OOPIF session) ──────
-      // Pydoll: Page.createIsolatedWorld → Runtime.evaluate('document.documentElement')
-      //   → callFunctionOn(querySelector('body')) → DOM.describeNode(pierce=true, depth=1)
-      //   → DOM.resolveNode(shadowRoot) → callFunctionOn(querySelector('span.cb-i'))
-      const checkboxResult = yield* strategies.phase3CheckboxFind(
+      const checkboxResult = yield* phase3CheckboxFind(
         send, oopifSessionId, active, via, solveStart,
       );
       if (!checkboxResult) return ClickResult.NoCheckbox();
@@ -594,7 +378,7 @@ export class CloudflareSolveStrategies {
       let frameId: string | null = null;
 
       // acquireRelease guarantees WS cleanup even on fiber interruption
-      const conn = yield* strategies.openCleanPageWsScoped(pageTargetId).pipe(
+      const conn = yield* openCleanPageWsScoped(pageTargetId, strategies.chromePort!).pipe(
         Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
       );
       if (!conn) return { backendNodeId, frameId };
@@ -618,390 +402,7 @@ export class CloudflareSolveStrategies {
     })().pipe(Effect.scoped);
   }
 
-  // ── Phase 2: OOPIF resolution ─────────────────────────────────────
 
-  private phase2OOPIFResolution(
-    send: EffectSend,
-    pageSend: EffectSend,
-    pageCdpSessionId: CdpSessionId,
-    pageTargetId: TargetId,
-    iframeFrameId: string | null,
-    via: string,
-  ): Effect.Effect<CdpSessionId | null, never, typeof SolverEvents.Identifier> {
-    return Effect.fn('cf.phase2OOPIFResolution')(function*() {
-      yield* Effect.annotateCurrentSpan({
-        'cf.target_id': pageTargetId,
-        'cf.via': via,
-        'cf.has_iframe_frame_id': !!iframeFrameId,
-      });
-      const events = yield* SolverEvents;
-      const targetsResult = yield* send('Target.getTargets').pipe(
-        Effect.orElseSucceed(() => ({ targetInfos: [] as any[] })),
-      );
-      const targetInfos = targetsResult?.targetInfos;
-      if (!targetInfos?.length) return null;
-
-      // Filter out test widgets
-      const candidates = targetInfos.filter(
-        (t: { type: string; url?: string }) =>
-          (t.type === 'iframe' || t.type === 'page')
-          && t.url?.includes('challenges.cloudflare.com')
-          && !isCFTestWidget(t.url),
-      );
-
-      let oopifSessionId: CdpSessionId | null = null;
-
-      // ── Instrumentation: Phase 2 timing ─────────────────────────────
-      const phase2Start = Date.now();
-      yield* events.marker(pageTargetId, 'cf.phase2_start', {
-        candidate_count: candidates.length,
-        has_iframe_frame_id: !!iframeFrameId,
-        via,
-      });
-
-      // Primary: match by frameId from page-side DOM.describeNode
-      // The iframe element's frameId (from page session) matches the target's
-      // frame tree root frame ID. frameId is a global Chrome identifier (unlike
-      // backendNodeId which is per-connection).
-      if (iframeFrameId && candidates.length > 0) {
-        for (const target of candidates) {
-          const attachStart = Date.now();
-          const trySessionId = yield* send('Target.attachToTarget', {
-            targetId: target.targetId,
-            flatten: true,
-          }).pipe(Effect.map((r: any) => r?.sessionId ?? null));
-
-          yield* events.marker(pageTargetId, 'cf.phase2_attach', {
-            targetId: target.targetId.substring(0, 20),
-            success: !!trySessionId,
-            elapsed_ms: Date.now() - attachStart,
-            loop: 'primary',
-          });
-
-          if (!trySessionId) continue; // This target didn't match — try next
-
-          const ft = yield* send('Page.getFrameTree', {}, trySessionId);
-          const frameId = ft?.frameTree?.frame?.id;
-          if (!frameId) continue; // This target didn't match — try next
-
-          if (frameId === iframeFrameId || target.targetId === iframeFrameId) {
-            oopifSessionId = trySessionId;
-            yield* events.marker(pageTargetId, 'cf.oopif_discovered', {
-              method: 'active', via,
-              filter: 'frameId_match',
-              targetId: target.targetId,
-              url: target.url?.substring(0, 100),
-              total_candidates: candidates.length,
-            });
-            break;
-          }
-        }
-      }
-
-      // Fallback: parentFrameId filter (if page-side traversal failed)
-      // When iframeFrameId is set but frameId_match failed, the correct OOPIF
-      // likely hasn't appeared in Target.getTargets yet (Chrome registers OOPIFs
-      // asynchronously after the iframe element appears in the DOM). Poll for it.
-      if (!oopifSessionId) {
-        const maxOopifPolls = iframeFrameId ? MAX_OOPIF_POLLS : 1; // 6 × 500ms = 3s max wait
-        for (let oopifPoll = 0; oopifPoll < maxOopifPolls; oopifPoll++) {
-          if (oopifPoll > 0) {
-            yield* Effect.sleep('500 millis');
-            // Re-fetch targets — the correct OOPIF may have appeared
-            const refreshed = yield* send('Target.getTargets').pipe(
-              Effect.orElseSucceed(() => ({ targetInfos: [] as any[] })),
-            );
-            const refreshedCandidates = (refreshed.targetInfos ?? []).filter(
-              (t: { type: string; url?: string }) =>
-                (t.type === 'iframe' || t.type === 'page')
-                && t.url?.includes('challenges.cloudflare.com')
-                && !isCFTestWidget(t.url),
-            );
-            // Try frameId_match on refreshed targets
-            for (const target of refreshedCandidates) {
-              const attachStart = Date.now();
-              const trySessionId = yield* send('Target.attachToTarget', {
-                targetId: target.targetId,
-                flatten: true,
-              }).pipe(Effect.map((r: any) => r?.sessionId ?? null));
-
-              yield* events.marker(pageTargetId, 'cf.phase2_attach', {
-                targetId: target.targetId.substring(0, 20),
-                success: !!trySessionId,
-                elapsed_ms: Date.now() - attachStart,
-                loop: 'fallback_retry',
-                poll: oopifPoll,
-              });
-
-              if (!trySessionId) continue;
-              const ft = yield* send('Page.getFrameTree', {}, trySessionId);
-              const frameId = ft?.frameTree?.frame?.id;
-              if (frameId && (frameId === iframeFrameId || target.targetId === iframeFrameId)) {
-                oopifSessionId = trySessionId;
-                yield* events.marker(pageTargetId, 'cf.oopif_discovered', {
-                  method: 'active', via,
-                  filter: 'frameId_match_retry',
-                  targetId: target.targetId,
-                  url: target.url?.substring(0, 100),
-                  total_candidates: refreshedCandidates.length,
-                  poll: oopifPoll,
-                });
-                break;
-              }
-            }
-            if (oopifSessionId) break;
-            continue;
-          }
-
-          // First poll (oopifPoll === 0): use parentFrameId filter on existing candidates
-          let pageFrameId: string | null = null;
-          const frameTree = yield* pageSend('Page.getFrameTree', {}, pageCdpSessionId);
-          pageFrameId = frameTree?.frameTree?.frame?.id ?? null;
-
-          let cfTargets = pageFrameId
-            ? candidates.filter(
-                (t: { parentFrameId?: string }) => t.parentFrameId === pageFrameId,
-              )
-            : [];
-
-          if (cfTargets.length === 0) cfTargets = candidates;
-
-          if (cfTargets.length > 0) {
-            const target = cfTargets[0];
-            const attachStart = Date.now();
-            const sessionId = yield* send('Target.attachToTarget', {
-              targetId: target.targetId,
-              flatten: true,
-            }).pipe(Effect.map((r: any) => r?.sessionId ?? null));
-
-            yield* events.marker(pageTargetId, 'cf.phase2_attach', {
-              targetId: target.targetId.substring(0, 20),
-              success: !!sessionId,
-              elapsed_ms: Date.now() - attachStart,
-              loop: 'fallback_first',
-            });
-
-            if (sessionId) {
-              // If we have iframeFrameId, verify this OOPIF matches before committing
-              if (iframeFrameId) {
-                const ft = yield* send('Page.getFrameTree', {}, sessionId);
-                const frameId = ft?.frameTree?.frame?.id;
-                if (frameId && frameId !== iframeFrameId && target.targetId !== iframeFrameId) {
-                  // Stale OOPIF — doesn't match our Phase 1 iframe. Keep polling.
-                  yield* events.marker(pageTargetId, 'cf.oopif_stale', {
-                    via, targetId: target.targetId,
-                    expected_frame_id: (iframeFrameId as string).substring(0, 20),
-                    actual_frame_id: frameId?.substring(0, 20),
-                    poll: oopifPoll,
-                  });
-                  continue;
-                }
-              }
-              oopifSessionId = sessionId;
-              yield* events.marker(pageTargetId, 'cf.oopif_discovered', {
-                method: 'active', via,
-                filter: pageFrameId ? 'parentFrameId' : 'url',
-                targetId: target.targetId,
-                url: target.url?.substring(0, 100),
-                total_candidates: cfTargets.length,
-              });
-              break;
-            }
-          }
-        }
-      }
-
-      yield* Effect.annotateCurrentSpan({ 'cf.oopif_found': !!oopifSessionId });
-      yield* events.marker(pageTargetId, 'cf.phase2_end', {
-        found: !!oopifSessionId,
-        elapsed_ms: Date.now() - phase2Start,
-        candidates_tried: candidates.length,
-      });
-      return oopifSessionId;
-    })();
-  }
-
-  // ── Shadow DOM diagnostics (for checkbox-not-found debugging) ─────
-
-  /**
-   * Snapshot the OOPIF shadow DOM structure for diagnostics when checkbox isn't found.
-   * Runs Runtime.evaluate on the OOPIF session (separate V8 isolate — safe from CF WASM).
-   * Returns compact summary: { alive, bodyLength, tags, shadow, cbI, inp }.
-   */
-  private diagnoseShadowDOM(
-    send: EffectSend,
-    oopifSessionId: CdpSessionId,
-    isolatedContextId: number | null,
-  ): Effect.Effect<Record<string, unknown>> {
-    return Effect.fn('cf.diagnoseShadowDOM')(function*() {
-      yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId });
-      const result: Record<string, unknown> = { alive: false };
-
-      // Check if OOPIF session is alive via body innerHTML length
-      const evalOpts = isolatedContextId
-        ? { contextId: isolatedContextId }
-        : {};
-
-      const docResult = yield* send('Runtime.evaluate', {
-        expression: 'document.body ? document.body.innerHTML.length : -1',
-        returnByValue: true,
-        ...evalOpts,
-      }, oopifSessionId);
-
-      if (docResult?.result?.value != null) {
-        result.alive = true;
-        result.bodyLen = docResult.result.value;
-      } else {
-        return result; // Session dead — no point in further queries
-      }
-
-      // Get compact tag summary + shadow root count + checkbox selector matches
-      const tagsResult = yield* send('Runtime.evaluate', {
-        expression: `(function() {
-          var b = document.body;
-          if (!b) return { tags: [], shadow: 0 };
-          var tags = Array.from(b.children).map(function(c) { return c.tagName ? c.tagName.toLowerCase() : '?'; });
-          var shadow = 0;
-          b.querySelectorAll('*').forEach(function(el) { if (el.shadowRoot) shadow++; });
-          var cbI = !!b.querySelector('span.cb-i');
-          var inp = !!b.querySelector('input[type="checkbox"]');
-          return { tags: tags, shadow: shadow, cbI: cbI, inp: inp };
-        })()`,
-        returnByValue: true,
-        ...evalOpts,
-      }, oopifSessionId);
-
-      if (tagsResult?.result?.value) {
-        Object.assign(result, tagsResult.result.value);
-      }
-
-      return result;
-    })().pipe(Effect.orElseSucceed(() => ({ error: 'diag_failed' } as Record<string, unknown>)));
-  }
-
-  // ── Phase 3: Checkbox finding (OOPIF session) ─────────────────────
-
-  private phase3CheckboxFind(
-    send: EffectSend,
-    oopifSessionId: CdpSessionId,
-    active: ActiveDetection,
-    via: string,
-    solveStart: number,
-  ): Effect.Effect<{ checkbox: { objectId: string; backendNodeId: number }; method: string } | null, never, typeof SolverEvents.Identifier> {
-    const strategies = this;
-    const pageTargetId = active.pageTargetId;
-    return Effect.fn('cf.phase3CheckboxFind')(function*() {
-      yield* Effect.annotateCurrentSpan({
-        'cf.type': active.info.type,
-        'cf.target_id': pageTargetId,
-        'cf.via': via,
-      });
-      const events = yield* SolverEvents;
-
-      const phase3Start = Date.now();
-      yield* events.marker(pageTargetId, 'cf.phase3_start', {
-        via, oopif_session: oopifSessionId.substring(0, 20),
-      });
-
-      // Create isolated world
-      let isolatedContextId: number | null = null;
-      let oopifFrameId: string | null = null;
-      const frameTreeResult = yield* send('Page.getFrameTree', {}, oopifSessionId);
-      oopifFrameId = frameTreeResult?.frameTree?.frame?.id ?? null;
-
-      if (oopifFrameId) {
-        // NOTE: pydoll has a typo "grantUniveralAccess" (missing 's') which
-        // Chrome ignores, so pydoll's isolated world does NOT have universal access.
-        // We intentionally omit grantUniversalAccess to match pydoll's actual behavior.
-        const isolatedWorld = yield* send('Page.createIsolatedWorld', {
-          frameId: oopifFrameId,
-          worldName: `browserless::cf::${oopifFrameId}`,
-        }, oopifSessionId);
-        isolatedContextId = isolatedWorld?.executionContextId ?? null;
-        // Isolated world creation failed — fall through to non-isolated path
-      }
-
-      yield* events.marker(pageTargetId, 'cf.cdp_dom_session', {
-        using_iframe: true, type: active.info.type, via,
-        isolated_world: !!isolatedContextId,
-        oopif_frame_id: oopifFrameId ?? 'none',
-      });
-
-      // Find checkbox with polling — matching pydoll's behavior.
-      // Pydoll's querySelector('span.cb-i') returns null initially and polls
-      // ~4 times over ~2 seconds with 500ms gaps. This wait is critical:
-      // CF's WASM needs time to render the widget after the OOPIF loads.
-      // Clicking immediately (within ms of attach) causes rechallenge.
-      let checkbox: { objectId: string; backendNodeId: number } | null = null;
-      let method = 'none';
-      let pollCount = 0;
-
-      const maxPolls = MAX_CHECKBOX_POLLS; // up to 4 seconds of polling
-      const pollInterval = CHECKBOX_POLL_INTERVAL_MS; // match pydoll's ~500ms gap
-
-      for (let poll = 0; poll < maxPolls; poll++) {
-        if (active.aborted) return null;
-        pollCount = poll + 1;
-
-        if (isolatedContextId) {
-          checkbox = yield* strategies.findCheckboxViaIsolatedWorld(send, oopifSessionId, isolatedContextId);
-          if (checkbox) { method = 'isolated_world'; break; }
-        }
-
-        if (!checkbox) {
-          checkbox = yield* strategies.findCheckboxViaRuntimeUsing(send, oopifSessionId);
-          if (checkbox) { method = 'runtime_query'; break; }
-        }
-
-        if (!checkbox) {
-          const doc = yield* send('DOM.getDocument', {
-            depth: -1, pierce: true,
-          }, oopifSessionId);
-          if (doc?.root) {
-            const node = strategies.findCheckboxInTree(doc.root);
-            if (node) {
-              checkbox = { objectId: '', backendNodeId: node.backendNodeId };
-              method = 'dom_tree_walk';
-              break;
-            }
-          }
-        }
-
-        // Checkbox not found yet — wait and retry (matching pydoll's polling)
-        yield* Effect.sleep(`${pollInterval} millis`);
-      }
-
-      if (!checkbox) {
-        yield* Effect.annotateCurrentSpan({ 'cf.checkbox_found': false, 'cf.poll_count': pollCount });
-        // Snapshot shadow DOM state for diagnostics — tells us WHY the checkbox wasn't found
-        const diag = yield* strategies.diagnoseShadowDOM(send, oopifSessionId, isolatedContextId);
-        yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox', { via, polls: pollCount, diag });
-        // Feed diag data to tracker so it appears in cf.failed summary via snapshot()
-        yield* events.emitProgress(active, 'widget_error', {
-          error_type: 'no_checkbox',
-          diag_alive: diag.alive,
-          diag_body_len: diag.bodyLen,
-          diag_shadow: diag.shadow,
-          diag_cbI: diag.cbI,
-          diag_inp: diag.inp,
-        });
-        yield* events.marker(pageTargetId, 'cf.phase3_end', { found: false, elapsed_ms: Date.now() - phase3Start });
-        return null;
-      }
-
-      yield* Effect.annotateCurrentSpan({ 'cf.checkbox_found': true, 'cf.poll_count': pollCount, 'cf.checkbox_method': method });
-      const checkboxFoundAt = Date.now();
-      yield* events.marker(pageTargetId, 'cf.cdp_checkbox_found', {
-        method, backendNodeId: checkbox.backendNodeId,
-        has_objectId: !!checkbox.objectId, via, polls: pollCount,
-        checkbox_found_ms: checkboxFoundAt - solveStart,
-      });
-      yield* events.emitProgress(active, 'widget_found', { method, x: 0, y: 0 });
-      yield* events.marker(pageTargetId, 'cf.phase3_end', { found: true, elapsed_ms: Date.now() - phase3Start });
-
-      return { checkbox, method };
-    })();
-  }
 
   // ── Phase 4: Click dispatch ───────────────────────────────────────
 
@@ -1099,7 +500,7 @@ export class CloudflareSolveStrategies {
       let iframePageX: number | null = null;
       let iframePageY: number | null = null;
       if (iframeBackendNodeId && strategies.chromePort && active.pageTargetId) {
-        const iframeCoords = yield* strategies.getIframePageCoords(active.pageTargetId, iframeBackendNodeId);
+        const iframeCoords = yield* getIframePageCoords(active.pageTargetId, iframeBackendNodeId, strategies.chromePort!);
         iframePageX = iframeCoords.x;
         iframePageY = iframeCoords.y;
       }
@@ -1219,82 +620,8 @@ export class CloudflareSolveStrategies {
     );
   }
 
-  // ── Helper: get iframe page-space coordinates ─────────────────────
-
-  private getIframePageCoords(
-    pageTargetId: TargetId,
-    iframeBackendNodeId: number,
-  ): Effect.Effect<{ x: number | null; y: number | null }> {
-    const strategies = this;
-    return Effect.fn('cf.getIframePageCoords')(function*() {
-      yield* Effect.annotateCurrentSpan({ 'cf.target_id': pageTargetId });
-      // acquireRelease guarantees WS cleanup even on fiber interruption
-      const conn = yield* strategies.openCleanPageWsScoped(pageTargetId).pipe(
-        Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
-      );
-      if (!conn) return { x: null, y: null };
-
-      const iframeBox = yield* conn.send('DOM.getBoxModel', {
-        backendNodeId: iframeBackendNodeId,
-      }).pipe(Effect.orElseSucceed(() => null));
-      if (iframeBox?.model?.content) {
-        const q = iframeBox.model.content;
-        // content quad: [x0,y0, x1,y1, x2,y2, x3,y3] — top-left origin is q[0],q[1]
-        return { x: q[0] as number, y: q[1] as number };
-      }
-      return { x: null, y: null };
-    })().pipe(Effect.scoped);
-  }
 
 
-  // ── Clean Page WS for Phase 1 ──────────────────────────────────────
-
-  /**
-   * Open a fresh /devtools/page/{targetId} WS with zero V8 state.
-   *
-   * WHY: CdpSession's WS is tainted by rrweb's addScriptToEvaluateOnNewDocument
-   * and Runtime.addBinding calls. CF's WASM detects this accumulated V8 state and
-   * rejects all subsequent clicks through the tainted connection. A fresh page WS
-   * has zero state — matching how pydoll connects via /devtools/page/{targetId}.
-   *
-   * Returns a scoped CdpConnection — callers use Effect.scoped to guarantee WS
-   * cleanup even on fiber interruption. Reuses CdpConnection from cdp-rpc.ts
-   * (same correlation map, timeout, and typed error handling).
-   */
-  private openCleanPageWsScoped(targetId: TargetId): Effect.Effect<CdpConnection, CdpSessionGone, Scope.Scope> {
-    const chromePort = this.chromePort;
-    return Effect.acquireRelease(
-      Effect.gen(function*() {
-        const { default: WebSocket } = yield* Effect.promise(() => import('ws'));
-        const pageWsUrl = `ws://127.0.0.1:${chromePort}/devtools/page/${targetId}`;
-        const ws = new WebSocket(pageWsUrl);
-
-        yield* Effect.callback<void, Error>((resume) => {
-          const timer = setTimeout(() => { ws.terminate(); resume(Effect.fail(new Error('Clean page WS timeout'))); }, CLEAN_WS_OPEN_TIMEOUT_MS);
-          ws.on('open', () => { clearTimeout(timer); resume(Effect.void); });
-          ws.on('error', (err) => { clearTimeout(timer); resume(Effect.fail(err)); });
-          return Effect.sync(() => { clearTimeout(timer); ws.terminate(); });
-        });
-
-        const conn = new CdpConnection(ws, { startId: 500_000, defaultTimeout: CLEAN_WS_CMD_TIMEOUT_MS });
-
-        ws.on('message', (data: Buffer) => {
-          const msg = JSON.parse(data.toString());
-          conn.handleResponse(msg);
-        });
-
-        return conn;
-      }).pipe(Effect.mapError(() => new CdpSessionGone({ sessionId: CdpSessionId.makeUnsafe(''), method: 'openCleanPageWs' }))),
-      (conn) => Effect.sync(() => {
-        conn.drainPending('cleanWs scope close');
-        conn.dispose();
-        // Access the underlying WS to terminate it
-        // CdpConnection stores ws as private readonly — use the drain to clean up pending,
-        // then the WS will close when the connection object is GC'd or via terminate
-        try { (conn as any).ws?.terminate(); } catch { /* already closed */ }
-      }),
-    );
-  }
 
 
   /**
@@ -1341,16 +668,28 @@ export class CloudflareSolveStrategies {
    * completely invisible to the page.
    */
   detectTurnstileViaCDP(_pageCdpSessionId: CdpSessionId, solvedCFTargetIds?: ReadonlySet<string>): Effect.Effect<CFDetectionResult, never, typeof CdpSender.Identifier> {
+    const strategies = this;
     return Effect.fn('cf.detectTurnstileViaCDP')(function*() {
       yield* Effect.annotateCurrentSpan({ 'cf.target_id': _pageCdpSessionId });
-      const cdp = yield* CdpSender;
-      const result = yield* cdp.sendViaProxy('Target.getTargets', {}, undefined, TARGET_GET_TIMEOUT_MS).pipe(
-        Effect.orElseSucceed(() => null),
-      );
-      if (!result?.targetInfos?.length) return { _tag: 'not_detected' as const };
+
+      // Cache Target.getTargets — 15 tabs polling at 5/sec = 75 CDP calls/sec without this.
+      // Single-threaded Node.js means no race conditions on the cache.
+      const now = Date.now();
+      let targetInfos: any[];
+      if (strategies.targetCache && (now - strategies.targetCache.timestamp) < CloudflareSolveStrategies.TARGET_CACHE_TTL_MS) {
+        targetInfos = strategies.targetCache.targets;
+      } else {
+        const cdp = yield* CdpSender;
+        const result = yield* cdp.sendViaProxy('Target.getTargets', {}, undefined, TARGET_GET_TIMEOUT_MS).pipe(
+          Effect.orElseSucceed(() => null),
+        );
+        targetInfos = result?.targetInfos ?? [];
+        strategies.targetCache = { targets: targetInfos, timestamp: now };
+      }
+      if (!targetInfos.length) return { _tag: 'not_detected' as const };
 
       // Count CF-matching targets BEFORE filtering by solvedCFTargetIds
-      const cfTargets = result.targetInfos.filter(
+      const cfTargets = targetInfos.filter(
         (t: { type: string; url?: string }) =>
           (t.type === 'iframe' || t.type === 'page')
           && t.url?.includes('challenges.cloudflare.com')
@@ -1365,7 +704,7 @@ export class CloudflareSolveStrategies {
 
       if (matched.length > 0 || filteredOut.length > 0) {
         yield* Effect.annotateCurrentSpan({
-          'cf.detect.total_targets': result.targetInfos.length,
+          'cf.detect.total_targets': targetInfos.length,
           'cf.detect.cf_targets': cfTargets.length,
           'cf.detect.filtered_stale': filteredOut.length,
           'cf.detect.fresh': matched.length,
@@ -1421,79 +760,9 @@ export class CloudflareSolveStrategies {
     })();
   }
 
-  // ── DOM Tree Walking ────────────────────────────────────────────────
 
-  /**
-   * Walk the CDP DOM tree to find the Turnstile checkbox element.
-   *
-   * Searches for:
-   * 1. span.cb-i — the visual checkbox indicator in Turnstile's shadow DOM
-   * 2. input[type=checkbox] — direct checkbox input
-   * 3. Any visible input element inside a shadow root
-   *
-   * Traverses both children[] and shadowRoots[] at each node.
-   */
-  private findCheckboxInTree(node: CDPNode): CDPNode | null {
-    // Check current node
-    if (this.isCheckboxTarget(node)) return node;
 
-    // Search shadow roots first (checkbox lives inside shadow DOM)
-    if (node.shadowRoots) {
-      for (const shadow of node.shadowRoots) {
-        const found = this.findCheckboxInTree(shadow);
-        if (found) return found;
-      }
-    }
 
-    // Search content document (for iframe nodes)
-    if (node.contentDocument) {
-      const found = this.findCheckboxInTree(node.contentDocument);
-      if (found) return found;
-    }
-
-    // Search children
-    if (node.children) {
-      for (const child of node.children) {
-        const found = this.findCheckboxInTree(child);
-        if (found) return found;
-      }
-    }
-
-    return null;
-  }
-
-  /**
-   * Check if a DOM node is the Turnstile checkbox target.
-   */
-  private isCheckboxTarget(node: CDPNode): boolean {
-    const name = node.localName || node.nodeName?.toLowerCase();
-    if (!name) return false;
-
-    // span.cb-i — Turnstile's checkbox indicator element
-    if (name === 'span' && this.hasClass(node, 'cb-i')) return true;
-
-    // input[type=checkbox]
-    if (name === 'input' && this.getAttr(node, 'type') === 'checkbox') return true;
-
-    return false;
-  }
-
-  /** Check if node has a specific CSS class. */
-  private hasClass(node: CDPNode, className: string): boolean {
-    const classAttr = this.getAttr(node, 'class');
-    if (!classAttr) return false;
-    return classAttr.split(/\s+/).includes(className);
-  }
-
-  /** Get attribute value from CDP node attributes array. */
-  private getAttr(node: CDPNode, name: string): string | null {
-    if (!node.attributes) return null;
-    // attributes is flat: [name1, val1, name2, val2, ...]
-    for (let i = 0; i < node.attributes.length - 1; i += 2) {
-      if (node.attributes[i] === name) return node.attributes[i + 1];
-    }
-    return null;
-  }
 
   /**
    * Walk the OOPIF DOM tree to find Turnstile state indicator elements.
@@ -1531,7 +800,7 @@ export class CloudflareSolveStrategies {
 
   /** Collect elements by ID from the DOM tree. */
   private collectElementsById(node: CDPNode, ids: string[], found: Set<string>): void {
-    const nodeId = this.getAttr(node, 'id');
+    const nodeId = getAttr(node, 'id');
     if (nodeId && ids.includes(nodeId)) {
       found.add(nodeId);
     }

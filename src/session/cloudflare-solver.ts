@@ -1,4 +1,4 @@
-import { Effect, FiberMap, Layer, ManagedRuntime } from 'effect';
+import { Effect, FiberMap, Layer, ManagedRuntime, Semaphore } from 'effect';
 import { CdpSessionId } from '../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareConfig } from '../shared/cloudflare-detection.js';
 import { CloudflareDetector } from './cf/cloudflare-detector.js';
@@ -15,6 +15,13 @@ import { CdpSessionGone } from './cf/cf-errors.js';
 import { solveDetection as solveDetectionEffect } from './cf/cloudflare-solver.effect.js';
 import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
 import { OtelLayer } from '../otel-layer.js';
+import { MAX_CONCURRENT_SOLVES } from './cf/cf-schedules.js';
+
+/** Return type of CDPProxy.createIsolatedConnection(). */
+type IsolatedConnection = {
+  send: (method: string, params?: object, sessionId?: CdpSessionId, timeoutMs?: number) => Promise<any>;
+  cleanup: () => void;
+};
 
 /** Service union type — the R channel of the Effect solver runtime. */
 type SolverR =
@@ -44,6 +51,7 @@ export class CloudflareSolver {
   private events: CloudflareEventEmitter;
   private sendCommand: SendCommand;
   private sendViaProxy: SendCommand | null = null;
+  private createIsolatedConn: (() => IsolatedConnection) | null = null;
   private _setRealEmit: (fn: EmitClientEvent) => void;
   /** FiberMap for detection loop fibers — created inside the Layer scope. */
   private _detectionFiberMap: FiberMap.FiberMap<TargetId> | null = null;
@@ -138,19 +146,57 @@ export class CloudflareSolver {
     }));
 
     // SolveDispatcher — routes solve attempts through the Effect solver.
-    // solveDetectionEffect requires TokenChecker/SolverEvents/SolveDeps in R,
-    // but those are provided by the same runtime. Use Effect.gen to yield them
-    // so the dispatch signature is Effect<SolveOutcome> (R = never).
+    // Per-solve isolated WS: each solve gets its own WebSocket to Chrome,
+    // preventing 15 concurrent solves from saturating the shared proxyConn.
+    // Semaphore limits concurrent solves to MAX_CONCURRENT_SOLVES.
     const solveDispatcherLayer = Layer.effect(SolveDispatcher, Effect.gen(function*() {
       const tokenChecker = yield* TokenChecker;
       const solverEvents = yield* SolverEvents;
       const solveDeps = yield* SolveDeps;
+      const originalSender = yield* CdpSender;
+      const solveSemaphore = yield* Semaphore.make(MAX_CONCURRENT_SOLVES);
+
       return SolveDispatcher.of({
-        dispatch: (active) => solveDetectionEffect(active).pipe(
-          Effect.provideService(TokenChecker, tokenChecker),
-          Effect.provideService(SolverEvents, solverEvents),
-          Effect.provideService(SolveDeps, solveDeps),
-        ),
+        dispatch: (active) =>
+          solveSemaphore.withPermits(1)(
+            Effect.scoped(
+              Effect.gen(function*() {
+                // If isolated connections available, give this solve its own WS
+                if (self.createIsolatedConn) {
+                  const conn = yield* Effect.acquireRelease(
+                    Effect.sync(() => self.createIsolatedConn!()),
+                    (c) => Effect.sync(() => c.cleanup()),
+                  );
+                  // Override sendViaProxy → isolated WS for this solve tree.
+                  // send (WS #1) stays unchanged — activity loops, token polling
+                  // remain on the direct page session WS.
+                  const isolatedSender = CdpSender.of({
+                    send: originalSender.send,
+                    sendViaProxy: (method, params, sessionId, timeoutMs) =>
+                      Effect.tryPromise({
+                        try: () => conn.send(method, params, sessionId, timeoutMs),
+                        catch: () => new CdpSessionGone({
+                          sessionId: sessionId ?? CdpSessionId.makeUnsafe(''),
+                          method,
+                        }),
+                      }),
+                  });
+                  return yield* solveDetectionEffect(active).pipe(
+                    Effect.provideService(TokenChecker, tokenChecker),
+                    Effect.provideService(SolverEvents, solverEvents),
+                    Effect.provideService(SolveDeps, solveDeps),
+                    Effect.provideService(CdpSender, isolatedSender),
+                  );
+                }
+                // Fallback: no CDPProxy yet, use original sender
+                return yield* solveDetectionEffect(active).pipe(
+                  Effect.provideService(TokenChecker, tokenChecker),
+                  Effect.provideService(SolverEvents, solverEvents),
+                  Effect.provideService(SolveDeps, solveDeps),
+                );
+              }),
+            ),
+          ),
       });
     }));
 
@@ -192,7 +238,7 @@ export class CloudflareSolver {
     // Wire dependencies:
     // - oopifCheckerLayer needs CdpSender
     // - solveDepsLayer needs OOPIFChecker + CdpSender + SolverEvents
-    // - solveDispatcherLayer needs TokenChecker + SolverEvents + SolveDeps
+    // - solveDispatcherLayer needs TokenChecker + SolverEvents + SolveDeps + CdpSender
     // Base layers (no deps) are merged first, then dependent layers are provided.
     const baseLayers = Layer.mergeAll(
       cdpSenderLayer, tokenCheckerLayer, solverEventsLayer,
@@ -204,6 +250,7 @@ export class CloudflareSolver {
     const withOOPIF = Layer.merge(baseLayers, Layer.provide(oopifCheckerLayer, cdpSenderLayer));
     // solveDepsLayer needs OOPIFChecker + CdpSender + SolverEvents
     const withSolveDeps = Layer.merge(withOOPIF, Layer.provide(solveDepsLayer, withOOPIF));
+    // solveDispatcherLayer needs TokenChecker + SolverEvents + SolveDeps + CdpSender (for isolated WS override)
     return Layer.merge(withSolveDeps, Layer.provide(solveDispatcherLayer, withSolveDeps));
   }
 
@@ -239,6 +286,10 @@ export class CloudflareSolver {
 
   setSendViaProxy(fn: SendCommand): void {
     this.sendViaProxy = fn;
+  }
+
+  setCreateIsolatedConnection(fn: () => IsolatedConnection): void {
+    this.createIsolatedConn = fn;
   }
 
   enable(config?: CloudflareConfig): void {
@@ -285,11 +336,13 @@ export class CloudflareSolver {
   }
 
   async onBeaconSolved(targetId: TargetId, tokenLength: number): Promise<void> {
-    await this.runtime.runPromise(this.stateTracker.onBeaconSolved(targetId, tokenLength));
+    await this.runtime.runPromise(this.stateTracker.onBeaconSolved(targetId, tokenLength))
+      .catch((e) => console.error(JSON.stringify({ message: 'CF runtime defect', method: 'onBeaconSolved', error: String(e) })));
   }
 
   async emitUnresolvedDetections(): Promise<void> {
-    await this.runtime.runPromise(this.stateTracker.emitUnresolvedDetections());
+    await this.runtime.runPromise(this.stateTracker.emitUnresolvedDetections())
+      .catch((e) => console.error(JSON.stringify({ message: 'CF runtime defect', method: 'emitUnresolvedDetections', error: String(e) })));
   }
 
   /**
