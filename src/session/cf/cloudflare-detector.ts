@@ -131,6 +131,10 @@ export class CloudflareDetector {
               // Clean URL — turnstile solved, page navigated after widget completion.
               // Keep type as 'turnstile' to match the original detection — pydoll tracks
               // phases by type, so mismatch causes no_resolution.
+              // PHANTOM GUARD: Set solvedPages HERE (producer side) before falling through
+              // to detection loop. triggerSolveFromUrlEffect sets it on the consumer side
+              // but runs in a separate fiber that hasn't woken up yet.
+              self.state.solvedPages.add(targetId);
               const attr = deriveSolveAttribution('page_navigated', !!active.clickDelivered);
               const result = {
                 solved: true as const, type: 'turnstile' as const, method: attr.method,
@@ -184,6 +188,9 @@ export class CloudflareDetector {
               self.state.pendingRechallengeCount.set(targetId, rechallengeCount);
             } else {
               // Clean destination — interstitial solved.
+              // PHANTOM GUARD: Set solvedPages HERE (producer side) before falling through
+              // to detection loop. See turnstile path comment above for race explanation.
+              self.state.solvedPages.add(targetId);
               const attr = deriveSolveAttribution('page_navigated', !!active.clickDelivered);
               const clickToNavMs = active.clickDeliveredAt
                 ? Date.now() - active.clickDeliveredAt
@@ -481,6 +488,9 @@ export class CloudflareDetector {
         if (self.state.destroyed || !self.enabled) return;
         if (self.state.registry.has(targetId)) return;
         if (self.state.bindingSolvedTargets.has(targetId)) return;
+        // PHANTOM GUARD: Check every iteration — solvedPages may be set by
+        // onPageNavigatedEffect while this loop is polling.
+        if (self.state.solvedPages.has(targetId)) return;
 
         // detectTurnstileViaCDP returns tagged union — pattern match on _tag
         // Pass solvedCFTargetIds to filter out stale OOPIFs from prior solves
