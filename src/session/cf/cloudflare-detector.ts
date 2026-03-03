@@ -238,6 +238,9 @@ export class CloudflareDetector {
       if (!alreadyWaited) {
         yield* Effect.sleep(`${RECHALLENGE_DELAY_MS} millis`);
       }
+      // PHANTOM GUARD: After navigation on a solved page, don't restart Turnstile detection.
+      // CF spawns new OOPIFs post-solve that look like fresh challenges. See solvedPages JSDoc.
+      if (self.state.solvedPages.has(targetId)) return;
       const starter = yield* DetectionLoopStarter;
       yield* starter.start(targetId, cdpSessionId);
     })();
@@ -425,6 +428,8 @@ export class CloudflareDetector {
         if (maybeResolved._tag === 'Some') {
           const resolved = maybeResolved.value;
           if (resolved._tag === 'solved') {
+            // PHANTOM GUARD: Mark page as solved to block post-solve OOPIF re-detection.
+            self.state.solvedPages.add(targetId);
             self.events.emitSolved(active, resolved.result);
           } else {
             self.events.emitFailed(active, resolved.reason, resolved.duration_ms);
@@ -466,6 +471,9 @@ export class CloudflareDetector {
       yield* Effect.annotateCurrentSpan({ 'cf.target_id': targetId });
       if (self.state.destroyed || !self.enabled) return;
       if (self.state.registry.has(targetId)) return;
+      // PHANTOM GUARD: Skip detection on pages that already solved CF — new OOPIFs
+      // spawned post-solve are not real challenges. See solvedPages JSDoc.
+      if (self.state.solvedPages.has(targetId)) return;
 
       const startTime = Date.now();
 
@@ -596,6 +604,8 @@ export class CloudflareDetector {
         if (maybeResolved._tag === 'Some') {
           const resolved = maybeResolved.value;
           if (resolved._tag === 'solved') {
+            // PHANTOM GUARD: Mark page as solved to block post-solve OOPIF re-detection.
+            self.state.solvedPages.add(targetId);
             self.events.emitSolved(active, resolved.result);
           } else {
             self.events.emitFailed(active, resolved.reason, resolved.duration_ms);
