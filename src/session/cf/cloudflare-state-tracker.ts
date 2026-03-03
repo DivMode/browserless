@@ -80,26 +80,33 @@ export class CloudflareStateTracker {
   /** CF OOPIF targetIds from completed solves — filtered out of future detection polls to prevent phantom re-detection of stale OOPIFs. */
   readonly solvedCFTargetIds = new Set<string>();
   /**
-   * Page targetIds that have successfully solved CF.
+   * Page targetIds that have successfully solved an EMBEDDED TURNSTILE.
    *
-   * CRITICAL: After a successful solve, Ahrefs/CF spawns NEW OOPIFs with different
-   * /rch/ URLs. Without this guard, the detection loop picks them up as fresh
-   * challenges, wastes 30s waiting for a checkbox that never appears, and emits
-   * "CF failed: widget_not_found" — a phantom failure on an already-solved page.
+   * CRITICAL: After a successful Turnstile solve, CF's client-side JS spawns NEW
+   * OOPIFs with different /rch/ URLs (token refresh). Without this guard, the
+   * detection loop picks them up as fresh challenges, wastes 30s waiting for a
+   * checkbox that never appears, and emits "CF failed: widget_not_found".
    *
    * Proven in replay 38B2528D:
    *   1. Turnstile detected (/rch/9bcl9/) → clicked → solved in 7.6s
    *   2. ahrefs.complete: success=true with 39 backlinks
    *   3. 33s later: NEW OOPIF (/rch/xnvae/) → phantom "CF failed: widget_not_found"
    *
-   * Root cause: solvedCFTargetIds tracks OOPIF targetIds, not page targetIds.
-   * New OOPIFs get unique targetIds and pass the filter. No per-page guard existed.
+   * ONLY tracks TURNSTILE solves — NOT interstitial solves. Interstitial solves
+   * redirect to a new page and don't produce phantom OOPIFs. Adding interstitial
+   * solves here blocks the embedded Turnstile detection in multi-phase (Int→Emb)
+   * flows — a P0 regression proven in production 2026-03-02 ("checkbox comes up
+   * but mouse never clicks"). The interstitial solve at onPageNavigatedEffect
+   * line ~193 adds to solvedPages, then the detection loop guard at line ~250
+   * blocks the embedded Turnstile detection from starting.
    *
-   * Tracks at PAGE level (not OOPIF level) because new OOPIFs get unique targetIds
-   * but share the same parent page. Checked in detectTurnstileWidgetEffect and
-   * onPageNavigatedEffect; set in triggerSolveFromUrlEffect and handleTurnstileDetection.
+   * Set in: handleTurnstileDetection (Resolution consumer), onPageNavigatedEffect
+   *         (turnstile branch only — NOT interstitial branch).
+   * Checked in: detectTurnstileWidgetEffect (entry + per-iteration),
+   *             onPageNavigatedEffect (before starting detection loop).
    *
    * DO NOT REMOVE — phantom widget_not_found failures will return.
+   * DO NOT ADD INTERSTITIAL SOLVES — multi-phase (Int→Emb) flows will break.
    */
   readonly solvedPages = new Set<TargetId>();
   readonly pendingIframes = new Map<TargetId, { iframeCdpSessionId: CdpSessionId; iframeTargetId: TargetId }>();

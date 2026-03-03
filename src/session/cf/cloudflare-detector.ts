@@ -188,9 +188,11 @@ export class CloudflareDetector {
               self.state.pendingRechallengeCount.set(targetId, rechallengeCount);
             } else {
               // Clean destination — interstitial solved.
-              // PHANTOM GUARD: Set solvedPages HERE (producer side) before falling through
-              // to detection loop. See turnstile path comment above for race explanation.
-              self.state.solvedPages.add(targetId);
+              // NOTE: Do NOT add to solvedPages here. Interstitial solves don't produce
+              // phantom OOPIFs (they redirect to the real page). Only TURNSTILE solves
+              // produce phantom token-refresh OOPIFs. Adding interstitial solves to
+              // solvedPages blocks the embedded Turnstile detection in multi-phase
+              // (Int→Emb) flows — a P0 regression proven in production 2026-03-02.
               const attr = deriveSolveAttribution('page_navigated', !!active.clickDelivered);
               const clickToNavMs = active.clickDeliveredAt
                 ? Date.now() - active.clickDeliveredAt
@@ -435,8 +437,10 @@ export class CloudflareDetector {
         if (maybeResolved._tag === 'Some') {
           const resolved = maybeResolved.value;
           if (resolved._tag === 'solved') {
-            // PHANTOM GUARD: Mark page as solved to block post-solve OOPIF re-detection.
-            self.state.solvedPages.add(targetId);
+            // NOTE: Do NOT add to solvedPages here. triggerSolveFromUrlEffect only
+            // handles interstitials (URL-pattern detection). Interstitial solves don't
+            // produce phantom OOPIFs. Adding to solvedPages would block the embedded
+            // Turnstile detection in multi-phase (Int→Emb) flows.
             self.events.emitSolved(active, resolved.result);
           } else {
             self.events.emitFailed(active, resolved.reason, resolved.duration_ms);
