@@ -3,12 +3,11 @@ import path from 'node:path';
 
 export default defineConfig({
   test: {
-    include: ['src/**/*.test.ts'],
-    exclude: ['src/**/*.integration.test.ts'],
+    include: ['src/**/*.integration.test.ts'],
     globals: false,
-    fakeTimers: {
-      toFake: undefined,
-    },
+    testTimeout: 60_000,
+    globalSetup: ['./vitest.integration.setup.ts'],
+    reporters: ['verbose'],
   },
   resolve: {
     alias: {

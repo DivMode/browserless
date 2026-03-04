@@ -338,15 +338,14 @@ export class CloudflareSolveStrategies {
       );
       if (!checkboxResult) return ClickResult.NoCheckbox();
 
-      const { checkbox, method: cbMethod } = checkboxResult;
+      const { checkbox, method: cbMethod, checkboxFoundAt } = checkboxResult;
 
       // ── Phase 4: Visibility check, scroll, bounds, click ─────────────
-      // No artificial delay — pydoll clicks immediately after finding the
-      // checkbox. The retry loop in solveByClicking polls every 500ms which
-      // naturally gives CF's WASM time to arm.
+      // No delay — pydoll clicks immediately after finding the checkbox.
+      // Humanized timing comes from mouse movement in Phase 4.
       return yield* strategies.phase4Click(
         send, send, oopifSessionId, active,
-        checkbox, cbMethod, iframeBackendNodeId, via, attempt, solveStart,
+        checkbox, cbMethod, iframeBackendNodeId, via, attempt, solveStart, checkboxFoundAt,
       );
     })().pipe(
       Effect.catch((err: unknown) =>
@@ -417,6 +416,7 @@ export class CloudflareSolveStrategies {
     via: string,
     attempt: number,
     solveStart: number,
+    checkboxFoundAt: number,
   ): Effect.Effect<ClickResult, never, typeof SolverEvents.Identifier> {
     const strategies = this;
     const pageTargetId = active.pageTargetId;
@@ -429,6 +429,7 @@ export class CloudflareSolveStrategies {
         'cf.checkbox_method': method,
       });
       const events = yield* SolverEvents;
+      const phase4Start = Date.now();
 
       yield* events.marker(pageTargetId, 'cf.phase4_start', { via, attempt });
 
@@ -596,6 +597,11 @@ export class CloudflareSolveStrategies {
       yield* Effect.annotateCurrentSpan({ 'cf.click_delivered': active.clickDelivered ?? false });
       yield* events.emitProgress(active, 'clicked', { x: clickX, y: clickY });
 
+      const clickNow = Date.now();
+      const checkbox_to_click_ms = clickNow - checkboxFoundAt;
+      const phase4_duration_ms = clickNow - phase4Start;
+      const total_solve_ms = clickNow - solveStart;
+
       yield* events.marker(pageTargetId, 'cf.oopif_click', {
         ok: clickVerified,
         click_verified: clickVerified,
@@ -609,8 +615,15 @@ export class CloudflareSolveStrategies {
         press_response: pressResponse ? JSON.stringify(pressResponse).substring(0, 100) : 'empty',
         release_response: releaseResponse ? JSON.stringify(releaseResponse).substring(0, 100) : 'empty',
         oopif_session_id: oopifSessionId.substring(0, 16),
-        elapsed_since_solve_start_ms: Date.now() - solveStart,
-        checkbox_to_click_ms: Date.now() - solveStart,
+        elapsed_since_solve_start_ms: total_solve_ms,
+        checkbox_to_click_ms,
+        phase4_duration_ms,
+      });
+
+      yield* events.marker(pageTargetId, 'cf.click_latency', {
+        checkbox_to_click_ms,
+        phase4_duration_ms,
+        total_solve_ms,
       });
       if (clickVerified) return ClickResult.Verified();
       if (verifyError) return ClickResult.NotVerified({ reason: verifyError });

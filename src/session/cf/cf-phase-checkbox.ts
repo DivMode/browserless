@@ -234,7 +234,7 @@ export function phase3CheckboxFind(
   active: ActiveDetection,
   via: string,
   solveStart: number,
-): Effect.Effect<{ checkbox: { objectId: string; backendNodeId: number }; method: string } | null, never, typeof SolverEvents.Identifier> {
+): Effect.Effect<{ checkbox: { objectId: string; backendNodeId: number }; method: string; checkboxFoundAt: number } | null, never, typeof SolverEvents.Identifier> {
   const pageTargetId = active.pageTargetId;
   return Effect.fn('cf.phase3CheckboxFind')(function*() {
     yield* Effect.annotateCurrentSpan({
@@ -354,7 +354,7 @@ export function phase3CheckboxFind(
     yield* events.emitProgress(active, 'widget_found', { method, x: 0, y: 0 });
     yield* events.marker(pageTargetId, 'cf.phase3_end', { found: true, elapsed_ms: Date.now() - phase3Start });
 
-    return { checkbox, method };
+    return { checkbox, method, checkboxFoundAt };
   })();
 }
 
