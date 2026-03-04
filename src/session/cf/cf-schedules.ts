@@ -58,8 +58,10 @@ export const MAX_OOPIF_POLLS = 6;
 /** Phase 3 checkbox polling: max attempts. */
 export const MAX_CHECKBOX_POLLS = 8;
 
-/** Phase 3 checkbox polling: interval between attempts (ms). */
-export const CHECKBOX_POLL_INTERVAL_MS = 500;
+/** Phase 3 checkbox polling: interval between attempts (ms).
+ * Reduced from 500 to 200 — DOM.getDocument is ~2-6ms, so 200ms gives
+ * plenty of margin while detecting the checkbox 2.5x faster. */
+export const CHECKBOX_POLL_INTERVAL_MS = 200;
 
 /** Clean WS open timeout (ms). */
 export const CLEAN_WS_OPEN_TIMEOUT_MS = 2_000;
@@ -82,7 +84,7 @@ export const STATE_POLL_INTERVAL_MS = 500;
 /** Individual CDP call timeout within checkbox-finding methods (ms).
  * Reduced from 5s to 2s — under concurrent load (15+ tabs), CDP calls
  * can stall. Faster timeout lets the retry loop recover on the next poll. */
-export const CDP_CALL_TIMEOUT_MS = 2_000;
+export const CDP_CALL_TIMEOUT_MS = 5_000;
 
 /** Max concurrent CF solve attempts per browser session.
  * Limits WS saturation when 15+ tabs solve simultaneously. */

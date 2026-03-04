@@ -99,6 +99,11 @@ export class BrowserLauncher {
       'video',
       false,
     );
+    const cfSolver = parseBooleanParam(
+      req.parsed.searchParams,
+      'cfSolver',
+      false,
+    );
     const trackingId =
       parseStringParam(req.parsed.searchParams, 'trackingId', '') || undefined;
 
@@ -246,6 +251,11 @@ export class BrowserLauncher {
       const cloudflareSolver = this.sessionCoordinator?.getCloudflareSolver(sessionId);
       if (cloudflareSolver && browser instanceof ChromiumCDP) {
         browser.setCloudflareSolver(cloudflareSolver);
+
+        // Auto-enable solver via query param (for integration tests)
+        if (cfSolver) {
+          cloudflareSolver.enable({});
+        }
       }
 
       // Wire replay marker callback for Browserless.addReplayMarker CDP command

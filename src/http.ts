@@ -216,4 +216,10 @@ export interface SystemQueryParameters {
    * Custom session identifier
    */
   trackingId?: string;
+
+  /**
+   * Auto-enable the Cloudflare solver for this session.
+   * Equivalent to sending Browserless.enableCloudflareSolver CDP command.
+   */
+  cfSolver?: boolean;
 }
