@@ -11,7 +11,6 @@
  */
 import {
   Logger,
-  type SessionReplay,
   type TabReplayCompleteParams,
 } from '@browserless.io/browserless';
 
@@ -56,9 +55,8 @@ export class CdpSession {
   private readonly cloudflareHooks: CloudflareHooks;
   private readonly chromePort: string;
 
-  // Replay config (previously in ReplayCaptureOptions)
-  private readonly sessionReplay: SessionReplay;
-  private readonly baseUrl: string;
+  // Replay config
+  private readonly replayBaseUrl: string;
   private readonly onTabReplayComplete?: (metadata: TabReplayCompleteParams) => void;
 
   // Unified target state
@@ -92,8 +90,7 @@ export class CdpSession {
     this.videoHooks = options.videoHooks;
     this.cloudflareHooks = options.cloudflareHooks;
     this.chromePort = new URL(options.wsEndpoint).port;
-    this.sessionReplay = options.sessionReplay;
-    this.baseUrl = options.baseUrl;
+    this.replayBaseUrl = options.replayBaseUrl;
     this.onTabReplayComplete = options.onTabReplayComplete;
     this.setupMessageRouting();
   }
@@ -111,8 +108,6 @@ export class CdpSession {
    */
   private buildLayer(): Layer.Layer<SessionR> {
     const self = this;
-    const replaysDir = this.sessionReplay.getReplaysDir();
-    const sessionReplay = this.sessionReplay;
 
     // CdpSenderLayer — uses Effect-native send() directly (no Promise bridge)
     const cdpSenderLayer = Layer.succeed(CdpSender, CdpSender.of({
@@ -120,40 +115,38 @@ export class CdpSession {
         self.send(method, params ?? {}, cdpSessionId, timeoutMs),
     }));
 
-    // ReplayWriterLayer — file writes + SQLite
+    // ReplayWriterLayer — HTTP POST to replay server (no local file/SQLite)
+    const replayServerUrl = process.env.REPLAY_INGEST_URL || 'http://replay:3000';
     const writerLayer = Layer.succeed(ReplayWriter, ReplayWriter.of({
       writeTabReplay: (tabReplayId, events, metadata) =>
         Effect.tryPromise({
           try: async () => {
-            const { writeFile } = await import('fs/promises');
-            const path = await import('path');
-            const filepath = path.join(replaysDir, `${tabReplayId}.json`);
-            const replay = { events, metadata };
-            await writeFile(filepath, JSON.stringify(replay), 'utf-8');
-            const store = sessionReplay.getStore();
-            if (store) {
-              const result = store.insert(metadata as any);
-              if (!result.ok) throw new Error(result.error.message);
-            }
-            return filepath;
+            const resp = await fetch(`${replayServerUrl}/replays`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                id: tabReplayId,
+                events,
+                metadata: {
+                  duration: metadata.duration,
+                  startedAt: metadata.startedAt,
+                  endedAt: metadata.endedAt,
+                  browserType: metadata.browserType,
+                  parentSessionId: metadata.parentSessionId,
+                  targetId: metadata.targetId,
+                  source: 'browserless',
+                },
+              }),
+            });
+            if (!resp.ok) throw new Error(`Replay server ${resp.status}: ${await resp.text()}`);
+            const result = await resp.json() as { url: string };
+            return result.url;
           },
           catch: (e) => new ReplayStoreError({
             message: e instanceof Error ? e.message : String(e),
           }),
         }),
-      writeMetadata: (metadata) =>
-        Effect.try({
-          try: () => {
-            const store = sessionReplay.getStore();
-            if (store) {
-              const result = store.insert(metadata as any);
-              if (!result.ok) throw new Error(result.error.message);
-            }
-          },
-          catch: (e) => new ReplayStoreError({
-            message: e instanceof Error ? e.message : String(e),
-          }),
-        }),
+      writeMetadata: (_metadata) => Effect.void, // Replay server stores metadata with events
     }));
 
     // ReplayMetricsLayer — Prometheus counters
@@ -628,7 +621,7 @@ export class CdpSession {
               eventCount: session.eventCounts.get(target.targetId) ?? 0,
               frameCount: 0,
               encodingStatus: 'none',
-              replayUrl: `${session.baseUrl}/replay/${tabReplayId}`,
+              replayUrl: `${session.replayBaseUrl}/replay/${tabReplayId}`,
               videoUrl: undefined,
             });
           } catch (e) {
@@ -1081,7 +1074,7 @@ export class CdpSession {
               eventCount: session.eventCounts.get(target.targetId) ?? 0,
               frameCount: 0,
               encodingStatus: 'none',
-              replayUrl: `${session.baseUrl}/replay/${tabReplayId}`,
+              replayUrl: `${session.replayBaseUrl}/replay/${tabReplayId}`,
               videoUrl: undefined,
             });
           } catch (e) {

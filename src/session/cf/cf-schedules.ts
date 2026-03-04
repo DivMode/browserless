@@ -85,7 +85,3 @@ export const STATE_POLL_INTERVAL_MS = 500;
  * Reduced from 5s to 2s — under concurrent load (15+ tabs), CDP calls
  * can stall. Faster timeout lets the retry loop recover on the next poll. */
 export const CDP_CALL_TIMEOUT_MS = 5_000;
-
-/** Max concurrent CF solve attempts per browser session.
- * Limits WS saturation when 15+ tabs solve simultaneously. */
-export const MAX_CONCURRENT_SOLVES = 3;

@@ -15,6 +15,7 @@ import path from 'node:path';
 const PORT = 3000;
 const HEALTH_URL = `http://localhost:${PORT}/json/version`;
 const BROWSERLESS_HTTP = `http://localhost:${PORT}`;
+const REPLAY_HTTP = process.env.REPLAY_INGEST_URL || 'http://192.168.4.200:3001';
 const BROWSERLESS_DIR = path.resolve(import.meta.dirname);
 const MAX_WAIT_MS = 30_000;
 const POLL_INTERVAL_MS = 500;
@@ -186,7 +187,7 @@ function printSummaryTable() {
     // Replay column — clickable OSC 8 link
     let replayCell: string;
     if (r.replayId) {
-      const replayUrl = `${BROWSERLESS_HTTP}/replay/${r.replayId}`;
+      const replayUrl = `${REPLAY_HTTP}/replay/${r.replayId}`;
       replayCell = link(replayUrl, 'replay');
     } else {
       replayCell = dim('  --  ');

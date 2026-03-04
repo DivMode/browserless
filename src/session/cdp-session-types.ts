@@ -29,5 +29,7 @@ export interface CdpSessionOptions {
   /** Replay config — previously in ReplayCaptureOptions. */
   sessionReplay: SessionReplay;
   baseUrl: string;
+  /** Base URL for replay viewer links (e.g. https://replay.catchseo.com). Falls back to baseUrl. */
+  replayBaseUrl: string;
   onTabReplayComplete?: (metadata: TabReplayCompleteParams) => void;
 }

@@ -32,6 +32,7 @@ export class SessionCoordinator {
   private cloudflareSolvers = new Map<string, CloudflareSolver>();
   private cdpSessions = new Map<string, CdpSession>();
   private baseUrl = process.env.BROWSERLESS_BASE_URL ?? '';
+  private replayBaseUrl = process.env.REPLAY_PLAYER_URL || process.env.BROWSERLESS_BASE_URL || '';
   constructor(private sessionReplay?: SessionReplay, private videoMgr?: VideoManager) {
     this.videoEncoder = new VideoEncoder(sessionReplay?.getStore() ?? null);
     videoMgr?.setVideoEncoder(this.videoEncoder);
@@ -137,6 +138,7 @@ export class SessionCoordinator {
       cloudflareHooks,
       sessionReplay: this.sessionReplay,
       baseUrl: this.baseUrl,
+      replayBaseUrl: this.replayBaseUrl,
       onTabReplayComplete: options?.onTabReplayComplete,
     });
 
