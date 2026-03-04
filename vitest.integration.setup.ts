@@ -1,21 +1,46 @@
 /**
  * vitest globalSetup: auto-build and start browserless for integration tests.
  *
- * If browserless is already running (e.g., `just dev` in another terminal),
- * skips both build and spawn — assumes the developer is managing it.
+ * Local mode (default): builds via tsc, kills any stale process on :3000,
+ * then spawns a fresh server using env-cmd + node.
  *
- * Otherwise: runs `npx tsc` to compile latest source, then spawns the server
- * using the same startup as `just dev` (minus --watch).
+ * Remote mode (TEST_ENV=prod): skips build/spawn, health-checks the remote
+ * endpoint from BROWSERLESS_ENDPOINT env var.
  */
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createWriteStream, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { loadEnv } from 'vite';
+
+// Load .env.{TEST_ENV} into process.env — globalSetup doesn't receive vitest's test.env
+const testEnvMode = process.env.TEST_ENV || 'dev';
+const envVars = loadEnv(testEnvMode, process.cwd(), '');
+Object.assign(process.env, envVars);
+
+async function killPort(port: number): Promise<void> {
+  try {
+    const stdout = execFileSync('lsof', ['-ti', `:${port}`], { encoding: 'utf-8' });
+    const pids = stdout.trim().split('\n').filter(Boolean);
+    if (pids.length === 0) return;
+    console.log(`[globalSetup] Killing stale process(es) on port ${port}: ${pids.join(', ')}`);
+    for (const pid of pids) {
+      process.kill(Number(pid), 'SIGTERM');
+    }
+    // Wait briefly for process to exit
+    await new Promise((r) => setTimeout(r, 500));
+  } catch {
+    // No process on port — nothing to kill
+  }
+}
 
 const PORT = 3000;
-const HEALTH_URL = `http://localhost:${PORT}/json/version`;
-const BROWSERLESS_HTTP = `http://localhost:${PORT}`;
-const REPLAY_HTTP = process.env.REPLAY_INGEST_URL || 'http://192.168.4.200:3001';
+const HEALTH_URL = `http://127.0.0.1:${PORT}/json/version`;
+const BROWSERLESS_HTTP = `http://127.0.0.1:${PORT}`;
+const REPLAY_HTTP = process.env.REPLAY_INGEST_URL;
+if (!REPLAY_HTTP) {
+  throw new Error('REPLAY_INGEST_URL env var required — set in .env.dev or .env.prod');
+}
 const BROWSERLESS_DIR = path.resolve(import.meta.dirname);
 const MAX_WAIT_MS = 30_000;
 const POLL_INTERVAL_MS = 500;
@@ -53,6 +78,21 @@ export async function setup() {
     );
   }
 
+  // Remote mode — skip build + spawn, just verify reachability
+  const isRemote = !!process.env.BROWSERLESS_ENDPOINT;
+  if (isRemote) {
+    const endpoint = process.env.BROWSERLESS_ENDPOINT!;
+    console.log(`[globalSetup] Using remote browserless: ${endpoint}`);
+    const healthUrl = `${endpoint}/json/version`;
+    const res = await fetch(healthUrl).catch(() => null);
+    if (!res?.ok) throw new Error(`Remote browserless not reachable at ${healthUrl}`);
+    console.log('[globalSetup] Remote browserless is healthy');
+    return;
+  }
+
+  // Local mode: query replays from the local server's SQLite store, not the VM
+  process.env.REPLAY_INGEST_URL = `http://127.0.0.1:${PORT}`;
+
   // Always build — ensures build/ reflects latest source edits even if server is already running
   console.log('[globalSetup] Building browserless (tsc)...');
   const buildStart = Date.now();
@@ -66,11 +106,8 @@ export async function setup() {
     execFileSync('bun', ['extensions/replay/build.js'], { cwd: BROWSERLESS_DIR, stdio: 'inherit' });
   }
 
-  // If already running (e.g., `just dev`), skip spawn — developer manages the server
-  if (await isRunning()) {
-    console.log('[globalSetup] Browserless already running at :3000 — skipping spawn');
-    return;
-  }
+  // Kill any stale process on port 3000 so we always spawn a fresh server with correct env
+  await killPort(PORT);
 
   console.log('[globalSetup] Starting browserless...');
 
@@ -81,7 +118,7 @@ export async function setup() {
     ['env-cmd', '-f', '.env.dev', 'node', 'build/index.js'],
     {
       cwd: BROWSERLESS_DIR,
-      env: { ...process.env, PORT: String(PORT) },
+      env: { ...process.env, PORT: String(PORT), HOST: '0.0.0.0' },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   );
@@ -114,7 +151,7 @@ export async function teardown() {
   // directly to the terminal, no worker interception, no escape stripping.
   printSummaryTable();
 
-  if (!serverProcess) return; // didn't spawn (was already running)
+  if (!serverProcess) return; // didn't spawn (remote mode)
 
   serverProcess.kill('SIGTERM');
 
@@ -129,6 +166,9 @@ export async function teardown() {
       resolve();
     });
   });
+
+  // Belt-and-suspenders: kill anything still on the port (child processes, etc.)
+  await killPort(PORT);
 }
 
 // ── Summary table (printed from main process) ──────────────────────
@@ -174,9 +214,11 @@ function printSummaryTable() {
     const signal = s?.signal ?? '';
     const dur = s?.durationMs != null ? `${(s.durationMs / 1000).toFixed(1)}s` : '';
 
-    // Color the summary label
+    // Color the summary label — red for failures even if solver produced a label
     let label: string;
-    if (rawLabel.includes('✓') || rawLabel.includes('→')) {
+    if (r.status === 'FAIL') {
+      label = red(rawLabel.padEnd(7));
+    } else if (rawLabel.includes('✓') || rawLabel.includes('→')) {
       label = green(rawLabel.padEnd(7));
     } else if (rawLabel === 'SKIP') {
       label = dim(rawLabel.padEnd(7));
@@ -199,6 +241,15 @@ function printSummaryTable() {
   }
 
   out.write('╚════════════════╧═════════╧══════════════╧═════════════════╧════════════════╧══════════╧════════╝\n');
+
+  // Print failure reasons
+  const failures = results.filter((r) => r.status === 'FAIL' && r.error);
+  if (failures.length > 0) {
+    out.write('\n');
+    for (const f of failures) {
+      out.write(`  ${red('✗')} ${f.name}: ${f.error}\n`);
+    }
+  }
 
   // Pass/fail counts
   const passed = results.filter((r) => r.status === 'PASS').length;

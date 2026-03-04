@@ -14,7 +14,7 @@ import { Schema } from 'effect';
 
 export const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN || '';
 export const PROXY_URL = process.env.LOCAL_MOBILE_PROXY || '';
-export const BROWSERLESS_HTTP = 'http://localhost:3000';
+export const BROWSERLESS_HTTP = process.env.BROWSERLESS_ENDPOINT || 'http://localhost:3000';
 /** Replay server HTTP endpoint — separate from browserless in the new architecture. */
 export const REPLAY_HTTP = process.env.REPLAY_INGEST_URL!;
 
@@ -44,6 +44,7 @@ export const PROXY = parseProxy(PROXY_URL);
 
 /** Build a browserless WebSocket URL with cfSolver, replay, and proxy params. */
 export function buildWsUrl(): string {
+  const httpUrl = new URL(BROWSERLESS_HTTP);
   const params = new URLSearchParams();
   if (BROWSERLESS_TOKEN) params.set('token', BROWSERLESS_TOKEN);
   if (PROXY) params.set('--proxy-server', PROXY.server);
@@ -51,7 +52,8 @@ export function buildWsUrl(): string {
   params.set('replay', 'true');
   params.set('cfSolver', 'true');
   params.set('launch', JSON.stringify({ args: ['--window-size=1280,900'] }));
-  return `ws://localhost:3000/chrome?${params.toString()}`;
+  // Prod container has Chromium (not Chrome) — /chrome route 404s. Use /chromium which works everywhere.
+  return `ws://${httpUrl.host}/chromium?${params.toString()}`;
 }
 
 export function tokenParam(): string {

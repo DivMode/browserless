@@ -27,6 +27,7 @@ import puppeteer, { type Browser, type Page } from 'puppeteer-core';
 
 import {
   PROXY,
+  type TurnstileSummary,
   buildSummaryFromMarkers,
   buildWsUrl,
   dumpMarkerTimeline,
@@ -218,6 +219,7 @@ describe.concurrent('CF Solver Multi-Site', () => {
         const testStartTs = Date.now();
         let replayId: string | null = null;
         let targetId: string | null = null;
+        let summary: TurnstileSummary | null = null;
 
         try {
           const page = yield* Effect.scoped(
@@ -263,7 +265,7 @@ describe.concurrent('CF Solver Multi-Site', () => {
 
           // ── 2. CF marker extraction ──────────────────────────────────
           const allMarkers = analyses.flatMap((a) => a.markers);
-          const summary = buildSummaryFromMarkers(allMarkers);
+          summary = buildSummaryFromMarkers(allMarkers);
 
           if (!summary && site.maySkip) {
             writeSiteResult({ name: site.name, summary: null, replayId, durationMs: 0, status: 'SKIP' });
@@ -325,7 +327,7 @@ describe.concurrent('CF Solver Multi-Site', () => {
         } catch (err) {
           writeSiteResult({
             name: site.name,
-            summary: null,
+            summary,
             replayId,
             durationMs: Date.now() - testStartTs,
             status: 'FAIL',
