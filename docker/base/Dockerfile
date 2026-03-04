@@ -103,4 +103,4 @@ COPY external external
 COPY scripts scripts
 COPY static static
 
-COPY CHANGELOG.md LICENSE NOTICE.txt README.md tsconfig.json vite.config.ts svelte.config.js ./
+COPY CHANGELOG.md LICENSE NOTICE.txt README.md tsconfig.json ./
