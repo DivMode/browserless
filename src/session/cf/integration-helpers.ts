@@ -14,6 +14,8 @@ import { join } from 'node:path';
 export const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN || '';
 export const PROXY_URL = process.env.LOCAL_MOBILE_PROXY || '';
 export const BROWSERLESS_HTTP = 'http://localhost:3000';
+/** Replay server HTTP endpoint — separate from browserless in the new architecture. */
+export const REPLAY_HTTP = process.env.REPLAY_INGEST_URL!;
 
 /** Shared path for test results — written by tests, read by globalSetup teardown. */
 export const RESULTS_FILE = join(tmpdir(), 'cf-integration-results.jsonl');
@@ -84,8 +86,7 @@ export interface SessionResult {
 
 /** Find the most recent replay started after `afterTs`. */
 export async function findReplay(afterTs: number): Promise<ReplayMeta | null> {
-  const url = `${BROWSERLESS_HTTP}/replays${tokenParam()}`;
-  const res = await fetch(url);
+  const res = await fetch(`${REPLAY_HTTP}/replays`);
   if (!res.ok) return null;
   const replays = (await res.json()) as ReplayMeta[];
   const recent = replays
@@ -96,8 +97,7 @@ export async function findReplay(afterTs: number): Promise<ReplayMeta | null> {
 
 /** Find ALL replays started after `afterTs` (multiple per-tab replays per session). */
 export async function findAllReplays(afterTs: number): Promise<ReplayMeta[]> {
-  const url = `${BROWSERLESS_HTTP}/replays${tokenParam()}`;
-  const res = await fetch(url);
+  const res = await fetch(`${REPLAY_HTTP}/replays`);
   if (!res.ok) return [];
   const replays = (await res.json()) as ReplayMeta[];
   return replays
@@ -107,8 +107,7 @@ export async function findAllReplays(afterTs: number): Promise<ReplayMeta[]> {
 
 /** Extract CF markers (type 5, tag starts with 'cf.') from a replay. */
 export async function fetchMarkers(replayId: string): Promise<ReplayMarker[]> {
-  const url = `${BROWSERLESS_HTTP}/replays/${replayId}${tokenParam()}`;
-  const res = await fetch(url);
+  const res = await fetch(`${REPLAY_HTTP}/replays/${replayId}`);
   if (!res.ok) return [];
   const replay = (await res.json()) as {
     events?: Array<{
@@ -128,8 +127,7 @@ export async function fetchDebugData(replayId: string): Promise<{
   consoleErrors: string[];
   allEvents: unknown[];
 }> {
-  const url = `${BROWSERLESS_HTTP}/replays/${replayId}${tokenParam()}`;
-  const res = await fetch(url);
+  const res = await fetch(`${REPLAY_HTTP}/replays/${replayId}`);
   if (!res.ok) return { consoleErrors: [], allEvents: [] };
   const replay = (await res.json()) as {
     events?: Array<{ type: number; timestamp: number; data: unknown }>;
@@ -153,8 +151,7 @@ export async function fetchDebugData(replayId: string): Promise<{
 
 /** Count events by rrweb type from a replay. */
 export async function fetchEventTypeCounts(replayId: string): Promise<Record<number, number>> {
-  const url = `${BROWSERLESS_HTTP}/replays/${replayId}${tokenParam()}`;
-  const res = await fetch(url);
+  const res = await fetch(`${REPLAY_HTTP}/replays/${replayId}`);
   if (!res.ok) return {};
   const replay = (await res.json()) as {
     events?: Array<{ type: number }>;
@@ -178,8 +175,7 @@ export interface ReplayAnalysis {
 
 /** Fetch a replay once and return event counts + CF markers. */
 export async function fetchReplayAnalysis(replayId: string): Promise<ReplayAnalysis> {
-  const url = `${BROWSERLESS_HTTP}/replays/${replayId}${tokenParam()}`;
-  const res = await fetch(url);
+  const res = await fetch(`${REPLAY_HTTP}/replays/${replayId}`);
   if (!res.ok) return { replayId, eventCounts: {}, totalEvents: 0, markers: [] };
   const replay = (await res.json()) as {
     events?: Array<{
@@ -285,7 +281,7 @@ export function dumpConsoleErrors(errors: string[]) {
 export function dumpReplayHint(replayId: string) {
   console.error(`=== REPLAY ===`);
   console.error(`  ID: ${replayId}`);
-  console.error(`  curl -s ${BROWSERLESS_HTTP}/replays/${replayId}${tokenParam()} | python3 -c "import sys,json; [print(f'{e[\"type\"]}:{e.get(\"data\",{}).get(\"tag\",\"\")}') for e in json.load(sys.stdin).get('events',[])]"`);
+  console.error(`  curl -s ${REPLAY_HTTP}/replays/${replayId} | python3 -c "import sys,json; [print(f'{e[\"type\"]}:{e.get(\"data\",{}).get(\"tag\",\"\")}') for e in json.load(sys.stdin).get('events',[])]"`);
 }
 
 export function dumpDebugContext(session: SessionResult) {

@@ -28,6 +28,7 @@ export class SessionLifecycleManager {
   private watchdogFiber: Fiber.Fiber<unknown> | null = null;
   private log = new Logger('session-lifecycle');
   private baseUrl = process.env.BROWSERLESS_BASE_URL ?? '';
+  private replayBaseUrl = process.env.REPLAY_PLAYER_URL || process.env.BROWSERLESS_BASE_URL || '';
 
   constructor(
     private registry: SessionRegistry,
@@ -116,6 +117,7 @@ export class SessionLifecycleManager {
       // If anything hangs, the fiber gets interrupted and Map cleanup runs via Effect.ensuring
       const coordinator = this.sessionCoordinator;
       const baseUrl = this.baseUrl;
+      const replayBaseUrl = this.replayBaseUrl;
       const sessionId = session.id;
       const log = this.log;
 
@@ -148,7 +150,7 @@ export class SessionLifecycleManager {
               eventCount: result.metadata.eventCount,
               frameCount: result.metadata.frameCount,
               encodingStatus: result.metadata.encodingStatus,
-              replayUrl: `${baseUrl}/replay/${result.metadata.id}`,
+              replayUrl: `${replayBaseUrl}/replay/${result.metadata.id}`,
               ...(session.trackingId ? { trackingId: session.trackingId } : {}),
               ...(result.metadata.frameCount > 0 && {
                 videoUrl: `${baseUrl}/video/${result.metadata.id}`,

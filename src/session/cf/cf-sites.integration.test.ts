@@ -19,8 +19,11 @@
  *   LOCAL_MOBILE_PROXY=$(op read "op://Catchseo.com/Proxies/local_mobile_proxy") \
  *     npx vitest run --config vitest.integration.config.ts
  */
-import { describe, expect, it } from 'vitest';
-import puppeteer, { type Page } from 'puppeteer-core';
+import { describe, expect, it } from '@effect/vitest';
+import { Effect } from 'effect';
+import type { Scope } from 'effect';
+import { afterAll, beforeAll } from 'vitest';
+import puppeteer, { type Browser, type Page } from 'puppeteer-core';
 
 import {
   PROXY,
@@ -49,31 +52,57 @@ import {
  * Falls back to maxWaitMs timeout if solve detection fails (same as before,
  * just doesn't waste time when the solve completes quickly).
  */
-async function waitForSolve(
+const waitForSolve = (
   page: Page,
   expectedType: 'interstitial' | 'turnstile',
   maxWaitMs: number,
-): Promise<void> {
-  if (expectedType === 'interstitial') {
-    // Interstitial: solved when CF auto-navigates away from challenge page
-    await page.waitForNavigation({ waitUntil: 'load', timeout: maxWaitMs }).catch(() => {});
-  } else {
-    // Turnstile: solved when turnstile.getResponse() returns a token
-    // Safe to call on embedding page (not the CF iframe) — confirmed safe post-detection
-    await page
-      .waitForFunction(
-        () => {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const t = (window as any).turnstile;
-          return t && typeof t.getResponse === 'function' && !!t.getResponse();
-        },
-        { timeout: maxWaitMs, polling: 500 },
-      )
-      .catch(() => {});
-  }
-  // Buffer for solver to emit final markers before browser close
-  await new Promise((r) => setTimeout(r, 1500));
-}
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    if (expectedType === 'interstitial') {
+      yield* Effect.promise(() =>
+        page.waitForNavigation({ waitUntil: 'load', timeout: maxWaitMs }).catch(() => {}),
+      );
+    } else {
+      yield* Effect.promise(() =>
+        page
+          .waitForFunction(
+            () => {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const t = (window as any).turnstile;
+              return t && typeof t.getResponse === 'function' && !!t.getResponse();
+            },
+            { timeout: maxWaitMs, polling: 500 },
+          )
+          .catch(() => {}),
+      );
+    }
+    // Buffer for solver to emit final markers before browser close
+    yield* Effect.sleep('1500 millis');
+  });
+
+// ── Effect helpers ──────────────────────────────────────────────────
+
+/** Acquire a page with automatic cleanup via acquireRelease. */
+const acquirePage = (browser: Browser): Effect.Effect<Page, never, Scope.Scope> =>
+  Effect.acquireRelease(
+    Effect.promise(() => browser.newPage()),
+    (page) =>
+      Effect.promise(() => page.close()).pipe(Effect.catch(() => Effect.void)),
+  );
+
+/** Get the CDP targetId for a page (used to find its replay). */
+const getTargetId = (page: Page) =>
+  Effect.promise(async () => {
+    const client = await page.createCDPSession();
+    const { targetInfo } = await client.send('Target.getTargetInfo');
+    return targetInfo.targetId;
+  });
+
+/** Setup proxy auth if configured. */
+const setupProxyAuth = (page: Page) =>
+  PROXY?.username
+    ? Effect.promise(() => page.authenticate({ username: PROXY!.username, password: PROXY!.password }))
+    : Effect.void;
 
 // ── Site definitions ────────────────────────────────────────────────
 
@@ -167,126 +196,144 @@ const CF_TEST_SITES: CfTestSite[] = [
 
 // ── Test suite ──────────────────────────────────────────────────────
 
-describe('CF Solver Multi-Site', () => {
+describe.concurrent('CF Solver Multi-Site', () => {
   const wsUrl = buildWsUrl();
+  const suiteStartTs = Date.now();
+  let browser: Browser;
+
+  beforeAll(async () => {
+    browser = await puppeteer.connect({
+      browserWSEndpoint: wsUrl,
+      defaultViewport: null,
+    });
+  });
+
+  afterAll(async () => {
+    await browser?.close().catch(() => {});
+  });
 
   for (const site of CF_TEST_SITES) {
-    it(site.name, { timeout: 90_000 }, async () => {
-      const testStartTs = Date.now();
-      let replayId: string | null = null;
-
-      try {
-        // Connect → navigate → wait → close
-        const browser = await puppeteer.connect({
-          browserWSEndpoint: wsUrl,
-          defaultViewport: null,
-        });
+    it.live(site.name, () =>
+      Effect.gen(function* () {
+        const testStartTs = Date.now();
+        let replayId: string | null = null;
+        let targetId: string | null = null;
 
         try {
-          const page = await browser.newPage();
-          if (PROXY?.username) {
-            await page.authenticate({ username: PROXY.username, password: PROXY.password });
-          }
+          const page = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const p = yield* acquirePage(browser);
 
-          await page.goto(site.url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {});
-          await waitForSolve(page, site.waitStrategy, site.waitMs ?? 15_000);
-        } finally {
-          await browser.close().catch(() => {});
-        }
+              // Get CDP targetId for this tab (used to find its replay later)
+              targetId = yield* getTargetId(p);
+              yield* setupProxyAuth(p);
 
-        // Wait for replay flush
-        await new Promise((r) => setTimeout(r, 2000));
+              yield* Effect.promise(() =>
+                p.goto(site.url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {}),
+              );
+              yield* waitForSolve(p, site.waitStrategy, site.waitMs ?? 15_000);
 
-        // ── 1. Per-tab replay verification ───────────────────────────
-        const replays = await findAllReplays(testStartTs);
-        replayId = replays[0]?.id ?? null;
-        expect(
-          replays.length,
-          `${site.name}: no replays found — recording pipeline broken`,
-        ).toBeGreaterThan(0);
+              return p;
+            }),
+          );
 
-        const analyses = await Promise.all(replays.map((r) => fetchReplayAnalysis(r.id)));
+          // acquireRelease has closed the page — wait for replay flush
+          yield* Effect.sleep('2 seconds');
 
-        // Every tab must have at least some events recorded
-        for (const a of analyses) {
+          // ── 1. Per-tab replay verification ───────────────────────────
+          const allReplays = yield* Effect.promise(() => findAllReplays(suiteStartTs));
+          const replays = allReplays.filter((r) => r.targetId === targetId);
+          replayId = replays[0]?.id ?? null;
           expect(
-            a.totalEvents,
-            `${site.name}: replay ${a.replayId} has zero events — recording broken for this tab`,
+            replays.length,
+            `${site.name}: no replay found for targetId ${targetId} — recording pipeline broken`,
           ).toBeGreaterThan(0);
-        }
 
-        // ── 2. CF marker extraction ──────────────────────────────────
-        const allMarkers = analyses.flatMap((a) => a.markers);
-        const summary = buildSummaryFromMarkers(allMarkers);
+          const analyses = yield* Effect.promise(() =>
+            Promise.all(replays.map((r) => fetchReplayAnalysis(r.id))),
+          );
 
-        if (!summary && site.maySkip) {
-          writeSiteResult({ name: site.name, summary: null, replayId, durationMs: 0, status: 'SKIP' });
-          return;
-        }
-
-        expect(
-          summary,
-          `${site.name}: no cf.detected marker — solver not detecting`,
-        ).toBeTruthy();
-
-        // ── 3. Rechallenge check ─────────────────────────────────────
-        if (summary!.rechallenge) {
-          dumpMarkerTimeline(allMarkers);
-          for (const a of analyses) dumpReplayHint(a.replayId);
-        }
-        expect(
-          summary!.rechallenge,
-          `${site.name}: RECHALLENGE detected — P0 failure`,
-        ).toBe(false);
-
-        // Hidden rechallenge: multiple cf.detected with large time gap
-        const allDetected = allMarkers.filter((m) => m.tag === 'cf.detected');
-        if (allDetected.length > 1) {
-          const timestamps = allDetected.map((m) => m.timestamp);
-          const spread = Math.max(...timestamps) - Math.min(...timestamps);
-          if (spread > 2000) {
-            dumpMarkerTimeline(allMarkers);
-            expect.fail(
-              `${site.name}: hidden rechallenge — ${allDetected.length} cf.detected events ${spread}ms apart`,
-            );
+          // Every tab must have at least some events recorded
+          for (const a of analyses) {
+            expect(
+              a.totalEvents,
+              `${site.name}: replay ${a.replayId} has zero events — recording broken for this tab`,
+            ).toBeGreaterThan(0);
           }
+
+          // ── 2. CF marker extraction ──────────────────────────────────
+          const allMarkers = analyses.flatMap((a) => a.markers);
+          const summary = buildSummaryFromMarkers(allMarkers);
+
+          if (!summary && site.maySkip) {
+            writeSiteResult({ name: site.name, summary: null, replayId, durationMs: 0, status: 'SKIP' });
+            return;
+          }
+
+          expect(
+            summary,
+            `${site.name}: no cf.detected marker — solver not detecting`,
+          ).toBeTruthy();
+
+          // ── 3. Rechallenge check ─────────────────────────────────────
+          if (summary!.rechallenge) {
+            dumpMarkerTimeline(allMarkers);
+            for (const a of analyses) dumpReplayHint(a.replayId);
+          }
+          expect(
+            summary!.rechallenge,
+            `${site.name}: RECHALLENGE detected — P0 failure`,
+          ).toBe(false);
+
+          // Hidden rechallenge: multiple cf.detected with large time gap
+          const allDetected = allMarkers.filter((m) => m.tag === 'cf.detected');
+          if (allDetected.length > 1) {
+            const timestamps = allDetected.map((m) => m.timestamp);
+            const spread = Math.max(...timestamps) - Math.min(...timestamps);
+            if (spread > 2000) {
+              dumpMarkerTimeline(allMarkers);
+              expect.fail(
+                `${site.name}: hidden rechallenge — ${allDetected.length} cf.detected events ${spread}ms apart`,
+              );
+            }
+          }
+
+          // ── 4. Turnstile summary comparison ──────────────────────────
+          const { label, type } = summary!;
+
+          expect(
+            site.expectedTypes,
+            `${site.name}: unexpected CF type '${type}' — expected one of [${site.expectedTypes.join(', ')}]`,
+          ).toContain(type);
+
+          if (!site.expectedSummaries.includes(label)) {
+            dumpMarkerTimeline(allMarkers);
+            for (const a of analyses) dumpReplayHint(a.replayId);
+          }
+          expect(
+            site.expectedSummaries.includes(label),
+            `${site.name}: summary '${label}' not in expected [${site.expectedSummaries.join(', ')}]`,
+          ).toBe(true);
+
+          writeSiteResult({
+            name: site.name,
+            summary: summary!,
+            replayId,
+            durationMs: Date.now() - testStartTs,
+            status: 'PASS',
+          });
+        } catch (err) {
+          writeSiteResult({
+            name: site.name,
+            summary: null,
+            replayId,
+            durationMs: Date.now() - testStartTs,
+            status: 'FAIL',
+            error: err instanceof Error ? err.message : String(err),
+          });
+          throw err;
         }
-
-        // ── 4. Turnstile summary comparison ──────────────────────────
-        const { label, type } = summary!;
-
-        expect(
-          site.expectedTypes,
-          `${site.name}: unexpected CF type '${type}' — expected one of [${site.expectedTypes.join(', ')}]`,
-        ).toContain(type);
-
-        if (!site.expectedSummaries.includes(label)) {
-          dumpMarkerTimeline(allMarkers);
-          for (const a of analyses) dumpReplayHint(a.replayId);
-        }
-        expect(
-          site.expectedSummaries.includes(label),
-          `${site.name}: summary '${label}' not in expected [${site.expectedSummaries.join(', ')}]`,
-        ).toBe(true);
-
-        writeSiteResult({
-          name: site.name,
-          summary: summary!,
-          replayId,
-          durationMs: Date.now() - testStartTs,
-          status: 'PASS',
-        });
-      } catch (err) {
-        writeSiteResult({
-          name: site.name,
-          summary: null,
-          replayId,
-          durationMs: Date.now() - testStartTs,
-          status: 'FAIL',
-          error: err instanceof Error ? err.message : String(err),
-        });
-        throw err;
-      }
-    });
+      }),
+    { timeout: 90_000 });
   }
 });

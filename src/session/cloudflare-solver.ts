@@ -1,4 +1,4 @@
-import { Effect, FiberMap, Layer, ManagedRuntime, Semaphore } from 'effect';
+import { Effect, FiberMap, Layer, ManagedRuntime } from 'effect';
 import { CdpSessionId } from '../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareConfig } from '../shared/cloudflare-detection.js';
 import { CloudflareDetector } from './cf/cloudflare-detector.js';
@@ -15,7 +15,6 @@ import { CdpSessionGone } from './cf/cf-errors.js';
 import { solveDetection as solveDetectionEffect } from './cf/cloudflare-solver.effect.js';
 import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
 import { OtelLayer } from '../otel-layer.js';
-import { MAX_CONCURRENT_SOLVES } from './cf/cf-schedules.js';
 
 /** Return type of CDPProxy.createIsolatedConnection(). */
 type IsolatedConnection = {
@@ -147,55 +146,51 @@ export class CloudflareSolver {
 
     // SolveDispatcher — routes solve attempts through the Effect solver.
     // Per-solve isolated WS: each solve gets its own WebSocket to Chrome,
-    // preventing 15 concurrent solves from saturating the shared proxyConn.
-    // Semaphore limits concurrent solves to MAX_CONCURRENT_SOLVES.
+    // Each solve gets its own isolated WS connection, so no concurrency limit needed.
     const solveDispatcherLayer = Layer.effect(SolveDispatcher, Effect.gen(function*() {
       const tokenChecker = yield* TokenChecker;
       const solverEvents = yield* SolverEvents;
       const solveDeps = yield* SolveDeps;
       const originalSender = yield* CdpSender;
-      const solveSemaphore = yield* Semaphore.make(MAX_CONCURRENT_SOLVES);
 
       return SolveDispatcher.of({
         dispatch: (active) =>
-          solveSemaphore.withPermits(1)(
-            Effect.scoped(
-              Effect.gen(function*() {
-                // If isolated connections available, give this solve its own WS
-                if (self.createIsolatedConn) {
-                  const conn = yield* Effect.acquireRelease(
-                    Effect.sync(() => self.createIsolatedConn!()),
-                    (c) => Effect.sync(() => c.cleanup()),
-                  );
-                  // Override sendViaProxy → isolated WS for this solve tree.
-                  // send (WS #1) stays unchanged — activity loops, token polling
-                  // remain on the direct page session WS.
-                  const isolatedSender = CdpSender.of({
-                    send: originalSender.send,
-                    sendViaProxy: (method, params, sessionId, timeoutMs) =>
-                      Effect.tryPromise({
-                        try: () => conn.send(method, params, sessionId, timeoutMs),
-                        catch: () => new CdpSessionGone({
-                          sessionId: sessionId ?? CdpSessionId.makeUnsafe(''),
-                          method,
-                        }),
+          Effect.scoped(
+            Effect.gen(function*() {
+              // If isolated connections available, give this solve its own WS
+              if (self.createIsolatedConn) {
+                const conn = yield* Effect.acquireRelease(
+                  Effect.sync(() => self.createIsolatedConn!()),
+                  (c) => Effect.sync(() => c.cleanup()),
+                );
+                // Override sendViaProxy → isolated WS for this solve tree.
+                // send (WS #1) stays unchanged — activity loops, token polling
+                // remain on the direct page session WS.
+                const isolatedSender = CdpSender.of({
+                  send: originalSender.send,
+                  sendViaProxy: (method, params, sessionId, timeoutMs) =>
+                    Effect.tryPromise({
+                      try: () => conn.send(method, params, sessionId, timeoutMs),
+                      catch: () => new CdpSessionGone({
+                        sessionId: sessionId ?? CdpSessionId.makeUnsafe(''),
+                        method,
                       }),
-                  });
-                  return yield* solveDetectionEffect(active).pipe(
-                    Effect.provideService(TokenChecker, tokenChecker),
-                    Effect.provideService(SolverEvents, solverEvents),
-                    Effect.provideService(SolveDeps, solveDeps),
-                    Effect.provideService(CdpSender, isolatedSender),
-                  );
-                }
-                // Fallback: no CDPProxy yet, use original sender
+                    }),
+                });
                 return yield* solveDetectionEffect(active).pipe(
                   Effect.provideService(TokenChecker, tokenChecker),
                   Effect.provideService(SolverEvents, solverEvents),
                   Effect.provideService(SolveDeps, solveDeps),
+                  Effect.provideService(CdpSender, isolatedSender),
                 );
-              }),
-            ),
+              }
+              // Fallback: no CDPProxy yet, use original sender
+              return yield* solveDetectionEffect(active).pipe(
+                Effect.provideService(TokenChecker, tokenChecker),
+                Effect.provideService(SolverEvents, solverEvents),
+                Effect.provideService(SolveDeps, solveDeps),
+              );
+            }),
           ),
       });
     }));
