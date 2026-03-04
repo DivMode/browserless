@@ -13,7 +13,6 @@ import {
   Methods,
   Metrics,
   Request,
-  SessionReplay,
   WebKitPlaywright,
   WebsocketRoutes,
   contentTypes,
@@ -95,7 +94,6 @@ type defaultLaunchOptions =
   | ((req: Request) => CDPLaunchOptions | BrowserlessLaunch);
 
 abstract class Route {
-  protected _sessionReplay?: SessionReplay;
   protected _videoManager?: VideoManager;
 
   constructor(
@@ -207,17 +205,8 @@ abstract class Route {
   limiter = () => this._limiter;
 
   /**
-   * Helper function that loads the session replay module for
-   * managing session replays. Defined and injected by
-   * browserless after initialization.
-   * @returns SessionReplay | undefined
-   */
-  sessionReplay = () => this._sessionReplay;
-
-  /**
    * Helper function that loads the video manager module for
    * video-specific operations (encoding, frame deletion).
-   * Separate from sessionReplay — video and replay are independent concerns.
    * @returns VideoManager | undefined
    */
   videoManager = () => this._videoManager;

@@ -52,30 +52,20 @@ export default class VideoStatusGetRoute extends HTTPRoute {
       throw new NotFound('Replay ID is required');
     }
 
-    const store = video.getStore();
-    if (!store) {
-      return jsonResponse(res, 503, { error: 'Video store not available' });
-    }
-
-    const result = store.findById(id);
-    if (result.ok && !result.value) {
-      throw new NotFound(`Replay "${id}" not found`);
-    }
-    if (!result.ok) {
-      return jsonResponse(res, 500, { error: 'Failed to read replay' });
-    }
-
-    const replayRecord = result.value!;
     const encoder = video.getVideoEncoder();
     const progress = encoder?.getProgress(id) ?? null;
 
+    if (!progress) {
+      throw new NotFound(`No encoding progress for "${id}"`);
+    }
+
     const response = {
-      encodingStatus: progress?.status ?? replayRecord.encodingStatus,
-      frameCount: replayRecord.frameCount,
-      framesProcessed: progress?.framesProcessed ?? 0,
-      fps: progress?.fps ?? 0,
-      percent: replayRecord.frameCount > 0 && progress
-        ? Math.min(100, Math.round((progress.framesProcessed / replayRecord.frameCount) * 100))
+      encodingStatus: progress.status,
+      frameCount: progress.totalFrames,
+      framesProcessed: progress.framesProcessed,
+      fps: progress.fps,
+      percent: progress.totalFrames > 0
+        ? Math.min(100, Math.round((progress.framesProcessed / progress.totalFrames) * 100))
         : 0,
     };
 

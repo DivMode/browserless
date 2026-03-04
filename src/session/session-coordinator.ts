@@ -9,8 +9,6 @@
 import {
   BrowserInstance,
   Logger,
-  SessionReplay,
-  StopReplayResult,
   TabReplayCompleteParams,
 } from '@browserless.io/browserless';
 
@@ -33,16 +31,16 @@ export class SessionCoordinator {
   private cdpSessions = new Map<string, CdpSession>();
   private baseUrl = process.env.BROWSERLESS_BASE_URL ?? '';
   private replayBaseUrl = process.env.REPLAY_PLAYER_URL || process.env.BROWSERLESS_BASE_URL || '';
-  constructor(private sessionReplay?: SessionReplay, private videoMgr?: VideoManager) {
-    this.videoEncoder = new VideoEncoder(sessionReplay?.getStore() ?? null);
+  constructor(private videoMgr?: VideoManager) {
+    this.videoEncoder = new VideoEncoder();
     videoMgr?.setVideoEncoder(this.videoEncoder);
   }
 
   /**
-   * Check if replay is enabled.
+   * Check if replay is enabled (always true — replay uses external server).
    */
   isEnabled(): boolean {
-    return this.sessionReplay?.isEnabled() ?? false;
+    return true;
   }
 
   /** Get solver for a session (used by browser-launcher to wire to CDPProxy). */
@@ -80,11 +78,6 @@ export class SessionCoordinator {
     sessionId: string,
     options?: { video?: boolean; onTabReplayComplete?: (metadata: TabReplayCompleteParams) => void },
   ): Promise<void> {
-    if (!this.sessionReplay) {
-      this.log.debug(`setupSession: sessionReplay is undefined, returning early`);
-      return;
-    }
-
     const wsEndpoint = browser.wsEndpoint();
     if (!wsEndpoint) {
       this.log.debug(`setupSession: wsEndpoint is null/undefined, returning early`);
@@ -136,7 +129,6 @@ export class SessionCoordinator {
       videosDir: this.videoMgr?.getVideosDir(),
       videoHooks: options?.video ? this.screencast.hooks : undefined,
       cloudflareHooks,
-      sessionReplay: this.sessionReplay,
       baseUrl: this.baseUrl,
       replayBaseUrl: this.replayBaseUrl,
       onTabReplayComplete: options?.onTabReplayComplete,
@@ -159,10 +151,9 @@ export class SessionCoordinator {
   }
 
   /**
-   * Start replay capture for a session.
+   * Start replay capture for a session (no-op: replay is handled by CdpSession → ReplayWriter).
    */
-  startReplay(sessionId: string, trackingId?: string): void {
-    this.sessionReplay?.startReplay(sessionId, trackingId);
+  startReplay(sessionId: string, _trackingId?: string): void {
     this.log.debug(`Started replay capture for session ${sessionId}`);
   }
 
@@ -172,24 +163,22 @@ export class SessionCoordinator {
    */
   stopReplayEffect(
     sessionId: string,
-    metadata?: {
+    _metadata?: {
       browserType?: string;
       routePath?: string;
       trackingId?: string;
     }
-  ): Effect.Effect<StopReplayResult | null> {
+  ): Effect.Effect<null> {
     const coordinator = this;
-    const sessionReplay = this.sessionReplay;
-    if (!sessionReplay) return Effect.succeed(null);
 
     return Effect.fn('coordinator.stopReplay')(function*() {
       yield* Effect.annotateCurrentSpan({ 'session.id': sessionId });
-      // Phase 1: Stop screencast capture → frame count
-      const frameCount = yield* Effect.tryPromise(
+      // Phase 1: Stop screencast capture
+      yield* Effect.tryPromise(
         () => Effect.runPromise(coordinator.screencast.stopCapture(sessionId)),
       ).pipe(Effect.orElseSucceed(() => 0));
 
-      // Phase 2: Destroy the CdpSession — ends Queue, waits for pipeline to write files
+      // Phase 2: Destroy the CdpSession — ends Queue, waits for pipeline to flush to external replay server
       // 8s timeout prevents hung CDP targets from blocking the entire pipeline
       const session = coordinator.cdpSessions.get(sessionId);
       if (session) {
@@ -199,12 +188,8 @@ export class SessionCoordinator {
         );
       }
 
-      // Phase 3: Stop rrweb replay capture (session registry cleanup)
-      const result = yield* Effect.tryPromise(
-        () => sessionReplay.stopReplay(sessionId, { ...metadata, frameCount }),
-      ).pipe(Effect.orElseSucceed(() => null));
-
-      return result;
+      // No local metadata to return — replay data is on the external replay server
+      return null;
     })().pipe(
       // Guaranteed Map cleanup — runs even if Effect times out or fails
       Effect.ensuring(Effect.sync(() => {
@@ -246,7 +231,7 @@ export class SessionCoordinator {
       routePath?: string;
       trackingId?: string;
     }
-  ): Promise<StopReplayResult | null> {
+  ): Promise<null> {
     return Effect.runPromise(this.stopReplayEffect(sessionId, metadata));
   }
 
@@ -262,10 +247,6 @@ export class SessionCoordinator {
 
       for (const sessionId of sessionIds) {
         yield* coordinator.stopReplayEffect(sessionId).pipe(Effect.ignore);
-      }
-
-      if (coordinator.sessionReplay) {
-        yield* Effect.tryPromise(() => coordinator.sessionReplay!.stopAllReplays()).pipe(Effect.ignore);
       }
 
       coordinator.videoEncoder.dispose();

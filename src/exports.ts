@@ -11,7 +11,6 @@ export * from './metrics.js';
 export * from './mime-types.js';
 export * from './monitoring.js';
 export * from './router.js';
-export * from './session-replay.js';
 export * from './cdp-proxy.js';
 export * from './sdk-utils.js';
 export * from './server.js';
@@ -25,15 +24,6 @@ export * from './browsers/browsers.cdp.js';
 export * from './browsers/browsers.playwright.js';
 
 // New modular architecture exports
-export * from './replay-store.js';
-export * from './replay-store.mock.js';
-// Export interface types explicitly to avoid ReplayMetadata conflict with session-replay.ts
-export type {
-  Result,
-  ReplayStoreError,
-  IReplayStore,
-} from './interfaces/replay-store.interface.js';
-export { ok, err, isOk, isErr } from './interfaces/replay-store.interface.js';
 export * from './session/session-registry.js';
 export * from './session/session-lifecycle-manager.js';
 export * from './session/session-coordinator.js';

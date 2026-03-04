@@ -6,29 +6,28 @@ import {
   exists,
 } from '@browserless.io/browserless';
 
-import type { IReplayStore } from '../interfaces/replay-store.interface.js';
 import type { VideoEncoder } from './encoder.js';
 
 /**
  * VideoManager owns all video-specific lifecycle operations.
  *
- * Separated from SessionReplay (which handles rrweb DOM recording)
+ * Separated from replay (which handles rrweb DOM recording)
  * because video (screencast PNG frames → HLS encoding) is an
  * independent concern with its own storage directory (videosDir).
  *
  * Responsibilities:
  * - Delete video frames (for successful scrapes where video isn't needed)
  * - Own the VideoEncoder reference (for on-demand encoding from routes)
- * - Provide store/videosDir access for video routes
+ * - Provide videosDir access for video routes
  */
 export class VideoManager {
   private log = new Logger('video-manager');
   private encoder?: VideoEncoder;
+  private videosDir: string;
 
-  constructor(
-    private videosDir: string,
-    private store: IReplayStore | null,
-  ) {}
+  constructor(videosDir?: string) {
+    this.videosDir = videosDir ?? '/tmp/browserless-videos';
+  }
 
   /**
    * Set the video encoder reference (created by SessionCoordinator).
@@ -49,20 +48,6 @@ export class VideoManager {
    */
   getVideosDir(): string {
     return this.videosDir;
-  }
-
-  /**
-   * Get the replay store (shared with SessionReplay).
-   */
-  getStore(): IReplayStore | null {
-    return this.store;
-  }
-
-  /**
-   * Update store reference (e.g., after SessionReplay creates it during initialize).
-   */
-  setStore(store: IReplayStore): void {
-    this.store = store;
   }
 
   /**
@@ -97,10 +82,6 @@ export class VideoManager {
       if (await exists(sessionDir)) {
         await rm(sessionDir, { recursive: true });
         deleted = true;
-      }
-      // Update store: reset encoding status (no video available)
-      if (this.store && deleted) {
-        this.store.updateEncodingStatus(id, 'none');
       }
       if (deleted) {
         this.log.info(`Deleted video frames for replay ${id}`);

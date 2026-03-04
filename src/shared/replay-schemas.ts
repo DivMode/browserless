@@ -65,6 +65,3 @@ export class ReplayStoreError extends Schema.TaggedErrorClass<ReplayStoreError>(
   'ReplayStoreError', { message: Schema.String },
 ) {}
 
-export class TabFlushError extends Schema.TaggedErrorClass<TabFlushError>()(
-  'TabFlushError', { targetId: TargetId, reason: Schema.String },
-) {}

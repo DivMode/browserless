@@ -4,7 +4,7 @@
  * These types are used by cdp-session.ts and session-coordinator.ts.
  * They live in a separate file to avoid circular imports.
  */
-import type { SessionReplay, TabReplayCompleteParams } from '@browserless.io/browserless';
+import type { TabReplayCompleteParams } from '@browserless.io/browserless';
 import type { VideoHooks } from './video-services.js';
 import type { CloudflareHooks } from './cloudflare-hooks.js';
 
@@ -26,8 +26,6 @@ export interface CdpSessionOptions {
   videosDir?: string;
   videoHooks?: VideoHooks;
   cloudflareHooks: CloudflareHooks;
-  /** Replay config — previously in ReplayCaptureOptions. */
-  sessionReplay: SessionReplay;
   baseUrl: string;
   /** Base URL for replay viewer links (e.g. https://replay.catchseo.com). Falls back to baseUrl. */
   replayBaseUrl: string;

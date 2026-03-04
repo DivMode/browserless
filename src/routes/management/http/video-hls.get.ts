@@ -70,24 +70,10 @@ export default class VideoHlsGetRoute extends HTTPRoute {
     const videosDir = video.getVideosDir();
     const filePath = path.join(videosDir, id, filename);
 
-    // If file doesn't exist yet, check if encoding is in progress and wait for it
+    // If file doesn't exist yet, wait briefly in case encoding is in progress
     if (!(await exists(filePath))) {
-      const store = video.getStore();
-      let shouldWait = false;
-      if (store) {
-        const replayResult = store.findById(id);
-        if (replayResult.ok && replayResult.value) {
-          const status = replayResult.value.encodingStatus;
-          shouldWait = status === 'encoding' || status === 'pending';
-        }
-      }
-
-      if (shouldWait) {
-        const appeared = await this.waitForFile(filePath, 30_000);
-        if (!appeared) {
-          throw new NotFound(`HLS file not available: ${filename}`);
-        }
-      } else {
+      const appeared = await this.waitForFile(filePath, 30_000);
+      if (!appeared) {
         throw new NotFound(`HLS file not found: ${filename}`);
       }
     }

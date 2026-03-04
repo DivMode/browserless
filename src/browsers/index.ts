@@ -15,7 +15,6 @@ import {
   ReplayCompleteParams,
   Request,
   ServerError,
-  SessionReplay,
   BrowserWebsocketRoute,
   availableBrowsers,
   isReplayCapable,
@@ -54,12 +53,11 @@ export class BrowserManager {
     protected config: Config,
     protected hooks: Hooks,
     protected fileSystem: FileSystem,
-    protected sessionReplay?: SessionReplay,
     protected videoMgr?: VideoManager,
   ) {
     // Initialize extracted components
     this.registry = new SessionRegistry();
-    this.session = new SessionCoordinator(sessionReplay, videoMgr);
+    this.session = new SessionCoordinator(videoMgr);
     this.lifecycle = new SessionLifecycleManager(
       this.registry,
       this.session,

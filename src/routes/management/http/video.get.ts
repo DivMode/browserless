@@ -55,31 +55,11 @@ export default class VideoGetRoute extends HTTPRoute {
     // Pass auth token through to sub-resource URLs (video, HLS, status)
     const token = req.parsed.searchParams.get('token') ?? '';
 
-    // Check replay metadata for encoding status
-    const store = video.getStore();
-    let encodingStatus = 'none';
-    let frameCount = 0;
-
-    if (store) {
-      const result = store.findById(id);
-      if (result.ok && result.value) {
-        encodingStatus = result.value.encodingStatus;
-        frameCount = result.value.frameCount;
-      } else if (result.ok && !result.value) {
-        throw new NotFound(`Replay "${id}" not found`);
-      }
-    }
-
-    // Trigger on-demand encoding for deferred sessions (lazy encoding)
-    if (encodingStatus === 'deferred') {
-      const encoder = video.getVideoEncoder();
-      const videosDir = video.getVideosDir();
-      if (encoder && store) {
-        store.updateEncodingStatus(id, 'pending');
-        encoder.queueEncode(id, videosDir, frameCount);
-        encodingStatus = 'pending';
-      }
-    }
+    // Check in-memory encoder for encoding status
+    const encoder = video.getVideoEncoder();
+    const progress = encoder?.getProgress(id) ?? null;
+    const encodingStatus = progress?.status ?? 'none';
+    const frameCount = progress?.totalFrames ?? 0;
 
     const html = this.generatePlayerHTML(id, encodingStatus, frameCount, token);
 
