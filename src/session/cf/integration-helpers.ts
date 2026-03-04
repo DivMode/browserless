@@ -10,6 +10,7 @@
 import { appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Schema } from 'effect';
 
 export const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN || '';
 export const PROXY_URL = process.env.LOCAL_MOBILE_PROXY || '';
@@ -65,13 +66,32 @@ export interface ReplayMarker {
   timestamp: number;
 }
 
+// Runtime schema for replay list response — catches server-side field renames immediately
+const ReplayMetaFromServer = Schema.Struct({
+  id: Schema.String,
+  eventCount: Schema.Number,
+  duration: Schema.NullOr(Schema.Number),
+  startedAt: Schema.NullOr(Schema.Number),
+  endedAt: Schema.NullOr(Schema.Number),
+  browserType: Schema.NullOr(Schema.String),
+  parentSessionId: Schema.NullOr(Schema.String),
+  targetId: Schema.NullOr(Schema.String),
+  source: Schema.NullOr(Schema.String),
+  createdAt: Schema.String,
+});
+const ReplayListResponse = Schema.Array(ReplayMetaFromServer);
+
 export interface ReplayMeta {
   id: string;
-  parentSessionId: string;
-  targetId: string;
-  startedAt: number;
-  endedAt: number;
+  parentSessionId: string | null;
+  targetId: string | null;
+  startedAt: number | null;
+  endedAt: number | null;
   eventCount: number;
+  duration: number | null;
+  browserType: string | null;
+  source: string | null;
+  createdAt: string;
 }
 
 export interface SessionResult {
@@ -88,10 +108,11 @@ export interface SessionResult {
 export async function findReplay(afterTs: number): Promise<ReplayMeta | null> {
   const res = await fetch(`${REPLAY_HTTP}/replays`);
   if (!res.ok) return null;
-  const replays = (await res.json()) as ReplayMeta[];
+  const raw = await res.json();
+  const replays = Schema.decodeUnknownSync(ReplayListResponse)(raw);
   const recent = replays
-    .filter((r) => r.startedAt >= afterTs)
-    .sort((a, b) => b.startedAt - a.startedAt);
+    .filter((r) => (r.startedAt ?? 0) >= afterTs)
+    .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
   return recent[0] ?? null;
 }
 
@@ -99,10 +120,11 @@ export async function findReplay(afterTs: number): Promise<ReplayMeta | null> {
 export async function findAllReplays(afterTs: number): Promise<ReplayMeta[]> {
   const res = await fetch(`${REPLAY_HTTP}/replays`);
   if (!res.ok) return [];
-  const replays = (await res.json()) as ReplayMeta[];
+  const raw = await res.json();
+  const replays = Schema.decodeUnknownSync(ReplayListResponse)(raw);
   return replays
-    .filter((r) => r.startedAt >= afterTs)
-    .sort((a, b) => b.startedAt - a.startedAt);
+    .filter((r) => (r.startedAt ?? 0) >= afterTs)
+    .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
 }
 
 /** Extract CF markers (type 5, tag starts with 'cf.') from a replay. */

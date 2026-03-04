@@ -53,13 +53,7 @@ export async function setup() {
     );
   }
 
-  // Skip build+spawn if already running (e.g., `just dev` + `just watch` in other terminals)
-  if (await isRunning()) {
-    console.log('[globalSetup] Browserless already running at :3000 — skipping build');
-    return;
-  }
-
-  // Build: compile TS → JS so build/ reflects latest source edits
+  // Always build — ensures build/ reflects latest source edits even if server is already running
   console.log('[globalSetup] Building browserless (tsc)...');
   const buildStart = Date.now();
   execFileSync('npx', ['tsc'], { cwd: BROWSERLESS_DIR, stdio: 'inherit' });
@@ -70,6 +64,12 @@ export async function setup() {
   if (!existsSync(extensionPath)) {
     console.log('[globalSetup] Building rrweb extension...');
     execFileSync('bun', ['extensions/replay/build.js'], { cwd: BROWSERLESS_DIR, stdio: 'inherit' });
+  }
+
+  // If already running (e.g., `just dev`), skip spawn — developer manages the server
+  if (await isRunning()) {
+    console.log('[globalSetup] Browserless already running at :3000 — skipping spawn');
+    return;
   }
 
   console.log('[globalSetup] Starting browserless...');
