@@ -193,6 +193,11 @@ export const CloudflareSnapshot = Schema.Struct({
   widget_error_type: Schema.optionalKey(Schema.NullOr(Schema.String)).annotate({
     description: 'Last error type: confirmed_error, error_text, iframe_error, expired',
   }),
+  widget_diag: Schema.optionalKey(
+    Schema.NullOr(Schema.Record(Schema.String, Schema.Any))
+  ).annotate({
+    description: 'Shadow DOM diagnostic snapshot when checkbox not found (alive, cbI, inp, shadow, bodyLen)',
+  }),
 }).annotate({
   title: 'CloudflareSnapshot',
   description: 'Accumulated state for one CF solve phase, included in solved/failed events.',

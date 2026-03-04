@@ -79,8 +79,10 @@ export const EMBEDDED_SUCCESS_WAIT_MS = 1_000;
 /** State tracker: poll interval for post-success state checks (ms). */
 export const STATE_POLL_INTERVAL_MS = 500;
 
-/** Individual CDP call timeout within checkbox-finding methods (ms). */
-export const CDP_CALL_TIMEOUT_MS = 5_000;
+/** Individual CDP call timeout within checkbox-finding methods (ms).
+ * Reduced from 5s to 2s — under concurrent load (15+ tabs), CDP calls
+ * can stall. Faster timeout lets the retry loop recover on the next poll. */
+export const CDP_CALL_TIMEOUT_MS = 2_000;
 
 /** Max concurrent CF solve attempts per browser session.
  * Limits WS saturation when 15+ tabs solve simultaneously. */

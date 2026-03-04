@@ -35,6 +35,7 @@ export class CloudflareTracker {
   private iframeStates: string[] = [];
   private widgetFindDebug: Record<string, any> | null = null;
   private lastErrorType: string | null = null;
+  private lastDiag: Record<string, any> | null = null;
 
   constructor(info: CloudflareInfo) {
     this.detectionMethod = info.detectionMethod;
@@ -77,6 +78,15 @@ export class CloudflareTracker {
       case 'widget_error':
         this.widgetErrorCount++;
         if (extra?.error_type) this.lastErrorType = extra.error_type;
+        if (extra?.diag_alive != null) {
+          this.lastDiag = {
+            alive: extra.diag_alive,
+            cbI: extra.diag_cbI,
+            inp: extra.diag_inp,
+            shadow: extra.diag_shadow,
+            bodyLen: extra.diag_body_len,
+          };
+        }
         break;
       case 'success':
       case 'verifying':
@@ -112,6 +122,7 @@ export class CloudflareTracker {
       iframe_states: this.iframeStates,
       widget_find_debug: this.widgetFindDebug,
       widget_error_type: this.lastErrorType,
+      widget_diag: this.lastDiag,
     };
   }
 }
@@ -209,7 +220,9 @@ export class CloudflareEventEmitter {
     const phase_label = phaseLabel ?? `✗ ${reason}`;
     const snap = active.tracker.snapshot();
     const isRechallenge = (active.rechallengeCount ?? 0) > 0;
-    this.log.warn(`CF failed: reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'} rechallenge=${isRechallenge} widget_error_count=${snap.widget_error_count} widget_error_type=${snap.widget_error_type ?? 'none'} click_count=${snap.click_count} false_positives=${snap.false_positive_count}`);
+    const diag = snap.widget_diag;
+    const diagStr = diag ? ` diag_alive=${diag.alive} diag_cbI=${diag.cbI} diag_inp=${diag.inp} diag_shadow=${diag.shadow} diag_bodyLen=${diag.bodyLen}` : '';
+    this.log.warn(`CF failed: reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'} rechallenge=${isRechallenge} widget_error_count=${snap.widget_error_count} widget_error_type=${snap.widget_error_type ?? 'none'} click_count=${snap.click_count} false_positives=${snap.false_positive_count}${diagStr}`);
     this.emitClientEvent('Browserless.cloudflareFailed', {
       reason, type: active.info.type, duration_ms: duration, attempts: active.attempt,
       targetId: active.pageTargetId,
