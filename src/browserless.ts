@@ -22,7 +22,6 @@ import {
   Metrics,
   Monitoring,
   Router,
-  SessionReplay,
   Token,
   WebHooks,
   WebKitPlaywright,
@@ -71,7 +70,6 @@ export class Browserless extends EventEmitter {
   protected metrics: Metrics;
   protected monitoring: Monitoring;
   protected router: Router;
-  protected sessionReplay: SessionReplay;
   protected videoManager: VideoManager;
   protected token: Token;
   protected webhooks: WebHooks;
@@ -94,9 +92,9 @@ export class Browserless extends EventEmitter {
     metrics,
     monitoring,
     router,
-    sessionReplay,
     token,
     webhooks,
+    videoManager,
   }: {
     Logger?: Browserless['Logger'];
     browserManager?: Browserless['browserManager'];
@@ -107,9 +105,9 @@ export class Browserless extends EventEmitter {
     metrics?: Browserless['metrics'];
     monitoring?: Browserless['monitoring'];
     router?: Browserless['router'];
-    sessionReplay?: Browserless['sessionReplay'];
     token?: Browserless['token'];
     webhooks?: Browserless['webhooks'];
+    videoManager?: Browserless['videoManager'];
   } = {}) {
     super();
     this.Logger = LoggerOverride ?? BlessLogger;
@@ -121,14 +119,10 @@ export class Browserless extends EventEmitter {
     this.webhooks = webhooks || new WebHooks(this.config);
     this.monitoring = monitoring || new Monitoring(this.config);
     this.fileSystem = fileSystem || new FileSystem(this.config);
-    this.sessionReplay = sessionReplay || new SessionReplay(this.config);
-    this.videoManager = new VideoManager(
-      this.sessionReplay.getVideosDir(),
-      this.sessionReplay.getStore(),
-    );
+    this.videoManager = videoManager || new VideoManager();
     this.browserManager =
       browserManager ||
-      new BrowserManager(this.config, this.hooks, this.fileSystem, this.sessionReplay, this.videoManager);
+      new BrowserManager(this.config, this.hooks, this.fileSystem, this.videoManager);
     this.limiter =
       limiter ||
       new Limiter(
@@ -277,7 +271,6 @@ export class Browserless extends EventEmitter {
       this.metrics.shutdown(),
       this.monitoring.shutdown(),
       this.router.shutdown(),
-      this.sessionReplay.shutdown(),
       this.token.shutdown(),
       this.webhooks.shutdown(),
       this.hooks.shutdown(),
@@ -351,7 +344,6 @@ export class Browserless extends EventEmitter {
           route.monitoring = () => this.monitoring;
           route.fileSystem = () => this.fileSystem;
           route.staticSDKDir = () => this.staticSDKDir;
-          route.sessionReplay = () => this.sessionReplay;
           route.videoManager = () => this.videoManager;
 
           httpRoutes.push(route);
@@ -401,7 +393,6 @@ export class Browserless extends EventEmitter {
           route.monitoring = () => this.monitoring;
           route.fileSystem = () => this.fileSystem;
           route.staticSDKDir = () => this.staticSDKDir;
-          route.sessionReplay = () => this.sessionReplay;
           route.videoManager = () => this.videoManager;
 
           wsRoutes.push(route);
@@ -463,18 +454,6 @@ export class Browserless extends EventEmitter {
     );
 
     await this.loadPwVersions();
-    await this.sessionReplay.initialize();
-
-    // Wire stores to VideoManager and VideoEncoder after SessionReplay.initialize()
-    // creates the ReplayStore. Both get null at construction time.
-    const store = this.sessionReplay.getStore();
-    if (store) {
-      this.videoManager.setStore(store);
-      const encoder = this.browserManager.getSessionCoordinator().getVideoEncoder();
-      encoder.setStore(store);
-      await encoder.cleanupOrphans(this.sessionReplay.getVideosDir());
-    }
-
     await this.server.start();
     this.logger.debug(`Starting metrics collection.`);
     this.metricsFiber = Effect.runFork(
@@ -521,9 +500,9 @@ export class Browserless extends EventEmitter {
       metrics: c.resolve<Metrics>(Services.Metrics),
       monitoring: c.resolve<Monitoring>(Services.Monitoring),
       router: c.resolve<Router>(Services.Router),
-      sessionReplay: c.resolve<SessionReplay>(Services.SessionReplay),
       token: c.resolve<Token>(Services.Token),
       webhooks: c.resolve<WebHooks>(Services.WebHooks),
+      videoManager: c.resolve<VideoManager>(Services.VideoManager),
     });
   }
 }

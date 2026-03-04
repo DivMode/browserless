@@ -2,7 +2,7 @@ import { expect } from 'chai';
 import { Schema } from 'effect';
 import {
   ReplayEvent, ReplayMetadata, TabEvent, RrwebEventBatch,
-  SessionId, ReplayStoreError, TabFlushError,
+  SessionId, ReplayStoreError,
 } from './replay-schemas.js';
 
 describe('Replay Schemas', () => {
@@ -101,10 +101,6 @@ describe('Replay Schemas', () => {
       expect(err.message).to.equal('db failed');
     });
 
-    it('creates TabFlushError with tag and targetId', () => {
-      const err = new TabFlushError({ targetId: 'tgt-1' as any, reason: 'write failed' });
-      expect(err._tag).to.equal('TabFlushError');
-    });
   });
 
   describe('SessionId brand', () => {

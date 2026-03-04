@@ -7,14 +7,12 @@ import {
   Metrics,
   Monitoring,
   Router,
-  SessionReplay,
   Token,
   WebHooks,
 } from '@browserless.io/browserless';
 
 import { ServiceContainer } from './container.js';
 import { BrowserManager } from '../browsers/index.js';
-import type { IReplayStore } from '../interfaces/replay-store.interface.js';
 import { SessionRegistry } from '../session/session-registry.js';
 import { SessionCoordinator } from '../session/session-coordinator.js';
 import { VideoManager } from '../video/video-manager.js';
@@ -30,8 +28,6 @@ export const Services = {
   WebHooks: 'webhooks',
   Monitoring: 'monitoring',
   FileSystem: 'fileSystem',
-  SessionReplay: 'sessionReplay',
-  ReplayStore: 'replayStore',
   SessionRegistry: 'sessionRegistry',
   SessionCoordinator: 'sessionCoordinator',
   VideoManager: 'videoManager',
@@ -55,8 +51,6 @@ export interface ContainerOptions {
   webhooks?: WebHooks;
   monitoring?: Monitoring;
   fileSystem?: FileSystem;
-  sessionReplay?: SessionReplay;
-  replayStore?: IReplayStore;
   sessionRegistry?: SessionRegistry;
   sessionCoordinator?: SessionCoordinator;
   videoManager?: VideoManager;
@@ -122,48 +116,27 @@ export function createContainer(options: ContainerOptions = {}): ServiceContaine
     [Services.Config]
   );
 
-  // SessionReplay - depends on config
-  container.registerSingleton(
-    Services.SessionReplay,
-    (c) => options.sessionReplay ?? new SessionReplay(c.resolve<Config>(Services.Config)),
-    [Services.Config]
-  );
-
-  // ReplayStore - lazy initialization based on replays dir
-  // This is optional - SessionReplay creates it during initialize()
-  if (options.replayStore) {
-    container.registerInstance(Services.ReplayStore, options.replayStore);
-  }
-
   // SessionRegistry - no dependencies (pure data structure)
   container.registerSingleton(Services.SessionRegistry, () =>
     options.sessionRegistry ?? new SessionRegistry()
   );
 
-  // VideoManager - depends on sessionReplay (for videosDir and store)
+  // VideoManager - no dependencies (video encoding only)
   container.registerSingleton(
     Services.VideoManager,
-    (c) => {
-      const replay = c.resolve<SessionReplay>(Services.SessionReplay);
-      return options.videoManager ?? new VideoManager(
-        replay.getVideosDir(),
-        replay.getStore(),
-      );
-    },
-    [Services.SessionReplay]
+    () => options.videoManager ?? new VideoManager(),
   );
 
-  // SessionCoordinator - depends on sessionReplay and videoManager
+  // SessionCoordinator - depends on videoManager
   container.registerSingleton(
     Services.SessionCoordinator,
     (c) => options.sessionCoordinator ?? new SessionCoordinator(
-      c.resolve<SessionReplay>(Services.SessionReplay),
       c.resolve<VideoManager>(Services.VideoManager),
     ),
-    [Services.SessionReplay, Services.VideoManager]
+    [Services.VideoManager]
   );
 
-  // BrowserManager - depends on config, hooks, fileSystem, sessionReplay, videoManager
+  // BrowserManager - depends on config, hooks, fileSystem, videoManager
   container.registerSingleton(
     Services.BrowserManager,
     (c) =>
@@ -172,10 +145,9 @@ export function createContainer(options: ContainerOptions = {}): ServiceContaine
         c.resolve<Config>(Services.Config),
         c.resolve<Hooks>(Services.Hooks),
         c.resolve<FileSystem>(Services.FileSystem),
-        c.resolve<SessionReplay>(Services.SessionReplay),
         c.resolve<VideoManager>(Services.VideoManager),
       ),
-    [Services.Config, Services.Hooks, Services.FileSystem, Services.SessionReplay, Services.VideoManager]
+    [Services.Config, Services.Hooks, Services.FileSystem, Services.VideoManager]
   );
 
   // Limiter - depends on config, metrics, monitoring, webhooks, hooks

@@ -90,9 +90,6 @@ export async function setup() {
     return;
   }
 
-  // Local mode: query replays from the local server's SQLite store, not the VM
-  process.env.REPLAY_INGEST_URL = `http://127.0.0.1:${PORT}`;
-
   // Always build — ensures build/ reflects latest source edits even if server is already running
   console.log('[globalSetup] Building browserless (tsc)...');
   const buildStart = Date.now();

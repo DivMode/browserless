@@ -8,7 +8,6 @@ import {
   exists,
 } from '@browserless.io/browserless';
 
-import type { IReplayStore } from '../interfaces/replay-store.interface.js';
 import { OtelLayer } from '../otel-layer.js';
 
 export interface EncodingProgress {
@@ -46,7 +45,7 @@ export class VideoEncoder {
   private runtime = ManagedRuntime.make(OtelLayer);
   private effectQueue: Queue.Queue<EncodeJob> | null = null;
 
-  constructor(private store: IReplayStore | null) {
+  constructor() {
     // Single runFork: queue creation + consumer loop inline — no .then() gap
     const encoder = this;
     this.runtime.runFork(
@@ -62,13 +61,6 @@ export class VideoEncoder {
         }
       }),
     );
-  }
-
-  /**
-   * Update the store reference (set after SessionReplay initializes).
-   */
-  setStore(store: IReplayStore): void {
-    this.store = store;
   }
 
   /**
@@ -90,10 +82,6 @@ export class VideoEncoder {
     }
 
     this.log.info(`Queuing video encode for session ${sessionId}`);
-
-    if (this.store) {
-      this.store.updateEncodingStatus(sessionId, 'pending');
-    }
 
     this.progress.set(sessionId, {
       framesProcessed: 0,
@@ -176,12 +164,10 @@ export class VideoEncoder {
 
     if (!(await exists(framesDir))) {
       this.log.warn(`No frames directory for ${sessionId}, skipping`);
-      this.store?.updateEncodingStatus(sessionId, 'failed');
       this.updateProgress(sessionId, { status: 'failed' });
       return;
     }
 
-    this.store?.updateEncodingStatus(sessionId, 'encoding');
     this.updateProgress(sessionId, { status: 'encoding' });
 
     try {
@@ -191,7 +177,6 @@ export class VideoEncoder {
 
       if (files.length === 0) {
         this.log.warn(`No frames found for ${sessionId}`);
-        this.store?.updateEncodingStatus(sessionId, 'failed');
         this.updateProgress(sessionId, { status: 'failed' });
         return;
       }
@@ -253,7 +238,6 @@ export class VideoEncoder {
         await rename(ffmpegPlaylistPath, playlistPath);
       }
 
-      this.store?.updateEncodingStatus(sessionId, 'completed', playlistPath);
       this.updateProgress(sessionId, { status: 'completed', framesProcessed: totalFrames });
 
       // Clean up frames + concat (keep HLS segments + playlist)
@@ -271,7 +255,6 @@ export class VideoEncoder {
       );
     } catch (e) {
       this.log.error(`Encoding failed for ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
-      this.store?.updateEncodingStatus(sessionId, 'failed');
       this.updateProgress(sessionId, { status: 'failed' });
       // Clean up progress entry after 30s (same as success path) to unblock re-encode attempts
       this.runtime.runFork(

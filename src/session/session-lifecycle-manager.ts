@@ -4,7 +4,6 @@ import {
   Logger,
   ReplayCompleteParams,
   exists,
-  isReplayCapable,
 } from '@browserless.io/browserless';
 import { rm } from 'fs/promises';
 
@@ -27,8 +26,6 @@ export class SessionLifecycleManager {
   private timerFibers: Map<string, Fiber.Fiber<void>> = new Map();
   private watchdogFiber: Fiber.Fiber<unknown> | null = null;
   private log = new Logger('session-lifecycle');
-  private baseUrl = process.env.BROWSERLESS_BASE_URL ?? '';
-  private replayBaseUrl = process.env.REPLAY_PLAYER_URL || process.env.BROWSERLESS_BASE_URL || '';
 
   constructor(
     private registry: SessionRegistry,
@@ -116,10 +113,7 @@ export class SessionLifecycleManager {
       // Effect pipeline: replay cleanup with layered timeouts
       // If anything hangs, the fiber gets interrupted and Map cleanup runs via Effect.ensuring
       const coordinator = this.sessionCoordinator;
-      const baseUrl = this.baseUrl;
-      const replayBaseUrl = this.replayBaseUrl;
       const sessionId = session.id;
-      const log = this.log;
 
       const cleanupEffect = Effect.gen(function*() {
         // Emit cf.solved for any unresolved CF detections (session-close fallback)
@@ -130,9 +124,9 @@ export class SessionLifecycleManager {
           }
         }
 
-        // Stop replay and save if replay was enabled
+        // Stop replay pipeline — flushes events to external replay server
         if (session.replay && coordinator) {
-          const result = yield* coordinator.stopReplayEffect(sessionId, {
+          yield* coordinator.stopReplayEffect(sessionId, {
             browserType: browser.constructor.name,
             routePath: Array.isArray(session.routePath)
               ? session.routePath[0]
@@ -140,41 +134,8 @@ export class SessionLifecycleManager {
             trackingId: session.trackingId,
           }).pipe(
             Effect.timeout('12 seconds'),
-            Effect.orElseSucceed(() => null),
+            Effect.ignore,
           );
-
-          if (result) {
-            const metadata: ReplayCompleteParams = {
-              id: result.metadata.id,
-              duration: result.metadata.duration,
-              eventCount: result.metadata.eventCount,
-              frameCount: result.metadata.frameCount,
-              encodingStatus: result.metadata.encodingStatus,
-              replayUrl: `${replayBaseUrl}/replay/${result.metadata.id}`,
-              ...(session.trackingId ? { trackingId: session.trackingId } : {}),
-              ...(result.metadata.frameCount > 0 && {
-                videoUrl: `${baseUrl}/video/${result.metadata.id}`,
-              }),
-            };
-
-            // Send replay metadata via CDP event before browser closes
-            if (isReplayCapable(browser) && connected > 0) {
-              yield* Effect.tryPromise(() => browser.sendReplayComplete(metadata)).pipe(
-                Effect.tap((sent) => Effect.sync(() => {
-                  if (sent) {
-                    log.info(`Injected replay complete event for ${sessionId}`);
-                  } else {
-                    log.debug(`Replay complete not sent for ${sessionId} (client disconnected)`);
-                  }
-                })),
-                Effect.ignore,
-              );
-            } else if (isReplayCapable(browser)) {
-              log.debug(`Skipping replay event for ${sessionId} (no connected clients)`);
-            }
-
-            return metadata;
-          }
         }
 
         return null;

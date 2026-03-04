@@ -186,10 +186,6 @@ export class Config extends EventEmitter {
   protected enableDebugger = !!parseEnvVars(true, 'ENABLE_DEBUGGER');
   protected enableReplay = !!parseEnvVars(true, 'ENABLE_REPLAY');
   protected enableCloudflareSolver = !!parseEnvVars(true, 'ENABLE_CLOUDFLARE_SOLVER');
-  protected replayDir = process.env.REPLAY_DIR
-    ? untildify(process.env.REPLAY_DIR)
-    : path.join(tmpdir(), 'browserless-replays');
-  protected replayMaxSize = +(process.env.REPLAY_MAX_SIZE ?? '52428800'); // 50MB default
   protected maxTabsPerSession = +(process.env.MAX_TABS_PER_SESSION ?? '50');
 
   public getRoutes(): string {
@@ -288,14 +284,6 @@ export class Config extends EventEmitter {
     return this.enableReplay;
   }
 
-  public getReplayDir(): string {
-    return this.replayDir;
-  }
-
-  public getReplayMaxSize(): number {
-    return this.replayMaxSize;
-  }
-
   public setEnableReplay(enable: boolean): boolean {
     this.emit('enableReplay', enable);
     return (this.enableReplay = enable);
@@ -312,16 +300,6 @@ export class Config extends EventEmitter {
   public setEnableCloudflareSolver(enable: boolean): boolean {
     this.emit('enableCloudflareSolver', enable);
     return (this.enableCloudflareSolver = enable);
-  }
-
-  public setReplayDir(dir: string): string {
-    this.emit('replayDir', dir);
-    return (this.replayDir = dir);
-  }
-
-  public setReplayMaxSize(size: number): number {
-    this.emit('replayMaxSize', size);
-    return (this.replayMaxSize = size);
   }
 
   /**
