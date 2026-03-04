@@ -281,29 +281,47 @@ export function phase3CheckboxFind(
       if (active.aborted) return null;
       pollCount = poll + 1;
 
+      // Strategy 3 FIRST — single CDP call, most resilient under concurrent load
+      const s3Start = Date.now();
+      const doc = yield* cdpCall(send('DOM.getDocument', {
+        depth: -1, pierce: true,
+      }, oopifSessionId));
+      if (doc?.root) {
+        const node = findCheckboxInTree(doc.root);
+        if (node) {
+          checkbox = { objectId: '', backendNodeId: node.backendNodeId };
+          method = 'dom_tree_walk';
+          yield* events.marker(pageTargetId, 'cf.phase3_strategy', {
+            strategy: 'dom_tree_walk', poll, elapsed_ms: Date.now() - s3Start,
+            found: true, doc_root: true,
+          });
+          break;
+        }
+      }
+      yield* events.marker(pageTargetId, 'cf.phase3_strategy', {
+        strategy: 'dom_tree_walk', poll, elapsed_ms: Date.now() - s3Start,
+        found: false, doc_root: !!doc?.root,
+      });
+
+      // Strategy 1 fallback — isolated world (only if tree walk found nothing)
       if (isolatedContextId) {
+        const s1Start = Date.now();
         checkbox = yield* findCheckboxViaIsolatedWorld(send, oopifSessionId, isolatedContextId);
+        yield* events.marker(pageTargetId, 'cf.phase3_strategy', {
+          strategy: 'isolated_world', poll, elapsed_ms: Date.now() - s1Start,
+          found: !!checkbox,
+        });
         if (checkbox) { method = 'isolated_world'; break; }
       }
 
-      if (!checkbox) {
-        checkbox = yield* findCheckboxViaRuntime(send, oopifSessionId);
-        if (checkbox) { method = 'runtime_query'; break; }
-      }
-
-      if (!checkbox) {
-        const doc = yield* send('DOM.getDocument', {
-          depth: -1, pierce: true,
-        }, oopifSessionId);
-        if (doc?.root) {
-          const node = findCheckboxInTree(doc.root);
-          if (node) {
-            checkbox = { objectId: '', backendNodeId: node.backendNodeId };
-            method = 'dom_tree_walk';
-            break;
-          }
-        }
-      }
+      // Strategy 2 fallback — runtime query
+      const s2Start = Date.now();
+      checkbox = yield* findCheckboxViaRuntime(send, oopifSessionId);
+      yield* events.marker(pageTargetId, 'cf.phase3_strategy', {
+        strategy: 'runtime_query', poll, elapsed_ms: Date.now() - s2Start,
+        found: !!checkbox,
+      });
+      if (checkbox) { method = 'runtime_query'; break; }
 
       // Checkbox not found yet — wait and retry (matching pydoll's polling)
       yield* Effect.sleep(`${pollInterval} millis`);
@@ -344,52 +362,49 @@ export function phase3CheckboxFind(
 
 /**
  * Snapshot the OOPIF shadow DOM structure for diagnostics when checkbox isn't found.
- * Runs Runtime.evaluate on the OOPIF session (separate V8 isolate — safe from CF WASM).
+ * Uses DOM.getDocument(pierce:true) + tree walk — pierces shadow DOM properly,
+ * unlike querySelector which cannot cross shadow boundaries.
  */
 function diagnoseShadowDOM(
   send: EffectSend,
   oopifSessionId: CdpSessionId,
-  isolatedContextId: number | null,
+  _isolatedContextId: number | null,
 ): Effect.Effect<Record<string, unknown>> {
   return Effect.fn('cf.diagnoseShadowDOM')(function*() {
     yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId });
-    const result: Record<string, unknown> = { alive: false };
+    const result: Record<string, unknown> = { alive: false, cbI: false, inp: false, shadow: 0, bodyLen: 0 };
 
-    const evalOpts = isolatedContextId
-      ? { contextId: isolatedContextId }
-      : {};
+    const doc = yield* cdpCall(send('DOM.getDocument', {
+      depth: -1, pierce: true,
+    }, oopifSessionId));
 
-    const docResult = yield* send('Runtime.evaluate', {
-      expression: 'document.body ? document.body.innerHTML.length : -1',
-      returnByValue: true,
-      ...evalOpts,
-    }, oopifSessionId);
+    if (!doc?.root) return result;
+    result.alive = true;
 
-    if (docResult?.result?.value != null) {
-      result.alive = true;
-      result.bodyLen = docResult.result.value;
-    } else {
-      return result;
+    // Check for checkbox in full tree (pierces shadow DOM)
+    const cbNode = findCheckboxInTree(doc.root);
+    result.cbI = !!cbNode;
+
+    // Walk tree for shadow root count + inp check + estimate body size
+    let shadowCount = 0;
+    let hasInput = false;
+    let nodeCount = 0;
+    function walk(n: CDPNode): void {
+      nodeCount++;
+      if (n.shadowRoots) {
+        shadowCount += n.shadowRoots.length;
+        n.shadowRoots.forEach(walk);
+      }
+      if (n.localName === 'input' && getAttr(n, 'type') === 'checkbox') {
+        hasInput = true;
+      }
+      n.children?.forEach(walk);
+      if (n.contentDocument) walk(n.contentDocument);
     }
-
-    const tagsResult = yield* send('Runtime.evaluate', {
-      expression: `(function() {
-        var b = document.body;
-        if (!b) return { tags: [], shadow: 0 };
-        var tags = Array.from(b.children).map(function(c) { return c.tagName ? c.tagName.toLowerCase() : '?'; });
-        var shadow = 0;
-        b.querySelectorAll('*').forEach(function(el) { if (el.shadowRoot) shadow++; });
-        var cbI = !!b.querySelector('span.cb-i');
-        var inp = !!b.querySelector('input[type="checkbox"]');
-        return { tags: tags, shadow: shadow, cbI: cbI, inp: inp };
-      })()`,
-      returnByValue: true,
-      ...evalOpts,
-    }, oopifSessionId);
-
-    if (tagsResult?.result?.value) {
-      Object.assign(result, tagsResult.result.value);
-    }
+    walk(doc.root);
+    result.shadow = shadowCount;
+    result.inp = hasInput;
+    result.bodyLen = nodeCount;
 
     return result;
   })().pipe(Effect.orElseSucceed(() => ({ error: 'diag_failed' } as Record<string, unknown>)));
