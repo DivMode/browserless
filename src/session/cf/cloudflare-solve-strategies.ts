@@ -539,11 +539,14 @@ export class CloudflareSolveStrategies {
 
       // ── Sub-span: Click dispatch (listener + mouse events) ──
       const { pressResponse, releaseResponse, holdMs } = yield* Effect.fn('cf.phase4_dispatch')(function*() {
+        const t0 = Date.now();
+
         // Install click verification listener (OOPIF session — safe, separate V8 isolate)
         yield* verifySend('Runtime.evaluate', {
           expression: `window.__bClkV=false;document.addEventListener('mousedown',function(){window.__bClkV=true},{once:true,capture:true});true`,
           returnByValue: true,
         }, oopifSessionId).pipe(Effect.orElseSucceed(() => null));
+        const tListener = Date.now();
 
         // mouseMoved before press/release — routes compositor + shows in rrweb
         yield* send('Input.dispatchMouseEvent', {
@@ -551,22 +554,37 @@ export class CloudflareSolveStrategies {
           x: clickX, y: clickY,
           button: 'none',
         }, oopifSessionId);
-        yield* Effect.sleep(`${20 + Math.random() * 30} millis`);
+        const tMove = Date.now();
+
+        const preMoveMs = 20 + Math.random() * 30;
+        yield* Effect.sleep(`${preMoveMs} millis`);
+        const tPreSleep = Date.now();
 
         const pressResponse = yield* send('Input.dispatchMouseEvent', {
           type: 'mousePressed',
           x: clickX, y: clickY,
           button: 'left', clickCount: 1,
         }, oopifSessionId);
+        const tPress = Date.now();
+
         const holdMs = 50 + Math.random() * 100;
         yield* Effect.sleep(`${holdMs} millis`);
+        const tHoldSleep = Date.now();
+
         const releaseResponse = yield* send('Input.dispatchMouseEvent', {
           type: 'mouseReleased',
           x: clickX, y: clickY,
           button: 'left', clickCount: 1,
         }, oopifSessionId);
+        const tRelease = Date.now();
 
         yield* Effect.annotateCurrentSpan({
+          'cf.listener_ms': tListener - t0,
+          'cf.move_ms': tMove - tListener,
+          'cf.pre_sleep_ms': tPreSleep - tMove,
+          'cf.press_ms': tPress - tPreSleep,
+          'cf.hold_sleep_ms': tHoldSleep - tPress,
+          'cf.release_ms': tRelease - tHoldSleep,
           'cf.hold_ms': Math.round(holdMs),
           'cf.press_ok': !!pressResponse,
           'cf.release_ok': !!releaseResponse,
