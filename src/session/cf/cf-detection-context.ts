@@ -48,6 +48,12 @@ export class DetectionContext {
   abort(): Effect.Effect<void> {
     return Effect.suspend(() => {
       if (this.active.aborted) return Effect.void;
+      console.error(JSON.stringify({
+        message: 'cf.lifecycle.abort',
+        target: this.active.pageTargetId.slice(0, 8),
+        resolution_done: this.resolved,
+        elapsed_ms: Date.now() - this.active.startTime,
+      }));
       this.active.aborted = true;
       this.active.abortLatch.openUnsafe();
       return Scope.close(this.scope, Exit.void);
