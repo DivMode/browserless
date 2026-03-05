@@ -362,6 +362,10 @@ const solveTurnstile = (
     const tokenPoll = Effect.fn('cf.tokenPoll')(function*() {
       let pollCount = 0;
       while (true) {
+        // Exit immediately if Resolution was completed by another path (beacon,
+        // activity loop). Without this, the poll runs for the full remaining
+        // deadline even though the answer is ready.
+        if (active.resolution?.isDone) return TR.Aborted();
         yield* Effect.sleep(AUTO_SOLVE_POLL_DELAY);
         pollCount++;
         const token = yield* tokens.getToken(pageCdpSessionId).pipe(
@@ -492,6 +496,14 @@ const pollToken = (
     const poll = Effect.fn(`${spanName}.loop`)(function*() {
       let pollCount = 0;
       while (true) {
+        // Exit immediately if Resolution was already completed by another path
+        // (beacon, activity loop, external abort). Without this check, the poll
+        // runs for the full remaining deadline even though the answer is ready,
+        // delaying the cf.solved emission and causing pydoll to time out.
+        if (active.resolution?.isDone) {
+          yield* Effect.annotateCurrentSpan({ 'cf.poll_exit_reason': 'resolution_done' });
+          return null;
+        }
         yield* Effect.sleep(pollDelay);
         pollCount++;
         const token = yield* tokens.getToken(pageCdpSessionId).pipe(
