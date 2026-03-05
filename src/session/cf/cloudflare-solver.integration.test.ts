@@ -176,6 +176,13 @@ describe('CF Solver Integration (real nopecha.com)', () => {
   { timeout: SOLVE_TIMEOUT_MS + 15_000 });
 
   // 2. No rechallenge — P0 gate
+  //
+  // Rechallenge marker timeline (ALWAYS a failure):
+  //   cf.detected       → first detection
+  //   cf.solved/failed  → first attempt result
+  //   cf.rechallenge    → {rechallenge_count: 1, click_delivered: true}
+  //   cf.detected       → second detection (new challenge)
+  //
   it.live('no rechallenge', () =>
     Effect.gen(function*() {
       const session = yield* getSession;
@@ -203,6 +210,19 @@ describe('CF Solver Integration (real nopecha.com)', () => {
   { timeout: 10_000 });
 
   // 3. Solver detected CF
+  //
+  // Expected marker timeline for a successful interstitial click solve:
+  //   cf.detected       → {type: "interstitial", method: "url_pattern"}
+  //   cf.state_change   → {state: "widget_found", method: "iframe-src", x, y}
+  //   cf.state_change   → {state: "clicked", x, y}
+  //   cf.solved         → {type: "interstitial", method: "click_navigation", duration_ms}
+  //
+  // For auto-solve (non-interactive, no click needed):
+  //   cf.detected       → {type: "turnstile", method: "cdp_dom_walk"}
+  //   cf.cdp_no_checkbox→ {polls: 8}
+  //   cf.token_polled   → {token_length: 1029}
+  //   cf.solved         → {type: "turnstile", method: "auto_solve", signal: "token_poll"}
+  //
   it.live('solver detected CF', () =>
     Effect.gen(function*() {
       const session = yield* getSession;
@@ -246,6 +266,13 @@ describe('CF Solver Integration (real nopecha.com)', () => {
   { timeout: 10_000 });
 
   // 5. Click timing (only for click path)
+  //
+  // Successful Turnstile click-solve marker timeline:
+  //   cf.detected       → {type: "turnstile", method: "cdp_dom_walk"}
+  //   cf.oopif_click    → {ok: true, method: "cdp_oopif_session", x: 21, y: 33}
+  //   cf.token_polled   → {token_length: 1029}
+  //   cf.solved         → {type: "turnstile", method: "click_solve", signal: "token_poll"}
+  //
   it.live('click timing (if click path)', () =>
     Effect.gen(function*() {
       const session = yield* getSession;

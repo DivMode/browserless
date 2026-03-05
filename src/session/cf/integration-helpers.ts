@@ -75,6 +75,47 @@ export interface ReplayMarker {
   timestamp: number;
 }
 
+// ── CF Markers Reference ─────────────────────────────────────────────
+//
+// All custom markers (rrweb type 5, tag starts with 'cf.') emitted by
+// the browserless solver. Use these tag names when filtering replay events.
+
+/** All CF marker tags emitted by the browserless solver. */
+export const CF_MARKERS = {
+  /** CF challenge found (payload: type, method) */
+  DETECTED: 'cf.detected',
+  /** Progress update (payload: state = widget_found | clicked | verifying | success | fail | expired) */
+  STATE_CHANGE: 'cf.state_change',
+  /** Phase 1 DOM walk found iframe (payload: attempt, phase1_ms) */
+  PAGE_TRAVERSAL: 'cf.page_traversal',
+  /** Found OOPIF target for iframe click (payload: method) */
+  OOPIF_DISCOVERED: 'cf.oopif_discovered',
+  /** Entered iframe DOM session (payload: using_iframe, isolated_world) */
+  CDP_DOM_SESSION: 'cf.cdp_dom_session',
+  /** Checkbox not found after N polls (payload: polls) */
+  CDP_NO_CHECKBOX: 'cf.cdp_no_checkbox',
+  /** Checkbox found in iframe (payload: polls, checkbox_found_ms, method) */
+  CDP_CHECKBOX_FOUND: 'cf.cdp_checkbox_found',
+  /** Click dispatched to OOPIF iframe (payload: ok, method, x, y, hold_ms) */
+  OOPIF_CLICK: 'cf.oopif_click',
+  /** turnstile.getResponse() returned a token (payload: token_length) */
+  TOKEN_POLLED: 'cf.token_polled',
+  /** Timing: ms between click dispatch and page navigation */
+  CLICK_TO_NAV: 'cf.click_to_nav',
+  /** Challenge solved (payload: type, method, signal, duration_ms) */
+  SOLVED: 'cf.solved',
+  /** Auto-solved via token poll or beacon (payload: signal, method) */
+  AUTO_SOLVED: 'cf.auto_solved',
+  /** Turnstile state said "success" but still detected + no token */
+  FALSE_POSITIVE: 'cf.false_positive',
+  /** Challenge failed (payload: reason, duration_ms) */
+  FAILED: 'cf.failed',
+  /** CF re-served challenge after navigation (payload: rechallenge_count, click_delivered) */
+  RECHALLENGE: 'cf.rechallenge',
+  /** Turnstile widget in error/expired state */
+  WIDGET_ERROR: 'cf.widget_error_detected',
+} as const;
+
 // Runtime schema for replay list response — catches server-side field renames immediately
 const ReplayMetaFromServer = Schema.Struct({
   id: Schema.String,
@@ -235,6 +276,41 @@ export async function fetchReplayAnalysis(replayId: string): Promise<ReplayAnaly
 
 // ── Turnstile summary from replay markers ───────────────────────────
 
+/**
+ * Turnstile summary derived from replay CF markers — mirrors pydoll's
+ * `_format_turnstile_summary()` output.
+ *
+ * ## Summary Labels
+ *
+ * | Label               | Meaning                                    |
+ * |---------------------|--------------------------------------------|
+ * | `Int→`              | Interstitial auto-solved (no click needed) |
+ * | `Int✓`              | Interstitial click-solved                  |
+ * | `Int✗ {reason}`     | Interstitial failed — ALWAYS investigate   |
+ * | `Int?`              | Interstitial detected, unrecognized outcome|
+ * | `Emb→`              | Embedded Turnstile auto-solved             |
+ * | `Emb✓`              | Embedded widget click-solved               |
+ * | `Emb✗ {reason}`     | Embedded widget failed — ALWAYS investigate|
+ * | `Emb?`              | Embedded detected, unrecognized outcome    |
+ *
+ * ## Rechallenge Labels (ALL are failures)
+ *
+ * | Label               | Meaning                                  |
+ * |---------------------|------------------------------------------|
+ * | `Int✓Int→`          | Click → rechallenge → auto-pass          |
+ * | `Int✓Int✓`          | Click → rechallenge → click again        |
+ * | `Int→Int→`          | Auto → rechallenge → auto-pass           |
+ * | `Int✓Int✗ timeout`  | Click → rechallenge → timed out          |
+ *
+ * ## Multi-Phase (Interstitial + Embedded)
+ *
+ * | Label               | Meaning                                  |
+ * |---------------------|------------------------------------------|
+ * | `Int→ Emb→`         | Both auto-solved                         |
+ * | `Int✓ Emb→`         | Interstitial clicked, embedded auto       |
+ * | `Int→ Emb✓`         | Interstitial auto, embedded clicked       |
+ * | `Int→ Emb✗ timeout` | Interstitial passed, embedded timed out  |
+ */
 export interface TurnstileSummary {
   /** Summary label matching pydoll format: Int→, Int✓, Emb→, Emb✓, etc. */
   label: string;
@@ -288,6 +364,75 @@ export function buildSummaryFromMarkers(markers: ReplayMarker[]): TurnstileSumma
   }
 
   return { label, type, method, signal, durationMs, rechallenge: !!rechallenge };
+}
+
+// ── Summary-to-Replay Cross-Reference ────────────────────────────────
+
+/**
+ * Summary-to-replay method/signal mapping.
+ *
+ * | Summary | Expected cf.solved method         | Expected cf.solved signal       |
+ * |---------|-----------------------------------|---------------------------------|
+ * | `Int✓`  | `click_navigation`                | `page_navigated`                |
+ * | `Int→`  | `auto_navigation`                 | `page_navigated`                |
+ * | `Emb✓`  | `click_solve` or `click_navigation`| `beacon_push` or `token_poll`  |
+ * | `Emb→`  | `auto_solve`                      | `beacon_push` or `token_poll`  |
+ */
+const SUMMARY_METHOD_MAP: Record<string, { methods: string[]; signals: string[] }> = {
+  'Int✓': { methods: ['click_navigation'], signals: ['page_navigated'] },
+  'Int→': { methods: ['auto_navigation'], signals: ['page_navigated'] },
+  'Emb✓': { methods: ['click_solve', 'click_navigation'], signals: ['beacon_push', 'token_poll'] },
+  'Emb→': { methods: ['auto_solve'], signals: ['beacon_push', 'token_poll'] },
+};
+
+/**
+ * Verify that a TurnstileSummary label is consistent with its method/signal.
+ *
+ * Returns null if consistent, or an error string describing the mismatch.
+ * Mismatch examples:
+ * - `Emb✓` but method is `auto_solve` → should be `Emb→`
+ * - `Int✓` but no `cf.oopif_click` marker → click never dispatched
+ * - `duplicate_detections` → TOCTOU race (parallel detection flows)
+ */
+export function assertSummaryConsistency(
+  summary: TurnstileSummary,
+  markers: ReplayMarker[],
+): string | null {
+  const expected = SUMMARY_METHOD_MAP[summary.label];
+  if (!expected) return null; // ✗ or ? labels — already a failure
+
+  if (!expected.methods.includes(summary.method)) {
+    return `Summary '${summary.label}' expects method [${expected.methods}] but got '${summary.method}'`;
+  }
+
+  if (summary.signal && !expected.signals.includes(summary.signal)) {
+    return `Summary '${summary.label}' expects signal [${expected.signals}] but got '${summary.signal}'`;
+  }
+
+  // Click labels must have a click marker
+  if ((summary.label === 'Int✓' || summary.label === 'Emb✓') &&
+      !markers.some((m) => m.tag === CF_MARKERS.OOPIF_CLICK && m.payload.ok)) {
+    return `Summary '${summary.label}' claims click-solve but no cf.oopif_click marker with ok=true`;
+  }
+
+  // Check for TOCTOU race: multiple cf.detected with large time gap
+  const detected = markers.filter((m) => m.tag === CF_MARKERS.DETECTED);
+  if (detected.length > 1) {
+    const timestamps = detected.map((m) => m.timestamp);
+    const spread = Math.max(...timestamps) - Math.min(...timestamps);
+    if (spread > 2000) {
+      return `TOCTOU race: ${detected.length} cf.detected events ${spread}ms apart`;
+    }
+  }
+
+  // Orphaned detection: cf.detected without cf.solved or cf.failed
+  const hasSolved = markers.some((m) => m.tag === CF_MARKERS.SOLVED || m.tag === CF_MARKERS.AUTO_SOLVED);
+  const hasFailed = markers.some((m) => m.tag === CF_MARKERS.FAILED);
+  if (detected.length > 0 && !hasSolved && !hasFailed) {
+    return 'Orphaned detection: cf.detected without cf.solved or cf.failed';
+  }
+
+  return null;
 }
 
 // ── Debug helpers ───────────────────────────────────────────────────
