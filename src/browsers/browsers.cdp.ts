@@ -574,7 +574,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
         // Wire solver to CDPProxy for event emission
         if (this.cloudflareSolver && this.cdpProxy) {
           this.cloudflareSolver.setEmitClientEvent(
-            (method: string, params: object) => this.cdpProxy!.emitClientEvent(method, params),
+            (method: string, params: object) => this.cdpProxy?.emitClientEvent(method, params) ?? Promise.resolve(),
           );
           // Route solver's Input events through CDPProxy's browser WS
           this.cloudflareSolver.setSendViaProxy(
