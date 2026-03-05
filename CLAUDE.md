@@ -150,6 +150,32 @@ Key environment variables (see `src/config.ts`):
 - Single quotes, trailing commas
 - Node.js >= 24 required
 
+### Effect v4 Rules
+
+**ALWAYS `Effect.fn`, NEVER `Effect.gen`.**
+
+`Effect.fn('span.name')` creates a traced span visible in Grafana Tempo. `Effect.gen` is untraced — invisible in traces. There is zero reason to use `Effect.gen` in this codebase.
+
+```typescript
+// CORRECT — traced, visible in Tempo as "cf.myOperation"
+const result = yield* Effect.fn('cf.myOperation')(function*() {
+  yield* Effect.sleep('1 second');
+  return 42;
+})();
+
+// CORRECT — with this-binding via { self }
+Effect.fn('cf.myOperation')({ self: this }, function*() {
+  this.stateTracker.registry.get(targetId);  // proper this
+})();
+
+// WRONG — untraced, invisible
+Effect.gen(function*() { ... });
+
+// WRONG — 2015 hack, use { self } instead
+const self = this;
+Effect.fn('name')(function*() { self.whatever });
+```
+
 ## Module Extension Pattern
 
 All core modules can be overridden by extending and default-exporting:
