@@ -343,31 +343,12 @@ export class CloudflareSolveStrategies {
       // ── Phase 4: Visibility check, scroll, bounds, click ─────────────
       // No delay — pydoll clicks immediately after finding the checkbox.
       // Humanized timing comes from mouse movement in Phase 4.
-      // Input events route through CDPProxy browser WS (pre-warmed compositor)
-      // to avoid 283-1162ms stall on first mouseMoved via isolated WS.
-      const inputSend: ClickPhaseSend = (method, params, sessionId, timeoutMs) => {
-        const seq = cmdSeq++;
-        const t0 = Date.now() - solveStart;
-        if (debugEnabled) {
-          const sid = sessionId ? `[sid=${sessionId.substring(0, 16)}]` : '[no-sid]';
-          const p = params ? JSON.stringify(params).substring(0, 150) : '{}';
-          console.log(`  [INPUT #${seq}] +${t0}ms ${method} ${sid} ${p}`);
-        }
-        return cdp.sendViaBrowser(method, params, sessionId, timeoutMs).pipe(
-          Effect.orElseSucceed(() => null),
-          Effect.tap((result) =>
-            Effect.sync(() => {
-              if (debugEnabled) {
-                const t1 = Date.now() - solveStart;
-                const summary = result ? JSON.stringify(result).substring(0, 120) : 'null';
-                console.log(`  [INPUT #${seq}] +${t1}ms → ${summary}`);
-              }
-            }),
-          ),
-        );
-      };
+      // Input events stay on isolated WS (same as DOM/Runtime) — the CDPProxy
+      // browser WS has worse contention under production load (4-5s stalls
+      // vs 1s on isolated WS). The Effect bridge elimination in sendViaProxy
+      // is the real improvement here.
       return yield* strategies.phase4Click(
-        send, send, inputSend, oopifSessionId, active,
+        send, send, send, oopifSessionId, active,
         checkbox, cbMethod, iframeBackendNodeId, via, attempt, solveStart, checkboxFoundAt,
       );
     })().pipe(
