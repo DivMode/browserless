@@ -62,6 +62,9 @@ export class DetectionRegistry {
         // Remove from map (idempotent — may already be gone if destroyAll iterates)
         self.entries.delete(targetId);
 
+        const action = (!context.resolved && !active.aborted) ? 'emit' : 'skip';
+        self.log.info(`CF lifecycle: scope_finalizer target=${targetId.slice(0,8)} resolved=${context.resolved} aborted=${active.aborted} action=${action}`);
+
         if (!context.resolved && !active.aborted) {
           // Orphaned detection — abort + emit session_close fallback
           active.aborted = true;

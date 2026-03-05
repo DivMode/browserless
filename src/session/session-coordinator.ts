@@ -108,6 +108,7 @@ export class SessionCoordinator {
         );
       },
       chromePort,
+      sessionId,
     );
     this.cloudflareSolvers.set(sessionId, cloudflareSolver);
 

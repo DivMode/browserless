@@ -61,16 +61,16 @@ export class CloudflareSolver {
   private _detectionFiberMap: FiberMap.FiberMap<TargetId> | null = null;
   private runtime: ManagedRuntime.ManagedRuntime<SolverR, never>;
 
-  constructor(sendCommand: SendCommand, injectMarker: InjectMarker, chromePort?: string) {
+  constructor(sendCommand: SendCommand, injectMarker: InjectMarker, chromePort?: string, sessionId?: string) {
     this.sendCommand = sendCommand;
     // Mutable closure: emitClientEvent is set after construction by session-coordinator.ts
     let realEmit: EmitClientEvent = async () => {};
-    this.events = new CloudflareEventEmitter(injectMarker, (...args) => realEmit(...args));
+    this.events = new CloudflareEventEmitter(injectMarker, (...args) => realEmit(...args), sessionId ?? '');
     this._setRealEmit = (fn) => { realEmit = fn; };
     this.strategies = new CloudflareSolveStrategies(chromePort);
     this.stateTracker = new CloudflareStateTracker(sendCommand, this.events);
     this.detector = new CloudflareDetector(
-      this.events, this.stateTracker, this.strategies,
+      this.events, this.stateTracker, this.strategies, sessionId ?? '',
     );
 
     // Build the Effect runtime with service layers

@@ -182,6 +182,7 @@ export class CloudflareEventEmitter {
   constructor(
     private injectMarker: InjectMarker,
     private emitClientEvent: EmitClientEvent = async () => {},
+    readonly sessionId: string = '',
   ) {}
 
   emitDetected(active: ActiveDetection): void {
@@ -213,7 +214,7 @@ export class CloudflareEventEmitter {
     const timingStr = snap.checkbox_to_click_ms != null
       ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
       : '';
-    this.log.info(`CF solved: type=${result.type} method=${result.method} duration=${result.duration_ms}ms${timingStr}`);
+    this.log.info(`CF solved: session=${this.sessionId.slice(0,8)} type=${result.type} method=${result.method} duration=${result.duration_ms}ms${timingStr}`);
     this.emitClientEvent('Browserless.cloudflareSolved', {
       ...result,
       token_length: result.token_length ?? result.token?.length ?? 0,
@@ -235,7 +236,7 @@ export class CloudflareEventEmitter {
     const timingStr = snap.checkbox_to_click_ms != null
       ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
       : '';
-    this.log.warn(`CF failed: reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'} rechallenge=${isRechallenge} widget_error_count=${snap.widget_error_count} widget_error_type=${snap.widget_error_type ?? 'none'} click_count=${snap.click_count} false_positives=${snap.false_positive_count}${diagStr}${timingStr}`);
+    this.log.warn(`CF failed: session=${this.sessionId.slice(0,8)} reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'} rechallenge=${isRechallenge} widget_error_count=${snap.widget_error_count} widget_error_type=${snap.widget_error_type ?? 'none'} click_count=${snap.click_count} false_positives=${snap.false_positive_count}${diagStr}${timingStr}`);
     this.emitClientEvent('Browserless.cloudflareFailed', {
       reason, type: active.info.type, duration_ms: duration, attempts: active.attempt,
       targetId: active.pageTargetId,

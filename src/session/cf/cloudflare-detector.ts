@@ -57,7 +57,11 @@ export class CloudflareDetector {
     private events: CloudflareEventEmitter,
     private state: CloudflareStateTracker,
     private strategies: CloudflareSolveStrategies,
+    private sessionId: string = '',
   ) {}
+
+  /** Short session ID for log lines. */
+  private get sid(): string { return this.sessionId.slice(0, 8); }
 
   /**
    * Enable CF detection. Called from sync context (browsers.cdp.ts).
@@ -332,7 +336,11 @@ export class CloudflareDetector {
   }
 
   private emitSolveFailure(active: ActiveDetection, targetId: TargetId, reason: string): Effect.Effect<void> {
-    if (active.aborted) return Effect.void;
+    if (active.aborted) {
+      const ctx = this.state.registry.getContext(targetId);
+      this.log.info(`CF lifecycle: emit_failure_skipped target=${targetId.slice(0,8)} session=${this.sid} reason=abort_guard resolution_done=${ctx?.resolved ?? 'no_ctx'}`);
+      return Effect.void;
+    }
     const self = this;
     const duration = Date.now() - active.startTime;
     const ctx = this.state.registry.getContext(targetId);
@@ -623,6 +631,7 @@ export class CloudflareDetector {
         yield* ctx.bindOOPIF(pending.iframeTargetId, pending.iframeCdpSessionId);
         self.state.pendingIframes.delete(targetId);
       }
+      self.log.info(`CF lifecycle: registered target=${targetId.slice(0,8)} session=${self.sid} pending_oopif=${!!pending}`);
       self.events.emitDetected(active);
       self.events.marker(targetId, 'cf.detected', {
         type: 'turnstile', method: 'cdp_dom_walk',
@@ -633,6 +642,7 @@ export class CloudflareDetector {
         sitekey: meta?.sitekey ?? null,
         oopif_mode: meta?.mode ?? null,
       });
+      self.log.info(`CF lifecycle: detected target=${targetId.slice(0,8)} session=${self.sid} sitekey=${meta?.sitekey ?? 'none'}`);
 
       // Skip Turnstile rechallenges — detected by the navigation tracker
       // (pendingRechallengeCount), NOT by URL parsing (/rch/ is in ALL OOPIF URLs).
@@ -649,6 +659,8 @@ export class CloudflareDetector {
       }
 
       // Dispatch solve via Effect service — no more Promise bridge
+      self.log.info(`CF lifecycle: dispatch_start target=${targetId.slice(0,8)} session=${self.sid}`);
+      const dispatchStartMs = Date.now();
       const dispatcher = yield* SolveDispatcher;
       const outcome = yield* dispatcher.dispatch(active).pipe(
         Effect.catchCause((cause) => {
@@ -657,10 +669,13 @@ export class CloudflareDetector {
           return Effect.succeed('aborted' as const);
         }),
       );
+      self.log.info(`CF lifecycle: dispatch_end target=${targetId.slice(0,8)} session=${self.sid} outcome=${outcome} aborted=${active.aborted} elapsed_ms=${Date.now() - dispatchStartMs}`);
       // Complete Resolution for immediate failures
       if (outcome === 'no_click') {
+        self.log.info(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=widget_not_found`);
         yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
       } else if (outcome === 'click_no_token') {
+        self.log.info(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=timeout`);
         yield* self.emitSolveFailure(active, targetId, 'timeout');
       }
 
@@ -669,20 +684,24 @@ export class CloudflareDetector {
       // For no_click/click_no_token: emitSolveFailure already completed it.
       // 10s timeout is generous fallback.
       if (active.resolution) {
+        self.log.info(`CF lifecycle: resolution_await target=${targetId.slice(0,8)} session=${self.sid} resolution_done=${active.resolution.isDone} aborted=${active.aborted}`);
         const maybeResolved = yield* active.resolution.await.pipe(
           Effect.timeoutOption('10 seconds'),
         );
         if (maybeResolved._tag === 'Some') {
           const resolved = maybeResolved.value;
           if (resolved._tag === 'solved') {
+            self.log.info(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=solved method=${resolved.result.method} elapsed_ms=${Date.now() - active.startTime}`);
             // PHANTOM GUARD: Mark page as solved to block post-solve OOPIF re-detection.
             self.state.solvedPages.add(targetId);
             self.events.emitSolved(active, resolved.result);
           } else {
+            self.log.info(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=failed reason=${resolved.reason} elapsed_ms=${resolved.duration_ms}`);
             self.events.emitFailed(active, resolved.reason, resolved.duration_ms);
           }
         } else {
           const duration = Date.now() - active.startTime;
+          self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=timeout elapsed_ms=${duration}`);
           self.events.emitFailed(active, 'solver_exit', duration);
         }
         if (self.state.registry.has(targetId)) {
