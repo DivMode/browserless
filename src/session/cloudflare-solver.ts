@@ -282,27 +282,28 @@ export class CloudflareSolver {
     // The detection effect is wrapped in catchAllCause to prevent silent fiber
     // death — without this, defects (NPE in emitClientEvent, etc.) kill the fiber
     // and pydoll never receives cf.solved/cf.failed (the "events=1" failure mode).
-    const solver = this;
     const guarded = this.detector.detectTurnstileWidgetEffect(targetId, cdpSessionId).pipe(
-      Effect.catchCause((cause) => Effect.gen(function*() {
-        const pretty = Cause.pretty(cause);
-        console.error(JSON.stringify({
-          message: 'Detection fiber crashed — emitting fallback failure',
-          targetId,
-          error: pretty,
-        }));
-        // Emit cf.failed so pydoll doesn't hang waiting for event #2
-        const active = solver.stateTracker.registry.get(targetId);
-        if (active && !active.aborted) {
-          const duration = Date.now() - active.startTime;
-          active.aborted = true;
-          active.abortLatch.openUnsafe();
-          solver.events.emitFailed(active, 'fiber_crash', duration);
-          if (solver.stateTracker.registry.has(targetId)) {
-            yield* solver.stateTracker.registry.resolve(targetId);
+      Effect.catchCause((cause) =>
+        Effect.fn('cf.detectionFiberGuard')({ self: this }, function*() {
+          const pretty = Cause.pretty(cause);
+          console.error(JSON.stringify({
+            message: 'Detection fiber crashed — emitting fallback failure',
+            targetId,
+            error: pretty,
+          }));
+          // Emit cf.failed so pydoll doesn't hang waiting for event #2
+          const active = this.stateTracker.registry.get(targetId);
+          if (active && !active.aborted) {
+            const duration = Date.now() - active.startTime;
+            active.aborted = true;
+            active.abortLatch.openUnsafe();
+            this.events.emitFailed(active, 'fiber_crash', duration);
+            if (this.stateTracker.registry.has(targetId)) {
+              yield* this.stateTracker.registry.resolve(targetId);
+            }
           }
-        }
-      })),
+        })(),
+      ),
     );
     this.runtime.runFork(
       FiberMap.run(this._detectionFiberMap, targetId, guarded),
