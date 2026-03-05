@@ -16,7 +16,14 @@ export const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN || '';
 export const PROXY_URL = process.env.LOCAL_MOBILE_PROXY || '';
 export const BROWSERLESS_HTTP = process.env.BROWSERLESS_ENDPOINT || 'http://localhost:3000';
 /** Replay server HTTP endpoint — separate from browserless in the new architecture. */
-export const REPLAY_HTTP = process.env.REPLAY_INGEST_URL!;
+const _replayUrl = process.env.REPLAY_INGEST_URL;
+if (!_replayUrl) {
+  throw new Error(
+    'REPLAY_INGEST_URL env var required for integration tests. ' +
+    'Ensure .env.dev exists and vitest.integration.config.ts loads it via loadEnv.',
+  );
+}
+export const REPLAY_HTTP: string = _replayUrl;
 
 /** Shared path for test results — written by tests, read by globalSetup teardown. */
 export const RESULTS_FILE = join(tmpdir(), 'cf-integration-results.jsonl');

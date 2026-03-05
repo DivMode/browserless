@@ -28,9 +28,19 @@ import { ReplayWriter, ReplayMetrics } from './replay-services.js';
 import { CdpSender, SessionLifecycle } from './session-services.js';
 import { tabConsumer } from './replay-pipeline.js';
 import type { CdpSessionOptions } from './cdp-session-types.js';
+
 import type { CloudflareHooks } from './cloudflare-hooks.js';
 import type { VideoHooks } from './video-services.js';
 import { OtelLayer } from '../otel-layer.js';
+
+// Capture at module load — defense-in-depth against stale `node --watch` zombies.
+// In March 2026, a zombie `node --watch build/index.js` (started via env-cmd which
+// silently fails on .env.dev) intercepted ALL connections. Our test-spawned server
+// had correct env but sat idle. Module-level capture ensures this value is frozen
+// at import time — if a zombie loads this module without the env var, buildLayer()
+// throws immediately on first connection instead of silently dropping replays.
+// Primary defense is index.ts startup validation; this is the second line.
+const REPLAY_INGEST_URL = process.env.REPLAY_INGEST_URL;
 
 type CdpSessionState = 'INITIALIZING' | 'ACTIVE' | 'DRAINING' | 'DESTROYED';
 
@@ -108,20 +118,30 @@ export class CdpSession {
    */
   private buildLayer(): Layer.Layer<SessionR> {
     const self = this;
-
     // CdpSenderLayer — uses Effect-native send() directly (no Promise bridge)
     const cdpSenderLayer = Layer.succeed(CdpSender, CdpSender.of({
       send: (method, params, cdpSessionId, timeoutMs) =>
         self.send(method, params ?? {}, cdpSessionId, timeoutMs),
     }));
 
-    // ReplayWriterLayer — HTTP POST to replay server (no local file/SQLite)
-    const replayServerUrl = process.env.REPLAY_INGEST_URL || 'http://replay:3000';
+    // ReplayWriterLayer — HTTP POST to replay server (REQUIRED, no fallback).
+    // Uses module-level REPLAY_INGEST_URL (captured at import time) — NOT process.env.
+    // A stale `node --watch` process without env vars would silently POST to undefined.
+    // index.ts validates at startup; this is defense-in-depth for the session layer.
+    if (!REPLAY_INGEST_URL) {
+      throw new Error(
+        'REPLAY_INGEST_URL not set when cdp-session module loaded. ' +
+        'This usually means a stale `node --watch` process is running without proper env. ' +
+        'Kill all node processes and restart: pkill -f "node.*build/index"',
+      );
+    }
+    const replayServerUrl = REPLAY_INGEST_URL;
     const writerLayer = Layer.succeed(ReplayWriter, ReplayWriter.of({
       writeTabReplay: (tabReplayId, events, metadata) =>
         Effect.tryPromise({
           try: async () => {
-            const resp = await fetch(`${replayServerUrl}/replays`, {
+            const url = `${replayServerUrl}/replays`;
+            const resp = await fetch(url, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({

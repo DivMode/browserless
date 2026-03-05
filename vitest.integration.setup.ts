@@ -1,11 +1,20 @@
 /**
  * vitest globalSetup: auto-build and start browserless for integration tests.
  *
- * Local mode (default): builds via tsc, kills any stale process on :3000,
- * then spawns a fresh server using env-cmd + node.
+ * Local mode (default): kills ALL stale node build/index processes, builds via
+ * tsc, spawns a fresh server with env vars loaded via Vite loadEnv, and verifies
+ * OUR spawned PID owns port 3000 before tests run.
  *
  * Remote mode (TEST_ENV=prod): skips build/spawn, health-checks the remote
  * endpoint from BROWSERLESS_ENDPOINT env var.
+ *
+ * IMPORTANT: env-cmd is NOT used — it silently fails on .env.dev files (treats
+ * .dev extension as a JSON RC file). All env vars come from Vite loadEnv.
+ *
+ * IMPORTANT: `node --watch` dev servers race with our spawned server. After tsc
+ * rebuilds `build/index.js`, any running `--watch` process auto-restarts and
+ * grabs port 3000 before our spawn. killByName() kills ALL matching processes
+ * regardless of port binding state. See: 2026-03-04 zombie process incident.
  */
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createWriteStream, existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -14,9 +23,12 @@ import path from 'node:path';
 import { loadEnv } from 'vite';
 
 // Load .env.{TEST_ENV} into process.env — globalSetup doesn't receive vitest's test.env
+// MUST use import.meta.dirname (not process.cwd()) — cwd may differ from project root
 const testEnvMode = process.env.TEST_ENV || 'dev';
-const envVars = loadEnv(testEnvMode, process.cwd(), '');
+const envVars = loadEnv(testEnvMode, import.meta.dirname, '');
 Object.assign(process.env, envVars);
+
+console.log(`[globalSetup] Loaded ${Object.keys(envVars).length} env vars from .env.${testEnvMode}`);
 
 async function killPort(port: number): Promise<void> {
   try {
@@ -27,10 +39,39 @@ async function killPort(port: number): Promise<void> {
     for (const pid of pids) {
       process.kill(Number(pid), 'SIGTERM');
     }
-    // Wait briefly for process to exit
     await new Promise((r) => setTimeout(r, 500));
   } catch {
     // No process on port — nothing to kill
+  }
+}
+
+/**
+ * Kill ALL node processes matching `build/index.js` — regardless of port state.
+ *
+ * killPort() only finds processes already LISTENING on :3000. A `node --watch`
+ * process that just restarted (after tsc rebuilt build/index.js) may not have
+ * bound the port yet — it races with our spawn. This function catches those
+ * in-flight zombies by matching the process command line.
+ *
+ * Skips our own PID to avoid self-termination.
+ */
+async function killByName(): Promise<void> {
+  try {
+    const stdout = execFileSync(
+      'pgrep', ['-f', 'node.*build/index\\.js'],
+      { encoding: 'utf-8' },
+    );
+    const pids = stdout.trim().split('\n').filter(Boolean).map(Number);
+    const ownPid = process.pid;
+    const toKill = pids.filter((pid) => pid !== ownPid);
+    if (toKill.length === 0) return;
+    console.log(`[globalSetup] Killing stale node build/index processes: ${toKill.join(', ')}`);
+    for (const pid of toKill) {
+      try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  } catch {
+    // pgrep returns exit code 1 when no processes match — expected
   }
 }
 
@@ -90,7 +131,14 @@ export async function setup() {
     return;
   }
 
-  // Always build — ensures build/ reflects latest source edits even if server is already running
+  // ── Kill ALL stale browserless processes ────────────────────────────
+  // Two strategies: by port (catches anything listening on :3000) AND by
+  // process name (catches `node --watch` zombies that haven't bound yet).
+  // Both run before AND after tsc — tsc rebuilds trigger --watch restarts.
+  await killPort(PORT);
+  await killByName();
+
+  // Always build — ensures build/ reflects latest source edits
   console.log('[globalSetup] Building browserless (tsc)...');
   const buildStart = Date.now();
   execFileSync('npx', ['tsc'], { cwd: BROWSERLESS_DIR, stdio: 'inherit' });
@@ -103,16 +151,17 @@ export async function setup() {
     execFileSync('bun', ['extensions/replay/build.js'], { cwd: BROWSERLESS_DIR, stdio: 'inherit' });
   }
 
-  // Kill any stale process on port 3000 so we always spawn a fresh server with correct env
+  // Kill AGAIN after build — tsc file changes trigger `node --watch` restarts
   await killPort(PORT);
+  await killByName();
 
   console.log('[globalSetup] Starting browserless...');
 
-  // Same as `just dev` but without --watch (no file watching needed for tests)
-  // Uses env-cmd to load .env.dev, MUST use node (not bun — bun breaks WS proxying)
+  // MUST use node (not bun — bun breaks WS proxying).
+  // Env vars come from Vite loadEnv (line 19), NOT env-cmd.
   serverProcess = spawn(
-    'npx',
-    ['env-cmd', '-f', '.env.dev', 'node', 'build/index.js'],
+    'node',
+    ['build/index.js'],
     {
       cwd: BROWSERLESS_DIR,
       env: { ...process.env, PORT: String(PORT), HOST: '0.0.0.0' },
@@ -120,14 +169,15 @@ export async function setup() {
     },
   );
 
-  // Redirect server output to log file — keeps test output clean.
-  // Server logs are only useful when debugging startup failures.
+  const spawnedPid = serverProcess.pid;
+  console.log(`[globalSetup] Spawned server PID: ${spawnedPid}`);
+
+  // Redirect server output to log file — keeps test output clean
   const logPath = path.join(BROWSERLESS_DIR, 'test-server.log');
   const logStream = createWriteStream(logPath);
   serverProcess.stdout?.pipe(logStream);
   serverProcess.stderr?.pipe(logStream);
   console.log(`[globalSetup] Server logs: ${logPath}`);
-
   serverProcess.on('error', (err) => {
     throw new Error(`Failed to spawn browserless: ${err.message}`);
   });
@@ -139,6 +189,31 @@ export async function setup() {
   });
 
   await waitForReady(MAX_WAIT_MS);
+
+  // ── PID ownership verification ─────────────────────────────────────
+  // After the port is ready, verify OUR spawned PID owns it — not a zombie.
+  // This catches the exact scenario from 2026-03-04: a stale `node --watch`
+  // process grabs port 3000, our server fails to bind (but doesn't crash),
+  // and all connections go to the wrong process.
+  if (spawnedPid) {
+    try {
+      const lsofOut = execFileSync('lsof', ['-ti', `:${PORT}`], { encoding: 'utf-8' });
+      const portPids = lsofOut.trim().split('\n').filter(Boolean).map(Number);
+      if (!portPids.includes(spawnedPid)) {
+        // Our PID is NOT on the port — a zombie stole it
+        const portOwners = portPids.join(', ');
+        throw new Error(
+          `Port ${PORT} owned by PID(s) ${portOwners}, but we spawned PID ${spawnedPid}. ` +
+          `A stale process is intercepting connections. ` +
+          `Kill all: pkill -f "node.*build/index"`,
+        );
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('owned by PID')) throw err;
+      // lsof failed — non-fatal, server is responding to health check
+    }
+  }
+
   console.log('[globalSetup] Browserless ready');
 }
 
