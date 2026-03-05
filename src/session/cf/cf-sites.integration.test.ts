@@ -20,6 +20,7 @@
  *     npx vitest run --config vitest.integration.config.ts
  */
 import { describe, expect, it } from '@effect/vitest';
+import { execFileSync } from 'node:child_process';
 import { Effect } from 'effect';
 import type { Scope } from 'effect';
 import { afterAll, beforeAll } from 'vitest';
@@ -338,4 +339,79 @@ describe.concurrent('CF Solver Multi-Site', () => {
       }),
     { timeout: 90_000 });
   }
+});
+
+// ── Pydoll subprocess tests ────────────────────────────────────────
+//
+// These run pydoll CLI commands as child processes, parsing stdout for
+// expected output. This puts the ENTIRE test pyramid — browserless unit
+// tests, integration tests, pydoll live tests, and stress tests — under
+// a single `npx vitest run --config vitest.integration.config.ts` command.
+
+const PYDOLL_DIR = '/Users/peter/Developer/catchseo/packages/pydoll-scraper';
+
+/** Run a command with proxy env var and return stdout. */
+function runWithProxy(args: string[], timeoutMs: number): string {
+  const proxy = process.env.LOCAL_MOBILE_PROXY;
+  if (!proxy) throw new Error('LOCAL_MOBILE_PROXY required for pydoll tests');
+  return execFileSync('uv', ['run', 'pydoll', ...args], {
+    cwd: PYDOLL_DIR,
+    env: { ...process.env, LOCAL_MOBILE_PROXY: proxy },
+    encoding: 'utf-8',
+    timeout: timeoutMs,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+}
+
+describe('Pydoll Pipeline', () => {
+  it('ahrefs-fast produces valid DR and CF summary', () => {
+    const stdout = runWithProxy(
+      ['ahrefs-fast', 'etsy.com', '--chrome-endpoint=local-browserless'],
+      120_000,
+    );
+
+    // Must have a [Turnstile] summary line
+    const summaryMatch = stdout.match(/\[Turnstile\]\s+(.+)/);
+    expect(summaryMatch, 'No [Turnstile] summary in ahrefs-fast output').toBeTruthy();
+    const summary = summaryMatch![1];
+
+    // Must contain Int→ or Emb→ (auto-solve paths)
+    const hasValidSummary = /(?:Int[→✓]|Emb[→✓])/.test(summary);
+    expect(hasValidSummary, `Unexpected summary: ${summary}`).toBe(true);
+
+    // Must have DR value in JSON output
+    const drMatch = stdout.match(/"domainRating":\s*(\d+)/);
+    expect(drMatch, 'No domainRating in ahrefs-fast output').toBeTruthy();
+    const dr = Number(drMatch![1]);
+    expect(dr).toBeGreaterThan(0);
+  }, { timeout: 180_000 });
+
+  it('cf-stress passes >=80% with 15 concurrent tabs', () => {
+    const stdout = runWithProxy(
+      ['cf-stress', '--concurrent', '15', '--chrome-endpoint=local-browserless'],
+      300_000,
+    );
+
+    // Parse results table: "N/15 passed"
+    const passMatch = stdout.match(/(\d+)\/15 passed/);
+    expect(passMatch, 'No pass count in cf-stress output').toBeTruthy();
+    const passed = Number(passMatch![1]);
+    expect(passed, `Only ${passed}/15 passed (need >=12 for 80%)`).toBeGreaterThanOrEqual(12);
+  }, { timeout: 360_000 });
+
+  it('pydoll unit tests pass', () => {
+    const stdout = execFileSync('uv', ['run', 'pytest', 'tests/test_cloudflare_metrics.py', '-v'], {
+      cwd: PYDOLL_DIR,
+      encoding: 'utf-8',
+      timeout: 30_000,
+    });
+
+    // pytest prints "N passed" at the end
+    const passMatch = stdout.match(/(\d+) passed/);
+    expect(passMatch, 'No "passed" count in pytest output').toBeTruthy();
+    expect(Number(passMatch![1])).toBeGreaterThan(0);
+
+    // No failures
+    expect(stdout).not.toMatch(/\d+ failed/);
+  }, { timeout: 60_000 });
 });

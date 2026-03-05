@@ -122,8 +122,8 @@ export class CloudflareDetector {
 
       const active = self.state.registry.get(targetId);
       if (active) {
-        active.aborted = true;
-        active.abortLatch.openUnsafe();
+        const navCtx = self.state.registry.getContext(targetId);
+        if (navCtx) yield* navCtx.abort();
         yield* self.state.registry.resolve(targetId);
         const duration = Date.now() - active.startTime;
 
@@ -280,65 +280,77 @@ export class CloudflareDetector {
     iframeTargetId: TargetId, iframeCdpSessionId: CdpSessionId,
     url: string, parentCdpSessionId: CdpSessionId,
   ): Effect.Effect<void> {
-    return Effect.sync(() => {
-      if (!this.enabled) return;
+    const self = this;
+    return Effect.fn('cf.detector.onIframeAttached')(function*() {
+      if (!self.enabled) return;
       if (!url?.includes('challenges.cloudflare.com')) return;
 
-      const pageTargetId = this.state.findPageBySession(parentCdpSessionId);
+      const pageTargetId = self.state.findPageBySession(parentCdpSessionId);
       if (!pageTargetId) return;
 
-      this.state.iframeToPage.set(iframeTargetId, pageTargetId);
+      // Maintain iframeToPage for backwards compat (filterOwnedTargets, onIframeNavigated)
+      self.state.iframeToPage.set(iframeTargetId, pageTargetId);
 
-      const active = this.state.registry.get(pageTargetId);
-      if (active) {
-        active.iframeCdpSessionId = iframeCdpSessionId;
-        active.iframeTargetId = iframeTargetId;
+      const ctx = self.state.registry.getContext(pageTargetId);
+      if (ctx) {
+        // Bind OOPIF as a scoped child — OOPIF death auto-aborts detection
+        yield* ctx.bindOOPIF(iframeTargetId, iframeCdpSessionId);
       } else {
         // Store iframe as pending — triggerSolveFromUrl or onPageNavigated's
         // detectTurnstileWidgetEffect will pick it up. Do NOT start detection
         // here: it races with triggerSolveFromUrl creating duplicate parallel solves
         // (both detected at +0.0s, interstitial orphaned → no_resolution).
-        this.state.pendingIframes.set(pageTargetId, { iframeCdpSessionId, iframeTargetId });
+        self.state.pendingIframes.set(pageTargetId, { iframeCdpSessionId, iframeTargetId });
       }
-    });
+    })();
   }
 
   /** Called when an iframe navigates (Target.targetInfoChanged for type=iframe). Returns Effect<void>. */
   onIframeNavigatedEffect(
     iframeTargetId: TargetId, iframeCdpSessionId: CdpSessionId, url: string,
   ): Effect.Effect<void> {
-    return Effect.sync(() => {
-      if (!this.enabled) return;
+    const self = this;
+    return Effect.fn('cf.detector.onIframeNavigated')(function*() {
+      if (!self.enabled) return;
       if (!url?.includes('challenges.cloudflare.com')) return;
 
-      const pageTargetId = this.state.iframeToPage.get(iframeTargetId);
+      const pageTargetId = self.state.iframeToPage.get(iframeTargetId);
       if (!pageTargetId) return;
 
-      const active = this.state.registry.get(pageTargetId);
-      if (active && !active.iframeCdpSessionId) {
-        active.iframeCdpSessionId = iframeCdpSessionId;
-        active.iframeTargetId = iframeTargetId;
-      } else if (!active) {
+      const ctx = self.state.registry.getContext(pageTargetId);
+      if (ctx && !ctx.active.iframeCdpSessionId) {
+        // Bind OOPIF as a scoped child — OOPIF death auto-aborts detection
+        yield* ctx.bindOOPIF(iframeTargetId, iframeCdpSessionId);
+      } else if (!ctx) {
         // Same race as onIframeAttached: if onPageNavigated hasn't fired yet,
         // there's no active detection, but triggerSolveFromUrl is about to create one.
         // Starting detection here races with it → dual detection → orphan.
         // Store as pending instead — triggerSolveFromUrl/detectTurnstileWidgetEffect will pick it up.
-        this.state.pendingIframes.set(pageTargetId, { iframeCdpSessionId, iframeTargetId });
+        self.state.pendingIframes.set(pageTargetId, { iframeCdpSessionId, iframeTargetId });
       }
-    });
+    })();
   }
 
   private emitSolveFailure(active: ActiveDetection, targetId: TargetId, reason: string): Effect.Effect<void> {
     if (active.aborted) return Effect.void;
+    const self = this;
     const duration = Date.now() - active.startTime;
-    active.aborted = true;
-    active.abortLatch.openUnsafe();
-    if (active.resolution) {
-      return active.resolution.fail(reason, duration);
-      // Don't resolve registry — single consumer handles it
-    }
-    this.events.emitFailed(active, reason, duration);
-    return this.state.registry.resolve(targetId);
+    const ctx = this.state.registry.getContext(targetId);
+    return Effect.gen(function*() {
+      if (ctx) {
+        yield* ctx.abort();
+      } else {
+        active.aborted = true;
+        active.abortLatch.openUnsafe();
+      }
+      if (active.resolution) {
+        yield* active.resolution.fail(reason, duration);
+        // Don't resolve registry — single consumer handles it
+      } else {
+        self.events.emitFailed(active, reason, duration);
+        yield* self.state.registry.resolve(targetId);
+      }
+    });
   }
 
   // ─── Private detection methods ──────────────────────────────────────
@@ -422,11 +434,10 @@ export class CloudflareDetector {
         resolution: Resolution.makeUnsafe(),
       };
 
-      yield* self.state.registry.register(targetId, active);
+      const ctx = yield* self.state.registry.register(targetId, active);
       const pending = self.state.pendingIframes.get(targetId);
       if (pending) {
-        active.iframeCdpSessionId = pending.iframeCdpSessionId;
-        active.iframeTargetId = pending.iframeTargetId;
+        yield* ctx.bindOOPIF(pending.iframeTargetId, pending.iframeCdpSessionId);
         self.state.pendingIframes.delete(targetId);
       }
       self.events.emitDetected(active);
@@ -606,11 +617,10 @@ export class CloudflareDetector {
       // rechallenges. The bindingSolvedTargets check (above) already covers
       // auto-solve via the push-based binding mechanism.
 
-      yield* self.state.registry.register(targetId, active);
+      const ctx = yield* self.state.registry.register(targetId, active);
       const pending = self.state.pendingIframes.get(targetId);
       if (pending) {
-        active.iframeCdpSessionId = pending.iframeCdpSessionId;
-        active.iframeTargetId = pending.iframeTargetId;
+        yield* ctx.bindOOPIF(pending.iframeTargetId, pending.iframeCdpSessionId);
         self.state.pendingIframes.delete(targetId);
       }
       self.events.emitDetected(active);

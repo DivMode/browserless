@@ -165,6 +165,9 @@ export const solveDetection = (
         if (!active.aborted) {
           const events = yield* SolverEvents;
           yield* events.emitFailed(active, 'solve_exception', Date.now() - active.startTime);
+          // Abort via latch directly — solveDetection runs inside the solve dispatch
+          // and doesn't have access to the DetectionContext. The context.abort() at the
+          // registry level will handle scope cleanup; here we just need to signal the latch.
           active.aborted = true;
           active.abortLatch.openUnsafe();
         }

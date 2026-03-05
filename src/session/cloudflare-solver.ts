@@ -1,4 +1,4 @@
-import { Cause, Effect, FiberMap, Layer, ManagedRuntime } from 'effect';
+import { Cause, Effect, Exit, FiberMap, Layer, ManagedRuntime, Scope } from 'effect';
 import { CdpSessionId } from '../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareConfig } from '../shared/cloudflare-detection.js';
 import { CloudflareDetector } from './cf/cloudflare-detector.js';
@@ -272,16 +272,15 @@ export class CloudflareSolver {
     // fires targetDestroyed after our detection poll but before cleanup
     this.stateTracker.solvedCFTargetIds.add(targetId as unknown as string);
 
-    // If this is an OOPIF being destroyed, abort the PARENT page's detection.
-    // Without this, the poll loop on the page session burns its full deadline
-    // polling for a token that will never arrive (CF killed the OOPIF = rejection).
-    const pageTargetId = this.stateTracker.iframeToPage.get(targetId);
-    if (pageTargetId) {
-      const active = this.stateTracker.registry.get(pageTargetId);
-      if (active && !active.aborted) {
-        active.aborted = true;
-        active.abortLatch.openUnsafe();
-      }
+    // If this is an OOPIF being destroyed, close the OOPIF's scope.
+    // The scope finalizer calls context.abort() → detection scope closes
+    // → latch opens → poll loops exit within ~500ms. No identity map needed.
+    const parentCtx = this.stateTracker.registry.findByIframeTarget(targetId);
+    if (parentCtx?.oopif) {
+      // Close OOPIF scope — finalizer propagates abort to parent detection
+      Effect.runSync(
+        Scope.close(parentCtx.oopif.scope, Exit.void),
+      );
     }
 
     return Effect.promise(() => this.runtime.runPromise(
@@ -305,12 +304,11 @@ export class CloudflareSolver {
             error: pretty,
           }));
           // Emit cf.failed so pydoll doesn't hang waiting for event #2
-          const active = this.stateTracker.registry.get(targetId);
-          if (active && !active.aborted) {
-            const duration = Date.now() - active.startTime;
-            active.aborted = true;
-            active.abortLatch.openUnsafe();
-            this.events.emitFailed(active, 'fiber_crash', duration);
+          const crashCtx = this.stateTracker.registry.getContext(targetId);
+          if (crashCtx && !crashCtx.aborted) {
+            const duration = Date.now() - crashCtx.active.startTime;
+            yield* crashCtx.abort();
+            this.events.emitFailed(crashCtx.active, 'fiber_crash', duration);
             if (this.stateTracker.registry.has(targetId)) {
               yield* this.stateTracker.registry.resolve(targetId);
             }
