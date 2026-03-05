@@ -199,19 +199,21 @@ export class CloudflareStateTracker {
         };
 
         // Complete via Resolution gateway if available — exactly-one emission
+        const ctx = tracker.registry.getContext(pageTargetId);
         if (active.resolution) {
           const won = yield* active.resolution.solve(solveResult);
-          if (won) {
-            active.aborted = true; active.abortLatch.openUnsafe();
+          if (won && ctx) {
+            yield* ctx.abort();
           }
         } else {
           // Fallback for detections without Resolution (should not happen after full wiring)
-          active.aborted = true; active.abortLatch.openUnsafe();
+          if (ctx) yield* ctx.abort();
           tracker.events.emitSolved(active, solveResult);
           yield* tracker.registry.resolve(pageTargetId);
         }
       } else if (state === 'fail' || state === 'expired' || state === 'timeout') {
-        active.aborted = true; active.abortLatch.openUnsafe();
+        const failCtx = tracker.registry.getContext(pageTargetId);
+        if (failCtx) yield* failCtx.abort();
         if (active.attempt < tracker.config.maxAttempts) {
           active.attempt++;
           active.aborted = false;
@@ -288,13 +290,14 @@ export class CloudflareStateTracker {
           token_length: tokenLength,
           phase_label: attr.label,
         };
+        const beaconCtx = tracker.registry.getContext(targetId);
         if (active.resolution) {
           const won = yield* active.resolution.solve(result);
-          if (won) {
-            active.aborted = true; active.abortLatch.openUnsafe();
+          if (won && beaconCtx) {
+            yield* beaconCtx.abort();
           }
         } else {
-          active.aborted = true; active.abortLatch.openUnsafe();
+          if (beaconCtx) yield* beaconCtx.abort();
           tracker.events.emitSolved(active, result);
           yield* tracker.registry.resolve(targetId);
         }
@@ -343,17 +346,18 @@ export class CloudflareStateTracker {
         attempts: active.attempt, auto_resolved: attr.autoResolved, signal,
         phase_label: attr.label,
       };
+      const autoCtx = tracker.registry.getContext(active.pageTargetId);
       if (active.resolution) {
         const won = yield* active.resolution.solve(result);
         // Only abort + emit marker if we actually won the race.
         // Losers (won=false) must not mutate active state or emit —
         // the winner already resolved and the detector handles emission.
         if (won) {
-          active.aborted = true; active.abortLatch.openUnsafe();
+          if (autoCtx) yield* autoCtx.abort();
           tracker.events.marker(active.pageTargetId, 'cf.auto_solved', { signal, method: attr.method });
         }
       } else {
-        active.aborted = true; active.abortLatch.openUnsafe();
+        if (autoCtx) yield* autoCtx.abort();
         const pageTargetId = tracker.findPageBySession(active.pageCdpSessionId);
         if (pageTargetId) yield* tracker.registry.resolve(pageTargetId);
         tracker.events.emitSolved(active, result);
