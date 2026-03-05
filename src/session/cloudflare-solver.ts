@@ -1,4 +1,4 @@
-import { Effect, FiberMap, Layer, ManagedRuntime } from 'effect';
+import { Cause, Effect, FiberMap, Layer, ManagedRuntime } from 'effect';
 import { CdpSessionId } from '../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareConfig } from '../shared/cloudflare-detection.js';
 import { CloudflareDetector } from './cf/cloudflare-detector.js';
@@ -278,11 +278,34 @@ export class CloudflareSolver {
 
   private startDetectionFiber(targetId: TargetId, cdpSessionId: CdpSessionId): void {
     if (!this._detectionFiberMap) return;
-    // FiberMap.run auto-interrupts existing fiber for same key
+    // FiberMap.run auto-interrupts existing fiber for same key.
+    // The detection effect is wrapped in catchAllCause to prevent silent fiber
+    // death — without this, defects (NPE in emitClientEvent, etc.) kill the fiber
+    // and pydoll never receives cf.solved/cf.failed (the "events=1" failure mode).
+    const solver = this;
+    const guarded = this.detector.detectTurnstileWidgetEffect(targetId, cdpSessionId).pipe(
+      Effect.catchCause((cause) => Effect.gen(function*() {
+        const pretty = Cause.pretty(cause);
+        console.error(JSON.stringify({
+          message: 'Detection fiber crashed — emitting fallback failure',
+          targetId,
+          error: pretty,
+        }));
+        // Emit cf.failed so pydoll doesn't hang waiting for event #2
+        const active = solver.stateTracker.registry.get(targetId);
+        if (active && !active.aborted) {
+          const duration = Date.now() - active.startTime;
+          active.aborted = true;
+          active.abortLatch.openUnsafe();
+          solver.events.emitFailed(active, 'fiber_crash', duration);
+          if (solver.stateTracker.registry.has(targetId)) {
+            yield* solver.stateTracker.registry.resolve(targetId);
+          }
+        }
+      })),
+    );
     this.runtime.runFork(
-      FiberMap.run(this._detectionFiberMap, targetId,
-        this.detector.detectTurnstileWidgetEffect(targetId, cdpSessionId),
-      ),
+      FiberMap.run(this._detectionFiberMap, targetId, guarded),
     );
   }
 
