@@ -50,9 +50,24 @@ npm run install:browsers
 
 **NEVER run `npm test`, `npx mocha`, or any mocha commands.** The mocha suite is upstream browserless's HTTP/screenshot integration tests. They are irrelevant to our CF solver work, require infrastructure we don't have, and take forever.
 
-**Verification for our code changes:**
-1. `npx tsc --noEmit` — typecheck
-2. `cf-test` via pydoll — live solver verification
+### Test Gate (MANDATORY before committing)
+
+**NEVER commit if ANY test fails.** Zero tolerance. Fix it or get explicit user approval.
+
+**NEVER change test expectations without explicit user approval.** Every line change in a test file must be explained and justified BEFORE committing. Tests are the contract.
+
+**ALWAYS run ALL tests in the CURRENT session before committing.** "Tests passed last session" is not valid.
+
+Vitest has TWO configs:
+1. `npx vitest run` — unit tests (`*.test.ts`, excludes integration). Fast, no browser.
+2. `LOCAL_MOBILE_PROXY=$(op read "op://Catchseo.com/Proxies/local_mobile_proxy") npx vitest run --config vitest.integration.config.ts` — integration tests (`*.integration.test.ts`). Launches real server, hits real CF sites, runs pydoll subprocess tests (ahrefs-fast, cf-stress, pytest). 60s timeout.
+
+`npx vitest run` alone only runs unit tests — ALWAYS run both.
+
+The full test gate:
+1. `npx tsc --noEmit` (typecheck)
+2. `npx vitest run` (unit tests)
+3. `LOCAL_MOBILE_PROXY=... npx vitest run --config vitest.integration.config.ts` (integration + pydoll)
 
 ## Architecture
 

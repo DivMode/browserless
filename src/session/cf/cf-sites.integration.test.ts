@@ -7,13 +7,51 @@
  *   3. Extract CF markers from replays
  *   4. Build Turnstile summary (same labels as pydoll: Int→, Emb✓, etc.)
  *   5. Compare summary against expected results
+ *   6. Assert summary-to-replay consistency (method/signal match label)
  *
  * This replaces the `cf-test` CLI command from pydoll for browserless-side solver validation.
- * Pydoll-specific tests (ahrefs-fast, cf-stress, native solver) remain in cf-testing.
+ * Pydoll-specific tests (ahrefs-fast, cf-stress, native solver) run as subprocess tests below.
  *
- * Prerequisites (handled by vitest globalSetup — vitest.integration.setup.ts):
+ * ## Prerequisites
+ *
+ * Handled by vitest globalSetup (vitest.integration.setup.ts):
  *   - LOCAL_MOBILE_PROXY env var set
- *   - Browserless auto-started if not already running
+ *   - Browserless auto-started if not already running (auto-build + spawn)
+ *   - If `just dev` is already running, globalSetup detects it and uses the existing instance
+ *
+ * For manual pydoll CLI debugging (not needed for vitest):
+ *   Terminal 1: cd /Users/peter/Developer/browserless && just watch
+ *   Terminal 2: cd /Users/peter/Developer/browserless && just dev
+ *   Verify: curl http://localhost:3000/json/version
+ *
+ * ## Debugging Mandate
+ *
+ * ANY failure (✗, No Data, rechallenge) MUST be investigated immediately:
+ *   - Extract CF markers from replay (type 5 events with cf.* tags)
+ *   - Check console errors in replay (type 6 events, rrweb/console@1 plugin)
+ *   - Cross-reference summary label against replay markers (see assertSummaryConsistency)
+ *   - Trace solver code path: detection → solve strategy → resolution
+ *   - NEVER rationalize failures as "pre-existing" without investigating
+ *
+ * ## Ad-hoc Debugging Commands (manual, not part of vitest)
+ *
+ * All from /Users/peter/Developer/catchseo/packages/pydoll-scraper with proxy:
+ *   LOCAL_MOBILE_PROXY=$(op read "op://Catchseo.com/Proxies/local_mobile_proxy")
+ *
+ *   # Nopecha serverside (browserless solver only)
+ *   $LOCAL_MOBILE_PROXY uv run pydoll nopecha --serverside --chrome-endpoint=local-browserless
+ *
+ *   # Ahrefs fast (production path)
+ *   $LOCAL_MOBILE_PROXY uv run pydoll ahrefs-fast etsy.com --chrome-endpoint=local-browserless
+ *
+ *   # Any URL with solver
+ *   $LOCAL_MOBILE_PROXY uv run pydoll navigate https://nopecha.com/demo/cloudflare --serverside --chrome-endpoint=local-browserless
+ *
+ *   # Multi-run reliability (5x)
+ *   for i in $(seq 1 5); do $LOCAL_MOBILE_PROXY uv run pydoll nopecha --serverside --chrome-endpoint=local-browserless; done
+ *
+ *   # Stress test
+ *   $LOCAL_MOBILE_PROXY uv run pydoll cf-stress --concurrent 15 --chrome-endpoint=local-browserless
  *
  * Run:
  *   LOCAL_MOBILE_PROXY=$(op read "op://Catchseo.com/Proxies/local_mobile_proxy") \
@@ -29,6 +67,7 @@ import puppeteer, { type Browser, type Page } from 'puppeteer-core';
 import {
   PROXY,
   type TurnstileSummary,
+  assertSummaryConsistency,
   buildSummaryFromMarkers,
   buildWsUrl,
   dumpMarkerTimeline,
@@ -144,11 +183,22 @@ interface CfTestSite {
 }
 
 /**
- * Test sites from the cf-testing skill.
+ * CF test sites with expected solver outcomes.
  *
- * Excluded:
- * - nopecha-cf: covered by the detailed cloudflare-solver.integration.test.ts
- * - 2captcha-ts: uses test sitekey (auto-passes without solver, expects ⚠ No Data)
+ * | Name            | URL                                                | Type          | Expected              | Notes                                           |
+ * |-----------------|----------------------------------------------------|---------------|-----------------------|-------------------------------------------------|
+ * | `2captcha-cf`   | `2captcha.com/demo/cloudflare-turnstile-challenge` | interstitial  | `Int→` or `Int✓`      | 2Captcha challenge page (403 = serving challenge)|
+ * | `nopecha-ts`    | `nopecha.com/captcha/turnstile`                    | turnstile     | `Emb✓` or `Emb→`     | Real sitekey embedded Turnstile                  |
+ * | `peet-managed`  | `peet.ws/turnstile-test/managed.html`              | turnstile     | `Emb✓` or `Emb→`     | Real sitekey. Managed (interactive) Turnstile    |
+ * | `peet-nonint`   | `peet.ws/turnstile-test/non-interactive.html`      | turnstile     | `Emb→`               | Non-interactive — auto-solves                    |
+ * | `peet-invisible`| `peet.ws/turnstile-test/invisible.html`            | turnstile     | `Emb→`               | Invisible widget — auto-solves                   |
+ * | `cfschl-peet`   | `cfschl.peet.ws/`                                  | interstitial  | `Int→` or `Int✓`     | May not always serve a challenge                 |
+ *
+ * Excluded sites:
+ * - `nopecha-cf`: covered by the detailed cloudflare-solver.integration.test.ts
+ * - `2captcha-ts`: uses test sitekey (auto-passes without solver, expects ⚠ No Data)
+ * - `nowsecure.nl`: test sitekey `3x00000000...` — auto-passes, not useful
+ * - `cloudflarechallenge.com`: times out — WebAuthn challenge type we don't target
  */
 const CF_TEST_SITES: CfTestSite[] = [
   {
@@ -315,8 +365,23 @@ describe.concurrent('CF Solver Multi-Site', () => {
           }
           expect(
             site.expectedSummaries.includes(label),
-            `${site.name}: summary '${label}' not in expected [${site.expectedSummaries.join(', ')}]`,
+            `${site.name}: summary '${label}' not in expected [${site.expectedSummaries.join(', ')}]. ` +
+            (label.includes('✗') ? 'Solver detected challenge but FAILED to resolve — extract replay markers.' :
+             label.includes('?') ? 'Unrecognized outcome — check cf.solved marker for unexpected method.' :
+             label === '⚠ No Data' ? 'Zero CF events — CDP event pipeline broken. P0 bug.' :
+             'Unexpected label.'),
           ).toBe(true);
+
+          // ── 5. Summary-to-replay consistency ────────────────────────
+          const inconsistency = assertSummaryConsistency(summary!, allMarkers);
+          if (inconsistency) {
+            dumpMarkerTimeline(allMarkers);
+            for (const a of analyses) dumpReplayHint(a.replayId);
+          }
+          expect(
+            inconsistency,
+            `${site.name}: summary/replay mismatch — ${inconsistency}`,
+          ).toBeNull();
 
           writeSiteResult({
             name: site.name,
@@ -386,6 +451,10 @@ describe('Pydoll Pipeline', () => {
     expect(dr).toBeGreaterThan(0);
   }, { timeout: 180_000 });
 
+  // WARNING: cf-stress burns proxy IP. Run ONCE per session — back-to-back runs
+  // degrade pass rates as Ahrefs/CF rate-limits the carrier block after ~30 rapid
+  // requests. The FIRST run is the meaningful result. If you need to re-run, wait
+  // 10+ minutes for IP rotation.
   it('cf-stress passes >=80% with 15 concurrent tabs', () => {
     const stdout = runWithProxy(
       ['cf-stress', '--concurrent', '15', '--chrome-endpoint=local-browserless'],
