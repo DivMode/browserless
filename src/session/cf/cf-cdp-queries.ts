@@ -55,7 +55,14 @@ export function getTokenEffect(sendCommand: SendCommand, cdpSessionId: CdpSessio
       })()`,
       returnByValue: true,
     }, cdpSessionId),
-    catch: () => new CdpSessionGone({ sessionId: cdpSessionId, method: 'getToken' }),
+    catch: (e) => {
+      console.error(JSON.stringify({
+        message: 'cf.getToken.error',
+        session_id: cdpSessionId.slice(0, 8),
+        error: e instanceof Error ? e.message : String(e),
+      }));
+      return new CdpSessionGone({ sessionId: cdpSessionId, method: 'getToken' });
+    },
   }).pipe(
     Effect.map((result) => {
       const val = result?.result?.value;

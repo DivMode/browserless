@@ -463,15 +463,23 @@ export class CloudflareDetector {
       // Complete Resolution for immediate failures — these are known outcomes
       // that don't require waiting for async signals.
       if (outcome === 'no_click') {
+        self.log.warn(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=widget_not_found`);
         yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
       } else if (outcome === 'click_no_token') {
+        self.log.warn(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=timeout`);
         yield* self.emitSolveFailure(active, targetId, 'timeout');
+      } else if (outcome === 'aborted' && !active.aborted) {
+        // Solver returned 'aborted' but no external abort signal (abortLatch didn't fire).
+        // This happens when tokenPoll gets CdpSessionGone or resolution?.isDone is true.
+        // Complete the Resolution immediately instead of waiting 10s for timeout.
+        const reason = active.clickDelivered ? 'session_gone_after_click' : 'session_gone';
+        self.log.warn(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=${reason} click_delivered=${!!active.clickDelivered}`);
+        yield* self.emitSolveFailure(active, targetId, reason);
       }
 
       // Await Resolution — the single emission consumer.
       // For click_dispatched: onPageNavigated completes it ~1.5-2s after click.
-      // For no_click/click_no_token: emitSolveFailure already completed it above.
-      // For aborted: onPageNavigated/resolveAutoSolved already completed it.
+      // For no_click/click_no_token/aborted: emitSolveFailure already completed it above.
       // 10s timeout is generous fallback for any path that never completes.
       if (active.resolution) {
         const maybeResolved = yield* active.resolution.await.pipe(
