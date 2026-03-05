@@ -298,19 +298,21 @@ describe('pollToken', () => {
       expect(outcome).toBe('aborted');
     }));
 
-  it.effect('9. CdpSessionGone recovery — catches error and continues', () =>
+  it.effect('9. CdpSessionGone — exits poll gracefully without crash', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       let callCount = 0;
 
+      // CdpSessionGone means the OOPIF is dead — the poll SHOULD exit immediately.
+      // PR #49 added sessionGone early exit: once a CDP session is gone, no token
+      // will ever arrive, so burning the remaining deadline is waste.
+      // This test verifies CdpSessionGone is caught gracefully (no defect/crash)
+      // and the solver exits cleanly with 'no_click'.
       const tokenLayer = Layer.succeed(TokenChecker, TokenChecker.of({
         getToken: () => {
           callCount++;
           if (callCount === 2) {
             return Effect.fail(new CdpSessionGone({ sessionId: CdpSessionId.makeUnsafe('test'), method: 'getToken' }));
-          }
-          if (callCount >= 5) {
-            return Effect.succeed('recovered-token');
           }
           return Effect.succeed(null);
         },
@@ -341,11 +343,13 @@ describe('pollToken', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('15 seconds');
+      yield* TestClock.adjust('35 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      expect(outcome).toBe('click_dispatched');
-      expect(callCount).toBeGreaterThanOrEqual(5);
+      // CdpSessionGone exits the poll → no token → no_click (not a crash)
+      expect(outcome).toBe('no_click');
+      // getToken was called at least twice: early check + one poll that hit CdpSessionGone
+      expect(callCount).toBeGreaterThanOrEqual(2);
     }));
 });
 
