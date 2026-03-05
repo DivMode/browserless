@@ -115,6 +115,28 @@
       ],
       "description": "Actual click Y coordinate"
     },
+    "checkbox_to_click_ms": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Milliseconds from checkbox found to click dispatched"
+    },
+    "phase4_duration_ms": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Total Phase 4 duration in ms"
+    },
     "presence_duration_ms": {
       "type": "integer",
       "description": "Human presence simulation duration in ms",
@@ -174,6 +196,17 @@
         }
       ],
       "description": "Last error type: confirmed_error, error_text, iframe_error, expired"
+    },
+    "widget_diag": {
+      "anyOf": [
+        {
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Shadow DOM diagnostic snapshot when checkbox not found (alive, cbI, inp, shadow, bodyLen)"
     }
   },
   "additionalProperties": false

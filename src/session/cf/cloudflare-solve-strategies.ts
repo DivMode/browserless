@@ -433,66 +433,80 @@ export class CloudflareSolveStrategies {
 
       yield* events.marker(pageTargetId, 'cf.phase4_start', { via, attempt });
 
-      // Pydoll does a visibility check (getBoundingClientRect + getComputedStyle)
-      // before clicking. This confirms the element is rendered and interactive.
-      if (checkbox.objectId) {
-        const visible = yield* send('Runtime.callFunctionOn', {
-          objectId: checkbox.objectId,
-          functionDeclaration: `function() {
-            const rect = this.getBoundingClientRect();
-            return (rect.width > 0 && rect.height > 0
-              && getComputedStyle(this).visibility !== 'hidden'
-              && getComputedStyle(this).display !== 'none');
-          }`,
-          returnByValue: true,
-        }, oopifSessionId);
+      // ── Sub-span: Visibility + scroll + box model ──
+      const coordsResult = yield* Effect.fn('cf.phase4_coords')(function*() {
+        yield* Effect.annotateCurrentSpan({ 'cf.has_object_id': !!checkbox.objectId });
 
-        if (visible?.result?.value === false) {
-          yield* events.marker(pageTargetId, 'cf.checkbox_not_visible', { via, polls: 0 });
-          return ClickResult.NoCheckbox();
+        if (checkbox.objectId) {
+          const visible = yield* send('Runtime.callFunctionOn', {
+            objectId: checkbox.objectId,
+            functionDeclaration: `function() {
+              const rect = this.getBoundingClientRect();
+              return (rect.width > 0 && rect.height > 0
+                && getComputedStyle(this).visibility !== 'hidden'
+                && getComputedStyle(this).display !== 'none');
+            }`,
+            returnByValue: true,
+          }, oopifSessionId);
+
+          if (visible?.result?.value === false) {
+            yield* Effect.annotateCurrentSpan({ 'cf.visible': false });
+            return { _tag: 'not_visible' as const };
+          }
         }
+
+        const scrollParams = checkbox.objectId
+          ? { objectId: checkbox.objectId }
+          : { backendNodeId: checkbox.backendNodeId };
+        yield* send('DOM.scrollIntoViewIfNeeded', scrollParams, oopifSessionId);
+
+        const boxParams = checkbox.objectId
+          ? { objectId: checkbox.objectId }
+          : { backendNodeId: checkbox.backendNodeId };
+        const box = yield* send('DOM.getBoxModel', boxParams, oopifSessionId);
+
+        let x: number, y: number;
+        let coordSource = 'getBoxModel';
+
+        if (box?.model?.content) {
+          const quad = box.model.content;
+          x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4;
+          y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4;
+        } else if (checkbox.objectId) {
+          const boundsResult = yield* send('Runtime.callFunctionOn', {
+            objectId: checkbox.objectId,
+            functionDeclaration: `function() {
+              const r = this.getBoundingClientRect();
+              return JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height });
+            }`,
+            returnByValue: true,
+          }, oopifSessionId);
+          const bounds = JSON.parse(boundsResult?.result?.value || '{}');
+          if (!bounds.width) {
+            yield* Effect.annotateCurrentSpan({ 'cf.coord_source': 'failed' });
+            return { _tag: 'no_box_model' as const };
+          }
+          x = bounds.x + bounds.width / 2;
+          y = bounds.y + bounds.height / 2;
+          coordSource = 'getBoundingClientRect';
+        } else {
+          yield* Effect.annotateCurrentSpan({ 'cf.coord_source': 'failed' });
+          return { _tag: 'no_box_model' as const };
+        }
+
+        yield* Effect.annotateCurrentSpan({ 'cf.coord_source': coordSource });
+        return { _tag: 'ok' as const, x, y, coordSource };
+      })();
+
+      if (coordsResult._tag === 'not_visible') {
+        yield* events.marker(pageTargetId, 'cf.checkbox_not_visible', { via, polls: 0 });
+        return ClickResult.NoCheckbox();
       }
-
-      // scrollIntoView
-      const scrollParams = checkbox.objectId
-        ? { objectId: checkbox.objectId }
-        : { backendNodeId: checkbox.backendNodeId };
-      yield* send('DOM.scrollIntoViewIfNeeded', scrollParams, oopifSessionId);
-
-      // DOM.getBoxModel with getBoundingClientRect fallback
-      const boxParams = checkbox.objectId
-        ? { objectId: checkbox.objectId }
-        : { backendNodeId: checkbox.backendNodeId };
-      const box = yield* send('DOM.getBoxModel', boxParams, oopifSessionId);
-
-      let x: number, y: number;
-      let coordSource = 'getBoxModel';
-
-      if (box?.model?.content) {
-        const quad = box.model.content;
-        x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4;
-        y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4;
-      } else if (checkbox.objectId) {
-        const boundsResult = yield* send('Runtime.callFunctionOn', {
-          objectId: checkbox.objectId,
-          functionDeclaration: `function() {
-            const r = this.getBoundingClientRect();
-            return JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height });
-          }`,
-          returnByValue: true,
-        }, oopifSessionId);
-        const bounds = JSON.parse(boundsResult?.result?.value || '{}');
-        if (!bounds.width) {
-          yield* events.marker(pageTargetId, 'cf.cdp_no_box_model', { method, via });
-          return ClickResult.ClickFailed();
-        }
-        x = bounds.x + bounds.width / 2;
-        y = bounds.y + bounds.height / 2;
-        coordSource = 'getBoundingClientRect';
-      } else {
+      if (coordsResult._tag === 'no_box_model') {
         yield* events.marker(pageTargetId, 'cf.cdp_no_box_model', { method, via });
         return ClickResult.ClickFailed();
       }
+      const { x, y, coordSource } = coordsResult;
 
       // ── Phase 4a: Get iframe page-space position for debugging ────────
       // Translate iframe-relative click coords → page-absolute coords
@@ -523,40 +537,43 @@ export class CloudflareSolveStrategies {
         had_phase1_iframe: !!iframeBackendNodeId,
       });
 
-      // ── Phase 4b pre-click: Install click verification listener ──────
-      // Adds a one-shot mousedown listener in the OOPIF. If Chrome delivers
-      // the mouse events to the renderer, this listener fires and sets __bClkV=true.
-      // Runtime.evaluate on OOPIF session is safe (separate V8 isolate from CF page).
-      yield* verifySend('Runtime.evaluate', {
-        expression: `window.__bClkV=false;document.addEventListener('mousedown',function(){window.__bClkV=true},{once:true,capture:true});true`,
-        returnByValue: true,
-      }, oopifSessionId).pipe(Effect.orElseSucceed(() => null));
+      // ── Sub-span: Click dispatch (listener + mouse events) ──
+      const { pressResponse, releaseResponse, holdMs } = yield* Effect.fn('cf.phase4_dispatch')(function*() {
+        // Install click verification listener (OOPIF session — safe, separate V8 isolate)
+        yield* verifySend('Runtime.evaluate', {
+          expression: `window.__bClkV=false;document.addEventListener('mousedown',function(){window.__bClkV=true},{once:true,capture:true});true`,
+          returnByValue: true,
+        }, oopifSessionId).pipe(Effect.orElseSucceed(() => null));
 
-      // ── Phase 4b: Dispatch click with mouseMoved + response capture ──
-      // Send a mouseMoved BEFORE the press/release. Without this, Chrome receives
-      // a bare mousePressed at coordinates it hasn't seen the cursor move to —
-      // the compositor may not route the event to the correct renderer process.
-      // This also makes the click visible in rrweb recordings (the extension inside
-      // the OOPIF captures mousemove DOM events, so the replay shows cursor movement).
-      yield* send('Input.dispatchMouseEvent', {
-        type: 'mouseMoved',
-        x: clickX, y: clickY,
-        button: 'none',
-      }, oopifSessionId);
-      yield* Effect.sleep(`${20 + Math.random() * 30} millis`);
+        // mouseMoved before press/release — routes compositor + shows in rrweb
+        yield* send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved',
+          x: clickX, y: clickY,
+          button: 'none',
+        }, oopifSessionId);
+        yield* Effect.sleep(`${20 + Math.random() * 30} millis`);
 
-      const pressResponse = yield* send('Input.dispatchMouseEvent', {
-        type: 'mousePressed',
-        x: clickX, y: clickY,
-        button: 'left', clickCount: 1,
-      }, oopifSessionId);
-      const holdMs = 50 + Math.random() * 100;
-      yield* Effect.sleep(`${holdMs} millis`);
-      const releaseResponse = yield* send('Input.dispatchMouseEvent', {
-        type: 'mouseReleased',
-        x: clickX, y: clickY,
-        button: 'left', clickCount: 1,
-      }, oopifSessionId);
+        const pressResponse = yield* send('Input.dispatchMouseEvent', {
+          type: 'mousePressed',
+          x: clickX, y: clickY,
+          button: 'left', clickCount: 1,
+        }, oopifSessionId);
+        const holdMs = 50 + Math.random() * 100;
+        yield* Effect.sleep(`${holdMs} millis`);
+        const releaseResponse = yield* send('Input.dispatchMouseEvent', {
+          type: 'mouseReleased',
+          x: clickX, y: clickY,
+          button: 'left', clickCount: 1,
+        }, oopifSessionId);
+
+        yield* Effect.annotateCurrentSpan({
+          'cf.hold_ms': Math.round(holdMs),
+          'cf.press_ok': !!pressResponse,
+          'cf.release_ok': !!releaseResponse,
+        });
+
+        return { pressResponse, releaseResponse, holdMs };
+      })();
 
       // Validate click delivery — if press/release returned null, CDP call failed
       if (!pressResponse || !releaseResponse) {
@@ -569,38 +586,46 @@ export class CloudflareSolveStrategies {
         return ClickResult.ClickFailed();
       }
 
-      // ── Phase 4b post-click: Verify the click actually landed ─────────
-      // Give renderer 100ms to process the event, then check the flag.
-      yield* Effect.sleep('100 millis');
-      let clickVerified = false;
-      let verifyError: string | null = null;
+      // ── Sub-span: Verify click landed ──
+      const { clickVerified, verifyError } = yield* Effect.fn('cf.phase4_verify')(function*() {
+        yield* Effect.sleep('100 millis');
+        let clickVerified = false;
+        let verifyError: string | null = null;
 
-      const verifyResult: true | string = yield* verifySend('Runtime.evaluate', {
-        expression: 'window.__bClkV',
-        returnByValue: true,
-      }, oopifSessionId).pipe(
-        Effect.map((r: any) => (r?.result?.value === true ? true as const : 'not_confirmed')),
-        Effect.catch(() => Effect.succeed('oopif_gone' as const)),
-      );
+        const verifyResult: true | string = yield* verifySend('Runtime.evaluate', {
+          expression: 'window.__bClkV',
+          returnByValue: true,
+        }, oopifSessionId).pipe(
+          Effect.map((r: any) => (r?.result?.value === true ? true as const : 'not_confirmed')),
+          Effect.catch(() => Effect.succeed('oopif_gone' as const)),
+        );
 
-      if (verifyResult === true) {
-        clickVerified = true;
-      } else if (typeof verifyResult === 'string') {
-        verifyError = verifyResult;     // OOPIF session died or errored during check
-      }
-      // else verifyResult === false: click silently dropped
+        if (verifyResult === true) {
+          clickVerified = true;
+        } else if (typeof verifyResult === 'string') {
+          verifyError = verifyResult;
+        }
+
+        yield* Effect.annotateCurrentSpan({ 'cf.click_verified': clickVerified });
+        return { clickVerified, verifyError };
+      })();
 
       if (clickVerified) {
         active.clickDelivered = true;
         active.clickDeliveredAt = Date.now();
       }
       yield* Effect.annotateCurrentSpan({ 'cf.click_delivered': active.clickDelivered ?? false });
-      yield* events.emitProgress(active, 'clicked', { x: clickX, y: clickY });
 
       const clickNow = Date.now();
       const checkbox_to_click_ms = clickNow - checkboxFoundAt;
       const phase4_duration_ms = clickNow - phase4Start;
       const total_solve_ms = clickNow - solveStart;
+
+      yield* events.emitProgress(active, 'clicked', {
+        x: clickX, y: clickY,
+        checkbox_to_click_ms,
+        phase4_duration_ms,
+      });
 
       yield* events.marker(pageTargetId, 'cf.oopif_click', {
         ok: clickVerified,

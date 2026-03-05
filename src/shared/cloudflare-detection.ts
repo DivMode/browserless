@@ -157,6 +157,12 @@ export const CloudflareSnapshot = Schema.Struct({
   click_y: Schema.optionalKey(Schema.NullOr(Schema.Finite)).annotate({
     description: 'Actual click Y coordinate',
   }),
+  checkbox_to_click_ms: Schema.optionalKey(Schema.NullOr(Int)).annotate({
+    description: 'Milliseconds from checkbox found to click dispatched',
+  }),
+  phase4_duration_ms: Schema.optionalKey(Schema.NullOr(Int)).annotate({
+    description: 'Total Phase 4 duration in ms',
+  }),
   presence_duration_ms: Schema.optionalKey(Int).annotate({
     description: 'Human presence simulation duration in ms',
     default: 0,
