@@ -342,11 +342,8 @@ export class CloudflareSolveStrategies {
 
       // ── Phase 4: Visibility check, scroll, bounds, click ─────────────
       // No delay — pydoll clicks immediately after finding the checkbox.
-      // Humanized timing comes from mouse movement in Phase 4.
-      // Input events stay on isolated WS (same as DOM/Runtime) — the CDPProxy
-      // browser WS has worse contention under production load (4-5s stalls
-      // vs 1s on isolated WS). The Effect bridge elimination in sendViaProxy
-      // is the real improvement here.
+      // Bare press + random hold + release, no mouseMoved (matches pydoll).
+      // All Input events on isolated WS (same as DOM/Runtime).
       return yield* strategies.phase4Click(
         send, send, send, oopifSessionId, active,
         checkbox, cbMethod, iframeBackendNodeId, via, attempt, solveStart, checkboxFoundAt,
@@ -543,24 +540,14 @@ export class CloudflareSolveStrategies {
       });
 
       // ── Sub-span: Click dispatch (listener + mouse events) ──
-      // Input events route through CDPProxy browser WS (inputSend) — pre-warmed
-      // compositor avoids 283-1162ms stall on first mouseMoved via isolated WS.
+      // Bare press + hold + release — NO mouseMoved (matches pydoll exactly).
+      // mouseMoved causes 283-5600ms compositor init stall on isolated WS.
       const { pressResponse, releaseResponse, holdMs } = yield* Effect.fn('cf.phase4_dispatch')(function*() {
         // Install click verification listener (OOPIF session — safe, separate V8 isolate)
         yield* verifySend('Runtime.evaluate', {
           expression: `window.__bClkV=false;document.addEventListener('mousedown',function(){window.__bClkV=true},{once:true,capture:true});true`,
           returnByValue: true,
         }, oopifSessionId).pipe(Effect.orElseSucceed(() => null));
-
-        // mouseMoved before press/release — routes compositor + shows in rrweb
-        yield* inputSend('Input.dispatchMouseEvent', {
-          type: 'mouseMoved',
-          x: clickX, y: clickY,
-          button: 'none',
-        }, oopifSessionId);
-
-        const preMoveMs = 20 + Math.random() * 30;
-        yield* Effect.sleep(`${preMoveMs} millis`);
 
         const pressResponse = yield* inputSend('Input.dispatchMouseEvent', {
           type: 'mousePressed',
