@@ -16,9 +16,14 @@ import { solveDetection as solveDetectionEffect } from './cf/cloudflare-solver.e
 import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
 import { OtelLayer } from '../otel-layer.js';
 
+import type { CdpConnection } from '../shared/cdp-rpc.js';
+import type WebSocket from 'ws';
+
 /** Return type of CDPProxy.createIsolatedConnection(). */
 type IsolatedConnection = {
-  send: (method: string, params?: object, sessionId?: CdpSessionId, timeoutMs?: number) => Promise<any>;
+  conn: CdpConnection;
+  ws: WebSocket;
+  waitForOpen: Effect.Effect<void, Error>;
   cleanup: () => void;
 };
 
@@ -101,6 +106,14 @@ export class CloudflareSolver {
             method,
           }),
         }),
+      sendViaBrowser: (method, params, sessionId, timeoutMs) =>
+        Effect.tryPromise({
+          try: () => (self.sendViaProxy || sendCommand)(method, params, sessionId, timeoutMs),
+          catch: () => new CdpSessionGone({
+            sessionId: sessionId ?? CdpSessionId.makeUnsafe(''),
+            method,
+          }),
+        }),
     }));
 
     const tokenCheckerLayer = Layer.succeed(TokenChecker, TokenChecker.of({
@@ -159,23 +172,22 @@ export class CloudflareSolver {
             Effect.gen(function*() {
               // If isolated connections available, give this solve its own WS
               if (self.createIsolatedConn) {
-                const conn = yield* Effect.acquireRelease(
+                const isolated = yield* Effect.acquireRelease(
                   Effect.sync(() => self.createIsolatedConn!()),
                   (c) => Effect.sync(() => c.cleanup()),
                 );
-                // Override sendViaProxy → isolated WS for this solve tree.
+                yield* isolated.waitForOpen.pipe(
+                  Effect.catch(() => Effect.succeed(undefined as void)),
+                );
+                // Override sendViaProxy → isolated WS for DOM/Runtime commands.
                 // send (WS #1) stays unchanged — activity loops, token polling
                 // remain on the direct page session WS.
+                // sendViaBrowser → CDPProxy browser WS (pre-warmed compositor for Input events).
                 const isolatedSender = CdpSender.of({
                   send: originalSender.send,
                   sendViaProxy: (method, params, sessionId, timeoutMs) =>
-                    Effect.tryPromise({
-                      try: () => conn.send(method, params, sessionId, timeoutMs),
-                      catch: () => new CdpSessionGone({
-                        sessionId: sessionId ?? CdpSessionId.makeUnsafe(''),
-                        method,
-                      }),
-                    }),
+                    isolated.conn.send(method, params, sessionId, timeoutMs),
+                  sendViaBrowser: originalSender.sendViaProxy,
                 });
                 return yield* solveDetectionEffect(active).pipe(
                   Effect.provideService(TokenChecker, tokenChecker),

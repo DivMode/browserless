@@ -343,8 +343,31 @@ export class CloudflareSolveStrategies {
       // ── Phase 4: Visibility check, scroll, bounds, click ─────────────
       // No delay — pydoll clicks immediately after finding the checkbox.
       // Humanized timing comes from mouse movement in Phase 4.
+      // Input events route through CDPProxy browser WS (pre-warmed compositor)
+      // to avoid 283-1162ms stall on first mouseMoved via isolated WS.
+      const inputSend: ClickPhaseSend = (method, params, sessionId, timeoutMs) => {
+        const seq = cmdSeq++;
+        const t0 = Date.now() - solveStart;
+        if (debugEnabled) {
+          const sid = sessionId ? `[sid=${sessionId.substring(0, 16)}]` : '[no-sid]';
+          const p = params ? JSON.stringify(params).substring(0, 150) : '{}';
+          console.log(`  [INPUT #${seq}] +${t0}ms ${method} ${sid} ${p}`);
+        }
+        return cdp.sendViaBrowser(method, params, sessionId, timeoutMs).pipe(
+          Effect.orElseSucceed(() => null),
+          Effect.tap((result) =>
+            Effect.sync(() => {
+              if (debugEnabled) {
+                const t1 = Date.now() - solveStart;
+                const summary = result ? JSON.stringify(result).substring(0, 120) : 'null';
+                console.log(`  [INPUT #${seq}] +${t1}ms → ${summary}`);
+              }
+            }),
+          ),
+        );
+      };
       return yield* strategies.phase4Click(
-        send, send, oopifSessionId, active,
+        send, send, inputSend, oopifSessionId, active,
         checkbox, cbMethod, iframeBackendNodeId, via, attempt, solveStart, checkboxFoundAt,
       );
     })().pipe(
@@ -408,6 +431,7 @@ export class CloudflareSolveStrategies {
   private phase4Click(
     send: ClickPhaseSend,
     verifySend: EffectSend,
+    inputSend: ClickPhaseSend,
     oopifSessionId: CdpSessionId,
     active: ActiveDetection,
     checkbox: { objectId: string; backendNodeId: number },
@@ -538,53 +562,41 @@ export class CloudflareSolveStrategies {
       });
 
       // ── Sub-span: Click dispatch (listener + mouse events) ──
+      // Input events route through CDPProxy browser WS (inputSend) — pre-warmed
+      // compositor avoids 283-1162ms stall on first mouseMoved via isolated WS.
       const { pressResponse, releaseResponse, holdMs } = yield* Effect.fn('cf.phase4_dispatch')(function*() {
-        const t0 = Date.now();
-
         // Install click verification listener (OOPIF session — safe, separate V8 isolate)
         yield* verifySend('Runtime.evaluate', {
           expression: `window.__bClkV=false;document.addEventListener('mousedown',function(){window.__bClkV=true},{once:true,capture:true});true`,
           returnByValue: true,
         }, oopifSessionId).pipe(Effect.orElseSucceed(() => null));
-        const tListener = Date.now();
 
         // mouseMoved before press/release — routes compositor + shows in rrweb
-        yield* send('Input.dispatchMouseEvent', {
+        yield* inputSend('Input.dispatchMouseEvent', {
           type: 'mouseMoved',
           x: clickX, y: clickY,
           button: 'none',
         }, oopifSessionId);
-        const tMove = Date.now();
 
         const preMoveMs = 20 + Math.random() * 30;
         yield* Effect.sleep(`${preMoveMs} millis`);
-        const tPreSleep = Date.now();
 
-        const pressResponse = yield* send('Input.dispatchMouseEvent', {
+        const pressResponse = yield* inputSend('Input.dispatchMouseEvent', {
           type: 'mousePressed',
           x: clickX, y: clickY,
           button: 'left', clickCount: 1,
         }, oopifSessionId);
-        const tPress = Date.now();
 
         const holdMs = 50 + Math.random() * 100;
         yield* Effect.sleep(`${holdMs} millis`);
-        const tHoldSleep = Date.now();
 
-        const releaseResponse = yield* send('Input.dispatchMouseEvent', {
+        const releaseResponse = yield* inputSend('Input.dispatchMouseEvent', {
           type: 'mouseReleased',
           x: clickX, y: clickY,
           button: 'left', clickCount: 1,
         }, oopifSessionId);
-        const tRelease = Date.now();
 
         yield* Effect.annotateCurrentSpan({
-          'cf.listener_ms': tListener - t0,
-          'cf.move_ms': tMove - tListener,
-          'cf.pre_sleep_ms': tPreSleep - tMove,
-          'cf.press_ms': tPress - tPreSleep,
-          'cf.hold_sleep_ms': tHoldSleep - tPress,
-          'cf.release_ms': tRelease - tHoldSleep,
           'cf.hold_ms': Math.round(holdMs),
           'cf.press_ok': !!pressResponse,
           'cf.release_ok': !!releaseResponse,
