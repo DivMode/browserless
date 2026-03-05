@@ -271,6 +271,19 @@ export class CloudflareSolver {
     // Record destroyed target — prevents stale OOPIF re-detection if Chrome
     // fires targetDestroyed after our detection poll but before cleanup
     this.stateTracker.solvedCFTargetIds.add(targetId as unknown as string);
+
+    // If this is an OOPIF being destroyed, abort the PARENT page's detection.
+    // Without this, the poll loop on the page session burns its full deadline
+    // polling for a token that will never arrive (CF killed the OOPIF = rejection).
+    const pageTargetId = this.stateTracker.iframeToPage.get(targetId);
+    if (pageTargetId) {
+      const active = this.stateTracker.registry.get(pageTargetId);
+      if (active && !active.aborted) {
+        active.aborted = true;
+        active.abortLatch.openUnsafe();
+      }
+    }
+
     return Effect.promise(() => this.runtime.runPromise(
       this.stateTracker.unregisterPage(targetId),
     ));

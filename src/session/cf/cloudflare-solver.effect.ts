@@ -368,9 +368,12 @@ const solveTurnstile = (
         if (active.resolution?.isDone) return TR.Aborted();
         yield* Effect.sleep(AUTO_SOLVE_POLL_DELAY);
         pollCount++;
+        let sessionGone = false;
         const token = yield* tokens.getToken(pageCdpSessionId).pipe(
-          Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
+          Effect.catchTag('CdpSessionGone', () => { sessionGone = true; return Effect.succeed(null); }),
         );
+        // OOPIF destroyed — exit immediately, no token will ever arrive
+        if (sessionGone) return TR.Aborted();
         if (token) {
           yield* events.marker(pageTargetId, 'cf.token_polled', {
             token_length: token.length,
@@ -506,9 +509,17 @@ const pollToken = (
         }
         yield* Effect.sleep(pollDelay);
         pollCount++;
+        let sessionGone = false;
         const token = yield* tokens.getToken(pageCdpSessionId).pipe(
-          Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
+          Effect.catchTag('CdpSessionGone', () => { sessionGone = true; return Effect.succeed(null); }),
         );
+        if (sessionGone) {
+          // OOPIF destroyed — no token will ever arrive. Exit immediately
+          // instead of burning the remaining deadline polling a dead session.
+          yield* Effect.annotateCurrentSpan({ 'cf.poll_exit_reason': 'cdp_session_gone', 'cf.poll_count': pollCount });
+          yield* events.marker(pageTargetId, 'cf.poll_session_gone', { poll_count: pollCount });
+          return null;
+        }
         if (token) {
           yield* Effect.annotateCurrentSpan({ 'cf.token_found': true, 'cf.token_length': token.length });
           yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: token.length });
