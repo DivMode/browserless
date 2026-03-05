@@ -507,12 +507,17 @@ export class CDPProxy {
    * Returns a sendCommand function scoped to the fresh WS.
    * Call cleanup() when done to close the connection.
    */
-  createIsolatedConnection(): { send: (method: string, params?: object, sessionId?: CdpSessionId, timeoutMs?: number) => Promise<any>; cleanup: () => void } {
+  createIsolatedConnection(): {
+    conn: CdpConnection;
+    ws: WebSocket;
+    waitForOpen: Effect.Effect<void, Error>;
+    cleanup: () => void;
+  } {
     const endpoint = this.browserWsEndpoint;
     const ws = new WebSocket(endpoint);
     const conn = new CdpConnection(ws, { startId: 300_000, defaultTimeout: 30_000 });
     let connected = false;
-    const waitForOpen = new Promise<void>((resolve, reject) => {
+    const openPromise = new Promise<void>((resolve, reject) => {
       ws.on('open', () => { connected = true; resolve(); });
       ws.on('error', (err) => { if (!connected) reject(err); });
     });
@@ -524,10 +529,10 @@ export class CDPProxy {
       } catch { /* ignore */ }
     });
 
-    const send = async (method: string, params: object = {}, sessionId?: string, timeoutMs: number = 30_000): Promise<any> => {
-      await waitForOpen;
-      return conn.sendPromise(method, params, sessionId ? CdpSessionId.makeUnsafe(sessionId) : undefined, timeoutMs);
-    };
+    const waitForOpen = Effect.tryPromise({
+      try: () => openPromise,
+      catch: (err) => err instanceof Error ? err : new Error(String(err)),
+    });
 
     const cleanup = () => {
       conn.drainPending('isolated_cleanup');
@@ -537,7 +542,7 @@ export class CDPProxy {
       }
     };
 
-    return { send, cleanup };
+    return { conn, ws, waitForOpen, cleanup };
   }
 
   /** Handle responses for proxy-injected commands (called from browser WS message handler) */

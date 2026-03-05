@@ -35,6 +35,14 @@ export const CdpSender = ServiceMap.Service<{
     sessionId?: CdpSessionId,
     timeoutMs?: number,
   ) => Effect.Effect<any, CdpSessionGone | CdpTimeout>;
+
+  /** Route through CDPProxy browser WS — pre-warmed compositor for Input events. */
+  readonly sendViaBrowser: (
+    method: string,
+    params?: object,
+    sessionId?: CdpSessionId,
+    timeoutMs?: number,
+  ) => Effect.Effect<any, CdpSessionGone | CdpTimeout>;
 }>('CdpSender');
 
 // ═══════════════════════════════════════════════════════════════════════
