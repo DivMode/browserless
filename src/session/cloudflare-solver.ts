@@ -12,6 +12,9 @@ import {
   SolveDispatcher, DetectionLoopStarter, OOPIFChecker, SolverConfig,
 } from './cf/cf-services.js';
 import { CdpSessionGone } from './cf/cf-errors.js';
+import {
+  getTokenEffect, isSolvedEffect, isWidgetErrorEffect, isStillDetectedEffect,
+} from './cf/cf-cdp-queries.js';
 import { solveDetection as solveDetectionEffect } from './cf/cloudflare-solver.effect.js';
 import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
 import { OtelLayer } from '../otel-layer.js';
@@ -116,11 +119,19 @@ export class CloudflareSolver {
         }),
     }));
 
+    // TokenChecker routes through CdpSender.sendViaProxy (CDPProxy browser WS)
+    // instead of stateTracker.sendCommand (CdpSession.sendCommand).
+    // CdpSession.send routes Runtime.evaluate through per-page WS which can die
+    // during page navigation/rechallenge, causing ALL getToken polls to fail with
+    // CdpSessionGone at 500ms — the root cause of no_resolution failures.
+    // CDPProxy browser WS is always alive (proven: detectTurnstileViaCDP works).
+    const proxyCmd: SendCommand = (method, params, sid, timeoutMs) =>
+      (self.sendViaProxy || sendCommand)(method, params ?? {}, sid, timeoutMs);
     const tokenCheckerLayer = Layer.succeed(TokenChecker, TokenChecker.of({
-      getToken: (sessionId) => stateTracker.getTokenEffect(sessionId),
-      isSolved: (sessionId) => stateTracker.isSolvedEffect(sessionId),
-      isWidgetError: (sessionId) => stateTracker.isWidgetErrorEffect(sessionId),
-      isStillDetected: (sessionId) => stateTracker.isStillDetectedEffect(sessionId),
+      getToken: (sessionId) => getTokenEffect(proxyCmd, sessionId),
+      isSolved: (sessionId) => isSolvedEffect(proxyCmd, sessionId),
+      isWidgetError: (sessionId) => isWidgetErrorEffect(proxyCmd, sessionId),
+      isStillDetected: (sessionId) => isStillDetectedEffect(proxyCmd, sessionId),
     }));
 
     const solverEventsLayer = Layer.succeed(SolverEvents, SolverEvents.of({
