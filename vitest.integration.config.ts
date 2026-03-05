@@ -1,7 +1,9 @@
 import { defineConfig } from 'vitest/config';
 import { loadEnv } from 'vite';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const mode = process.env.TEST_ENV || 'dev';
 
 export default defineConfig({
@@ -12,7 +14,7 @@ export default defineConfig({
     maxConcurrency: 50,
     globalSetup: ['./vitest.integration.setup.ts'],
     reporters: ['verbose'],
-    env: loadEnv(mode, process.cwd(), ''),
+    env: loadEnv(mode, __dirname, ''),
   },
   resolve: {
     alias: {

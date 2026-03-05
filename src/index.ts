@@ -1,6 +1,21 @@
 import { Browserless, Logger } from '@browserless.io/browserless';
 import { Effect } from 'effect';
 
+// ── Fail-fast env validation ─────────────────────────────────────────
+// REQUIRED env vars must be present BEFORE the server accepts connections.
+// Without this, a stale `node --watch` process (started without proper env)
+// silently boots and steals connections — all replays fail with no error.
+// See: 2026-03-04 incident — 2 hours debugging phantom replay failures
+// caused by a zombie `node --watch` process with empty env.
+const REQUIRED_ENV = ['REPLAY_INGEST_URL'] as const;
+for (const key of REQUIRED_ENV) {
+  if (!process.env[key]) {
+    console.error(`\n  FATAL: Missing required env var: ${key}`);
+    console.error(`  Set it in .env.dev (local) or production config.\n`);
+    process.exit(1);
+  }
+}
+
 (async () => {
   const browserless = new Browserless();
   const logger = new Logger('index.js');
