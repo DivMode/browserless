@@ -36,6 +36,8 @@ export class CloudflareTracker {
   private widgetFindDebug: Record<string, any> | null = null;
   private lastErrorType: string | null = null;
   private lastDiag: Record<string, any> | null = null;
+  private checkboxToClickMs: number | null = null;
+  private phase4DurationMs: number | null = null;
 
   constructor(info: CloudflareInfo) {
     this.detectionMethod = info.detectionMethod;
@@ -60,6 +62,8 @@ export class CloudflareTracker {
         this.clickCount++;
         if (extra?.x != null) this.clickX = extra.x;
         if (extra?.y != null) this.clickY = extra.y;
+        if (extra?.checkbox_to_click_ms != null) this.checkboxToClickMs = extra.checkbox_to_click_ms;
+        if (extra?.phase4_duration_ms != null) this.phase4DurationMs = extra.phase4_duration_ms;
         break;
       case 'presence_complete':
         this.presencePhases++;
@@ -113,6 +117,8 @@ export class CloudflareTracker {
       click_count: this.clickCount,
       click_x: this.clickX,
       click_y: this.clickY,
+      checkbox_to_click_ms: this.checkboxToClickMs,
+      phase4_duration_ms: this.phase4DurationMs,
       presence_duration_ms: this.presenceDurationMs,
       presence_phases: this.presencePhases,
       approach_phases: this.approachPhases,
@@ -203,7 +209,11 @@ export class CloudflareEventEmitter {
   }
 
   emitSolved(active: ActiveDetection, result: CloudflareResult): void {
-    this.log.info(`CF solved: type=${result.type} method=${result.method} duration=${result.duration_ms}ms`);
+    const snap = active.tracker.snapshot();
+    const timingStr = snap.checkbox_to_click_ms != null
+      ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
+      : '';
+    this.log.info(`CF solved: type=${result.type} method=${result.method} duration=${result.duration_ms}ms${timingStr}`);
     this.emitClientEvent('Browserless.cloudflareSolved', {
       ...result,
       token_length: result.token_length ?? result.token?.length ?? 0,
@@ -222,7 +232,10 @@ export class CloudflareEventEmitter {
     const isRechallenge = (active.rechallengeCount ?? 0) > 0;
     const diag = snap.widget_diag;
     const diagStr = diag ? ` diag_alive=${diag.alive} diag_cbI=${diag.cbI} diag_inp=${diag.inp} diag_shadow=${diag.shadow} diag_bodyLen=${diag.bodyLen}` : '';
-    this.log.warn(`CF failed: reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'} rechallenge=${isRechallenge} widget_error_count=${snap.widget_error_count} widget_error_type=${snap.widget_error_type ?? 'none'} click_count=${snap.click_count} false_positives=${snap.false_positive_count}${diagStr}`);
+    const timingStr = snap.checkbox_to_click_ms != null
+      ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
+      : '';
+    this.log.warn(`CF failed: reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'} rechallenge=${isRechallenge} widget_error_count=${snap.widget_error_count} widget_error_type=${snap.widget_error_type ?? 'none'} click_count=${snap.click_count} false_positives=${snap.false_positive_count}${diagStr}${timingStr}`);
     this.emitClientEvent('Browserless.cloudflareFailed', {
       reason, type: active.info.type, duration_ms: duration, attempts: active.attempt,
       targetId: active.pageTargetId,
