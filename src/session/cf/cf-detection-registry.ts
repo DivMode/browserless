@@ -17,12 +17,12 @@
 import { Effect, Exit, Scope } from 'effect';
 import { Logger } from '@browserless.io/browserless';
 import type { TargetId } from '../../shared/cloudflare-detection.js';
-import type { ActiveDetection } from './cloudflare-event-emitter.js';
+import type { ActiveDetection, ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
 import type { SolveSignal } from './cloudflare-state-tracker.js';
 import { DetectionContext } from './cf-detection-context.js';
 
 /** Callback to emit a session_close fallback for an orphaned detection. */
-export type EmitFallback = (active: ActiveDetection, signal: SolveSignal) => void;
+export type EmitFallback = (active: ReadonlyActiveDetection, signal: SolveSignal) => void;
 
 export class DetectionRegistry {
   private log = new Logger('cf-registry');
@@ -120,8 +120,8 @@ export class DetectionRegistry {
   // Synchronous reads (plain Map access — no Effect overhead)
   // ═══════════════════════════════════════════════════════════════════════
 
-  /** Get the ActiveDetection for a target (backwards compat). */
-  get(targetId: TargetId): ActiveDetection | undefined {
+  /** Get the ActiveDetection for a target (read-only view). */
+  get(targetId: TargetId): ReadonlyActiveDetection | undefined {
     return this.entries.get(targetId)?.active;
   }
 
@@ -135,7 +135,7 @@ export class DetectionRegistry {
   }
 
   /** Iterate all active detections (for emitUnresolvedDetections). */
-  *[Symbol.iterator](): IterableIterator<[TargetId, ActiveDetection]> {
+  *[Symbol.iterator](): IterableIterator<[TargetId, ReadonlyActiveDetection]> {
     for (const [targetId, context] of this.entries) {
       yield [targetId, context.active];
     }

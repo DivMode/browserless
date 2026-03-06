@@ -3,7 +3,7 @@ import { Logger } from '@browserless.io/browserless';
 import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, CloudflareType } from '../../shared/cloudflare-detection.js';
 import { DETECTION_POLL_DELAY, MAX_RECHALLENGES, RECHALLENGE_DELAY_MS } from './cf-schedules.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
-import type { ActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
+import type { ActiveDetection, ReadonlyActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
 import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
 import type { CloudflareStateTracker } from './cloudflare-state-tracker.js';
 import type { CloudflareSolveStrategies, CFDetected, CFTargetMatch, TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
@@ -316,7 +316,7 @@ export class CloudflareDetector {
     })();
   }
 
-  private emitSolveFailure(active: ActiveDetection, targetId: TargetId, reason: string): Effect.Effect<void> {
+  private emitSolveFailure(active: ReadonlyActiveDetection, targetId: TargetId, reason: string): Effect.Effect<void> {
     if (active.aborted) {
       const ctx = this.state.registry.getContext(targetId);
       this.log.warn(`CF lifecycle: emit_failure_skipped target=${targetId.slice(0,8)} session=${this.sid} reason=abort_guard resolution_done=${ctx?.resolved ?? 'no_ctx'}`);

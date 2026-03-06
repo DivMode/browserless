@@ -7,7 +7,7 @@ import {
   STATE_POLL_INTERVAL_MS,
 } from './cf-schedules.js';
 import type { CdpSessionId, TargetId, CloudflareConfig } from '../../shared/cloudflare-detection.js';
-import type { ActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
+import type { ReadonlyActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
 import { DetectionRegistry } from './cf-detection-registry.js';
 import { OOPIFChecker } from './cf-services.js';
 import {
@@ -208,8 +208,9 @@ export class CloudflareStateTracker {
         const failCtx = tracker.registry.getContext(pageTargetId);
         if (failCtx) yield* failCtx.abort();
         if (active.attempt < tracker.config.maxAttempts) {
-          active.attempt++;
-          active.aborted = false;
+          if (failCtx) {
+            failCtx.resetForRetry();
+          }
           tracker.log.info(`Retrying CF detection (attempt ${active.attempt})`);
         } else {
           const duration = Date.now() - active.startTime;
@@ -308,7 +309,7 @@ export class CloudflareStateTracker {
    * Resolve an active detection as auto-solved (token appeared without navigation).
    * Returns Effect<void> — called from Effect contexts.
    */
-  resolveAutoSolved(active: ActiveDetection, signal: string): Effect.Effect<void> {
+  resolveAutoSolved(active: ReadonlyActiveDetection, signal: string): Effect.Effect<void> {
     const tracker = this;
     return Effect.fn('cf.state.resolveAutoSolved')(function*() {
       yield* Effect.annotateCurrentSpan({
@@ -354,7 +355,7 @@ export class CloudflareStateTracker {
    * Safe for ALL types: uses the iframe CDP session, not the page session.
    * Yields OOPIFChecker service — provided via Layer in the bridge.
    */
-  private checkOOPIFStateIteration(active: ActiveDetection): Effect.Effect<'aborted' | 'continue', never, typeof OOPIFChecker.Identifier> {
+  private checkOOPIFStateIteration(active: ReadonlyActiveDetection): Effect.Effect<'aborted' | 'continue', never, typeof OOPIFChecker.Identifier> {
     const tracker = this;
     return Effect.fn('cf.state.checkOOPIF')(function*() {
       yield* Effect.annotateCurrentSpan({ 'cf.target_id': active.pageTargetId });
@@ -377,7 +378,7 @@ export class CloudflareStateTracker {
    * Page is the EMBEDDING site — Runtime.evaluate is safe.
    * Checks: isSolved + OOPIF state + widget error
    */
-  activityLoopEmbedded(active: ActiveDetection): Effect.Effect<void, never, typeof OOPIFChecker.Identifier> {
+  activityLoopEmbedded(active: ReadonlyActiveDetection): Effect.Effect<void, never, typeof OOPIFChecker.Identifier> {
     const tracker = this;
 
     const activityIteration = (loopIter: number) =>
@@ -436,7 +437,7 @@ export class CloudflareStateTracker {
    * Page IS the CF challenge — Runtime.evaluate is FORBIDDEN.
    * Checks: OOPIF state only (uses iframe CDP session, not page session)
    */
-  activityLoopInterstitial(active: ActiveDetection): Effect.Effect<void, never, typeof OOPIFChecker.Identifier> {
+  activityLoopInterstitial(active: ReadonlyActiveDetection): Effect.Effect<void, never, typeof OOPIFChecker.Identifier> {
     const tracker = this;
 
     const activityIteration = (loopIter: number) =>

@@ -245,6 +245,82 @@ describe('DetectionContext', () => {
       yield* Scope.close(ctx.oopif!.scope, { _tag: 'Success', value: void 0 });
       // No throw = success
     }));
+
+  it.effect('active getter returns ReadonlyActiveDetection', () =>
+    Effect.gen(function*() {
+      const scope = yield* Scope.make();
+      const active = makeActive('T1');
+      const ctx = new DetectionContext(active, scope);
+
+      // ctx.active returns the same object (readonly view)
+      expect(ctx.active.pageTargetId).toBe(active.pageTargetId);
+      expect(ctx.active.info.type).toBe('turnstile');
+      expect(ctx.active.aborted).toBe(false);
+
+      // Cleanup
+      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
+    }));
+
+  it.effect('setClickDelivered sets clickDelivered and timestamp', () =>
+    Effect.gen(function*() {
+      const scope = yield* Scope.make();
+      const active = makeActive('T1');
+      const ctx = new DetectionContext(active, scope);
+
+      expect(active.clickDelivered).toBeUndefined();
+      expect(active.clickDeliveredAt).toBeUndefined();
+
+      ctx.setClickDelivered();
+
+      expect(active.clickDelivered).toBe(true);
+      expect(active.clickDeliveredAt).toBeTypeOf('number');
+      expect(active.clickDeliveredAt).toBeLessThanOrEqual(Date.now());
+
+      // Cleanup
+      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
+    }));
+
+  it.effect('markActivityLoopStarted sets activityLoopStarted', () =>
+    Effect.gen(function*() {
+      const scope = yield* Scope.make();
+      const active = makeActive('T1');
+      const ctx = new DetectionContext(active, scope);
+
+      expect(active.activityLoopStarted).toBeUndefined();
+
+      ctx.markActivityLoopStarted();
+
+      expect(active.activityLoopStarted).toBe(true);
+
+      // Idempotent
+      ctx.markActivityLoopStarted();
+      expect(active.activityLoopStarted).toBe(true);
+
+      // Cleanup
+      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
+    }));
+
+  it.effect('resetForRetry increments attempt and resets aborted', () =>
+    Effect.gen(function*() {
+      const scope = yield* Scope.make();
+      const active = makeActive('T1');
+      const ctx = new DetectionContext(active, scope);
+
+      expect(active.attempt).toBe(1);
+      expect(active.aborted).toBe(false);
+
+      // Simulate abort then retry
+      DetectionContext.setAborted(active);
+      expect(active.aborted).toBe(true);
+
+      ctx.resetForRetry();
+
+      expect(active.attempt).toBe(2);
+      expect(active.aborted).toBe(false);
+
+      // Cleanup
+      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
+    }));
 });
 
 describe('DetectionRegistry with DetectionContext', () => {

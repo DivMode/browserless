@@ -1,7 +1,7 @@
 import { Data, Effect } from 'effect';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
 import type { TargetId } from '../../shared/cloudflare-detection.js';
-import type { ActiveDetection } from './cloudflare-event-emitter.js';
+import type { ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
 
 /** Effect-returning CDP sender — eliminates the Promise bridge. */
 type EffectSend = (
@@ -106,7 +106,7 @@ export type SolveOutcome =
  * during verify" (fatal — don't waste 23s polling a dead iframe).
  */
 export type ClickResult = Data.TaggedEnum<{
-  Verified: {}
+  Verified: { readonly clickDeliveredAt: number }
   NotVerified: { readonly reason: string }
   NoCheckbox: {}
   ClickFailed: {}
@@ -186,14 +186,14 @@ export class CloudflareSolveStrategies {
    * Called by the Effect solver directly (no more bridge).
    */
   findAndClickViaCDP(
-    active: ActiveDetection,
+    active: ReadonlyActiveDetection,
     attempt = 0,
   ): Effect.Effect<ClickResult, never, StrategiesR> {
     return this._findAndClickViaCDP(active, attempt);
   }
 
   private _findAndClickViaCDP(
-    active: ActiveDetection,
+    active: ReadonlyActiveDetection,
     attempt = 0,
   ): Effect.Effect<ClickResult, never, StrategiesR> {
     const strategies = this;
@@ -411,7 +411,7 @@ export class CloudflareSolveStrategies {
     verifySend: EffectSend,
     inputSend: ClickPhaseSend,
     oopifSessionId: CdpSessionId,
-    active: ActiveDetection,
+    active: ReadonlyActiveDetection,
     checkbox: { objectId: string; backendNodeId: number },
     method: string,
     iframeBackendNodeId: number | null,
@@ -608,11 +608,7 @@ export class CloudflareSolveStrategies {
         return { clickVerified, verifyError };
       })();
 
-      if (clickVerified) {
-        active.clickDelivered = true;
-        active.clickDeliveredAt = Date.now();
-      }
-      yield* Effect.annotateCurrentSpan({ 'cf.click_delivered': active.clickDelivered ?? false });
+      yield* Effect.annotateCurrentSpan({ 'cf.click_delivered': clickVerified });
 
       const clickNow = Date.now();
       const checkbox_to_click_ms = clickNow - checkboxFoundAt;
@@ -648,7 +644,7 @@ export class CloudflareSolveStrategies {
         phase4_duration_ms,
         total_solve_ms,
       });
-      if (clickVerified) return ClickResult.Verified();
+      if (clickVerified) return ClickResult.Verified({ clickDeliveredAt: Date.now() });
       if (verifyError) return ClickResult.NotVerified({ reason: verifyError });
       return ClickResult.ClickFailed();
     })().pipe(

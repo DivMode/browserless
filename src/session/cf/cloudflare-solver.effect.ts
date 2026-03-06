@@ -12,13 +12,13 @@ import { Cause, Data, Effect } from 'effect';
 import type { SolveOutcome } from './cloudflare-solve-strategies.js';
 import { DetectionContext } from './cf-detection-context.js';
 import { ClickResult } from './cloudflare-solve-strategies.js';
-import type { ActiveDetection } from './cloudflare-event-emitter.js';
+import type { ActiveDetection, ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
 import { TokenChecker, SolverEvents, SolveDeps } from './cf-services.js';
 import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
 import type { SolveSignal } from './cloudflare-state-tracker.js';
 
 /** Annotate the current span with ActiveDetection context for Tempo filtering. */
-const annotateActive = (active: ActiveDetection) =>
+const annotateActive = (active: ReadonlyActiveDetection) =>
   Effect.annotateCurrentSpan({
     'cf.type': active.info.type,
     'cf.target_id': active.pageTargetId,
@@ -55,7 +55,7 @@ import {
  * handles fiber cancellation; the Resolution gateway signals the external
  * consumer (handleTurnstileDetection) that a result is ready.
  */
-const resolveTokenFound = (active: ActiveDetection, signal: SolveSignal, token: string | null) =>
+const resolveTokenFound = (active: ReadonlyActiveDetection, signal: SolveSignal, token: string | null) =>
   Effect.gen(function*() {
     const attr = deriveSolveAttribution(signal, !!active.clickDelivered);
     const result = {
@@ -199,6 +199,8 @@ const solveByClicking = (
 
       switch (result._tag) {
         case 'Verified':
+          active.clickDelivered = true;
+          active.clickDeliveredAt = result.clickDeliveredAt;
           yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
           return true;
 
@@ -308,6 +310,8 @@ const solveTurnstile = (
 
         switch (result._tag) {
           case 'Verified':
+            active.clickDelivered = true;
+            active.clickDeliveredAt = result.clickDeliveredAt;
             yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
             return TR.Clicked({ attempt });
 

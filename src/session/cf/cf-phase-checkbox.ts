@@ -9,7 +9,7 @@
  */
 import { Effect } from 'effect';
 import type { CdpSessionId } from '../../shared/cloudflare-detection.js';
-import type { ActiveDetection } from './cloudflare-event-emitter.js';
+import type { ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
 import { SolverEvents } from './cf-services.js';
 import { CDP_CALL_TIMEOUT_MS, MAX_CHECKBOX_POLLS, CHECKBOX_POLL_INTERVAL_MS } from './cf-schedules.js';
 
@@ -231,7 +231,7 @@ function queryCheckboxInShadow(
 export function phase3CheckboxFind(
   send: EffectSend,
   oopifSessionId: CdpSessionId,
-  active: ActiveDetection,
+  active: ReadonlyActiveDetection,
   via: string,
   solveStart: number,
 ): Effect.Effect<{ checkbox: { objectId: string; backendNodeId: number }; method: string; checkboxFoundAt: number } | null, never, typeof SolverEvents.Identifier> {
