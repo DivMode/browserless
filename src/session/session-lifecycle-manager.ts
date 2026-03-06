@@ -7,7 +7,7 @@ import {
 } from '@browserless.io/browserless';
 import { rm } from 'fs/promises';
 
-import { Duration, Effect, Fiber, Schedule } from 'effect';
+import { Duration, Effect, Fiber, Schedule, Scope } from 'effect';
 import { sessionDuration } from '../prom-metrics.js';
 import { SessionCoordinator } from './session-coordinator.js';
 import { SessionRegistry } from './session-registry.js';
@@ -31,6 +31,31 @@ export class SessionLifecycleManager {
     private registry: SessionRegistry,
     private sessionCoordinator?: SessionCoordinator,
   ) {}
+
+  /**
+   * Acquire a session resource with guaranteed cleanup.
+   *
+   * Registration happens on acquire, removal + full close on release.
+   * Release runs GUARANTEED by Effect runtime, even on interrupt/defect.
+   * Use with Effect.scoped() for automatic scope management.
+   */
+  acquireSession(
+    browser: BrowserInstance,
+    session: BrowserlessSession,
+  ): Effect.Effect<BrowserInstance, never, Scope.Scope> {
+    return Effect.acquireRelease(
+      Effect.sync(() => {
+        this.registry.register(browser, session);
+        return browser;
+      }),
+      () =>
+        Effect.promise(async () => {
+          await this.close(browser, session, true).catch((e) => {
+            this.log.warn(`acquireRelease cleanup failed for ${session.id}: ${e instanceof Error ? e.message : String(e)}`);
+          });
+        }),
+    );
+  }
 
   /**
    * Remove a user data directory.

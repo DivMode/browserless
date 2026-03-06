@@ -75,23 +75,21 @@ export class Router extends EventEmitter {
         'browser' in route &&
         route.browser
       ) {
-        const browser = await this.browserManager.getBrowserForRequest(
+        // Launch + register INSIDE try so complete() in finally covers all paths.
+        // Previously, if code between getBrowserForRequest() and try threw,
+        // the session would leak from the registry.
+        let browser = await this.browserManager.getBrowserForRequest(
           req,
           route,
           logger,
         );
 
-        if (!isConnected(res)) {
-          this.log.warn(`HTTP Request has closed prior to running`);
-          this.browserManager.complete(browser);
-          return Promise.resolve();
-        }
-
-        if (!browser) {
-          return writeResponse(res, 500, `Error loading the browser`);
-        }
-
         try {
+          if (!isConnected(res)) {
+            this.log.warn(`HTTP Request has closed prior to running`);
+            return;
+          }
+
           this.log.trace(`Running found HTTP handler.`);
           return await Promise.race([
             handler(req, res, logger, browser),
@@ -130,23 +128,19 @@ export class Router extends EventEmitter {
         'browser' in route &&
         route.browser
       ) {
+        // Launch + register INSIDE try so complete() in finally covers all paths.
         const browser = await this.browserManager.getBrowserForRequest(
           req,
           route,
           logger,
         );
 
-        if (!isConnected(socket)) {
-          this.log.warn(`WebSocket Request has closed prior to running`);
-          this.browserManager.complete(browser);
-          return Promise.resolve();
-        }
-
-        if (!browser) {
-          return writeResponse(socket, 500, `Error loading the browser.`);
-        }
-
         try {
+          if (!isConnected(socket)) {
+            this.log.warn(`WebSocket Request has closed prior to running`);
+            return;
+          }
+
           this.log.trace(`Running found WebSocket handler.`);
           await Promise.race([
             handler(req, socket, head, logger, browser),
