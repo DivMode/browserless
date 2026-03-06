@@ -5,7 +5,7 @@ import { CloudflareDetector } from './cf/cloudflare-detector.js';
 import { CloudflareSolveStrategies } from './cf/cloudflare-solve-strategies.js';
 import { CloudflareStateTracker } from './cf/cloudflare-state-tracker.js';
 import { CloudflareEventEmitter } from './cf/cloudflare-event-emitter.js';
-import type { EmitClientEvent, InjectMarker } from './cf/cloudflare-event-emitter.js';
+import type { ActiveDetection, EmitClientEvent, InjectMarker } from './cf/cloudflare-event-emitter.js';
 import type { SendCommand } from './cf/cloudflare-state-tracker.js';
 import {
   CdpSender, TokenChecker, SolverEvents, SolveDeps,
@@ -177,44 +177,40 @@ export class CloudflareSolver {
       const solveDeps = yield* SolveDeps;
       const originalSender = yield* CdpSender;
 
+      const provideServices = (active: ActiveDetection, sender: Parameters<typeof CdpSender.of>[0]) =>
+        solveDetectionEffect(active).pipe(
+          Effect.provideService(TokenChecker, tokenChecker),
+          Effect.provideService(SolverEvents, solverEvents),
+          Effect.provideService(SolveDeps, solveDeps),
+          Effect.provideService(CdpSender, sender),
+        );
+
       return SolveDispatcher.of({
-        dispatch: (active) =>
-          Effect.scoped(
-            Effect.gen(function*() {
-              // If isolated connections available, give this solve its own WS
-              if (self.createIsolatedConn) {
-                const isolated = yield* Effect.acquireRelease(
-                  Effect.sync(() => self.createIsolatedConn!()),
-                  (c) => Effect.sync(() => c.cleanup()),
-                );
-                yield* isolated.waitForOpen.pipe(
-                  Effect.catch(() => Effect.succeed(undefined as void)),
-                );
-                // Override sendViaProxy → isolated WS for DOM/Runtime commands.
-                // send (WS #1) stays unchanged — activity loops, token polling
-                // remain on the direct page session WS.
-                // sendViaBrowser → CDPProxy browser WS (pre-warmed compositor for Input events).
-                const isolatedSender = CdpSender.of({
-                  send: originalSender.send,
-                  sendViaProxy: (method, params, sessionId, timeoutMs) =>
-                    isolated.conn.send(method, params, sessionId, timeoutMs),
-                  sendViaBrowser: originalSender.sendViaProxy,
-                });
-                return yield* solveDetectionEffect(active).pipe(
-                  Effect.provideService(TokenChecker, tokenChecker),
-                  Effect.provideService(SolverEvents, solverEvents),
-                  Effect.provideService(SolveDeps, solveDeps),
-                  Effect.provideService(CdpSender, isolatedSender),
-                );
-              }
-              // Fallback: no CDPProxy yet, use original sender
-              return yield* solveDetectionEffect(active).pipe(
-                Effect.provideService(TokenChecker, tokenChecker),
-                Effect.provideService(SolverEvents, solverEvents),
-                Effect.provideService(SolveDeps, solveDeps),
-              );
-            }),
-          ),
+        dispatch: (active) => {
+          if (!self.createIsolatedConn) {
+            return provideServices(active, originalSender);
+          }
+          // Each solve gets its own isolated WS connection to Chrome.
+          // Override sendViaProxy → isolated WS for DOM/Runtime commands.
+          // send (WS #1) stays unchanged — activity loops, token polling
+          // remain on the direct page session WS.
+          // sendViaBrowser → CDPProxy browser WS (pre-warmed compositor for Input events).
+          return Effect.acquireRelease(
+            Effect.sync(() => self.createIsolatedConn!()),
+            (c) => Effect.sync(() => c.cleanup()),
+          ).pipe(
+            Effect.tap((isolated) => isolated.waitForOpen.pipe(
+              Effect.catch(() => Effect.succeed(undefined as void)),
+            )),
+            Effect.flatMap((isolated) => provideServices(active, CdpSender.of({
+              send: originalSender.send,
+              sendViaProxy: (method, params, sessionId, timeoutMs) =>
+                isolated.conn.send(method, params, sessionId, timeoutMs),
+              sendViaBrowser: originalSender.sendViaProxy,
+            }))),
+            Effect.scoped,
+          );
+        },
       });
     }));
 
@@ -278,20 +274,28 @@ export class CloudflareSolver {
 
   /** Interrupt and stop the detection fiber for a target (e.g. on tab close). */
   stopTargetDetection(targetId: TargetId): Effect.Effect<void> {
-    this.stopDetectionFiber(targetId);
     // Record destroyed target — prevents stale OOPIF re-detection if Chrome
     // fires targetDestroyed after our detection poll but before cleanup
     this.stateTracker.solvedCFTargetIds.add(targetId as unknown as string);
 
-    // If this is an OOPIF being destroyed, close the OOPIF's scope.
-    // The scope finalizer calls context.abort() → detection scope closes
-    // → latch opens → poll loops exit within ~500ms. No identity map needed.
+    // Check if this target is an OOPIF child of a page detection.
+    // If so, DON'T kill the parent page's detection fiber — it needs to
+    // continue to detect navigation/token. Only abort if click was delivered.
     const parentCtx = this.stateTracker.registry.findByIframeTarget(targetId);
-    if (parentCtx?.oopif) {
-      // Close OOPIF scope — finalizer propagates abort to parent detection
-      Effect.runSync(
-        Scope.close(parentCtx.oopif.scope, Exit.void),
-      );
+    if (parentCtx) {
+      if (parentCtx.oopif && parentCtx.active.clickDelivered) {
+        // Post-click: close OOPIF scope — finalizer propagates abort
+        Effect.runSync(
+          Scope.close(parentCtx.oopif.scope, Exit.void),
+        );
+      } else if (parentCtx.oopif) {
+        // Pre-click: OOPIF replaced by CF — clear stale binding so
+        // replacement OOPIF can bind via onIframeAttached/onIframeNavigated
+        parentCtx.clearOOPIF();
+      }
+    } else {
+      // This is a PAGE target being destroyed (tab close) — kill the fiber.
+      this.stopDetectionFiber(targetId);
     }
 
     return Effect.promise(() => this.runtime.runPromise(

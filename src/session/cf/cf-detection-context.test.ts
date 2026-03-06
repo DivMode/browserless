@@ -4,8 +4,9 @@ import { CdpSessionId, TargetId } from '../../shared/cloudflare-detection.js';
 import type { CloudflareInfo } from '../../shared/cloudflare-detection.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
-import { DetectionContext } from './cf-detection-context.js';
+import { DetectionContext, OOPIFState } from './cf-detection-context.js';
 import { DetectionRegistry } from './cf-detection-registry.js';
+import { Resolution } from './cf-resolution.js';
 import type { SolveSignal } from './cloudflare-state-tracker.js';
 
 const makeActive = (targetId: string): ActiveDetection => {
@@ -19,10 +20,40 @@ const makeActive = (targetId: string): ActiveDetection => {
     aborted: false,
     tracker: new CloudflareTracker(info),
     abortLatch: Latch.makeUnsafe(false),
+    resolution: Resolution.makeUnsafe(),
   };
 };
 
 describe('DetectionContext', () => {
+  it.effect('setAborted sets aborted=true and opens latch', () =>
+    Effect.gen(function*() {
+      const active = makeActive('T1');
+
+      expect(active.aborted).toBe(false);
+
+      DetectionContext.setAborted(active);
+
+      expect(active.aborted).toBe(true);
+      // Latch should be open — await resolves immediately
+      let latchOpened = false;
+      yield* active.abortLatch.await.pipe(
+        Effect.map(() => { latchOpened = true; }),
+        Effect.timeout('100 millis'),
+        Effect.ignore,
+      );
+      expect(latchOpened).toBe(true);
+    }));
+
+  it.effect('setAborted is idempotent — second call is no-op', () =>
+    Effect.gen(function*() {
+      const active = makeActive('T1');
+
+      DetectionContext.setAborted(active);
+      DetectionContext.setAborted(active); // should not throw
+
+      expect(active.aborted).toBe(true);
+    }));
+
   it.effect('abort() sets aborted=true and opens latch', () =>
     Effect.gen(function*() {
       const scope = yield* Scope.make();
@@ -73,7 +104,7 @@ describe('DetectionContext', () => {
       yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
     }));
 
-  it.effect('OOPIF scope close → parent detection aborted', () =>
+  it.effect('OOPIF scope close pre-click → detection NOT aborted (normal CF lifecycle)', () =>
     Effect.gen(function*() {
       const scope = yield* Scope.make();
       const active = makeActive('T1');
@@ -85,12 +116,102 @@ describe('DetectionContext', () => {
 
       expect(ctx.aborted).toBe(false);
 
-      // Simulate OOPIF destruction — close the OOPIF scope
+      // Simulate pre-click OOPIF destruction — clickDelivered is falsy
       yield* Scope.close(ctx.oopif!.scope, { _tag: 'Success', value: void 0 });
 
-      // Parent detection should be aborted
+      // Detection should NOT be aborted — pre-click OOPIF death is normal
+      expect(ctx.aborted).toBe(false);
+      expect(active.aborted).toBe(false);
+
+      // Cleanup
+      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
+    }));
+
+  it.effect('OOPIF scope close post-click → detection aborted', () =>
+    Effect.gen(function*() {
+      const scope = yield* Scope.make();
+      const active = makeActive('T1');
+      const ctx = new DetectionContext(active, scope);
+
+      const iframeTargetId = TargetId.makeUnsafe('iframe-1');
+      const iframeCdpSessionId = CdpSessionId.makeUnsafe('iframe-session-1');
+      yield* ctx.bindOOPIF(iframeTargetId, iframeCdpSessionId);
+
+      // Mark click as delivered — post-click OOPIF death should abort
+      active.clickDelivered = true;
+
+      // Simulate post-click OOPIF destruction
+      yield* Scope.close(ctx.oopif!.scope, { _tag: 'Success', value: void 0 });
+
+      // Parent detection SHOULD be aborted — CF rejected our click
       expect(ctx.aborted).toBe(true);
       expect(active.aborted).toBe(true);
+    }));
+
+  it.effect('clearOOPIF resets binding so new OOPIF can bind', () =>
+    Effect.gen(function*() {
+      const scope = yield* Scope.make();
+      const active = makeActive('T1');
+      const ctx = new DetectionContext(active, scope);
+
+      // Bind first OOPIF
+      const iframe1Target = TargetId.makeUnsafe('iframe-1');
+      const iframe1Session = CdpSessionId.makeUnsafe('iframe-session-1');
+      yield* ctx.bindOOPIF(iframe1Target, iframe1Session);
+
+      expect(ctx.oopif).not.toBeNull();
+      expect(active.iframeCdpSessionId).toBe(iframe1Session);
+
+      // Pre-click OOPIF destruction — clear stale binding
+      ctx.clearOOPIF();
+
+      expect(ctx.oopif).toBeNull();
+      expect(active.iframeCdpSessionId).toBeUndefined();
+      expect(active.iframeTargetId).toBeUndefined();
+      expect(ctx.aborted).toBe(false);
+
+      // Bind replacement OOPIF
+      const iframe2Target = TargetId.makeUnsafe('iframe-2');
+      const iframe2Session = CdpSessionId.makeUnsafe('iframe-session-2');
+      yield* ctx.bindOOPIF(iframe2Target, iframe2Session);
+
+      expect(ctx.oopif).not.toBeNull();
+      expect(ctx.oopif!.iframeTargetId).toBe(iframe2Target);
+      expect(ctx.oopif!.iframeCdpSessionId).toBe(iframe2Session);
+      expect(active.iframeCdpSessionId).toBe(iframe2Session);
+
+      // Cleanup
+      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
+    }));
+
+  it.effect('oopifState transitions: Unbound → Bound → Cleared → Bound', () =>
+    Effect.gen(function*() {
+      const scope = yield* Scope.make();
+      const active = makeActive('T1');
+      const ctx = new DetectionContext(active, scope);
+
+      // Initial state: Unbound
+      expect(ctx.oopifState._tag).toBe('Unbound');
+      expect(ctx.canBindOOPIF).toBe(true);
+
+      // Bind → Bound
+      yield* ctx.bindOOPIF(TargetId.makeUnsafe('i1'), CdpSessionId.makeUnsafe('s1'));
+      expect(ctx.oopifState._tag).toBe('Bound');
+      expect(ctx.canBindOOPIF).toBe(false);
+
+      // Clear → Cleared
+      ctx.clearOOPIF();
+      expect(ctx.oopifState._tag).toBe('Cleared');
+      expect(ctx.canBindOOPIF).toBe(true);
+      expect(ctx.oopif).toBeNull();
+
+      // Rebind → Bound
+      yield* ctx.bindOOPIF(TargetId.makeUnsafe('i2'), CdpSessionId.makeUnsafe('s2'));
+      expect(ctx.oopifState._tag).toBe('Bound');
+      expect(ctx.oopif!.iframeTargetId).toBe(TargetId.makeUnsafe('i2'));
+
+      // Cleanup
+      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
     }));
 
   it.effect('OOPIF destroyed before binding → no crash, detection not aborted', () =>
@@ -175,7 +296,7 @@ describe('DetectionRegistry with DetectionContext', () => {
       yield* registry.resolve(targetId);
     }));
 
-  it.effect('OOPIF destroyed → context.abort() via scope → detection aborted (no fallback)', () =>
+  it.effect('OOPIF destroyed pre-click → detection NOT aborted, no emission', () =>
     Effect.gen(function*() {
       const emissions: Array<{ targetId: string; signal: SolveSignal }> = [];
       const registry = new DetectionRegistry((active, signal) => {
@@ -188,16 +309,40 @@ describe('DetectionRegistry with DetectionContext', () => {
       const iframeTargetId = TargetId.makeUnsafe('iframe-1');
       yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe('iframe-session-1'));
 
-      // Simulate OOPIF destruction — close the OOPIF scope
+      // Simulate pre-click OOPIF destruction
       yield* Scope.close(ctx.oopif!.scope, { _tag: 'Success', value: void 0 });
 
-      // Detection should be aborted + scope closed
+      // Detection should NOT be aborted — pre-click OOPIF death is normal
+      expect(ctx.aborted).toBe(false);
+      expect(registry.has(targetId)).toBe(true);
+      expect(emissions).toHaveLength(0);
+
+      // Cleanup
+      yield* registry.resolve(targetId);
+    }));
+
+  it.effect('OOPIF destroyed post-click → detection aborted via scope', () =>
+    Effect.gen(function*() {
+      const emissions: Array<{ targetId: string; signal: SolveSignal }> = [];
+      const registry = new DetectionRegistry((active, signal) => {
+        emissions.push({ targetId: active.pageTargetId, signal });
+      });
+
+      const targetId = TargetId.makeUnsafe('T1');
+      const active = makeActive('T1');
+      const ctx = yield* registry.register(targetId, active);
+      const iframeTargetId = TargetId.makeUnsafe('iframe-1');
+      yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe('iframe-session-1'));
+
+      // Mark click as delivered
+      active.clickDelivered = true;
+
+      // Simulate post-click OOPIF destruction
+      yield* Scope.close(ctx.oopif!.scope, { _tag: 'Success', value: void 0 });
+
+      // Detection SHOULD be aborted — CF rejected our click
       expect(ctx.aborted).toBe(true);
       expect(registry.has(targetId)).toBe(false);
-      // No fallback emission — abort() set aborted=true before closing scope,
-      // so the finalizer sees aborted=true and skips emission. The abort itself
-      // is the signal — poll loops exit via latch, and the detection consumer
-      // (handleTurnstileDetection) handles the actual failure emission.
       expect(emissions).toHaveLength(0);
     }));
 

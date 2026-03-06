@@ -198,18 +198,11 @@ export class CloudflareStateTracker {
           phase_label: attr.label,
         };
 
-        // Complete via Resolution gateway if available — exactly-one emission
+        // Complete via Resolution gateway — exactly-one emission
         const ctx = tracker.registry.getContext(pageTargetId);
-        if (active.resolution) {
-          const won = yield* active.resolution.solve(solveResult);
-          if (won && ctx) {
-            yield* ctx.abort();
-          }
-        } else {
-          // Fallback for detections without Resolution (should not happen after full wiring)
-          if (ctx) yield* ctx.abort();
-          tracker.events.emitSolved(active, solveResult);
-          yield* tracker.registry.resolve(pageTargetId);
+        const won = yield* active.resolution.solve(solveResult);
+        if (won && ctx) {
+          yield* ctx.abort();
         }
       } else if (state === 'fail' || state === 'expired' || state === 'timeout') {
         const failCtx = tracker.registry.getContext(pageTargetId);
@@ -220,12 +213,7 @@ export class CloudflareStateTracker {
           tracker.log.info(`Retrying CF detection (attempt ${active.attempt})`);
         } else {
           const duration = Date.now() - active.startTime;
-          if (active.resolution) {
-            yield* active.resolution.fail(state, duration);
-          } else {
-            tracker.events.emitFailed(active, state, duration);
-            yield* tracker.registry.resolve(pageTargetId);
-          }
+          yield* active.resolution.fail(state, duration);
         }
       }
     })();
@@ -291,15 +279,9 @@ export class CloudflareStateTracker {
           phase_label: attr.label,
         };
         const beaconCtx = tracker.registry.getContext(targetId);
-        if (active.resolution) {
-          const won = yield* active.resolution.solve(result);
-          if (won && beaconCtx) {
-            yield* beaconCtx.abort();
-          }
-        } else {
-          if (beaconCtx) yield* beaconCtx.abort();
-          tracker.events.emitSolved(active, result);
-          yield* tracker.registry.resolve(targetId);
+        const won = yield* active.resolution.solve(result);
+        if (won && beaconCtx) {
+          yield* beaconCtx.abort();
         }
         return;
       }
@@ -347,20 +329,12 @@ export class CloudflareStateTracker {
         phase_label: attr.label,
       };
       const autoCtx = tracker.registry.getContext(active.pageTargetId);
-      if (active.resolution) {
-        const won = yield* active.resolution.solve(result);
-        // Only abort + emit marker if we actually won the race.
-        // Losers (won=false) must not mutate active state or emit —
-        // the winner already resolved and the detector handles emission.
-        if (won) {
-          if (autoCtx) yield* autoCtx.abort();
-          tracker.events.marker(active.pageTargetId, 'cf.auto_solved', { signal, method: attr.method });
-        }
-      } else {
+      const won = yield* active.resolution.solve(result);
+      // Only abort + emit marker if we actually won the race.
+      // Losers (won=false) must not mutate active state or emit —
+      // the winner already resolved and the detector handles emission.
+      if (won) {
         if (autoCtx) yield* autoCtx.abort();
-        const pageTargetId = tracker.findPageBySession(active.pageCdpSessionId);
-        if (pageTargetId) yield* tracker.registry.resolve(pageTargetId);
-        tracker.events.emitSolved(active, result);
         tracker.events.marker(active.pageTargetId, 'cf.auto_solved', { signal, method: attr.method });
       }
     })();
