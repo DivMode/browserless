@@ -37,8 +37,17 @@ export const AUTO_SOLVE_POLL_DELAY = '500 millis' as const;
 /** Top-level solveTurnstile deadline (ms). */
 export const SOLVE_DEADLINE_MS = 30_000;
 
+/** Duration-string version of SOLVE_DEADLINE_MS for Effect.timeoutOption. */
+export const SOLVE_DEADLINE = '30 seconds' as const;
+
 /** Post-click wait — max time after click dispatch to wait for resolution. */
 export const POST_CLICK_DEADLINE_MS = 10_000;
+
+/** Interstitial resolution timeout — max time after click for page navigation.
+ * CF can take 10-15s to verify interstitial clicks before redirecting.
+ * Must exceed POST_CLICK_DEADLINE_MS to avoid premature solver_exit on slow CF verifications.
+ * Proven: bsctjs.com ahrefs scrape — CF took 12.4s to verify, 10s timeout missed by 1.4s. */
+export const INTERSTITIAL_RESOLUTION_TIMEOUT = '30 seconds' as const;
 
 /** Navigation wait — how long to wait for page navigation after click (ms). */
 export const NAV_WAIT_MS = 3_000;
@@ -81,7 +90,13 @@ export const EMBEDDED_SUCCESS_WAIT_MS = 1_000;
 /** State tracker: poll interval for post-success state checks (ms). */
 export const STATE_POLL_INTERVAL_MS = 500;
 
+/** State tracker: Duration-string version of STATE_POLL_INTERVAL_MS for Effect.sleep/Effect.repeat. */
+export const STATE_POLL_INTERVAL = '500 millis' as const;
+
 /** Individual CDP call timeout within checkbox-finding methods (ms).
  * Reduced from 5s to 2s — under concurrent load (15+ tabs), CDP calls
  * can stall. Faster timeout lets the retry loop recover on the next poll. */
 export const CDP_CALL_TIMEOUT_MS = 5_000;
+
+/** Duration-string version of CDP_CALL_TIMEOUT_MS for Effect.timeout. */
+export const CDP_CALL_TIMEOUT = '5 seconds' as const;

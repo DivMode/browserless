@@ -1,10 +1,10 @@
 import { Logger } from '@browserless.io/browserless';
-import { Effect } from 'effect';
+import { Effect, Schedule } from 'effect';
 import {
   activityLoopSchedule,
   INTERSTITIAL_SUCCESS_WAIT_MS,
   EMBEDDED_SUCCESS_WAIT_MS,
-  STATE_POLL_INTERVAL_MS,
+  STATE_POLL_INTERVAL,
 } from './cf-schedules.js';
 import type { CdpSessionId, TargetId, CloudflareConfig } from '../../shared/cloudflare-detection.js';
 import type { ReadonlyActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
@@ -153,25 +153,33 @@ export class CloudflareStateTracker {
         // Poll until CF markers disappear or token appears, rather than a fixed wait.
         const isInterstitial = active.info.type === 'interstitial';
         const maxWaitMs = isInterstitial ? INTERSTITIAL_SUCCESS_WAIT_MS : EMBEDDED_SUCCESS_WAIT_MS;
-        const pollInterval = STATE_POLL_INTERVAL_MS;
-        const pollStart = Date.now();
         let token: string | null = null;
         let stillDetected = true;
+        const pollStart = Date.now();
 
-        while (Date.now() - pollStart < maxWaitMs) {
-          yield* Effect.sleep(`${pollInterval} millis`);
-          if (active.aborted) return;
+        const successPoll = Schedule.both(
+          Schedule.spaced(STATE_POLL_INTERVAL),
+          Schedule.during(`${maxWaitMs} millis`),
+        );
 
-          token = yield* tracker.getTokenEffect(active.pageCdpSessionId).pipe(
+        yield* Effect.suspend(() => {
+          if (active.aborted) return Effect.fail('done' as const);
+          return tracker.getTokenEffect(active.pageCdpSessionId).pipe(
             Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
+            Effect.flatMap((t) => {
+              token = t;
+              return tracker.isStillDetectedEffect(active.pageCdpSessionId).pipe(
+                Effect.catchTag('CdpSessionGone', () => Effect.succeed(false)),
+              );
+            }),
+            Effect.flatMap((detected) => {
+              stillDetected = detected;
+              return (!stillDetected || token)
+                ? Effect.fail('done' as const)
+                : Effect.void;
+            }),
           );
-          stillDetected = yield* tracker.isStillDetectedEffect(active.pageCdpSessionId).pipe(
-            Effect.catchTag('CdpSessionGone', () => Effect.succeed(false)),
-          );
-
-          // Page navigated away from CF challenge or token appeared
-          if (!stillDetected || token) break;
-        }
+        }).pipe(Effect.repeat(successPoll), Effect.catch(() => Effect.void));
 
         if (stillDetected && !token) {
           tracker.events.marker(active.pageTargetId, 'cf.false_positive', {
@@ -415,11 +423,12 @@ export class CloudflareStateTracker {
         return 'continue' as const;
       })();
 
-    let loopIter = 0;
     return Effect.suspend(() => {
       if (active.aborted || tracker.destroyed) return Effect.fail('done' as const);
-      loopIter++;
-      return activityIteration(loopIter).pipe(
+      return Effect.gen(function*() {
+        const meta = yield* Schedule.CurrentMetadata;
+        return yield* activityIteration(meta.attempt + 1);
+      }).pipe(
         Effect.flatMap(result =>
           result === 'solved' || result === 'aborted'
             ? Effect.fail('done' as const)
@@ -457,11 +466,12 @@ export class CloudflareStateTracker {
         return 'continue' as const;
       })();
 
-    let loopIter = 0;
     return Effect.suspend(() => {
       if (active.aborted || tracker.destroyed) return Effect.fail('done' as const);
-      loopIter++;
-      return activityIteration(loopIter).pipe(
+      return Effect.gen(function*() {
+        const meta = yield* Schedule.CurrentMetadata;
+        return yield* activityIteration(meta.attempt + 1);
+      }).pipe(
         Effect.flatMap(result =>
           result === 'aborted'
             ? Effect.fail('done' as const)

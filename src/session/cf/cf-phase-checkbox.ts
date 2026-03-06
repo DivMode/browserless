@@ -11,7 +11,7 @@ import { Effect } from 'effect';
 import type { CdpSessionId } from '../../shared/cloudflare-detection.js';
 import type { ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
 import { SolverEvents } from './cf-services.js';
-import { CDP_CALL_TIMEOUT_MS, MAX_CHECKBOX_POLLS, CHECKBOX_POLL_INTERVAL_MS } from './cf-schedules.js';
+import { CDP_CALL_TIMEOUT, MAX_CHECKBOX_POLLS, CHECKBOX_POLL_INTERVAL_MS } from './cf-schedules.js';
 
 /** Effect-returning CDP sender — eliminates the Promise bridge. */
 type EffectSend = (
@@ -39,7 +39,7 @@ interface CDPNode {
 /** Wrap an Effect-returning CDP call with a timeout to prevent hangs when OOPIF navigates away. */
 const cdpCall = <T>(effect: Effect.Effect<T>) =>
   effect.pipe(
-    Effect.timeout(`${CDP_CALL_TIMEOUT_MS} millis`),
+    Effect.timeout(CDP_CALL_TIMEOUT),
     Effect.orElseSucceed(() => null as T | null),
   );
 
