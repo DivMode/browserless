@@ -350,13 +350,37 @@ export const TURNSTILE_CALLBACK_HOOK_JS = `(function() {
             return widgetId;
         };
         ts.__cbHooked = true;
+        proxyGetResponse(ts);
     }
 
-    if (window.turnstile) wrapRender(window.turnstile);
+    var tokenReported = false;
+    function proxyGetResponse(ts) {
+        if (!ts || !ts.getResponse || ts.__grHooked) return;
+        var origGR = ts.getResponse.bind(ts);
+        ts.getResponse = function(widgetId) {
+            var token = origGR(widgetId);
+            if (token && !tokenReported) {
+                tokenReported = true;
+                window.__turnstileSolved = true;
+                window.__turnstileTokenLength = token.length;
+                if (typeof window.__turnstileSolvedBinding === 'function') {
+                    try { window.__turnstileSolvedBinding('solved'); } catch(e) {}
+                }
+            }
+            return token;
+        };
+        ts.__grHooked = true;
+    }
+
+    if (window.turnstile) {
+        wrapRender(window.turnstile);
+        proxyGetResponse(window.turnstile);
+    }
     var _pollId = setInterval(function() {
-        if (window.turnstile && !window.turnstile.__cbHooked) {
-            wrapRender(window.turnstile);
-            clearInterval(_pollId);
+        if (window.turnstile) {
+            if (!window.turnstile.__cbHooked) wrapRender(window.turnstile);
+            if (!window.turnstile.__grHooked) proxyGetResponse(window.turnstile);
+            if (window.turnstile.__cbHooked && window.turnstile.__grHooked) clearInterval(_pollId);
         }
     }, 20);
     setTimeout(function() { clearInterval(_pollId); }, 30000);
