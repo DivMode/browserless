@@ -100,3 +100,11 @@ export const CDP_CALL_TIMEOUT_MS = 5_000;
 
 /** Duration-string version of CDP_CALL_TIMEOUT_MS for Effect.timeout. */
 export const CDP_CALL_TIMEOUT = '5 seconds' as const;
+
+// ── CDPProxy heartbeat ────────────────────────────────────────────────
+
+/** Browser WS heartbeat: fixed ping interval. */
+export const BROWSER_WS_PING_INTERVAL = '10 seconds' as const;
+
+/** Browser WS heartbeat: max wait for pong response (ms). */
+export const BROWSER_WS_PONG_TIMEOUT_MS = 5_000;
