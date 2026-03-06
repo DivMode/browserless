@@ -20,8 +20,10 @@ import type { ActiveDetection } from './cloudflare-event-emitter.js';
 import { Resolution } from './cf-resolution.js';
 import { TokenChecker, SolverEvents, SolveDeps } from './cf-services.js';
 import { ClickResult } from './cloudflare-solve-strategies.js';
+import type { SolveDetectionResult, TurnstileResult } from './cloudflare-solver.effect.js';
 import { MAX_CLICK_ATTEMPTS } from './cf-schedules.js';
 import { CdpSessionGone } from './cf-errors.js';
+import { DetectionContext } from './cf-detection-context.js';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Test helpers
@@ -127,6 +129,10 @@ const makeTestLayer = (config: TestLayerConfig = {}) => {
 
 const importSolver = () => import('./cloudflare-solver.effect.js');
 
+/** Extract the tag from a SolveDetectionResult for assertion readability. */
+const tag = (result: SolveDetectionResult): string =>
+  typeof result === 'string' ? result : result._tag;
+
 // ═══════════════════════════════════════════════════════════════════════
 // Group 1: solveTurnstile core paths
 // ═══════════════════════════════════════════════════════════════════════
@@ -140,8 +146,8 @@ describe('solveTurnstile', () => {
 
       const outcome = yield* solveDetection(active).pipe(Effect.provide(layer));
 
-      expect(outcome).toBe('click_dispatched');
-      expect(active.resolution!.isDone).toBe(true);
+      expect(tag(outcome)).toBe('TokenFound');
+      expect(active.resolution.isDone).toBe(true);
     }));
 
   it.effect('2. token during click loop — token poll wins race', () =>
@@ -161,8 +167,8 @@ describe('solveTurnstile', () => {
       yield* TestClock.adjust('5 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      expect(outcome).toBe('click_dispatched');
-      expect(active.resolution!.isDone).toBe(true);
+      expect(tag(outcome)).toBe('TokenFound');
+      expect(active.resolution.isDone).toBe(true);
     }));
 
   it.effect('3. click succeeds OR token found — either concurrent path resolves', () =>
@@ -185,10 +191,10 @@ describe('solveTurnstile', () => {
       yield* TestClock.adjust('15 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      // Either the click or the token poll resolves first — both map to 'click_dispatched'
-      expect(outcome).toBe('click_dispatched');
+      // Either the click or the token poll resolves first
+      expect(['TokenFound', 'Clicked']).toContain(tag(outcome));
       // Resolution gateway must be completed
-      expect(active.resolution!.isDone).toBe(true);
+      expect(active.resolution.isDone).toBe(true);
     }));
 
   it.effect('4. no click, no token → returns no_click after deadline', () =>
@@ -204,7 +210,7 @@ describe('solveTurnstile', () => {
       yield* TestClock.adjust('35 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      expect(outcome).toBe('no_click');
+      expect(tag(outcome)).toBe('NoClick');
     }));
 
   it.effect('5. external abort — latch opens mid-solve', () =>
@@ -219,12 +225,11 @@ describe('solveTurnstile', () => {
       );
 
       yield* TestClock.adjust('100 millis');
-      active.aborted = true;
-      active.abortLatch.openUnsafe();
+      DetectionContext.setAborted(active);
       yield* TestClock.adjust('1 second');
 
       const outcome = yield* Fiber.join(fiber);
-      expect(outcome).toBe('aborted');
+      expect(tag(outcome)).toBe('Aborted');
     }));
 
   it.effect('6. click but no token in postClickWait → click_no_token', () =>
@@ -243,7 +248,7 @@ describe('solveTurnstile', () => {
       yield* TestClock.adjust('45 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      expect(outcome).toBe('click_no_token');
+      expect(tag(outcome)).toBe('ClickNoToken');
       expect(captures.clickAttempts).toBeGreaterThanOrEqual(1);
     }));
 });
@@ -273,9 +278,9 @@ describe('pollToken', () => {
       const outcome = yield* Fiber.join(fiber);
 
       // Token found via either early check retry or concurrent poll
-      expect(outcome).toBe('click_dispatched');
+      expect(tag(outcome)).toBe('TokenFound');
       // Resolution must be completed via resolveTokenFound
-      expect(active.resolution!.isDone).toBe(true);
+      expect(active.resolution.isDone).toBe(true);
     }));
 
   it.effect('8. abort during poll — returns gracefully', () =>
@@ -290,12 +295,11 @@ describe('pollToken', () => {
       );
 
       yield* TestClock.adjust('2 seconds');
-      active.aborted = true;
-      active.abortLatch.openUnsafe();
+      DetectionContext.setAborted(active);
       yield* TestClock.adjust('1 second');
 
       const outcome = yield* Fiber.join(fiber);
-      expect(outcome).toBe('aborted');
+      expect(tag(outcome)).toBe('Aborted');
     }));
 
   it.effect('9. CdpSessionGone — exits poll gracefully without crash', () =>
@@ -347,7 +351,7 @@ describe('pollToken', () => {
       const outcome = yield* Fiber.join(fiber);
 
       // CdpSessionGone exits the poll → no token → no_click (not a crash)
-      expect(outcome).toBe('no_click');
+      expect(tag(outcome)).toBe('NoClick');
       // getToken was called at least twice: early check + one poll that hit CdpSessionGone
       expect(callCount).toBeGreaterThanOrEqual(2);
     }));
@@ -381,8 +385,7 @@ describe('postClickWait', () => {
       // is a successful solve via click — the page navigated because our click
       // worked. The solver returns click_dispatched because the click DID land
       // (postClickWait returns true when aborted=true in Phase A).
-      active.aborted = true;
-      active.abortLatch.openUnsafe();
+      DetectionContext.setAborted(active);
       yield* TestClock.adjust('5 seconds');
 
       const outcome = yield* Fiber.join(fiber);
@@ -398,7 +401,7 @@ describe('postClickWait', () => {
       // the same raceFirst, opening abortLatch during the race triggers the
       // abort path. The click result hasn't propagated yet.
       // Accept 'aborted' — this is correct: the external signal arrived.
-      expect(outcome).toBe('aborted');
+      expect(tag(outcome)).toBe('Aborted');
     }));
 
   it.effect('11. Phase B token found — click or token wins in concurrent race', () =>
@@ -422,10 +425,10 @@ describe('postClickWait', () => {
       yield* TestClock.adjust('15 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      // Either concurrent path resolves — both map to click_dispatched
-      expect(outcome).toBe('click_dispatched');
+      // Either concurrent path resolves
+      expect(['TokenFound', 'Clicked']).toContain(tag(outcome));
       // Resolution gateway must be completed
-      expect(active.resolution!.isDone).toBe(true);
+      expect(active.resolution.isDone).toBe(true);
     }));
 
   it.effect('12. Phase B timeout — no token within POST_CLICK_DEADLINE', () =>
@@ -444,7 +447,7 @@ describe('postClickWait', () => {
       yield* TestClock.adjust('45 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      expect(outcome).toBe('click_no_token');
+      expect(tag(outcome)).toBe('ClickNoToken');
     }));
 });
 
@@ -597,7 +600,7 @@ describe('Exhaustive ClickResult handling', () => {
 
       // ClickFailed reduces maxAttempts from 6 to 2 on first attempt
       expect(captures.clickAttempts).toBe(2);
-      expect(outcome).toBe('no_click');
+      expect(tag(outcome)).toBe('NoClick');
       // Verify the cf.reduced_attempts marker was emitted with cdp_error reason
       const reducedMarker = captures.markers.find(m => m.tag === 'cf.reduced_attempts');
       expect(reducedMarker).toBeDefined();
@@ -626,7 +629,7 @@ describe('Exhaustive ClickResult handling', () => {
 
       // OopifDead exits on first attempt — no retries
       expect(captures.clickAttempts).toBe(1);
-      expect(outcome).toBe('no_click');
+      expect(tag(outcome)).toBe('OopifDead');
       // Verify oopif_dead marker
       const oopifMarker = captures.markers.find(m => m.tag === 'cf.oopif_dead_on_verify');
       expect(oopifMarker).toBeDefined();
@@ -650,7 +653,7 @@ describe('Exhaustive ClickResult handling', () => {
 
       // not_confirmed retries all MAX_CLICK_ATTEMPTS — it doesn't reduce
       expect(captures.clickAttempts).toBe(MAX_CLICK_ATTEMPTS);
-      expect(outcome).toBe('no_click');
+      expect(tag(outcome)).toBe('NoClick');
     }));
 
   it.effect('21. ClickFailed then Verified on attempt 2', () =>
@@ -674,7 +677,7 @@ describe('Exhaustive ClickResult handling', () => {
 
       // Attempt 0 → ClickFailed (reduces to 2), attempt 1 → Verified
       expect(captures.clickAttempts).toBe(2);
-      expect(outcome).toBe('click_dispatched');
+      expect(['TokenFound', 'Clicked']).toContain(tag(outcome));
     }));
 
   it.effect('22. NoCheckbox and ClickFailed both reduce attempts equally', () =>
@@ -739,7 +742,7 @@ describe('Click latency tracking', () => {
       // (it just returns ClickResult). The real phase4Click emits markers, but our
       // mock bypasses it. Instead, verify the click succeeded via captures.
       expect(captures.clickAttempts).toBeGreaterThanOrEqual(1);
-      expect(active.resolution!.isDone).toBe(true);
+      expect(active.resolution.isDone).toBe(true);
 
       // Verify the marker layer captured tags correctly
       const allTags = captures.markers.map(m => m.tag);
@@ -765,7 +768,7 @@ describe('Click latency tracking', () => {
 
       // Fast path: click verified on first attempt, no retries
       expect(captures.clickAttempts).toBe(1);
-      expect(active.resolution!.isDone).toBe(true);
+      expect(active.resolution.isDone).toBe(true);
     }));
 
   it.effect('25. ClickFailed then Verified — exactly 2 attempts, no excess delay', () =>
@@ -788,7 +791,7 @@ describe('Click latency tracking', () => {
 
       // Attempt 0: ClickFailed (reduces max to 2), attempt 1: Verified
       expect(captures.clickAttempts).toBe(2);
-      expect(outcome).toBe('click_dispatched');
+      expect(['TokenFound', 'Clicked']).toContain(tag(outcome));
       // Verify the cf.reduced_attempts marker was emitted
       const reducedMarker = captures.markers.find(m => m.tag === 'cf.reduced_attempts');
       expect(reducedMarker).toBeDefined();

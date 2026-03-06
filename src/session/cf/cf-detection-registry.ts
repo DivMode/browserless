@@ -67,8 +67,7 @@ export class DetectionRegistry {
 
         if (!context.resolved && !active.aborted) {
           // Orphaned detection — abort + emit session_close fallback
-          active.aborted = true;
-          active.abortLatch.openUnsafe();
+          DetectionContext.setAborted(active);
           self.log.info(`Scope finalizer: emitting session_close fallback for orphaned detection on ${targetId}`);
           self.emitFallback(active, 'session_close');
         }

@@ -5,6 +5,7 @@ import type { CloudflareInfo } from '../../shared/cloudflare-detection.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
 import { DetectionRegistry } from './cf-detection-registry.js';
+import { Resolution } from './cf-resolution.js';
 import type { SolveSignal } from './cloudflare-state-tracker.js';
 
 const makeActive = (targetId: string): ActiveDetection => {
@@ -18,6 +19,7 @@ const makeActive = (targetId: string): ActiveDetection => {
     aborted: false,
     tracker: new CloudflareTracker(info),
     abortLatch: Latch.makeUnsafe(false),
+    resolution: Resolution.makeUnsafe(),
   };
 };
 
@@ -139,12 +141,14 @@ describe('DetectionRegistry', () => {
       info: info1, pageCdpSessionId: CdpSessionId.makeUnsafe('s1'),
       pageTargetId: targetId, startTime: Date.now(), attempt: 1, aborted: false,
       tracker: new CloudflareTracker(info1), abortLatch: Latch.makeUnsafe(false),
+      resolution: Resolution.makeUnsafe(),
     };
     const info2: CloudflareInfo = { type: 'turnstile', url: '', detectionMethod: 'second' };
     const active2: ActiveDetection = {
       info: info2, pageCdpSessionId: CdpSessionId.makeUnsafe('s1'),
       pageTargetId: targetId, startTime: Date.now(), attempt: 1, aborted: false,
       tracker: new CloudflareTracker(info2), abortLatch: Latch.makeUnsafe(false),
+      resolution: Resolution.makeUnsafe(),
     };
 
     await Effect.runPromise(Effect.gen(function*() {

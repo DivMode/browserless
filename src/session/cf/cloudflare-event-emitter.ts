@@ -3,7 +3,7 @@ import { Latch } from 'effect';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot } from '../../shared/cloudflare-detection.js';
 import type { TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
-import type { Resolution } from './cf-resolution.js';
+import { Resolution } from './cf-resolution.js';
 
 export type EmitClientEvent = (method: string, params: object) => Promise<void>;
 export type InjectMarker = (targetId: TargetId, tag: string, payload?: object) => void;
@@ -170,8 +170,9 @@ export interface ActiveDetection {
    * Multiple concurrent fibers race to complete it via Deferred.succeed (idempotent).
    * The single consumer (handleTurnstileDetection / triggerSolveFromUrl) awaits
    * the result and performs the actual emission.
+   * Always present — created at detection registration.
    */
-  resolution?: Resolution;
+  resolution: Resolution;
 }
 
 /** Handles all CDP event emission for Cloudflare detection/solving. */
@@ -214,7 +215,7 @@ export class CloudflareEventEmitter {
     const timingStr = snap.checkbox_to_click_ms != null
       ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
       : '';
-    this.log.info(`CF solved: session=${this.sessionId.slice(0,8)} type=${result.type} method=${result.method} duration=${result.duration_ms}ms${timingStr}`);
+    this.log.warn(`CF solved: session=${this.sessionId.slice(0,8)} type=${result.type} method=${result.method} duration=${result.duration_ms}ms${timingStr}`);
     this.emitClientEvent('Browserless.cloudflareSolved', {
       ...result,
       token_length: result.token_length ?? result.token?.length ?? 0,
@@ -263,6 +264,7 @@ export class CloudflareEventEmitter {
       startTime: Date.now(), attempt: 0, aborted: true,
       tracker: new CloudflareTracker(info),
       abortLatch,
+      resolution: Resolution.makeUnsafe(),
     };
 
     this.emitDetected(active);

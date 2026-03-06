@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { Schema } from 'effect';
 
 export const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN || '';
-export const PROXY_URL = process.env.LOCAL_MOBILE_PROXY || '';
+export const PROXY_URL = process.env.LOCAL_MOBILE_PROXY ?? (() => { throw new Error('LOCAL_MOBILE_PROXY required — add it to .env'); })();
 export const BROWSERLESS_HTTP = process.env.BROWSERLESS_ENDPOINT || 'http://localhost:3000';
 /** Replay server HTTP endpoint — separate from browserless in the new architecture. */
 const _replayUrl = process.env.REPLAY_INGEST_URL;
@@ -153,18 +153,6 @@ export interface SessionResult {
 }
 
 // ── Replay API (plain async) ────────────────────────────────────────
-
-/** Find the most recent replay started after `afterTs`. */
-export async function findReplay(afterTs: number): Promise<ReplayMeta | null> {
-  const res = await fetch(`${REPLAY_HTTP}/replays`);
-  if (!res.ok) return null;
-  const raw = await res.json();
-  const replays = Schema.decodeUnknownSync(ReplayListResponse)(raw);
-  const recent = replays
-    .filter((r) => (r.startedAt ?? 0) >= afterTs)
-    .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
-  return recent[0] ?? null;
-}
 
 /** Find ALL replays started after `afterTs` (multiple per-tab replays per session). */
 export async function findAllReplays(afterTs: number): Promise<ReplayMeta[]> {
@@ -371,18 +359,18 @@ export function buildSummaryFromMarkers(markers: ReplayMarker[]): TurnstileSumma
 /**
  * Summary-to-replay method/signal mapping.
  *
- * | Summary | Expected cf.solved method         | Expected cf.solved signal       |
- * |---------|-----------------------------------|---------------------------------|
- * | `Int✓`  | `click_navigation`                | `page_navigated`                |
- * | `Int→`  | `auto_navigation`                 | `page_navigated`                |
- * | `Emb✓`  | `click_solve` or `click_navigation`| `beacon_push` or `token_poll`  |
- * | `Emb→`  | `auto_solve`                      | `beacon_push` or `token_poll`  |
+ * | Summary | Expected cf.solved method              | Expected cf.solved signal                          |
+ * |---------|----------------------------------------|----------------------------------------------------|
+ * | `Int✓`  | `click_navigation`                     | `page_navigated`                                   |
+ * | `Int→`  | `auto_navigation`                      | `page_navigated`                                   |
+ * | `Emb✓`  | `click_solve` or `click_navigation`    | `beacon_push`, `token_poll`, `activity_poll`, `page_navigated` |
+ * | `Emb→`  | `auto_solve` or `auto_navigation`      | `beacon_push`, `token_poll`, `activity_poll`, `page_navigated` |
  */
 const SUMMARY_METHOD_MAP: Record<string, { methods: string[]; signals: string[] }> = {
   'Int✓': { methods: ['click_navigation'], signals: ['page_navigated'] },
   'Int→': { methods: ['auto_navigation'], signals: ['page_navigated'] },
-  'Emb✓': { methods: ['click_solve', 'click_navigation'], signals: ['beacon_push', 'token_poll'] },
-  'Emb→': { methods: ['auto_solve'], signals: ['beacon_push', 'token_poll'] },
+  'Emb✓': { methods: ['click_solve', 'click_navigation'], signals: ['beacon_push', 'token_poll', 'activity_poll', 'page_navigated'] },
+  'Emb→': { methods: ['auto_solve', 'auto_navigation'], signals: ['beacon_push', 'token_poll', 'activity_poll', 'page_navigated'] },
 };
 
 /**
@@ -415,13 +403,21 @@ export function assertSummaryConsistency(
     return `Summary '${summary.label}' claims click-solve but no cf.oopif_click marker with ok=true`;
   }
 
-  // Check for TOCTOU race: multiple cf.detected with large time gap
+  // Check for TOCTOU race: multiple cf.detected with large time gap.
+  // Allow multi-phase (Int→Emb): if cf.solved exists after the first detection,
+  // the second detection is a new challenge on the destination page, not a race.
   const detected = markers.filter((m) => m.tag === CF_MARKERS.DETECTED);
   if (detected.length > 1) {
     const timestamps = detected.map((m) => m.timestamp);
     const spread = Math.max(...timestamps) - Math.min(...timestamps);
     if (spread > 2000) {
-      return `TOCTOU race: ${detected.length} cf.detected events ${spread}ms apart`;
+      const firstTs = Math.min(...timestamps);
+      const solvedBetween = markers.some(
+        (m) => m.tag === CF_MARKERS.SOLVED && m.timestamp > firstTs,
+      );
+      if (!solvedBetween) {
+        return `TOCTOU race: ${detected.length} cf.detected events ${spread}ms apart`;
+      }
     }
   }
 
@@ -433,6 +429,34 @@ export function assertSummaryConsistency(
   }
 
   return null;
+}
+
+// ── Structured failure ──────────────────────────────────────────────
+
+/** Fail a CF test with full marker evidence embedded in the error message.
+ *  This is the ONLY way CF integration tests should fail.
+ *  Raw expect.fail() is banned — use this instead. */
+export function failWithEvidence(
+  siteName: string,
+  message: string,
+  markers: ReplayMarker[],
+  replayUrl: string | null,
+): never {
+  const cfMarkers = markers.filter(m => m.tag.startsWith('cf.'));
+  const sorted = [...cfMarkers].sort((a, b) => a.timestamp - b.timestamp);
+  const baseTs = sorted[0]?.timestamp ?? 0;
+  const markerDump = sorted
+    .map(m => `  ${m.tag} +${m.timestamp - baseTs}ms ${JSON.stringify(m.payload)}`)
+    .join('\n');
+  const full =
+    `${siteName}: ${message}\n\n` +
+    `=== CF MARKERS (${cfMarkers.length}) ===\n${markerDump}\n\n` +
+    (replayUrl ? `Replay: ${replayUrl}` : 'No replay URL');
+  // Throw AssertionError-like to integrate with vitest's test runner.
+  // Cannot import vitest here (src/ file compiled by tsc).
+  const err = new Error(full);
+  err.name = 'AssertionError';
+  throw err;
 }
 
 // ── Debug helpers ───────────────────────────────────────────────────
@@ -464,4 +488,25 @@ export function dumpDebugContext(session: SessionResult) {
   dumpMarkerTimeline(session.markers);
   dumpConsoleErrors(session.consoleErrors);
   dumpReplayHint(session.replayId);
+}
+
+export function dumpRechallengeDiag(markers: ReplayMarker[], replayId: string | null): void {
+  const detections = markers.filter((m) => m.tag === 'cf.detected');
+  const solves = markers.filter((m) => m.tag === 'cf.solved');
+  const fails = markers.filter((m) => m.tag === 'cf.failed');
+
+  console.error('=== RECHALLENGE DIAGNOSTIC ===');
+  console.error(`Detections: ${detections.length}`);
+  for (const d of detections) {
+    console.error(`  +${d.timestamp}ms  type=${d.payload.type} method=${d.payload.method ?? d.payload.detectionMethod}`);
+  }
+  console.error(`Solves: ${solves.length}`);
+  for (const s of solves) {
+    console.error(`  +${s.timestamp}ms  method=${s.payload.method} signal=${s.payload.signal} duration=${s.payload.duration_ms}ms`);
+  }
+  console.error(`Fails: ${fails.length}`);
+  for (const f of fails) {
+    console.error(`  +${f.timestamp}ms  reason=${f.payload.reason} duration=${f.payload.duration_ms}ms`);
+  }
+  if (replayId) dumpReplayHint(replayId);
 }

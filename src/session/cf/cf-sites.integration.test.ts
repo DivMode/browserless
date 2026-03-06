@@ -66,12 +66,15 @@ import puppeteer, { type Browser, type Page } from 'puppeteer-core';
 
 import {
   PROXY,
+  REPLAY_HTTP,
   type TurnstileSummary,
   assertSummaryConsistency,
   buildSummaryFromMarkers,
   buildWsUrl,
   dumpMarkerTimeline,
+  dumpRechallengeDiag,
   dumpReplayHint,
+  failWithEvidence,
   fetchReplayAnalysis,
   findAllReplays,
   writeSiteResult,
@@ -330,24 +333,36 @@ describe.concurrent('CF Solver Multi-Site', () => {
 
           // ── 3. Rechallenge check ─────────────────────────────────────
           if (summary!.rechallenge) {
-            dumpMarkerTimeline(allMarkers);
-            for (const a of analyses) dumpReplayHint(a.replayId);
+            const replayUrl = replayId ? `${REPLAY_HTTP}/replays/${replayId}` : null;
+            failWithEvidence(
+              site.name,
+              'RECHALLENGE detected — P0 failure',
+              allMarkers,
+              replayUrl,
+            );
           }
-          expect(
-            summary!.rechallenge,
-            `${site.name}: RECHALLENGE detected — P0 failure`,
-          ).toBe(false);
 
           // Hidden rechallenge: multiple cf.detected with large time gap
+          // BUT: allow multi-phase (Int→Emb) — a cf.solved between two cf.detected
+          // means the first challenge solved and the destination has a new challenge.
           const allDetected = allMarkers.filter((m) => m.tag === 'cf.detected');
           if (allDetected.length > 1) {
             const timestamps = allDetected.map((m) => m.timestamp);
             const spread = Math.max(...timestamps) - Math.min(...timestamps);
             if (spread > 2000) {
-              dumpMarkerTimeline(allMarkers);
-              expect.fail(
-                `${site.name}: hidden rechallenge — ${allDetected.length} cf.detected events ${spread}ms apart`,
+              const firstTs = Math.min(...timestamps);
+              const solvedBetween = allMarkers.some(
+                (m) => m.tag === 'cf.solved' && m.timestamp > firstTs,
               );
+              if (!solvedBetween) {
+                const replayUrl = replayId ? `${REPLAY_HTTP}/replays/${replayId}` : null;
+                failWithEvidence(
+                  site.name,
+                  `hidden rechallenge — ${allDetected.length} cf.detected events ${spread}ms apart`,
+                  allMarkers,
+                  replayUrl,
+                );
+              }
             }
           }
 
@@ -360,28 +375,30 @@ describe.concurrent('CF Solver Multi-Site', () => {
           ).toContain(type);
 
           if (!site.expectedSummaries.includes(label)) {
-            dumpMarkerTimeline(allMarkers);
-            for (const a of analyses) dumpReplayHint(a.replayId);
+            const replayUrl = replayId ? `${REPLAY_HTTP}/replays/${replayId}` : null;
+            failWithEvidence(
+              site.name,
+              `summary '${label}' not in expected [${site.expectedSummaries.join(', ')}]. ` +
+              (label.includes('✗') ? 'Solver FAILED to resolve.' :
+               label.includes('?') ? 'Unrecognized outcome.' :
+               label === '⚠ No Data' ? 'Zero CF events — P0.' :
+               'Unexpected label.'),
+              allMarkers,
+              replayUrl,
+            );
           }
-          expect(
-            site.expectedSummaries.includes(label),
-            `${site.name}: summary '${label}' not in expected [${site.expectedSummaries.join(', ')}]. ` +
-            (label.includes('✗') ? 'Solver detected challenge but FAILED to resolve — extract replay markers.' :
-             label.includes('?') ? 'Unrecognized outcome — check cf.solved marker for unexpected method.' :
-             label === '⚠ No Data' ? 'Zero CF events — CDP event pipeline broken. P0 bug.' :
-             'Unexpected label.'),
-          ).toBe(true);
 
           // ── 5. Summary-to-replay consistency ────────────────────────
           const inconsistency = assertSummaryConsistency(summary!, allMarkers);
           if (inconsistency) {
-            dumpMarkerTimeline(allMarkers);
-            for (const a of analyses) dumpReplayHint(a.replayId);
+            const replayUrl = replayId ? `${REPLAY_HTTP}/replays/${replayId}` : null;
+            failWithEvidence(
+              site.name,
+              `summary/replay mismatch — ${inconsistency}`,
+              allMarkers,
+              replayUrl,
+            );
           }
-          expect(
-            inconsistency,
-            `${site.name}: summary/replay mismatch — ${inconsistency}`,
-          ).toBeNull();
 
           writeSiteResult({
             name: site.name,
@@ -429,7 +446,7 @@ function runWithProxy(args: string[], timeoutMs: number): string {
 }
 
 describe('Pydoll Pipeline', () => {
-  it('ahrefs-fast produces valid DR and CF summary', () => {
+  it('ahrefs-fast produces valid DR and CF summary', { timeout: 180_000 }, () => {
     const stdout = runWithProxy(
       ['ahrefs-fast', 'etsy.com', '--chrome-endpoint=local-browserless'],
       120_000,
@@ -449,13 +466,13 @@ describe('Pydoll Pipeline', () => {
     expect(drMatch, 'No domainRating in ahrefs-fast output').toBeTruthy();
     const dr = Number(drMatch![1]);
     expect(dr).toBeGreaterThan(0);
-  }, { timeout: 180_000 });
+  });
 
   // WARNING: cf-stress burns proxy IP. Run ONCE per session — back-to-back runs
   // degrade pass rates as Ahrefs/CF rate-limits the carrier block after ~30 rapid
   // requests. The FIRST run is the meaningful result. If you need to re-run, wait
   // 10+ minutes for IP rotation.
-  it('cf-stress passes >=80% with 15 concurrent tabs', () => {
+  it('cf-stress passes >=80% with 15 concurrent tabs', { timeout: 360_000 }, () => {
     const stdout = runWithProxy(
       ['cf-stress', '--concurrent', '15', '--chrome-endpoint=local-browserless'],
       300_000,
@@ -466,9 +483,9 @@ describe('Pydoll Pipeline', () => {
     expect(passMatch, 'No pass count in cf-stress output').toBeTruthy();
     const passed = Number(passMatch![1]);
     expect(passed, `Only ${passed}/15 passed (need >=12 for 80%)`).toBeGreaterThanOrEqual(12);
-  }, { timeout: 360_000 });
+  });
 
-  it('pydoll unit tests pass', () => {
+  it('pydoll unit tests pass', { timeout: 60_000 }, () => {
     const stdout = execFileSync('uv', ['run', 'pytest', 'tests/test_cloudflare_metrics.py', '-v'], {
       cwd: PYDOLL_DIR,
       encoding: 'utf-8',
@@ -482,5 +499,5 @@ describe('Pydoll Pipeline', () => {
 
     // No failures
     expect(stdout).not.toMatch(/\d+ failed/);
-  }, { timeout: 60_000 });
+  });
 });

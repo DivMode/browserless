@@ -24,11 +24,14 @@ import puppeteer, { type Browser, type Page } from 'puppeteer-core';
 
 import {
   PROXY,
+  REPLAY_HTTP,
   buildWsUrl,
   dumpDebugContext,
+  dumpRechallengeDiag,
+  failWithEvidence,
   fetchDebugData,
   fetchMarkers,
-  findReplay,
+  findAllReplays,
   type ReplayMarker,
   type ReplayMeta,
   type SessionResult,
@@ -48,7 +51,7 @@ let sessionError: Error | null = null;
 // ── ReplayAPI Service ───────────────────────────────────────────────
 
 const ReplayAPI = ServiceMap.Service<{
-  readonly findReplay: (afterTs: number) => Effect.Effect<ReplayMeta | null>;
+  readonly findAllReplays: (afterTs: number) => Effect.Effect<ReplayMeta[]>;
   readonly fetchMarkers: (replayId: string) => Effect.Effect<ReplayMarker[]>;
   readonly fetchDebugData: (replayId: string) => Effect.Effect<{
     consoleErrors: string[];
@@ -57,7 +60,7 @@ const ReplayAPI = ServiceMap.Service<{
 }>('ReplayAPI');
 
 const replayAPIImpl = {
-  findReplay: (afterTs: number) => Effect.promise(() => findReplay(afterTs)),
+  findAllReplays: (afterTs: number) => Effect.promise(() => findAllReplays(afterTs)),
   fetchMarkers: (replayId: string) => Effect.promise(() => fetchMarkers(replayId)),
   fetchDebugData: (replayId: string) => Effect.promise(() => fetchDebugData(replayId)),
 };
@@ -107,6 +110,12 @@ const runSession: Effect.Effect<
   yield* setupProxyAuth(page);
   console.log(`  [${Date.now() - testStartTs}ms] proxy auth set up, navigating...`);
 
+  // Capture targetId for replay isolation (multi-file tests run concurrently)
+  const cdpSession = yield* Effect.promise(() => page.createCDPSession());
+  const { targetInfo } = yield* Effect.promise(() => cdpSession.send('Target.getTargetInfo'));
+  const pageTargetId = targetInfo.targetId;
+  console.log(`  [${Date.now() - testStartTs}ms] targetId=${pageTargetId.slice(0, 8)}`);
+
   console.log(`  [${Date.now() - testStartTs}ms] goto start`);
   yield* Effect.promise(() =>
     page.goto(NOPECHA_URL, { waitUntil: 'load', timeout: 30_000 }).catch(() => {}),
@@ -123,9 +132,11 @@ const runSession: Effect.Effect<
   console.log(`  [${Date.now() - testStartTs}ms] browser closed`);
 
   const api = yield* Effect.service(ReplayAPI);
-  const replay = yield* api.findReplay(testStartTs);
+  // Use findAllReplays + targetId filter for isolation from concurrent test files
+  const allReplays = yield* api.findAllReplays(testStartTs);
+  const replay = allReplays.find((r) => r.targetId === pageTargetId) ?? null;
   if (!replay) {
-    throw new Error('No replay found after session — browserless may not be recording');
+    throw new Error(`No replay found for targetId ${pageTargetId} — browserless may not be recording`);
   }
   console.log(`  replay: ${replay.id} (${replay.eventCount} events)`);
 
@@ -190,20 +201,25 @@ describe('CF Solver Integration (real nopecha.com)', () => {
 
       const rechallenge = markers.find((m) => m.tag === 'cf.rechallenge');
       if (rechallenge) {
-        console.error('=== RECHALLENGE DETECTED ===');
-        dumpDebugContext(session);
+        failWithEvidence('nopecha', 'RECHALLENGE — session poisoned', markers, `${REPLAY_HTTP}/replays/${session.replayId}`);
       }
-      expect(rechallenge, 'RECHALLENGE — session poisoned. See debug output above.').toBeUndefined();
 
       // Also check for duplicate cf.detected at different timestamps (hidden rechallenge)
+      // Allow multi-phase (Int→Emb): if cf.solved exists between detections, it's a new
+      // challenge on the destination page, not a rechallenge.
       const detected = markers.filter((m) => m.tag === 'cf.detected');
       if (detected.length > 1) {
         const timestamps = detected.map((m) => m.timestamp);
         const spread = Math.max(...timestamps) - Math.min(...timestamps);
         if (spread > 2000) {
-          console.error(`=== HIDDEN RECHALLENGE: ${detected.length} cf.detected events, ${spread}ms apart ===`);
-          dumpDebugContext(session);
-          expect.fail(`Hidden rechallenge: ${detected.length} cf.detected events ${spread}ms apart`);
+          // cf.solved may fire AFTER the second cf.detected (async Resolution)
+          const firstTs = Math.min(...timestamps);
+          const solvedBetween = markers.some(
+            (m) => m.tag === 'cf.solved' && m.timestamp > firstTs,
+          );
+          if (!solvedBetween) {
+            failWithEvidence('nopecha', `Hidden rechallenge: ${detected.length} cf.detected events ${spread}ms apart`, markers, `${REPLAY_HTTP}/replays/${session.replayId}`);
+          }
         }
       }
     }),
@@ -346,9 +362,7 @@ describe('CF Solver Integration (real nopecha.com)', () => {
 
       const checkboxFound = markers.find((m) => m.tag === 'cf.cdp_checkbox_found');
       if (!checkboxFound) {
-        console.error('=== CHECKBOX MARKER MISSING ===');
-        dumpDebugContext(session);
-        expect.fail('cf.cdp_checkbox_found marker missing for click path');
+        failWithEvidence('nopecha', 'cf.cdp_checkbox_found marker missing for click path', markers, `${REPLAY_HTTP}/replays/${session.replayId}`);
       }
 
       const findMs = Number(checkboxFound!.payload.checkbox_found_ms ?? 0);

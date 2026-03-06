@@ -13,7 +13,8 @@ import { ServiceMap } from 'effect';
 import type { CdpSessionId, TargetId, CloudflareResult, CloudflareConfig } from '../../shared/cloudflare-detection.js';
 import type { CdpSessionGone, CdpTimeout } from './cf-errors.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
-import type { SolveOutcome, ClickResult } from './cloudflare-solve-strategies.js';
+import type { ClickResult } from './cloudflare-solve-strategies.js';
+import type { SolveDetectionResult } from './cloudflare-solver.effect.js';
 
 // ═══════════════════════════════════════════════════════════════════════
 // CdpSender — send CDP commands to browser/page/OOPIF sessions
@@ -99,7 +100,7 @@ export const SolveDeps = ServiceMap.Service<{
 // ═══════════════════════════════════════════════════════════════════════
 
 export const SolveDispatcher = ServiceMap.Service<{
-  readonly dispatch: (active: ActiveDetection) => Effect.Effect<SolveOutcome>;
+  readonly dispatch: (active: ActiveDetection) => Effect.Effect<SolveDetectionResult>;
 }>('SolveDispatcher');
 
 // ═══════════════════════════════════════════════════════════════════════
