@@ -4,10 +4,11 @@ const WebSocketServer = (WebSocket as any).Server as typeof import('ws').WebSock
 import { Duplex } from 'stream';
 import { IncomingMessage } from 'http';
 import { Config, Logger } from '@browserless.io/browserless';
-import { Duration, Effect, Schema } from 'effect';
+import { Duration, Effect, Fiber, Schedule, Schema } from 'effect';
 
 import { CloudflareConfig } from './shared/cloudflare-detection.js';
 import { CdpSessionId, TargetId } from './shared/cloudflare-detection.js';
+import { BROWSER_WS_PING_INTERVAL, BROWSER_WS_PONG_TIMEOUT_MS } from './session/cf/cf-schedules.js';
 import { decodeCDPCommand, decodeCDPMessage, decodeAddReplayMarkerParams } from './shared/cdp-schemas.js';
 import { CdpConnection } from './shared/cdp-rpc.js';
 
@@ -90,9 +91,6 @@ export function isReplayCapable(browser: unknown): browser is ReplayCapableBrows
  */
 const ON_BEFORE_CLOSE_TIMEOUT_MS = 15000;
 
-/** WS ping interval to detect stalled Chrome connections. */
-const BROWSER_WS_PING_INTERVAL_MS = 10_000;
-
 export class CDPProxy {
   private clientWs: WebSocket | null = null;
   private browserWs: WebSocket | null = null;
@@ -100,7 +98,7 @@ export class CDPProxy {
   private closeRequested = false;
   private log = new Logger('cdp-proxy');
   private getTabCount?: () => number;
-  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private heartbeatFiber: Fiber.Fiber<unknown> | null = null;
 
   /**
    * Debug mode: log all CDP commands going through the proxy.
@@ -586,31 +584,62 @@ export class CDPProxy {
   private startHeartbeat(): void {
     if (!this.browserWs) return;
 
-    let pongReceived = true;
-    this.browserWs.on('pong', () => { pongReceived = true; });
+    const tick = Effect.fn('cdp.heartbeat')({ self: this }, function*() {
+      const ws = this.browserWs;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
-    this.heartbeatTimer = setInterval(() => {
-      if (!pongReceived) {
+      // Send ping
+      yield* Effect.try({
+        try: () => ws.ping(),
+        catch: () => new Error('ping_failed'),
+      });
+
+      // Wait for pong with timeout
+      const gotPong = yield* Effect.callback<boolean>((resume) => {
+        let settled = false;
+        const timeout = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          ws.removeListener('pong', onPong);
+          resume(Effect.succeed(false));
+        }, BROWSER_WS_PONG_TIMEOUT_MS);
+        const onPong = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          resume(Effect.succeed(true));
+        };
+        ws.once('pong', onPong);
+        return Effect.sync(() => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timeout);
+            ws.removeListener('pong', onPong);
+          }
+        });
+      });
+
+      if (!gotPong) {
         this.log.warn('Browser WS heartbeat timeout — Chrome not responding, closing session');
-        this.stopHeartbeat();
-        this.handleClose();
-        return;
-      }
-      pongReceived = false;
-      try {
-        this.browserWs?.ping();
-      } catch {
-        this.log.warn('Browser WS ping failed, closing session');
-        this.stopHeartbeat();
         this.handleClose();
       }
-    }, BROWSER_WS_PING_INTERVAL_MS);
+    });
+
+    this.heartbeatFiber = Effect.runFork(
+      tick().pipe(
+        Effect.catch((e) => Effect.sync(() => {
+          this.log.warn(`Browser WS ping failed, closing session: ${e instanceof Error ? e.message : String(e)}`);
+          this.handleClose();
+        })),
+        Effect.repeat(Schedule.fixed(BROWSER_WS_PING_INTERVAL)),
+      ),
+    );
   }
 
   private stopHeartbeat(): void {
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
+    if (this.heartbeatFiber) {
+      Effect.runFork(Fiber.interrupt(this.heartbeatFiber));
+      this.heartbeatFiber = null;
     }
   }
 
