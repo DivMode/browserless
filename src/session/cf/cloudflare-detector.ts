@@ -1,7 +1,7 @@
 import { Cause, Effect, Latch } from 'effect';
 import { Logger } from '@browserless.io/browserless';
 import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, CloudflareType } from '../../shared/cloudflare-detection.js';
-import { DETECTION_POLL_DELAY, MAX_RECHALLENGES, RECHALLENGE_DELAY_MS } from './cf-schedules.js';
+import { DETECTION_POLL_DELAY, INTERSTITIAL_RESOLUTION_TIMEOUT, MAX_RECHALLENGES, RECHALLENGE_DELAY_MS } from './cf-schedules.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
 import type { ActiveDetection, ReadonlyActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
 import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
@@ -460,9 +460,10 @@ export class CloudflareDetector {
       // Await Resolution — the single emission consumer.
       // For click_dispatched: onPageNavigated completes it ~1.5-2s after click.
       // For no_click/click_no_token/aborted: emitSolveFailure already completed it above.
-      // 10s timeout is generous fallback for any path that never completes.
+      // 30s timeout: CF can take 10-15s to verify interstitial clicks before redirecting.
+      // (10s was too short — bsctjs.com CF took 12.4s, causing premature solver_exit.)
       const maybeResolved = yield* active.resolution.await.pipe(
-        Effect.timeoutOption('10 seconds'),
+        Effect.timeoutOption(INTERSTITIAL_RESOLUTION_TIMEOUT),
       );
       if (maybeResolved._tag === 'Some') {
         const resolved = maybeResolved.value;

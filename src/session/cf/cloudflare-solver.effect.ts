@@ -8,7 +8,7 @@
  * The CloudflareSolver bridge (cloudflare-solver.ts) provides the services
  * via ManagedRuntime and calls these via runtime.runPromise().
  */
-import { Cause, Data, Effect } from 'effect';
+import { Cause, Data, Effect, Option, Ref } from 'effect';
 import type { SolveOutcome } from './cloudflare-solve-strategies.js';
 import { DetectionContext } from './cf-detection-context.js';
 import { ClickResult } from './cloudflare-solve-strategies.js';
@@ -33,6 +33,7 @@ import {
   CLICK_RETRY_DELAY,
   TOKEN_POLL_DELAY,
   AUTO_SOLVE_POLL_DELAY,
+  SOLVE_DEADLINE,
   SOLVE_DEADLINE_MS,
   POST_CLICK_DEADLINE_MS,
   NAV_WAIT_MS,
@@ -127,7 +128,13 @@ export const solveDetection = (
           yield* deps.startActivityLoopEmbedded(active).pipe(Effect.forkChild);
         }
 
-        const result = yield* solveTurnstile(active, deps);
+        // Outer-scope SOLVE_DEADLINE timeout propagates via fiber interruption
+        // to all child effects (race, pollToken, postClickWait Phase B).
+        // Exception: postClickWait Phase B keeps its own clickTime-anchored deadline.
+        const resultOption = yield* solveTurnstile(active, deps).pipe(
+          Effect.timeoutOption(SOLVE_DEADLINE),
+        );
+        const result = Option.getOrElse(resultOption, () => TR.NoClick());
         if (active.aborted) return TR.Aborted();
         // Return TurnstileResult directly — detector pattern-matches on _tag
         return result;
@@ -296,60 +303,72 @@ const solveTurnstile = (
     // ── Two concurrent strategies — first one to succeed wins ──────────
 
     // Strategy 1: Click loop — try to find and click the Turnstile checkbox.
-    // Non-interactive widgets never render a checkbox. After first failed attempt,
-    // reduce max attempts from 6→2 to preserve deadline for token polling.
-    const clickLoop = Effect.fn('cf.clickLoop')(function*() {
-      let maxAttempts = MAX_CLICK_ATTEMPTS;
-      const clickLoopStart = Date.now();
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        if (attempt > 0) yield* Effect.sleep(CLICK_RETRY_DELAY);
-
-        const result = yield* deps.findAndClickViaCDP(active, attempt).pipe(
-          Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
-        );
-
+    // Non-interactive widgets never render a checkbox. First attempt determines
+    // whether to reduce max attempts (6→2) to preserve deadline for token polling.
+    const handleClickResult = (result: ClickResult, attempt: number) =>
+      Effect.fn('cf.handleClickResult')(function*() {
         switch (result._tag) {
           case 'Verified':
             active.clickDelivered = true;
             active.clickDeliveredAt = result.clickDeliveredAt;
             yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
-            return TR.Clicked({ attempt });
-
+            return TR.Clicked({ attempt }) as TurnstileResult | null;
           case 'NotVerified':
             if (result.reason === 'oopif_gone') {
               yield* events.marker(pageTargetId, 'cf.oopif_dead_on_verify', { attempt });
-              return TR.OopifDead({ attempt });
+              return TR.OopifDead({ attempt }) as TurnstileResult | null;
             }
-            // not_confirmed — click dispatched but verify flag not set.
-            // Worth retrying (OOPIF may rerender, timing window).
-            continue;
-
+            return null as TurnstileResult | null; // continue retrying
           case 'NoCheckbox':
           case 'ClickFailed':
-            // No checkbox or CDP error — reduce attempts on first failure
-            if (attempt === 0 && maxAttempts > 2) {
-              maxAttempts = 2;
-              yield* events.marker(pageTargetId, 'cf.reduced_attempts', {
-                reason: result._tag === 'NoCheckbox'
-                  ? 'first_attempt_no_checkbox'
-                  : 'first_attempt_cdp_error',
-                original: MAX_CLICK_ATTEMPTS,
-                reduced_to: maxAttempts,
-              });
-            }
-            continue;
-
+            return null as TurnstileResult | null; // continue retrying
           default: {
             const _exhaustive: never = result;
             throw new Error(`Unhandled ClickResult: ${(_exhaustive as any)._tag}`);
           }
         }
+      })();
+
+    const clickLoop = Effect.fn('cf.clickLoop')(function*() {
+      const clickLoopStart = Date.now();
+
+      // First attempt — determines retry strategy
+      const firstResult = yield* deps.findAndClickViaCDP(active, 0).pipe(
+        Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
+      );
+      const firstExit = yield* handleClickResult(firstResult, 0);
+      if (firstExit) return firstExit;
+
+      // Reduce remaining attempts if first attempt found no checkbox or CDP errored
+      const shouldReduce = firstResult._tag === 'NoCheckbox' || firstResult._tag === 'ClickFailed';
+      const remainingAttempts = shouldReduce ? 1 : MAX_CLICK_ATTEMPTS - 1;
+
+      if (shouldReduce) {
+        yield* events.marker(pageTargetId, 'cf.reduced_attempts', {
+          reason: firstResult._tag === 'NoCheckbox'
+            ? 'first_attempt_no_checkbox'
+            : 'first_attempt_cdp_error',
+          original: MAX_CLICK_ATTEMPTS,
+          reduced_to: remainingAttempts + 1,
+        });
       }
+
+      // Remaining attempts (fixed count, no mutation)
+      for (let attempt = 1; attempt <= remainingAttempts; attempt++) {
+        yield* Effect.sleep(CLICK_RETRY_DELAY);
+        const result = yield* deps.findAndClickViaCDP(active, attempt).pipe(
+          Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
+        );
+        const exit = yield* handleClickResult(result, attempt);
+        if (exit) return exit;
+      }
+
+      const totalAttempts = remainingAttempts + 1;
       yield* Effect.annotateCurrentSpan({
         'cf.click_loop_ms': Date.now() - clickLoopStart,
-        'cf.max_attempts': maxAttempts,
+        'cf.max_attempts': totalAttempts,
       });
-      yield* events.emitProgress(active, 'cdp_click_complete', { success: false, attempts: maxAttempts });
+      yield* events.emitProgress(active, 'cdp_click_complete', { success: false, attempts: totalAttempts });
       return TR.NoClick();
     })();
 
@@ -363,54 +382,47 @@ const solveTurnstile = (
     // causing the tokenPoll fiber to be interrupted before completion.
     // Side effects that modify shared state belong AFTER the race resolves.
     const tokenPoll = Effect.fn('cf.tokenPoll')(function*() {
-      let pollCount = 0;
-      while (true) {
-        // Exit immediately if Resolution was completed by another path (beacon,
-        // activity loop). Without this, the poll runs for the full remaining
-        // deadline even though the answer is ready.
-        if (active.resolution.isDone) return TR.Aborted();
-        yield* Effect.sleep(AUTO_SOLVE_POLL_DELAY);
-        pollCount++;
-        let sessionGone = false;
-        const token = yield* tokens.getToken(pageCdpSessionId).pipe(
-          Effect.catchTag('CdpSessionGone', () => { sessionGone = true; return Effect.succeed(null); }),
+      const count = yield* Ref.make(0);
+
+      const poll = Effect.suspend(() => {
+        if (active.resolution.isDone) return Effect.fail(TR.Aborted() as TurnstileResult);
+        return Effect.sleep(AUTO_SOLVE_POLL_DELAY).pipe(
+          Effect.flatMap(() => Ref.updateAndGet(count, (n) => n + 1)),
+          Effect.flatMap((pollCount) =>
+            tokens.getToken(pageCdpSessionId).pipe(
+              Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
+              Effect.flatMap((token) => {
+                if (token) {
+                  return events.marker(pageTargetId, 'cf.token_polled', {
+                    token_length: token.length,
+                    concurrent: true,
+                    concurrent_polls: pollCount,
+                  }).pipe(
+                    Effect.flatMap(() => Effect.fail(
+                      TR.TokenFound({ pollCount, tokenLength: token.length, token }) as TurnstileResult,
+                    )),
+                  );
+                }
+                return Effect.void; // continue polling
+              }),
+            ),
+          ),
         );
-        // Session temporarily unavailable — don't abort immediately.
-        // The page session may be transiently dead (reconnect, navigation).
-        // Continue polling — the race deadline will terminate if truly dead.
-        if (sessionGone) continue;
-        if (token) {
-          yield* events.marker(pageTargetId, 'cf.token_polled', {
-            token_length: token.length,
-            concurrent: true,
-            concurrent_polls: pollCount,
-          });
-          return TR.TokenFound({ pollCount, tokenLength: token.length, token });
-        }
-      }
+      });
+
+      return yield* Effect.forever(poll).pipe(
+        Effect.catch((exit: TurnstileResult) => Effect.succeed(exit)),
+      );
     })();
 
     // raceFirst: both run concurrently, loser auto-interrupted via fiber cancellation.
     // abortLatch.await races alongside — if the detection is aborted externally
     // (page navigated, session destroyed), both fibers are interrupted immediately.
-    const raceStart = Date.now();
-    let timedOut = false;
+    // No per-race timeout — outer-scope SOLVE_DEADLINE_MS handles it via fiber interruption.
     const raceResult = yield* Effect.raceFirst(
       Effect.raceFirst(clickLoop, tokenPoll),
       active.abortLatch.await.pipe(Effect.map(() => TR.Aborted())),
-    ).pipe(
-      Effect.timeout(SOLVE_DEADLINE_MS),
-      Effect.orElseSucceed(() => { timedOut = true; return TR.NoClick(); }),
     );
-
-    // Emit timeout-specific marker — answers: did the 30s deadline fire?
-    if (timedOut) {
-      yield* events.marker(pageTargetId, 'cf.solve_deadline_fired', {
-        deadline_ms: SOLVE_DEADLINE_MS,
-        total_elapsed_ms: Date.now() - solveEntryMs,
-        race_elapsed_ms: Date.now() - raceStart,
-      });
-    }
 
     // Handle post-race outcomes
     const raceElapsedMs = Date.now() - solveEntryMs;
@@ -460,17 +472,10 @@ const solveTurnstile = (
 
     // NoClick — widget not found. May be non-interactive (auto-solves without click).
     yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox');
-    // Poll for token using remaining deadline
-    const remainingDeadline = Math.max(0, active.startTime + SOLVE_DEADLINE_MS - Date.now());
-    yield* Effect.annotateCurrentSpan({ 'cf.post_race_remaining_ms': remainingDeadline });
 
-    // Apply remaining deadline as timeout to prevent unbounded polling.
-    // Without this, pollToken runs until abortLatch opens (session close) —
-    // potentially 300s. This bounds total solve time to ~SOLVE_DEADLINE_MS.
-    let tokenResult = yield* pollToken(active, AUTO_SOLVE_POLL_DELAY, 'cf.pollForAutoSolveToken').pipe(
-      Effect.timeout(remainingDeadline),
-      Effect.orElseSucceed(() => null),
-    );
+    // Poll for token — no per-poll timeout needed. The outer-scope
+    // SOLVE_DEADLINE_MS timeout handles it via fiber interruption.
+    let tokenResult = yield* pollToken(active, AUTO_SOLVE_POLL_DELAY, 'cf.pollForAutoSolveToken');
 
     // Final token check — non-interactive/invisible widgets may auto-solve right as
     // the OOPIF is destroyed. The poll above gets cancelled by abortLatch, but the
@@ -511,46 +516,49 @@ const pollToken = (
     const { pageCdpSessionId, pageTargetId } = active;
     const events = yield* SolverEvents;
     const tokens = yield* TokenChecker;
+    const count = yield* Ref.make(0);
 
-    // Poll loop as an Effect — runs until token found (never terminates on its own).
+    // Poll loop — exits via Effect.fail when token found or resolution completed.
     // IMPORTANT: Do NOT call resolveTokenFound inside the race — it opens the
     // abortLatch, which would trigger the abort racer and interrupt this fiber
     // before the marker emission completes.
-    const poll = Effect.fn(`${spanName}.loop`)(function*() {
-      let pollCount = 0;
-      while (true) {
-        // Exit immediately if Resolution was already completed by another path
-        // (beacon, activity loop, external abort). Without this check, the poll
-        // runs for the full remaining deadline even though the answer is ready,
-        // delaying the cf.solved emission and causing pydoll to time out.
-        if (active.resolution.isDone) {
-          yield* Effect.annotateCurrentSpan({ 'cf.poll_exit_reason': 'resolution_done' });
-          return null;
-        }
-        yield* Effect.sleep(pollDelay);
-        pollCount++;
-        let sessionGone = false;
-        const token = yield* tokens.getToken(pageCdpSessionId).pipe(
-          Effect.catchTag('CdpSessionGone', () => { sessionGone = true; return Effect.succeed(null); }),
-        );
-        if (sessionGone) {
-          // Session temporarily unavailable — don't abort immediately.
-          // Continue polling — the timeout will terminate if truly dead.
-          yield* events.marker(pageTargetId, 'cf.poll_session_retry', { poll_count: pollCount });
-          continue;
-        }
-        if (token) {
-          yield* Effect.annotateCurrentSpan({ 'cf.token_found': true, 'cf.token_length': token.length });
-          yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: token.length });
-          return TR.TokenFound({ pollCount, tokenLength: token.length, token });
-        }
+    const poll = Effect.suspend(() => {
+      if (active.resolution.isDone) {
+        return Effect.fail(null as TurnstileResult | null);
       }
-    })();
+      return Effect.sleep(pollDelay).pipe(
+        Effect.flatMap(() => Ref.updateAndGet(count, (n) => n + 1)),
+        Effect.flatMap((pollCount) =>
+          tokens.getToken(pageCdpSessionId).pipe(
+            Effect.catchTag('CdpSessionGone', () => {
+              // Session temporarily unavailable — don't abort immediately.
+              // Continue polling — the timeout will terminate if truly dead.
+              return events.marker(pageTargetId, 'cf.poll_session_retry', { poll_count: pollCount }).pipe(
+                Effect.map(() => null),
+              );
+            }),
+            Effect.flatMap((token) => {
+              if (token) {
+                return Effect.annotateCurrentSpan({ 'cf.token_found': true, 'cf.token_length': token.length }).pipe(
+                  Effect.flatMap(() => events.marker(pageTargetId, 'cf.token_polled', { token_length: token.length })),
+                  Effect.flatMap(() => Effect.fail(
+                    TR.TokenFound({ pollCount, tokenLength: token.length, token }) as TurnstileResult | null,
+                  )),
+                );
+              }
+              return Effect.void; // continue polling
+            }),
+          ),
+        ),
+      );
+    });
 
     // Race poll against abort — abort wins if detection is cancelled externally
     const result = yield* Effect.raceFirst(
-      poll,
-      active.abortLatch.await.pipe(Effect.map(() => null)),
+      Effect.forever(poll).pipe(
+        Effect.catch((exit: TurnstileResult | null) => Effect.succeed(exit)),
+      ),
+      active.abortLatch.await.pipe(Effect.map(() => null as TurnstileResult | null)),
     );
 
     // Resolve AFTER the race — resolveTokenFound opens abortLatch, so it
