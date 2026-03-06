@@ -383,6 +383,7 @@ const solveTurnstile = (
     // Side effects that modify shared state belong AFTER the race resolves.
     const tokenPoll = Effect.fn('cf.tokenPoll')(function*() {
       const count = yield* Ref.make(0);
+      const consecutiveGone = yield* Ref.make(0);
 
       const poll = Effect.suspend(() => {
         if (active.resolution.isDone) return Effect.fail(TR.Aborted() as TurnstileResult);
@@ -390,7 +391,17 @@ const solveTurnstile = (
           Effect.flatMap(() => Ref.updateAndGet(count, (n) => n + 1)),
           Effect.flatMap((pollCount) =>
             tokens.getToken(pageCdpSessionId).pipe(
-              Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
+              Effect.catchTag('CdpSessionGone', () =>
+                Ref.updateAndGet(consecutiveGone, (n) => n + 1).pipe(
+                  Effect.flatMap((gone) => gone >= 3
+                    ? Effect.fail(TR.Aborted() as TurnstileResult)
+                    : events.marker(pageTargetId, 'cf.poll_session_retry', { poll_count: pollCount, consecutive_gone: gone }).pipe(
+                        Effect.map(() => null),
+                      ),
+                  ),
+                ),
+              ),
+              Effect.tap(() => Ref.set(consecutiveGone, 0)),
               Effect.flatMap((token) => {
                 if (token) {
                   return events.marker(pageTargetId, 'cf.token_polled', {
@@ -517,6 +528,7 @@ const pollToken = (
     const events = yield* SolverEvents;
     const tokens = yield* TokenChecker;
     const count = yield* Ref.make(0);
+    const consecutiveGone = yield* Ref.make(0);
 
     // Poll loop — exits via Effect.fail when token found or resolution completed.
     // IMPORTANT: Do NOT call resolveTokenFound inside the race — it opens the
@@ -530,13 +542,17 @@ const pollToken = (
         Effect.flatMap(() => Ref.updateAndGet(count, (n) => n + 1)),
         Effect.flatMap((pollCount) =>
           tokens.getToken(pageCdpSessionId).pipe(
-            Effect.catchTag('CdpSessionGone', () => {
-              // Session temporarily unavailable — don't abort immediately.
-              // Continue polling — the timeout will terminate if truly dead.
-              return events.marker(pageTargetId, 'cf.poll_session_retry', { poll_count: pollCount }).pipe(
-                Effect.map(() => null),
-              );
-            }),
+            Effect.catchTag('CdpSessionGone', () =>
+              Ref.updateAndGet(consecutiveGone, (n) => n + 1).pipe(
+                Effect.flatMap((gone) => gone >= 3
+                  ? Effect.fail(null as TurnstileResult | null)
+                  : events.marker(pageTargetId, 'cf.poll_session_retry', { poll_count: pollCount, consecutive_gone: gone }).pipe(
+                      Effect.map(() => null),
+                    ),
+                ),
+              ),
+            ),
+            Effect.tap(() => Ref.set(consecutiveGone, 0)),
             Effect.flatMap((token) => {
               if (token) {
                 return Effect.annotateCurrentSpan({ 'cf.token_found': true, 'cf.token_length': token.length }).pipe(

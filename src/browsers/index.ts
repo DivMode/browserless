@@ -26,6 +26,7 @@ import { SessionRegistry } from '../session/session-registry.js';
 import { SessionLifecycleManager } from '../session/session-lifecycle-manager.js';
 import { SessionCoordinator } from '../session/session-coordinator.js';
 import { BrowserLauncher } from './browser-launcher.js';
+import { setRegistrySize } from '../prom-metrics.js';
 import type { VideoManager } from '../video/video-manager.js';
 
 /**
@@ -72,6 +73,9 @@ export class BrowserManager {
     // Start watchdog: force-close sessions that outlive TIMEOUT + 60s buffer
     const timeout = +(process.env.TIMEOUT || '300000');
     this.lifecycle.startWatchdog(timeout + 60_000);
+
+    // Wire registry size into Prometheus gauge for leak detection
+    setRegistrySize(() => this.registry.size());
   }
 
   /**
