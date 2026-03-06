@@ -47,6 +47,21 @@ try {
 // Collect-based gauges: derive values from live session state on each scrape.
 // No inc()/dec() = no mismatch = no negatives. Ever.
 
+// Callback for browser session registry size — set by BrowserManager on init
+let getRegistrySize: () => number = () => 0;
+
+export function setRegistrySize(fn: () => number): void {
+  getRegistrySize = fn;
+}
+
+export const browserSessionsRegistered = getOrCreateCollectGauge(
+  'browserless_sessions_registered',
+  'Number of browser sessions in the session registry (should match running count)',
+  function (this: Gauge) {
+    this.set(getRegistrySize());
+  },
+);
+
 export const sessionsActive = getOrCreateCollectGauge(
   'browserless_replay_sessions_active',
   'Number of active replay sessions (derived from session registry)',
