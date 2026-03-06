@@ -12,7 +12,7 @@ import type { Effect } from 'effect';
 import { ServiceMap } from 'effect';
 import type { CdpSessionId, TargetId, CloudflareResult, CloudflareConfig } from '../../shared/cloudflare-detection.js';
 import type { CdpSessionGone, CdpTimeout } from './cf-errors.js';
-import type { ActiveDetection } from './cloudflare-event-emitter.js';
+import type { ActiveDetection, ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
 import type { ClickResult } from './cloudflare-solve-strategies.js';
 import type { SolveDetectionResult } from './cloudflare-solver.effect.js';
 
@@ -69,10 +69,10 @@ export const TokenChecker = ServiceMap.Service<{
 // ═══════════════════════════════════════════════════════════════════════
 
 export const SolverEvents = ServiceMap.Service<{
-  readonly emitDetected: (active: ActiveDetection) => Effect.Effect<void>;
-  readonly emitProgress: (active: ActiveDetection, state: string, extra?: Record<string, any>) => Effect.Effect<void>;
-  readonly emitSolved: (active: ActiveDetection, result: CloudflareResult) => Effect.Effect<void>;
-  readonly emitFailed: (active: ActiveDetection, reason: string, duration: number, phaseLabel?: string) => Effect.Effect<void>;
+  readonly emitDetected: (active: ReadonlyActiveDetection) => Effect.Effect<void>;
+  readonly emitProgress: (active: ReadonlyActiveDetection, state: string, extra?: Record<string, any>) => Effect.Effect<void>;
+  readonly emitSolved: (active: ReadonlyActiveDetection, result: CloudflareResult) => Effect.Effect<void>;
+  readonly emitFailed: (active: ReadonlyActiveDetection, reason: string, duration: number, phaseLabel?: string) => Effect.Effect<void>;
   readonly marker: (targetId: TargetId, tag: string, payload?: object) => Effect.Effect<void>;
 }>('SolverEvents');
 
@@ -84,12 +84,12 @@ export const SolverEvents = ServiceMap.Service<{
 // ═══════════════════════════════════════════════════════════════════════
 
 export const SolveDeps = ServiceMap.Service<{
-  readonly findAndClickViaCDP: (active: ActiveDetection, attempt: number) => Effect.Effect<ClickResult>;
-  readonly simulatePresence: (active: ActiveDetection) => Effect.Effect<void>;
+  readonly findAndClickViaCDP: (active: ReadonlyActiveDetection, attempt: number) => Effect.Effect<ClickResult>;
+  readonly simulatePresence: (active: ReadonlyActiveDetection) => Effect.Effect<void>;
   /** Activity loop for embedded types (turnstile/non_interactive/invisible). Runtime.evaluate is safe. */
-  readonly startActivityLoopEmbedded: (active: ActiveDetection) => Effect.Effect<void>;
+  readonly startActivityLoopEmbedded: (active: ReadonlyActiveDetection) => Effect.Effect<void>;
   /** Activity loop for interstitial/managed types. Runtime.evaluate is FORBIDDEN. */
-  readonly startActivityLoopInterstitial: (active: ActiveDetection) => Effect.Effect<void>;
+  readonly startActivityLoopInterstitial: (active: ReadonlyActiveDetection) => Effect.Effect<void>;
 }>('SolveDeps');
 
 // ═══════════════════════════════════════════════════════════════════════

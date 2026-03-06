@@ -175,6 +175,22 @@ export interface ActiveDetection {
   resolution: Resolution;
 }
 
+/**
+ * Public read-only view of an active detection.
+ *
+ * All top-level properties are readonly — prevents accidental mutation.
+ * Mutations go through controlled methods on DetectionContext:
+ *   - abort() / setAborted() — aborted + abortLatch
+ *   - setClickDelivered() — clickDelivered + clickDeliveredAt
+ *   - markActivityLoopStarted() — activityLoopStarted
+ *   - bindOOPIF() / clearOOPIF() — iframe fields
+ *   - resetForRetry() — attempt + aborted
+ *
+ * Sub-object method calls (resolution.solve(), tracker.onProgress()) still work
+ * because Readonly<T> is shallow — it only prevents property reassignment.
+ */
+export type ReadonlyActiveDetection = Readonly<ActiveDetection>;
+
 /** Handles all CDP event emission for Cloudflare detection/solving. */
 export class CloudflareEventEmitter {
   private log = new Logger('cf-events');
@@ -186,7 +202,7 @@ export class CloudflareEventEmitter {
     readonly sessionId: string = '',
   ) {}
 
-  emitDetected(active: ActiveDetection): void {
+  emitDetected(active: ReadonlyActiveDetection): void {
     this.emitClientEvent('Browserless.cloudflareDetected', {
       type: active.info.type,
       url: active.info.url,
@@ -198,7 +214,7 @@ export class CloudflareEventEmitter {
     }).catch((e) => this.log.debug(`emitDetected failed: ${e instanceof Error ? e.message : String(e)}`));
   }
 
-  emitProgress(active: ActiveDetection, state: string, extra?: Record<string, any>): void {
+  emitProgress(active: ReadonlyActiveDetection, state: string, extra?: Record<string, any>): void {
     active.tracker.onProgress(state, extra);
     this.emitClientEvent('Browserless.cloudflareProgress', {
       state,
@@ -210,7 +226,7 @@ export class CloudflareEventEmitter {
     this.marker(active.pageTargetId, 'cf.state_change', { state, ...extra });
   }
 
-  emitSolved(active: ActiveDetection, result: CloudflareResult): void {
+  emitSolved(active: ReadonlyActiveDetection, result: CloudflareResult): void {
     const snap = active.tracker.snapshot();
     const timingStr = snap.checkbox_to_click_ms != null
       ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
@@ -228,7 +244,7 @@ export class CloudflareEventEmitter {
     });
   }
 
-  emitFailed(active: ActiveDetection, reason: string, duration: number, phaseLabel?: string): void {
+  emitFailed(active: ReadonlyActiveDetection, reason: string, duration: number, phaseLabel?: string): void {
     const phase_label = phaseLabel ?? `✗ ${reason}`;
     const snap = active.tracker.snapshot();
     const isRechallenge = (active.rechallengeCount ?? 0) > 0;
