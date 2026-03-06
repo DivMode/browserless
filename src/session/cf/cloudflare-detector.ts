@@ -670,13 +670,24 @@ export class CloudflareDetector {
             yield* self.emitSolveFailure(active, targetId, 'timeout');
             break;
           case 'OopifDead':
-            // OOPIF died during solve — different from "no checkbox".
-            // Don't emit failure — let Resolution.await handle it.
+            // OOPIF died during solve — complete Resolution immediately.
+            // Activity loop (forkChild) was interrupted when solve scope closed,
+            // so nobody else can complete Resolution.
+            if (!active.resolution.isDone) {
+              yield* active.resolution.fail('oopif_dead', Date.now() - active.startTime);
+            }
             break;
           case 'Aborted':
             // Yield to let concurrent fibers (onPageNavigated) complete the Resolution.
             if (active.aborted && !active.resolution.isDone) {
               yield* Effect.yieldNow;
+            }
+            // If concurrent fibers didn't complete Resolution (e.g. turnstile
+            // navigation to CF URL aborts but doesn't resolve), fail it explicitly.
+            // Without this, Resolution.await times out after 10s → solver_exit →
+            // no_resolution on pydoll side (P0). With this, failure emits immediately.
+            if (!active.resolution.isDone) {
+              yield* active.resolution.fail('aborted', Date.now() - active.startTime);
             }
             break;
           // TokenFound, Clicked — no immediate action needed, Resolution.await handles it
@@ -685,6 +696,9 @@ export class CloudflareDetector {
         // String 'aborted' from catchCause — same gap fix
         if (active.aborted && !active.resolution.isDone) {
           yield* Effect.yieldNow;
+        }
+        if (!active.resolution.isDone) {
+          yield* active.resolution.fail('aborted', Date.now() - active.startTime);
         }
       }
 
