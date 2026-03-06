@@ -90,6 +90,9 @@ export function isReplayCapable(browser: unknown): browser is ReplayCapableBrows
  */
 const ON_BEFORE_CLOSE_TIMEOUT_MS = 15000;
 
+/** WS ping interval to detect stalled Chrome connections. */
+const BROWSER_WS_PING_INTERVAL_MS = 10_000;
+
 export class CDPProxy {
   private clientWs: WebSocket | null = null;
   private browserWs: WebSocket | null = null;
@@ -97,6 +100,7 @@ export class CDPProxy {
   private closeRequested = false;
   private log = new Logger('cdp-proxy');
   private getTabCount?: () => number;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   /**
    * Debug mode: log all CDP commands going through the proxy.
@@ -357,6 +361,12 @@ export class CDPProxy {
       this.log.trace('Browser WebSocket closed');
       this.handleClose();
     });
+
+    // Heartbeat: ping Chrome WS every 10s, close if no pong within 5s.
+    // Detects stalled Chrome connections (tab renderer crash, WS backpressure)
+    // that don't emit close events. Without this, pydoll waits the full
+    // 60s+ timeout and gets cf_events=0 → "No Data".
+    this.startHeartbeat();
   }
 
   private async runBeforeCloseAndForward(
@@ -567,11 +577,51 @@ export class CDPProxy {
   }
 
   /**
+   * Start WS-level ping/pong heartbeat to Chrome.
+   *
+   * When Chrome's renderer crashes or the WS stalls, no 'close' event fires.
+   * The heartbeat detects this within PONG_TIMEOUT_MS and tears down the session,
+   * causing pydoll to get a WS close and retry on a fresh session.
+   */
+  private startHeartbeat(): void {
+    if (!this.browserWs) return;
+
+    let pongReceived = true;
+    this.browserWs.on('pong', () => { pongReceived = true; });
+
+    this.heartbeatTimer = setInterval(() => {
+      if (!pongReceived) {
+        this.log.warn('Browser WS heartbeat timeout — Chrome not responding, closing session');
+        this.stopHeartbeat();
+        this.handleClose();
+        return;
+      }
+      pongReceived = false;
+      try {
+        this.browserWs?.ping();
+      } catch {
+        this.log.warn('Browser WS ping failed, closing session');
+        this.stopHeartbeat();
+        this.handleClose();
+      }
+    }, BROWSER_WS_PING_INTERVAL_MS);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  /**
    * Close both WebSocket connections.
    */
   private handleClose(): void {
     if (this.isClosing) return;
     this.isClosing = true;
+
+    this.stopHeartbeat();
 
     const clientState = this.clientWs?.readyState;
     const browserState = this.browserWs?.readyState;

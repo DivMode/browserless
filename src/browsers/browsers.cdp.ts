@@ -537,6 +537,11 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
         socket.off('close', close);
         socket.off('end', close);
         socket.off('error', close);
+        // Close CDPProxy BEFORE nulling — sends WS close frame to pydoll
+        // so it detects the dead session immediately instead of waiting 60s+.
+        // handleClose() is idempotent (isClosing guard), safe to call here
+        // even if CDPProxy.handleClose() fires later from browserWs 'close'.
+        this.cdpProxy?.close();
         this.cdpProxy = null;
         return resolve();
       });
