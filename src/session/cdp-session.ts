@@ -498,47 +498,61 @@ export class CdpSession {
 
     return Effect.fn('cdp.openPageWs')(function*() {
       yield* Effect.annotateCurrentSpan({ 'cdp.target_id': targetId });
-      const pageWs = new WebSocket(pageWsUrl);
 
-      pageWs.on('message', (data: Buffer) => {
-        try {
-          const msg = JSON.parse(data.toString());
+      // acquireRelease guarantees WS cleanup even on fiber interruption
+      const pageWs = yield* Effect.acquireRelease(
+        Effect.gen(function*() {
+          const pageWs = new WebSocket(pageWsUrl);
+
+          pageWs.on('message', (data: Buffer) => {
+            try {
+              const msg = JSON.parse(data.toString());
+              const conn = (pageWs as any).__cdpConn as CdpConnection | undefined;
+              conn?.handleResponse(msg);
+            } catch {}
+          });
+          pageWs.on('error', (err: Error) => { session.log.warn(`Per-page WS error for ${targetId}: ${err.message}`); });
+          pageWs.on('close', () => {
+            const target = session.targets.getByTarget(targetId);
+            if (target && target.pageWebSocket === pageWs) {
+              target.pageWebSocket = null;
+            }
+          });
+
+          yield* Effect.callback<void, Error>((resume) => {
+            pageWs.on('open', () => resume(Effect.void));
+            return Effect.sync(() => pageWs.terminate());
+          }).pipe(Effect.timeout('2 seconds'), Effect.catch(() =>
+            Effect.fail(new Error('Per-page WS connect timeout')),
+          ));
+
+          const target = session.targets.getByTarget(targetId);
+          if (target) {
+            target.pageWebSocket = pageWs;
+          }
+
+          const pageConn = new CdpConnection(pageWs, {
+            startId: session.pageWsCmdId,
+            defaultTimeout: 30_000,
+          });
+          session.pageWsCmdId += 10_000;
+          (pageWs as any).__cdpConn = pageConn;
+
+          session.log.debug(`Per-page WS opened for target ${targetId}`);
+
+          return pageWs;
+        }),
+        // Release: guaranteed cleanup — runs on normal exit, failure, AND interruption
+        (pageWs) => Effect.sync(() => {
           const conn = (pageWs as any).__cdpConn as CdpConnection | undefined;
-          conn?.handleResponse(msg);
-        } catch {}
-      });
-      pageWs.on('error', (err: Error) => { session.log.warn(`Per-page WS error for ${targetId}: ${err.message}`); });
-      pageWs.on('close', () => {
-        const target = session.targets.getByTarget(targetId);
-        if (target && target.pageWebSocket === pageWs) {
-          target.pageWebSocket = null;
-        }
-        const conn = (pageWs as any).__cdpConn as CdpConnection | undefined;
-        conn?.dispose();
-      });
+          conn?.drainPending('pageWs scope close');
+          conn?.dispose();
+          pageWs.removeAllListeners();
+          pageWs.terminate();
+        }),
+      );
 
-      yield* Effect.callback<void, Error>((resume) => {
-        pageWs.on('open', () => resume(Effect.void));
-        return Effect.sync(() => pageWs.terminate());
-      }).pipe(Effect.timeout('2 seconds'), Effect.catch(() =>
-        Effect.fail(new Error('Per-page WS connect timeout')),
-      ));
-
-      const target = session.targets.getByTarget(targetId);
-      if (target) {
-        target.pageWebSocket = pageWs;
-      }
-
-      const pageConn = new CdpConnection(pageWs, {
-        startId: session.pageWsCmdId,
-        defaultTimeout: 30_000,
-      });
-      session.pageWsCmdId += 10_000;
-      (pageWs as any).__cdpConn = pageConn;
-
-      session.log.debug(`Per-page WS opened for target ${targetId}`);
-
-      // Keepalive loop
+      // Keepalive loop — runs inside the scope, interruption triggers release above
       while (pageWs.readyState === WebSocket.OPEN) {
         yield* Effect.sleep('30 seconds');
         if (pageWs.readyState !== WebSocket.OPEN) break;
@@ -572,7 +586,7 @@ export class CdpSession {
           break;
         }
       }
-    })().pipe(Effect.ignore);
+    })().pipe(Effect.scoped, Effect.ignore);
   }
 
   // ─── Teardown ───────────────────────────────────────────────────────────
@@ -674,7 +688,7 @@ export class CdpSession {
     }
 
     // Close main WS (no-op if already closed via ws_close)
-    try { this.ws?.close(); } catch {}
+    try { this.ws?.removeAllListeners(); this.ws?.terminate(); } catch {}
     this.ws = null;
     this.unregisterGauges = null;
 
