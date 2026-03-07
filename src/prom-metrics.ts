@@ -31,6 +31,14 @@ function getOrCreateCollectGauge(name: string, help: string, collect: () => void
   return new Gauge({ name, help, collect });
 }
 
+function getOrCreateLabeledCollectGauge(
+  name: string, help: string, labelNames: string[], collect: () => void,
+): Gauge {
+  const existing = register.getSingleMetric(name);
+  if (existing) return existing as Gauge;
+  return new Gauge({ name, help, labelNames, collect });
+}
+
 // Auto-register Node.js process metrics (idempotent — prom-client tracks this internally):
 // - nodejs_eventloop_lag_seconds (histogram) — primary slowdown signal
 // - nodejs_active_handles_total — leaked WS/timers show as upward trend
@@ -153,6 +161,24 @@ export const replayEstimatedBytes = getOrCreateCollectGauge(
 export const replayOverflowsTotal = getOrCreateCounter(
   'browserless_replay_overflows_total',
   'Total replay overflow events (replay exceeded max size and stopped merged capture)',
+);
+
+export const handlesByType = getOrCreateLabeledCollectGauge(
+  'browserless_active_handles_by_type',
+  'Active handles broken down by constructor type (Timeout, Socket, etc.)',
+  ['type'],
+  function (this: Gauge) {
+    this.reset();
+    const handles = (process as any)._getActiveHandles() as Array<{ constructor: { name: string } }>;
+    const counts = new Map<string, number>();
+    for (const h of handles) {
+      const type = h?.constructor?.name || 'Unknown';
+      counts.set(type, (counts.get(type) || 0) + 1);
+    }
+    for (const [type, count] of counts) {
+      this.labels(type).set(count);
+    }
+  },
 );
 
 export { register };

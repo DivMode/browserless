@@ -4,7 +4,7 @@ const WebSocketServer = (WebSocket as any).Server as typeof import('ws').WebSock
 import { Duplex } from 'stream';
 import { IncomingMessage } from 'http';
 import { Config, Logger } from '@browserless.io/browserless';
-import { Duration, Effect, Fiber, Schedule, Schema } from 'effect';
+import { Duration, Effect, Exit, FiberSet, Schedule, Schema, Scope } from 'effect';
 
 import { CloudflareConfig } from './shared/cloudflare-detection.js';
 import { CdpSessionId, TargetId } from './shared/cloudflare-detection.js';
@@ -98,7 +98,12 @@ export class CDPProxy {
   private closeRequested = false;
   private log = new Logger('cdp-proxy');
   private getTabCount?: () => number;
-  private heartbeatFiber: Fiber.Fiber<unknown> | null = null;
+  private readonly proxyScope = Scope.makeUnsafe();
+  private readonly fibers = Effect.runSync(
+    FiberSet.make<void, unknown>().pipe(
+      Effect.provideService(Scope.Scope, this.proxyScope),
+    ),
+  );
 
   /**
    * Debug mode: log all CDP commands going through the proxy.
@@ -258,7 +263,7 @@ export class CDPProxy {
 
           // Delay Page.close to flush pending screencast frames + event collection
           if (msg.method === 'Page.close') {
-            Effect.runFork(
+            this.forkManaged(
               Effect.sleep('250 millis').pipe(
                 Effect.andThen(Effect.sync(() => {
                   if (this.browserWs?.readyState === WebSocket.OPEN) {
@@ -624,7 +629,7 @@ export class CDPProxy {
       }
     });
 
-    this.heartbeatFiber = Effect.runFork(
+    this.forkManaged(
       tick().pipe(
         Effect.catch((e) => Effect.sync(() => {
           this.log.warn(`Browser WS ping failed, closing session: ${e instanceof Error ? e.message : String(e)}`);
@@ -635,11 +640,9 @@ export class CDPProxy {
     );
   }
 
-  private stopHeartbeat(): void {
-    if (this.heartbeatFiber) {
-      Effect.runFork(Fiber.interrupt(this.heartbeatFiber));
-      this.heartbeatFiber = null;
-    }
+  /** Fork a fire-and-forget effect — auto-interrupted on handleClose, auto-removed on completion. */
+  private forkManaged(effect: Effect.Effect<void>): void {
+    FiberSet.addUnsafe(this.fibers, Effect.runFork(effect));
   }
 
   /**
@@ -649,7 +652,8 @@ export class CDPProxy {
     if (this.isClosing) return;
     this.isClosing = true;
 
-    this.stopHeartbeat();
+    // Close proxy scope → interrupts ALL managed fibers (heartbeat + page-close delays)
+    Effect.runFork(Scope.close(this.proxyScope, Exit.void));
 
     const clientState = this.clientWs?.readyState;
     const browserState = this.browserWs?.readyState;
