@@ -1,7 +1,7 @@
 import { Logger } from '@browserless.io/browserless';
 import { Latch } from 'effect';
-import { CdpSessionId, isInterstitialType } from '../../shared/cloudflare-detection.js';
-import type { TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot, CloudflareType, InterstitialInfo, EmbeddedInfo } from '../../shared/cloudflare-detection.js';
+import { CdpSessionId } from '../../shared/cloudflare-detection.js';
+import type { TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot, InterstitialInfo, EmbeddedInfo } from '../../shared/cloudflare-detection.js';
 import type { TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
 import { Resolution } from './cf-resolution.js';
 
@@ -197,139 +197,118 @@ export type EmbeddedDetection = ActiveDetection & { readonly info: EmbeddedInfo 
 export type ReadonlyInterstitialDetection = Readonly<InterstitialDetection>;
 export type ReadonlyEmbeddedDetection = Readonly<EmbeddedDetection>;
 
-/** Handles all CDP event emission for Cloudflare detection/solving. */
-export class CloudflareEventEmitter {
-  private log = new Logger('cf-events');
-  recordingMarkers = true;
-  /** Running accumulator of all solved/failed phases in this session. */
-  private summaryPhases: { type: string; label: string }[] = [];
+/** Creates a frozen record of CF event emission methods. No class = no fields = no per-page state. */
+export function createCFEvents(
+  injectMarker: InjectMarker,
+  emitClientEvent: EmitClientEvent = async () => {},
+  sessionId = '',
+  shouldRecordMarkers: () => boolean = () => true,
+) {
+  const log = new Logger('cf-events');
 
-  constructor(
-    private injectMarker: InjectMarker,
-    private emitClientEvent: EmitClientEvent = async () => {},
-    readonly sessionId: string = '',
-  ) {}
-
-  /**
-   * Build compound summary label from accumulated phases.
-   * Interstitial phases concatenated without space: Int✓Int→
-   * Embedded phases concatenated without space: Emb→
-   * Space between groups: Int✓Int→ Emb→
-   */
-  private buildCompoundLabel(): string {
-    const intParts = this.summaryPhases
-      .filter(p => isInterstitialType(p.type as CloudflareType))
-      .map(p => `Int${p.label}`);
-    const embParts = this.summaryPhases
-      .filter(p => !isInterstitialType(p.type as CloudflareType))
-      .map(p => `Emb${p.label}`);
-    const parts: string[] = [];
-    if (intParts.length) parts.push(intParts.join(''));
-    if (embParts.length) parts.push(embParts.join(''));
-    return parts.join(' ');
-  }
-
-  emitDetected(active: ReadonlyActiveDetection): void {
-    this.emitClientEvent('Browserless.cloudflareDetected', {
-      type: active.info.type,
-      url: active.info.url,
-      iframeUrl: active.info.iframeUrl,
-      cRay: active.info.cRay,
-      detectionMethod: active.info.detectionMethod,
-      pollCount: active.info.pollCount || 1,
-      targetId: active.pageTargetId,
-    }).catch((e) => this.log.debug(`emitDetected failed: ${e instanceof Error ? e.message : String(e)}`));
-  }
-
-  emitProgress(active: ReadonlyActiveDetection, state: string, extra?: Record<string, any>): void {
-    active.tracker.onProgress(state, extra);
-    this.emitClientEvent('Browserless.cloudflareProgress', {
-      state,
-      elapsed_ms: Date.now() - active.startTime,
-      attempt: active.attempt,
-      targetId: active.pageTargetId,
-      ...extra,
-    }).catch((e) => this.log.debug(`emitProgress failed: ${e instanceof Error ? e.message : String(e)}`));
-    this.marker(active.pageTargetId, 'cf.state_change', { state, ...extra });
-  }
-
-  emitSolved(active: ReadonlyActiveDetection, result: CloudflareResult): void {
-    this.summaryPhases.push({ type: result.type, label: result.phase_label || '→' });
-    const cf_summary_label = this.buildCompoundLabel();
-    const snap = active.tracker.snapshot();
-    const timingStr = snap.checkbox_to_click_ms != null
-      ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
-      : '';
-    this.log.warn(`CF solved: session=${this.sessionId.slice(0,8)} type=${result.type} method=${result.method} duration=${result.duration_ms}ms${timingStr}`);
-    this.emitClientEvent('Browserless.cloudflareSolved', {
-      ...result,
-      token_length: result.token_length ?? result.token?.length ?? 0,
-      targetId: active.pageTargetId,
-      summary: active.tracker.snapshot(),
-      cf_summary_label,
-    }).catch((e) => this.log.debug(`emitSolved failed: ${e instanceof Error ? e.message : String(e)}`));
-    this.marker(active.pageTargetId, 'cf.solved', {
-      type: result.type, method: result.method, duration_ms: result.duration_ms,
-      phase_label: result.phase_label, signal: result.signal,
-    });
-  }
-
-  emitFailed(active: ReadonlyActiveDetection, reason: string, duration: number, phaseLabel?: string): void {
-    const phase_label = phaseLabel ?? `✗ ${reason}`;
-    this.summaryPhases.push({ type: active.info.type, label: phase_label });
-    const cf_summary_label = this.buildCompoundLabel();
-    const snap = active.tracker.snapshot();
-    const isRechallenge = (active.rechallengeCount ?? 0) > 0;
-    const diag = snap.widget_diag;
-    const diagStr = diag ? ` diag_alive=${diag.alive} diag_cbI=${diag.cbI} diag_inp=${diag.inp} diag_shadow=${diag.shadow} diag_bodyLen=${diag.bodyLen}` : '';
-    const timingStr = snap.checkbox_to_click_ms != null
-      ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
-      : '';
-    this.log.warn(`CF failed: session=${this.sessionId.slice(0,8)} reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'} rechallenge=${isRechallenge} widget_error_count=${snap.widget_error_count} widget_error_type=${snap.widget_error_type ?? 'none'} click_count=${snap.click_count} false_positives=${snap.false_positive_count}${diagStr}${timingStr}`);
-    this.emitClientEvent('Browserless.cloudflareFailed', {
-      reason, type: active.info.type, duration_ms: duration, attempts: active.attempt,
-      targetId: active.pageTargetId,
-      oopif_url: active.info.url,
-      summary: snap,
-      phase_label,
-      cf_summary_label,
-    }).catch((e) => this.log.debug(`emitFailed failed: ${e instanceof Error ? e.message : String(e)}`));
-    this.marker(active.pageTargetId, 'cf.failed', { reason, duration_ms: duration, phase_label, oopif_url: active.info.url, rechallenge: isRechallenge });
-  }
-
-  emitStandaloneAutoSolved(
-    targetId: TargetId,
-    signal: string,
-    tokenLength: number,
-    cdpSessionId?: CdpSessionId,
-  ): void {
-    const info: CloudflareInfo = {
-      type: 'turnstile', url: '', detectionMethod: signal,
-    };
-    const abortLatch = Latch.makeUnsafe(false);
-    abortLatch.openUnsafe();
-    const active: ActiveDetection = {
-      info, pageCdpSessionId: cdpSessionId || CdpSessionId.makeUnsafe(''), pageTargetId: targetId,
-      startTime: Date.now(), attempt: 0, aborted: true,
-      tracker: new CloudflareTracker(info),
-      abortLatch,
-      resolution: Resolution.makeUnsafe(),
-    };
-
-    this.emitDetected(active);
-    if (targetId) {
-      this.marker(targetId, 'cf.detected', { type: 'turnstile' });
+  const marker = (targetId: TargetId, tag: string, payload?: object): void => {
+    if (shouldRecordMarkers()) {
+      injectMarker(targetId, tag, payload);
     }
-    this.emitSolved(active, {
-      solved: true, type: 'turnstile', method: 'auto_solve',
-      duration_ms: 0, attempts: 0, auto_resolved: true,
-      signal, token_length: tokenLength, phase_label: '→',
-    });
-  }
+  };
 
-  marker(targetId: TargetId, tag: string, payload?: object): void {
-    if (this.recordingMarkers) {
-      this.injectMarker(targetId, tag, payload);
-    }
-  }
+  return Object.freeze({
+    emitDetected(active: ReadonlyActiveDetection): void {
+      emitClientEvent('Browserless.cloudflareDetected', {
+        type: active.info.type,
+        url: active.info.url,
+        iframeUrl: active.info.iframeUrl,
+        cRay: active.info.cRay,
+        detectionMethod: active.info.detectionMethod,
+        pollCount: active.info.pollCount || 1,
+        targetId: active.pageTargetId,
+      }).catch((e) => log.debug(`emitDetected failed: ${e instanceof Error ? e.message : String(e)}`));
+    },
+
+    emitProgress(active: ReadonlyActiveDetection, state: string, extra?: Record<string, any>): void {
+      active.tracker.onProgress(state, extra);
+      emitClientEvent('Browserless.cloudflareProgress', {
+        state,
+        elapsed_ms: Date.now() - active.startTime,
+        attempt: active.attempt,
+        targetId: active.pageTargetId,
+        ...extra,
+      }).catch((e) => log.debug(`emitProgress failed: ${e instanceof Error ? e.message : String(e)}`));
+      marker(active.pageTargetId, 'cf.state_change', { state, ...extra });
+    },
+
+    emitSolved(active: ReadonlyActiveDetection, result: CloudflareResult, cf_summary_label = ''): void {
+      const snap = active.tracker.snapshot();
+      const timingStr = snap.checkbox_to_click_ms != null
+        ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
+        : '';
+      log.warn(`CF solved: session=${sessionId.slice(0,8)} type=${result.type} method=${result.method} duration=${result.duration_ms}ms${timingStr}`);
+      emitClientEvent('Browserless.cloudflareSolved', {
+        ...result,
+        token_length: result.token_length ?? result.token?.length ?? 0,
+        targetId: active.pageTargetId,
+        summary: active.tracker.snapshot(),
+        cf_summary_label,
+      }).catch((e) => log.debug(`emitSolved failed: ${e instanceof Error ? e.message : String(e)}`));
+      marker(active.pageTargetId, 'cf.solved', {
+        type: result.type, method: result.method, duration_ms: result.duration_ms,
+        phase_label: result.phase_label, signal: result.signal,
+      });
+    },
+
+    emitFailed(active: ReadonlyActiveDetection, reason: string, duration: number, phaseLabel?: string, cf_summary_label?: string): void {
+      const phase_label = phaseLabel ?? `✗ ${reason}`;
+      const snap = active.tracker.snapshot();
+      const isRechallenge = (active.rechallengeCount ?? 0) > 0;
+      const diag = snap.widget_diag;
+      const diagStr = diag ? ` diag_alive=${diag.alive} diag_cbI=${diag.cbI} diag_inp=${diag.inp} diag_shadow=${diag.shadow} diag_bodyLen=${diag.bodyLen}` : '';
+      const timingStr = snap.checkbox_to_click_ms != null
+        ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
+        : '';
+      log.warn(`CF failed: session=${sessionId.slice(0,8)} reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'} rechallenge=${isRechallenge} widget_error_count=${snap.widget_error_count} widget_error_type=${snap.widget_error_type ?? 'none'} click_count=${snap.click_count} false_positives=${snap.false_positive_count}${diagStr}${timingStr}`);
+      emitClientEvent('Browserless.cloudflareFailed', {
+        reason, type: active.info.type, duration_ms: duration, attempts: active.attempt,
+        targetId: active.pageTargetId,
+        oopif_url: active.info.url,
+        summary: snap,
+        phase_label,
+        cf_summary_label,
+      }).catch((e) => log.debug(`emitFailed failed: ${e instanceof Error ? e.message : String(e)}`));
+      marker(active.pageTargetId, 'cf.failed', { reason, duration_ms: duration, phase_label, oopif_url: active.info.url, rechallenge: isRechallenge });
+    },
+
+    emitStandaloneAutoSolved(
+      targetId: TargetId,
+      signal: string,
+      tokenLength: number,
+      cdpSessionId?: CdpSessionId,
+    ): void {
+      const info: CloudflareInfo = {
+        type: 'turnstile', url: '', detectionMethod: signal,
+      };
+      const abortLatch = Latch.makeUnsafe(false);
+      abortLatch.openUnsafe();
+      const active: ActiveDetection = {
+        info, pageCdpSessionId: cdpSessionId || CdpSessionId.makeUnsafe(''), pageTargetId: targetId,
+        startTime: Date.now(), attempt: 0, aborted: true,
+        tracker: new CloudflareTracker(info),
+        abortLatch,
+        resolution: Resolution.makeUnsafe(),
+      };
+
+      this.emitDetected(active);
+      if (targetId) {
+        marker(targetId, 'cf.detected', { type: 'turnstile' });
+      }
+      this.emitSolved(active, {
+        solved: true, type: 'turnstile', method: 'auto_solve',
+        duration_ms: 0, attempts: 0, auto_resolved: true,
+        signal, token_length: tokenLength, phase_label: '→',
+      }, 'Emb→');
+    },
+
+    marker,
+  });
 }
+
+export type CFEvents = ReturnType<typeof createCFEvents>;

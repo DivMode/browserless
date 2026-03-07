@@ -4,8 +4,8 @@ import type { TargetId, CloudflareConfig } from '../shared/cloudflare-detection.
 import { CloudflareDetector } from './cf/cloudflare-detector.js';
 import { CloudflareSolveStrategies } from './cf/cloudflare-solve-strategies.js';
 import { CloudflareStateTracker } from './cf/cloudflare-state-tracker.js';
-import { CloudflareEventEmitter } from './cf/cloudflare-event-emitter.js';
-import type { ActiveDetection, EmitClientEvent, InjectMarker } from './cf/cloudflare-event-emitter.js';
+import { createCFEvents } from './cf/cloudflare-event-emitter.js';
+import type { ActiveDetection, CFEvents, EmitClientEvent, InjectMarker } from './cf/cloudflare-event-emitter.js';
 import type { SendCommand } from './cf/cloudflare-state-tracker.js';
 import {
   CdpSender, SolverEvents, SolveDeps,
@@ -51,7 +51,7 @@ export class CloudflareSolver {
   private detector: CloudflareDetector;
   private strategies: CloudflareSolveStrategies;
   private stateTracker: CloudflareStateTracker;
-  private events: CloudflareEventEmitter;
+  private events: CFEvents;
   private sendCommand: SendCommand;
   private sendViaProxy: SendCommand | null = null;
   private createIsolatedConn: (() => IsolatedConnection) | null = null;
@@ -64,7 +64,12 @@ export class CloudflareSolver {
     this.sendCommand = sendCommand;
     // Mutable closure: emitClientEvent is set after construction by session-coordinator.ts
     let realEmit: EmitClientEvent = async () => {};
-    this.events = new CloudflareEventEmitter(injectMarker, (...args) => realEmit(...args), sessionId ?? '');
+    this.events = createCFEvents(
+      injectMarker,
+      (...args) => realEmit(...args),
+      sessionId ?? '',
+      () => this.stateTracker.config.recordingMarkers,
+    );
     this._setRealEmit = (fn) => { realEmit = fn; };
     this.strategies = new CloudflareSolveStrategies(chromePort);
     this.stateTracker = new CloudflareStateTracker(this.events);
