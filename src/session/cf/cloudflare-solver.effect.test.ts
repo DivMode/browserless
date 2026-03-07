@@ -223,7 +223,7 @@ describe('solveTurnstile', () => {
       expect(tag(outcome)).toBe('Aborted');
     }));
 
-  it.effect('6. click but no bridge push in postClickWait → click_no_token', () =>
+  it.effect('6. click delivered — pure push wait resolves via bridge', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer, captures } = makeTestLayer({ clickSuccessOnAttempt: 1 });
@@ -233,10 +233,14 @@ describe('solveTurnstile', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('45 seconds');
+      // Bridge push resolves after click (pure push — no timeout)
+      yield* simulateBridgePush(active, '5 seconds').pipe(Effect.forkChild);
+      yield* TestClock.adjust('10 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      expect(tag(outcome)).toBe('ClickNoToken');
+      // Bridge push sets aborted → solveDetection returns Aborted
+      expect(tag(outcome)).toBe('Aborted');
+      expect(active.resolution.isDone).toBe(true);
       expect(captures.clickAttempts).toBeGreaterThanOrEqual(1);
     }));
 });
@@ -351,7 +355,7 @@ describe('postClickWait', () => {
       expect(active.resolution.isDone).toBe(true);
     }));
 
-  it.effect('12. Phase B timeout — no bridge push within POST_CLICK_DEADLINE', () =>
+  it.effect('12. click delivered — pure push waits indefinitely for bridge', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer } = makeTestLayer({ clickSuccessOnAttempt: 1 });
@@ -361,10 +365,14 @@ describe('postClickWait', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('45 seconds');
+      // Bridge push after 120s — well past any old timeout. Pure push waits.
+      yield* simulateBridgePush(active, '120 seconds').pipe(Effect.forkChild);
+      yield* TestClock.adjust('125 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      expect(tag(outcome)).toBe('ClickNoToken');
+      // No timeout — push resolves cleanly after 120s
+      expect(tag(outcome)).toBe('Aborted');
+      expect(active.resolution.isDone).toBe(true);
     }));
 });
 

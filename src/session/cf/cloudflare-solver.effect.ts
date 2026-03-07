@@ -8,7 +8,7 @@
  * The CloudflareSolver bridge (cloudflare-solver.ts) provides the services
  * via ManagedRuntime and calls these via runtime.runPromise().
  */
-import { Cause, Data, Effect, Option } from 'effect';
+import { Cause, Data, Effect } from 'effect';
 import type { SolveOutcome } from './cloudflare-solve-strategies.js';
 import { DetectionContext } from './cf-detection-context.js';
 import { ClickResult } from './cloudflare-solve-strategies.js';
@@ -30,8 +30,6 @@ type SolveDepsI = typeof SolveDeps.Service;
 import {
   CLICK_RETRY_DELAY,
   SOLVE_DEADLINE,
-  POST_CLICK_DEADLINE_MS,
-  NAV_WAIT_MS,
   MAX_CLICK_ATTEMPTS,
 } from './cf-schedules.js';
 
@@ -91,13 +89,10 @@ export const solveDetection = (
           yield* deps.startActivityLoopEmbedded(embedded).pipe(Effect.forkChild);
         }
 
-        // Outer-scope SOLVE_DEADLINE timeout propagates via fiber interruption
-        // to all child effects (race, pollToken, postClickWait Phase B).
-        // Exception: postClickWait Phase B keeps its own clickTime-anchored deadline.
-        const resultOption = yield* solveTurnstile(active, deps).pipe(
-          Effect.timeoutOption(SOLVE_DEADLINE),
-        );
-        const result = Option.getOrElse(resultOption, () => TR.NoClick());
+        // No outer timeout. Each path inside solveTurnstile has its own bound:
+        // - Clicked: pure push, no timeout (session close is structural bound)
+        // - NoClick: latch await bounded by SOLVE_DEADLINE (30s for bridge auto-solve)
+        const result = yield* solveTurnstile(active, deps);
         if (active.aborted) return TR.Aborted();
         // Return TurnstileResult directly — detector pattern-matches on _tag
         return result;
@@ -208,7 +203,6 @@ const solveByClicking = (
 export type TurnstileResult = Data.TaggedEnum<{
   TokenFound: { readonly pollCount: number; readonly tokenLength: number; readonly token: string }
   Clicked: { readonly attempt: number }
-  ClickNoToken: { readonly attempt: number }
   NoClick: {}
   OopifDead: { readonly attempt: number }
   Aborted: {}
@@ -337,13 +331,10 @@ const solveTurnstile = (
     }
 
     if (raceResult._tag === 'Clicked') {
-      // Click dispatched — wait for bridge push to resolve.
-      const clickTime = Date.now();
-      const postResult = yield* postClickWait(active, clickTime);
-      if (postResult) {
-        return raceResult;
-      }
-      return TR.ClickNoToken({ attempt: raceResult.attempt });
+      // Click delivered. Pure push wait — bridge/beacon/navigation will resolve.
+      // No timeout. Session close is the structural bound (scope finalizer).
+      yield* active.abortLatch.await.pipe(Effect.ignore);
+      return raceResult;
     }
 
     if (raceResult._tag === 'OopifDead') {
@@ -351,95 +342,19 @@ const solveTurnstile = (
       return raceResult;
     }
 
-    // NoClick — widget not found. Wait for bridge push (auto-solve).
+    // NoClick — widget not found. Bridge is installed — auto-solve might push.
+    // Give bridge SOLVE_DEADLINE (30s) to auto-resolve, then give up.
     yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox');
-
-    // Wait for bridge push to resolve — abortLatch opens when bridge
-    // pushes solved event through onBridgeEvent → resolveAutoSolved.
-    // Outer SOLVE_DEADLINE timeout handles it via fiber interruption.
-    yield* active.abortLatch.await.pipe(Effect.ignore);
+    yield* active.abortLatch.await.pipe(
+      Effect.timeout(SOLVE_DEADLINE),
+      Effect.ignore,
+    );
 
     yield* Effect.annotateCurrentSpan({
       'cf.solve_total_ms': Date.now() - solveEntryMs,
       'cf.post_race_result': active.resolution.isDone ? 'BridgeResolved' : 'NoClick',
     });
     return active.resolution.isDone ? TR.Aborted() : TR.NoClick();
-  })();
-
-// ═══════════════════════════════════════════════════════════════════════
-// postClickWait — wait for navigation (interstitial) or token (embedded)
-//
-// Phase A: Wait for page navigation (Latch-based, zero CPU).
-// Phase B: If no navigation, poll for token.
-// ═══════════════════════════════════════════════════════════════════════
-
-const postClickWait = (
-  active: ActiveDetection,
-  clickTime: number,
-) =>
-  Effect.fn('cf.postClickWait')(function*() {
-    yield* annotateActive(active);
-    const entryTime = Date.now();
-    const events = yield* SolverEvents;
-
-    yield* events.marker(active.pageTargetId, 'cf.postclick_entry', {
-      elapsed_since_detection_ms: entryTime - active.startTime,
-      elapsed_since_click_ms: entryTime - clickTime,
-      post_click_deadline_ms: POST_CLICK_DEADLINE_MS,
-    });
-
-    // Phase A: Wait up to NAV_WAIT_MS for page navigation (interstitial signal).
-    // Uses Latch.await — blocks until abort signal (zero CPU), with timeout.
-    yield* active.abortLatch.await.pipe(
-      Effect.timeout(NAV_WAIT_MS),
-      Effect.ignore,
-    );
-
-    const phaseAMs = Date.now() - entryTime;
-    yield* events.marker(active.pageTargetId, 'cf.postclick_phase_a', {
-      aborted: active.aborted,
-      phase_a_ms: phaseAMs,
-    });
-
-    // If navigation happened (interstitial), we're done — don't token-poll
-    if (active.aborted) {
-      yield* Effect.annotateCurrentSpan({ 'cf.resolved': true, 'cf.resolution_signal': 'navigation' });
-      yield* events.marker(active.pageTargetId, 'cf.postclick_result', {
-        resolved: true,
-        signal: 'navigation',
-        total_ms: Date.now() - entryTime,
-      });
-      return true;
-    }
-
-    // Phase B: No navigation — this is an embedded widget. Wait for bridge push.
-    // The CF bridge pushes solved/error events via onBridgeEvent → resolveAutoSolved
-    // → resolution.solve() → ctx.abort() → abortLatch.open.
-    const remainingMs = Math.max(0, clickTime + POST_CLICK_DEADLINE_MS - Date.now());
-
-    yield* events.marker(active.pageTargetId, 'cf.postclick_phase_b', {
-      remaining_ms: remainingMs,
-    });
-
-    yield* active.abortLatch.await.pipe(
-      Effect.timeout(remainingMs),
-      Effect.ignore,
-    );
-
-    const resolved = active.resolution.isDone;
-    yield* events.marker(active.pageTargetId, 'cf.postclick_result', {
-      resolved,
-      signal: resolved ? 'bridge_push' : 'timeout',
-      total_ms: Date.now() - entryTime,
-    });
-
-    if (resolved) {
-      yield* Effect.annotateCurrentSpan({ 'cf.resolved': true, 'cf.resolution_signal': 'bridge_push' });
-      return true;
-    }
-
-    yield* Effect.annotateCurrentSpan({ 'cf.resolved': false });
-    return false;
   })();
 
 // ═══════════════════════════════════════════════════════════════════════
