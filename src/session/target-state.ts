@@ -58,7 +58,7 @@ export class TargetRegistry {
     this.byCdpSessionId.delete(state.cdpSessionId);
     // Close per-page WS if open (keepalive fiber auto-interrupts on runtime dispose)
     if (state.pageWebSocket) {
-      try { state.pageWebSocket.close(); } catch {}
+      try { state.pageWebSocket.removeAllListeners(); state.pageWebSocket.terminate(); } catch {}
       state.pageWebSocket = null;
     }
     // Clean iframe refs that reference this target's cdpSessionId
@@ -159,7 +159,7 @@ export class TargetRegistry {
   clear(): void {
     for (const state of this.byTargetId.values()) {
       if (state.pageWebSocket) {
-        try { state.pageWebSocket.close(); } catch {}
+        try { state.pageWebSocket.removeAllListeners(); state.pageWebSocket.terminate(); } catch {}
       }
     }
     this.byTargetId.clear();

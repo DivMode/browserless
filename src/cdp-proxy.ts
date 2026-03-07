@@ -545,9 +545,8 @@ export class CDPProxy {
     const cleanup = () => {
       conn.drainPending('isolated_cleanup');
       conn.dispose();
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.close();
-      }
+      ws.removeAllListeners();
+      ws.terminate();
     };
 
     return { conn, ws, waitForOpen, cleanup };
@@ -660,9 +659,8 @@ export class CDPProxy {
     );
 
     // Close client WebSocket
-    if (this.clientWs?.readyState === WebSocket.OPEN) {
-      this.clientWs.close();
-    }
+    this.clientWs?.removeAllListeners();
+    this.clientWs?.terminate();
     this.clientWs = null;
 
     // Clean up proxy CdpConnection before closing browser WS
@@ -671,9 +669,8 @@ export class CDPProxy {
     this.proxyConn = null;
 
     // Close browser WebSocket
-    if (this.browserWs?.readyState === WebSocket.OPEN) {
-      this.browserWs.close();
-    }
+    this.browserWs?.removeAllListeners();
+    this.browserWs?.terminate();
     this.browserWs = null;
 
     this.onClose?.();
