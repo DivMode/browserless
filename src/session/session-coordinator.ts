@@ -118,7 +118,7 @@ export class SessionCoordinator {
       onPageNavigated: (tid, sid, url) => cloudflareSolver.onPageNavigated(tid, sid, url),
       onIframeAttached: (tid, sid, url, parent) => cloudflareSolver.onIframeAttached(tid, sid, url, parent),
       onIframeNavigated: (tid, sid, url) => cloudflareSolver.onIframeNavigated(tid, sid, url),
-      onAutoSolveBinding: (sid) => cloudflareSolver.onAutoSolveBinding(sid),
+      onBridgeEvent: (sid, event) => cloudflareSolver.onBridgeEvent(sid, event),
       onTargetDestroyed: (tid) => cloudflareSolver.stopTargetDetection(tid),
       destroy: () => cloudflareSolver.destroy(),
     };

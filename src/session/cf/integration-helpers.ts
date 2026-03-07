@@ -363,14 +363,14 @@ export function buildSummaryFromMarkers(markers: ReplayMarker[]): TurnstileSumma
  * |---------|----------------------------------------|----------------------------------------------------|
  * | `Int✓`  | `click_navigation`                     | `page_navigated`                                   |
  * | `Int→`  | `auto_navigation`                      | `page_navigated`                                   |
- * | `Emb✓`  | `click_solve` or `click_navigation`    | `beacon_push`, `token_poll`, `activity_poll`, `page_navigated` |
- * | `Emb→`  | `auto_solve` or `auto_navigation`      | `beacon_push`, `token_poll`, `activity_poll`, `page_navigated` |
+ * | `Emb✓`  | `click_solve` or `click_navigation`    | `bridge_solved`, `beacon_push`, `token_poll`, `activity_poll`, `page_navigated` |
+ * | `Emb→`  | `auto_solve` or `auto_navigation`      | `bridge_solved`, `beacon_push`, `token_poll`, `activity_poll`, `page_navigated` |
  */
 const SUMMARY_METHOD_MAP: Record<string, { methods: string[]; signals: string[] }> = {
   'Int✓': { methods: ['click_navigation'], signals: ['page_navigated'] },
   'Int→': { methods: ['auto_navigation'], signals: ['page_navigated'] },
-  'Emb✓': { methods: ['click_solve', 'click_navigation'], signals: ['beacon_push', 'token_poll', 'activity_poll', 'page_navigated'] },
-  'Emb→': { methods: ['auto_solve', 'auto_navigation'], signals: ['beacon_push', 'token_poll', 'activity_poll', 'page_navigated'] },
+  'Emb✓': { methods: ['click_solve', 'click_navigation'], signals: ['bridge_solved', 'beacon_push', 'token_poll', 'activity_poll', 'page_navigated'] },
+  'Emb→': { methods: ['auto_solve', 'auto_navigation'], signals: ['bridge_solved', 'beacon_push', 'token_poll', 'activity_poll', 'page_navigated'] },
 };
 
 /**

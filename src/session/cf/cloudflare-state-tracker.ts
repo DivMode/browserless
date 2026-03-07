@@ -2,23 +2,15 @@ import { Logger } from '@browserless.io/browserless';
 import { Effect, Schedule } from 'effect';
 import {
   activityLoopSchedule,
-  INTERSTITIAL_SUCCESS_WAIT_MS,
-  EMBEDDED_SUCCESS_WAIT_MS,
-  STATE_POLL_INTERVAL,
 } from './cf-schedules.js';
 import type { CdpSessionId, TargetId, CloudflareConfig } from '../../shared/cloudflare-detection.js';
-import type { ReadonlyActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
+import { isInterstitialType } from '../../shared/cloudflare-detection.js';
+import type { ReadonlyActiveDetection, ReadonlyEmbeddedDetection, ReadonlyInterstitialDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
 import { DetectionRegistry } from './cf-detection-registry.js';
 import { OOPIFChecker } from './cf-services.js';
-import {
-  isSolvedEffect,
-  getTokenEffect,
-  isWidgetErrorEffect,
-  isStillDetectedEffect,
-} from './cf-cdp-queries.js';
-import type { SendCommand } from './cf-cdp-queries.js';
 
-export type { SendCommand } from './cf-cdp-queries.js';
+/** CDP send command — returns any because CDP response shapes vary per method. */
+export type SendCommand = (method: string, params?: object, cdpSessionId?: CdpSessionId, timeoutMs?: number) => Promise<any>;
 
 // ─── Decision Table ────────────────────────────────────────────────────
 //
@@ -43,7 +35,7 @@ export type { SendCommand } from './cf-cdp-queries.js';
 // └──────────────┴──────────────────┴──────────────┴───────┘
 
 export type SolveSignal = 'page_navigated' | 'beacon_push' | 'token_poll' | 'activity_poll'
-  | 'state_change' | 'callback_binding' | 'session_close' | 'cdp_dom_walk';
+  | 'bridge_solved' | 'state_change' | 'callback_binding' | 'session_close' | 'cdp_dom_walk';
 
 export function deriveSolveAttribution(signal: SolveSignal, clickDelivered: boolean) {
   // Interstitials: page navigated away from CF challenge page
@@ -116,7 +108,6 @@ export class CloudflareStateTracker {
   destroyed = false;
 
   constructor(
-    private sendCommand: SendCommand,
     private events: CloudflareEventEmitter,
   ) {
     this.registry = new DetectionRegistry((active, signal) => {
@@ -149,60 +140,33 @@ export class CloudflareStateTracker {
       tracker.events.emitProgress(active, state);
 
       if (state === 'success') {
-        // For interstitials, CF redirects after Turnstile success — takes 1-5s.
-        // Poll until CF markers disappear or token appears, rather than a fixed wait.
-        const isInterstitial = active.info.type === 'interstitial';
-        const maxWaitMs = isInterstitial ? INTERSTITIAL_SUCCESS_WAIT_MS : EMBEDDED_SUCCESS_WAIT_MS;
-        let token: string | null = null;
-        let stillDetected = true;
-        const pollStart = Date.now();
-
-        const successPoll = Schedule.both(
-          Schedule.spaced(STATE_POLL_INTERVAL),
-          Schedule.during(`${maxWaitMs} millis`),
-        );
-
-        yield* Effect.suspend(() => {
-          if (active.aborted) return Effect.fail('done' as const);
-          return tracker.getTokenEffect(active.pageCdpSessionId).pipe(
-            Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
-            Effect.flatMap((t) => {
-              token = t;
-              return tracker.isStillDetectedEffect(active.pageCdpSessionId).pipe(
-                Effect.catchTag('CdpSessionGone', () => Effect.succeed(false)),
-              );
-            }),
-            Effect.flatMap((detected) => {
-              stillDetected = detected;
-              return (!stillDetected || token)
-                ? Effect.fail('done' as const)
-                : Effect.void;
-            }),
-          );
-        }).pipe(Effect.repeat(successPoll), Effect.catch(() => Effect.void));
-
-        if (stillDetected && !token) {
-          tracker.events.marker(active.pageTargetId, 'cf.false_positive', {
-            state, waited_ms: Date.now() - pollStart, type: active.info.type,
+        // Interstitials solve via page navigation (CF redirects away from challenge page).
+        // OOPIF success only means the Turnstile widget INSIDE the interstitial solved —
+        // CF hasn't redirected yet. Resolving here would close the browser too early → rechallenge.
+        // Let the page_navigated signal handle interstitial resolution.
+        if (isInterstitialType(active.info.type)) {
+          tracker.log.info(`OOPIF success for interstitial ${pageTargetId} — waiting for page navigation`);
+          tracker.events.marker(active.pageTargetId, 'cf.oopif_success_interstitial', {
+            waiting_for: 'page_navigated',
           });
-          tracker.events.emitProgress(active, 'false_positive');
-          tracker.log.warn(`False positive success for page ${pageTargetId}`);
           return;
         }
 
-        const duration = Date.now() - active.startTime;
-        const solveSignal: SolveSignal = token ? 'token_poll' : 'state_change';
-        // clickDelivered = our click landed on checkbox before iframe state changed
-        const attr = deriveSolveAttribution(solveSignal, !!active.clickDelivered);
+        // Embedded types: OOPIF DOM walk confirmed success — resolve immediately.
+        // Token is delivered separately via bridge push event (onBridgeEvent).
+        // After the interstitial guard, TypeScript narrows to EmbeddedCFType | 'block'.
+        // 'block' never reaches here (dies at solveDetection entry) — cast is safe.
+        const embedded = active as ReadonlyEmbeddedDetection;
+        const duration = Date.now() - embedded.startTime;
+        const attr = deriveSolveAttribution('state_change', !!active.clickDelivered);
         const solveResult = {
           solved: true as const,
           type: active.info.type,
           method: attr.method,
-          token: token || undefined,
           duration_ms: duration,
           attempts: active.attempt,
           auto_resolved: attr.autoResolved,
-          signal: solveSignal,
+          signal: 'state_change' as const,
           phase_label: attr.label,
         };
 
@@ -229,31 +193,58 @@ export class CloudflareStateTracker {
   }
 
   /**
-   * Called when TURNSTILE_CALLBACK_HOOK_JS detects an auto-solve on any page.
-   * Returns Effect<void> — caller runs via Effect.runPromise or yield*.
+   * Called when the CF bridge pushes an event from the browser.
+   * Routes bridge events to existing resolution infrastructure.
    */
-  onAutoSolveBinding(cdpSessionId: CdpSessionId): Effect.Effect<void> {
+  onBridgeEvent(cdpSessionId: CdpSessionId, event: unknown): Effect.Effect<void> {
     const tracker = this;
-    return Effect.fn('cf.state.onAutoSolveBinding')(function*() {
-      yield* Effect.annotateCurrentSpan({ 'cf.target_id': cdpSessionId });
+    return Effect.fn('cf.state.onBridgeEvent')(function*() {
+      const parsed = event as { type: string; [key: string]: unknown };
+      yield* Effect.annotateCurrentSpan({ 'cf.bridge_event': parsed.type, 'cf.session_id': cdpSessionId });
       const pageTargetId = tracker.findPageBySession(cdpSessionId);
       if (!pageTargetId) return;
 
-      const active = tracker.registry.get(pageTargetId);
+      switch (parsed.type) {
+        case 'solved': {
+          const token = parsed.token as string;
+          const tokenLength = parsed.tokenLength as number;
+          const active = tracker.registry.get(pageTargetId);
 
-      if (active && !active.aborted) {
-        yield* tracker.resolveAutoSolved(active, 'callback_binding');
-        return;
-      }
+          if (active && !active.aborted) {
+            // Bridge solved events only resolve embedded types (turnstile/non_interactive/invisible).
+            // Interstitials solve via page navigation — bridge events on the CF challenge page
+            // must not steal the resolution from the page_navigated signal.
+            if (isInterstitialType(active.info.type)) return;
+            yield* tracker.resolveAutoSolved(active as ReadonlyEmbeddedDetection, 'bridge_solved', token);
+            return;
+          }
 
-      // No active detection — standalone Turnstile (fast-path auto-solve)
-      if (!tracker.bindingSolvedTargets.has(pageTargetId)) {
-        const token = yield* tracker.getTokenEffect(cdpSessionId).pipe(
-          Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
-        );
-        yield* Effect.annotateCurrentSpan({ 'cf.token_length': token?.length || 0 });
-        tracker.events.emitStandaloneAutoSolved(pageTargetId, 'callback_binding', token?.length || 0, cdpSessionId);
-        tracker.bindingSolvedTargets.add(pageTargetId);
+          // No active detection — standalone Turnstile (fast-path auto-solve)
+          if (!tracker.bindingSolvedTargets.has(pageTargetId)) {
+            yield* Effect.annotateCurrentSpan({ 'cf.token_length': tokenLength });
+            tracker.events.emitStandaloneAutoSolved(pageTargetId, 'bridge_solved', tokenLength, cdpSessionId);
+            tracker.bindingSolvedTargets.add(pageTargetId);
+          }
+          break;
+        }
+        case 'error': {
+          const active = tracker.registry.get(pageTargetId);
+          if (active && !active.aborted) {
+            tracker.events.marker(pageTargetId, 'cf.bridge.widget_error', {
+              error_type: parsed.errorType, has_token: parsed.hasToken,
+            });
+            tracker.events.emitProgress(active, 'widget_error', {
+              error_type: parsed.errorType, has_token: parsed.hasToken,
+            });
+          }
+          break;
+        }
+        case 'detected': {
+          tracker.events.marker(pageTargetId, 'cf.bridge.detected', {
+            method: parsed.method,
+          });
+          break;
+        }
       }
     })();
   }
@@ -315,9 +306,9 @@ export class CloudflareStateTracker {
 
   /**
    * Resolve an active detection as auto-solved (token appeared without navigation).
-   * Returns Effect<void> — called from Effect contexts.
+   * Token is provided by the CF bridge push event — no Runtime.evaluate fallback.
    */
-  resolveAutoSolved(active: ReadonlyActiveDetection, signal: string): Effect.Effect<void> {
+  resolveAutoSolved(active: ReadonlyEmbeddedDetection, signal: string, token?: string): Effect.Effect<void> {
     const tracker = this;
     return Effect.fn('cf.state.resolveAutoSolved')(function*() {
       yield* Effect.annotateCurrentSpan({
@@ -326,9 +317,6 @@ export class CloudflareStateTracker {
         'cf.signal': signal,
       });
       const duration = Date.now() - active.startTime;
-      const token = yield* tracker.getTokenEffect(active.pageCdpSessionId).pipe(
-        Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
-      );
       // clickDelivered = our click landed on checkbox before token/state resolved
       const attr = deriveSolveAttribution(signal as SolveSignal, !!active.clickDelivered);
       const result = {
@@ -348,15 +336,6 @@ export class CloudflareStateTracker {
       }
     })();
   }
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // Effect-native CDP query methods — delegates to cf-cdp-queries.ts
-  // ═══════════════════════════════════════════════════════════════════════
-
-  isSolvedEffect(cdpSessionId: CdpSessionId) { return isSolvedEffect(this.sendCommand, cdpSessionId); }
-  getTokenEffect(cdpSessionId: CdpSessionId) { return getTokenEffect(this.sendCommand, cdpSessionId); }
-  isWidgetErrorEffect(cdpSessionId: CdpSessionId) { return isWidgetErrorEffect(this.sendCommand, cdpSessionId); }
-  isStillDetectedEffect(cdpSessionId: CdpSessionId) { return isStillDetectedEffect(this.sendCommand, cdpSessionId); }
 
   /**
    * Shared OOPIF state check — used by both activity loop variants.
@@ -383,42 +362,21 @@ export class CloudflareStateTracker {
 
   /**
    * Activity loop for embedded types (turnstile/non_interactive/invisible).
-   * Page is the EMBEDDING site — Runtime.evaluate is safe.
-   * Checks: isSolved + OOPIF state + widget error
+   * CF bridge pushes solved/error events — this loop only checks OOPIF state.
+   * No more Runtime.evaluate polling (isSolved/isWidgetError replaced by bridge push).
    */
-  activityLoopEmbedded(active: ReadonlyActiveDetection): Effect.Effect<void, never, typeof OOPIFChecker.Identifier> {
+  activityLoopEmbedded(active: ReadonlyEmbeddedDetection): Effect.Effect<void, never, typeof OOPIFChecker.Identifier> {
     const tracker = this;
 
     const activityIteration = (loopIter: number) =>
       Effect.fn('cf.state.activityIterationEmbedded')(function*() {
         yield* Effect.annotateCurrentSpan({ 'cf.target_id': active.pageTargetId });
-        // Check if solved via Runtime.evaluate — safe because page is the embedding site
-        const solved = yield* tracker.isSolvedEffect(active.pageCdpSessionId).pipe(
-          Effect.catchTag('CdpSessionGone', () => Effect.succeed(false)),
-        );
-        if (solved) {
-          yield* tracker.resolveAutoSolved(active, 'activity_poll');
-          return 'solved' as const;
-        }
 
         tracker.events.emitProgress(active, 'activity_poll', { iteration: loopIter });
 
-        // Check OOPIF state via CDP DOM walk
+        // Check OOPIF state via CDP DOM walk — safe, uses iframe session
         const oopifResult = yield* tracker.checkOOPIFStateIteration(active);
         if (oopifResult === 'aborted') return 'aborted' as const;
-
-        // Check widget error via Runtime.evaluate — safe for embedded types
-        const widgetErr = yield* tracker.isWidgetErrorEffect(active.pageCdpSessionId).pipe(
-          Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
-        );
-        if (widgetErr) {
-          tracker.events.marker(active.pageTargetId, 'cf.widget_error_detected', {
-            error_type: widgetErr.type, has_token: widgetErr.has_token,
-          });
-          tracker.events.emitProgress(active, 'widget_error', {
-            error_type: widgetErr.type, has_token: widgetErr.has_token,
-          });
-        }
 
         return 'continue' as const;
       })();
@@ -430,7 +388,7 @@ export class CloudflareStateTracker {
         return yield* activityIteration(meta.attempt + 1);
       }).pipe(
         Effect.flatMap(result =>
-          result === 'solved' || result === 'aborted'
+          result === 'aborted'
             ? Effect.fail('done' as const)
             : Effect.void,
         ),
@@ -446,7 +404,7 @@ export class CloudflareStateTracker {
    * Page IS the CF challenge — Runtime.evaluate is FORBIDDEN.
    * Checks: OOPIF state only (uses iframe CDP session, not page session)
    */
-  activityLoopInterstitial(active: ReadonlyActiveDetection): Effect.Effect<void, never, typeof OOPIFChecker.Identifier> {
+  activityLoopInterstitial(active: ReadonlyInterstitialDetection): Effect.Effect<void, never, typeof OOPIFChecker.Identifier> {
     const tracker = this;
 
     const activityIteration = (loopIter: number) =>

@@ -757,9 +757,24 @@ export class CdpSession {
     const name = msg.params?.name;
     const cdpSessionId = CdpSessionId.makeUnsafe(msg.sessionId);
     if (name === '__rrwebPush') {
-      // Direct — no hooks boundary needed
+      // Multiplexed: rrweb batches (array) and bridge events (object with type).
+      // Bridge events routed through __rrwebPush to avoid adding a detectable
+      // binding name — CF scans for suspicious window globals.
       try {
         const parsed = JSON.parse(msg.params.payload);
+
+        // Bridge event: non-array object with a type field
+        if (!Array.isArray(parsed) && parsed && typeof parsed.type === 'string') {
+          if (this.runtime && this._fiberMap) {
+            this.runtime.runFork(
+              FiberMap.run(this._fiberMap, `cf:bridge:${cdpSessionId}`,
+                this.cloudflareHooks.onBridgeEvent(cdpSessionId, parsed).pipe(Effect.ignore)),
+            );
+          }
+          return;
+        }
+
+        // rrweb event batch (array)
         const batchExit = decodeRrwebEventBatch(parsed);
         if (batchExit._tag === 'Failure') return;
         const events = batchExit.value;
@@ -769,14 +784,6 @@ export class CdpSession {
         }
       } catch (e) {
         this.log.debug(`rrweb push parse failed: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    } else if (name === '__turnstileSolvedBinding') {
-      // Dispatch as tracked fiber instead of fire-and-forget
-      if (this.runtime && this._fiberMap) {
-        this.runtime.runFork(
-          FiberMap.run(this._fiberMap, `cf:binding:${cdpSessionId}`,
-            this.cloudflareHooks.onAutoSolveBinding(cdpSessionId).pipe(Effect.ignore)),
-        );
       }
     }
   }

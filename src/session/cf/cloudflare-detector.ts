@@ -1,9 +1,10 @@
 import { Cause, Effect, Latch } from 'effect';
 import { Logger } from '@browserless.io/browserless';
-import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, CloudflareType } from '../../shared/cloudflare-detection.js';
+import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, CloudflareType, EmbeddedInfo, InterstitialCFType } from '../../shared/cloudflare-detection.js';
+import { isInterstitialType } from '../../shared/cloudflare-detection.js';
 import { DETECTION_POLL_DELAY, INTERSTITIAL_RESOLUTION_TIMEOUT, MAX_RECHALLENGES, RECHALLENGE_DELAY_MS } from './cf-schedules.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
-import type { ActiveDetection, ReadonlyActiveDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
+import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
 import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
 import type { CloudflareStateTracker } from './cloudflare-state-tracker.js';
 import type { CloudflareSolveStrategies, CFDetected, CFTargetMatch, TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
@@ -11,6 +12,7 @@ import { SolveDispatcher, DetectionLoopStarter, CdpSender } from './cf-services.
 import { Resolution } from './cf-resolution.js';
 import { DetectionContext } from './cf-detection-context.js';
 import type { SolveDetectionResult } from './cloudflare-solver.effect.js';
+import { CF_BRIDGE_JS } from '../../generated/cf-bridge.js';
 
 /** R channel requirements for detector methods that yield services. */
 type DetectorR = typeof SolveDispatcher.Identifier | typeof DetectionLoopStarter.Identifier | typeof CdpSender.Identifier;
@@ -38,14 +40,18 @@ export function filterOwnedTargets(
 /**
  * Detection lifecycle for Cloudflare challenges.
  *
- * ZERO-INJECTION approach: No Runtime.evaluate, no addScriptToEvaluateOnNewDocument,
- * no Runtime.addBinding on the page. This matches what happens when pydoll's native
- * solver runs (which succeeds) — zero server-side JS execution on the CF page.
+ * ZERO-INJECTION on CF pages: No Runtime.evaluate, no addScriptToEvaluateOnNewDocument,
+ * no Runtime.addBinding on CF challenge pages. This matches what happens when pydoll's
+ * native solver runs (which succeeds) — zero server-side JS execution on CF pages.
+ *
+ * For EMBEDDED types (turnstile on third-party pages), the bridge is injected via
+ * Runtime.evaluate AFTER detection confirms the type. This is safe because the page
+ * is the embedding site (e.g. peet.ws, ahrefs.com), not a CF challenge page.
  *
  * Detection paths:
  *   1. URL pattern matching — challenges.cloudflare.com in page URL (interstitials)
  *   2. CDP DOM walk — iframe[src*="challenges.cloudflare.com"] (embedded Turnstile)
- *   3. onAutoSolveBinding — instant callback via Runtime.addBinding (handled by state tracker)
+ *   3. onBridgeEvent — instant push multiplexed through __rrwebPush binding (handled by state tracker)
  *
  * All public methods return Effect — the bridge (CloudflareSolver) runs them via
  * runtime.runPromise(). Services (SolveDispatcher, DetectionLoopStarter) are yielded
@@ -135,7 +141,7 @@ export class CloudflareDetector {
 
         // For click-based types (interstitial, turnstile, managed), check if the
         // destination is ALSO a CF page before emitting solved/failed.
-        const clickBased = active.info.type === 'interstitial' || active.info.type === 'turnstile' || active.info.type === 'managed';
+        const clickBased = isInterstitialType(active.info.type) || active.info.type === 'turnstile';
         if (clickBased) {
           const destinationIsCF = !!self.detectCFFromUrl(url);
 
@@ -239,7 +245,7 @@ export class CloudflareDetector {
       const cfType = self.detectCFFromUrl(url);
       if (cfType) {
         // If we already waited for click-based rechallenge check above, skip extra delay
-        const alreadyWaited = active && (active.info.type === 'interstitial' || active.info.type === 'managed');
+        const alreadyWaited = active && (isInterstitialType(active.info.type));
         if (!alreadyWaited) {
           yield* Effect.sleep(`${RECHALLENGE_DELAY_MS} millis`);
         }
@@ -248,7 +254,7 @@ export class CloudflareDetector {
       }
 
       // Not a CF URL — check for embedded Turnstile via DOM walk (zero JS injection)
-      const alreadyWaited = active && (active.info.type === 'interstitial' || active.info.type === 'managed');
+      const alreadyWaited = active && (isInterstitialType(active.info.type));
       if (!alreadyWaited) {
         yield* Effect.sleep(`${RECHALLENGE_DELAY_MS} millis`);
       }
@@ -316,6 +322,24 @@ export class CloudflareDetector {
     })();
   }
 
+  /**
+   * Inject CF bridge on the EMBEDDING page. Requires EmbeddedDetection proof —
+   * calling this on an interstitial (CF challenge page) would trigger CF's WASM
+   * V8 detection via Runtime.evaluate. The type system prevents this at compile time.
+   */
+  private injectBridge(
+    cdpSessionId: CdpSessionId,
+    _proof: EmbeddedDetection,
+  ): Effect.Effect<void, never, typeof CdpSender.Identifier> {
+    return Effect.fn('cf.injectBridge')(function*() {
+      const cdpSender = yield* CdpSender;
+      yield* cdpSender.send('Runtime.evaluate', {
+        expression: CF_BRIDGE_JS,
+        returnByValue: true,
+      }, cdpSessionId).pipe(Effect.ignore);
+    })();
+  }
+
   private emitSolveFailure(active: ReadonlyActiveDetection, targetId: TargetId, reason: string): Effect.Effect<void> {
     if (active.aborted) {
       const ctx = this.state.registry.getContext(targetId);
@@ -350,7 +374,7 @@ export class CloudflareDetector {
    * - /cdn-cgi/challenge-platform/ in pathname
    * - challenges.cloudflare.com hostname (rare — direct challenge URLs)
    */
-  private detectCFFromUrl(url: string): CloudflareType | null {
+  private detectCFFromUrl(url: string): InterstitialCFType | null {
     if (!url) return null;
     try {
       const parsed = new URL(url);
@@ -589,11 +613,11 @@ export class CloudflareDetector {
       // CDP detection is always turnstile — interstitials are caught by URL pattern
       const firstTarget = detection.targets[0];
       const meta: TurnstileOOPIFMeta | undefined = firstTarget?.meta;
-      const info: CloudflareInfo = {
+      const info: EmbeddedInfo = {
         type: 'turnstile', url: firstTarget?.url ?? '', detectionMethod: 'cdp_dom_walk',
         iframeUrl: firstTarget?.url,
       };
-      const active: ActiveDetection = {
+      const active: EmbeddedDetection = {
         info, pageCdpSessionId: cdpSessionId, pageTargetId: targetId,
         startTime, attempt: 1, aborted: false,
         tracker: new CloudflareTracker(info),
@@ -644,6 +668,9 @@ export class CloudflareDetector {
         yield* self.emitSolveFailure(active, targetId, 'rechallenge_skipped');
         return;
       }
+
+      // Inject CF bridge — type-safe: only accepts EmbeddedDetection proof
+      yield* self.injectBridge(cdpSessionId, active);
 
       // Dispatch solve via Effect service — no more Promise bridge
       self.log.warn(`CF lifecycle: dispatch_start target=${targetId.slice(0,8)} session=${self.sid}`);

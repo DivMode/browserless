@@ -121,7 +121,7 @@ const waitForSolve = (
       );
     }
     // Buffer for solver to emit final markers before browser close
-    yield* Effect.sleep('1500 millis');
+    yield* Effect.sleep('1 second');
   });
 
 // ── Effect helpers ──────────────────────────────────────────────────
@@ -179,7 +179,7 @@ interface CfTestSite {
    *   Emb→ = embedded auto-solved        Emb✓ = embedded click-solved
    */
   expectedSummaries: string[];
-  /** How long to wait for the solver (ms). Default 15000. */
+  /** How long to wait for the solver (ms). Default 10000. */
   waitMs?: number;
   /** If true, the site may not always serve a CF challenge — skip gracefully. */
   maySkip?: boolean;
@@ -285,16 +285,17 @@ describe.concurrent('CF Solver Multi-Site', () => {
               yield* setupProxyAuth(p);
 
               yield* Effect.promise(() =>
-                p.goto(site.url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {}),
+                p.goto(site.url, { waitUntil: 'load', timeout: 10_000 }).catch(() => {}),
               );
-              yield* waitForSolve(p, site.waitStrategy, site.waitMs ?? 15_000);
+
+              yield* waitForSolve(p, site.waitStrategy, site.waitMs ?? 8_000);
 
               return p;
             }),
           );
 
           // acquireRelease has closed the page — wait for replay flush
-          yield* Effect.sleep('2 seconds');
+          yield* Effect.sleep('1500 millis');
 
           // ── 1. Per-tab replay verification ───────────────────────────
           const allReplays = yield* Effect.promise(() => findAllReplays(suiteStartTs));
@@ -324,6 +325,21 @@ describe.concurrent('CF Solver Multi-Site', () => {
           if (!summary && site.maySkip) {
             writeSiteResult({ name: site.name, summary: null, replayId, durationMs: 0, status: 'SKIP' });
             return;
+          }
+
+          // ── 2b. Turnstile widget rendered ─────────────────────────────
+          // If this site ONLY expects turnstile and we got no detection at all,
+          // the widget didn't load. This catches bugs where our bridge code
+          // prevents CF from rendering the widget entirely (e.g., trapping
+          // window.turnstile with Object.defineProperty).
+          if (!summary && site.expectedTypes.every((t) => t === 'turnstile')) {
+            const replayUrl = replayId ? `${REPLAY_HTTP}/replays/${replayId}` : null;
+            failWithEvidence(
+              site.name,
+              'Turnstile widget never rendered — zero CF detection on a known turnstile site. Bridge may be blocking CF rendering.',
+              allMarkers,
+              replayUrl,
+            );
           }
 
           expect(
@@ -363,6 +379,24 @@ describe.concurrent('CF Solver Multi-Site', () => {
                   replayUrl,
                 );
               }
+            }
+          }
+
+          // ── 3b. Turnstile widget rendered (with detection) ────────────
+          // Detection fired but the widget iframe never appeared. The solver
+          // saw CF's JS but the actual challenge widget didn't render.
+          if (site.expectedTypes.includes('turnstile') && summary!.type === 'turnstile') {
+            const widgetRendered = allMarkers.some((m) =>
+              m.tag === 'cf.oopif_discovered' || m.tag === 'cf.phase2_end' && m.payload.found === true,
+            );
+            if (!widgetRendered) {
+              const replayUrl = replayId ? `${REPLAY_HTTP}/replays/${replayId}` : null;
+              failWithEvidence(
+                site.name,
+                'Turnstile detected but widget never rendered — CF iframe never appeared',
+                allMarkers,
+                replayUrl,
+              );
             }
           }
 
@@ -419,7 +453,7 @@ describe.concurrent('CF Solver Multi-Site', () => {
           throw err;
         }
       }),
-    { timeout: 90_000 });
+    { timeout: 15_000 });
   }
 });
 
@@ -456,10 +490,10 @@ function runWithProxy(args: string[], timeoutMs: number): string {
 }
 
 describe('Pydoll Pipeline', () => {
-  it('ahrefs-fast produces valid DR and CF summary', { timeout: 180_000 }, () => {
+  it('ahrefs-fast produces valid DR and CF summary', { timeout: 30_000 }, () => {
     const stdout = runWithProxy(
       ['ahrefs-fast', 'etsy.com', '--chrome-endpoint=local-browserless'],
-      120_000,
+      25_000,
     );
 
     // Must have a [Turnstile] summary line
@@ -482,10 +516,10 @@ describe('Pydoll Pipeline', () => {
   // degrade pass rates as Ahrefs/CF rate-limits the carrier block after ~30 rapid
   // requests. The FIRST run is the meaningful result. If you need to re-run, wait
   // 10+ minutes for IP rotation.
-  it('cf-stress passes >=80% with 15 concurrent tabs', { timeout: 360_000 }, () => {
+  it('cf-stress passes >=80% with 15 concurrent tabs', { timeout: 65_000 }, () => {
     const stdout = runWithProxy(
       ['cf-stress', '--concurrent', '15', '--chrome-endpoint=local-browserless'],
-      300_000,
+      60_000,
     );
 
     // Parse results table: "N/15 passed"
@@ -495,11 +529,11 @@ describe('Pydoll Pipeline', () => {
     expect(passed, `Only ${passed}/15 passed (need >=12 for 80%)`).toBeGreaterThanOrEqual(12);
   });
 
-  it('pydoll unit tests pass', { timeout: 60_000 }, () => {
+  it('pydoll unit tests pass', { timeout: 10_000 }, () => {
     const stdout = execFileSync('uv', ['run', 'pytest', 'tests/test_cloudflare_metrics.py', '-v'], {
       cwd: PYDOLL_DIR,
       encoding: 'utf-8',
-      timeout: 30_000,
+      timeout: 8_000,
     });
 
     // pytest prints "N passed" at the end
