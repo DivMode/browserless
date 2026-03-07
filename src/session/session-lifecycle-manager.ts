@@ -7,7 +7,7 @@ import {
 } from '@browserless.io/browserless';
 import { rm } from 'fs/promises';
 
-import { Duration, Effect, Fiber, Schedule, Scope } from 'effect';
+import { Effect, Fiber, Schedule, Scope } from 'effect';
 import { sessionDuration } from '../prom-metrics.js';
 import { SessionCoordinator } from './session-coordinator.js';
 import { SessionRegistry } from './session-registry.js';
@@ -33,6 +33,74 @@ export class SessionLifecycleManager {
   ) {}
 
   /**
+   * Unconditional session destruction — the ONLY cleanup implementation.
+   * All code paths (close, watchdog, shutdown, killSessions, acquireRelease) call this.
+   *
+   * Effect.ensuring guarantees data dir cleanup runs even if browser.close() hangs.
+   * No code path can skip cleanup because there is only ONE implementation.
+   */
+  private destroySession(
+    browser: BrowserInstance,
+    session: BrowserlessSession,
+  ): Effect.Effect<void> {
+    const lifecycle = this;
+
+    const replayCleanup = Effect.fn('session.destroy.replay')(function*() {
+      const coordinator = lifecycle.sessionCoordinator;
+      if (!coordinator) return;
+
+      const solver = coordinator.getCloudflareSolver(session.id);
+      if (solver) {
+        yield* Effect.tryPromise(() => solver.emitUnresolvedDetections()).pipe(Effect.ignore);
+      }
+
+      if (session.replay) {
+        yield* coordinator.stopReplayEffect(session.id, {
+          browserType: browser.constructor.name,
+          routePath: Array.isArray(session.routePath)
+            ? session.routePath[0]
+            : session.routePath,
+          trackingId: session.trackingId,
+        }).pipe(
+          Effect.timeout('12 seconds'),
+          Effect.ignore,
+        );
+      }
+    })();
+
+    return Effect.fn('session.destroy')(function*() {
+      yield* Effect.annotateCurrentSpan({ 'session.id': session.id });
+
+      // Step 1: Registry removal (immediate — prevents stale /sessions)
+      lifecycle.registry.remove(browser);
+
+      // Step 2: Prometheus session duration
+      const durationSec = (Date.now() - session.startedOn) / 1000;
+      sessionDuration.observe(durationSec);
+
+      // Step 3: Replay + CF cleanup (with timeout)
+      yield* replayCleanup.pipe(
+        Effect.timeout('15 seconds'),
+        Effect.ignore,
+      );
+
+      // Step 4: Browser close (with timeout — SIGKILL fallback is in browsers.cdp.ts)
+      yield* Effect.tryPromise(() => browser.close()).pipe(
+        Effect.timeout('5 seconds'),
+        Effect.ignore,
+      );
+    })().pipe(
+      // Step 5: Data dir cleanup — GUARANTEED by Effect.ensuring
+      // Runs even if steps 1-4 throw, timeout, or get interrupted
+      Effect.ensuring(
+        session.isTempDataDir
+          ? Effect.tryPromise(() => lifecycle.removeUserDataDir(session.userDataDir)).pipe(Effect.ignore)
+          : Effect.void,
+      ),
+    );
+  }
+
+  /**
    * Acquire a session resource with guaranteed cleanup.
    *
    * Registration happens on acquire, removal + full close on release.
@@ -48,12 +116,7 @@ export class SessionLifecycleManager {
         this.registry.register(browser, session);
         return browser;
       }),
-      () =>
-        Effect.promise(async () => {
-          await this.close(browser, session, true).catch((e) => {
-            this.log.warn(`acquireRelease cleanup failed for ${session.id}: ${e instanceof Error ? e.message : String(e)}`);
-          });
-        }),
+      () => this.destroySession(browser, session).pipe(Effect.ignore),
     );
   }
 
@@ -77,9 +140,7 @@ export class SessionLifecycleManager {
    * Handles:
    * - Keep-alive timers
    * - Connection counting
-   * - Replay stop
-   * - Browser close
-   * - Temp directory cleanup
+   * - Delegates to destroySession for actual cleanup
    */
   async close(
     browser: BrowserInstance,
@@ -108,7 +169,7 @@ export class SessionLifecycleManager {
         `Setting timer ${timeout.toLocaleString()} for "${session.id}"`,
       );
       const fiber = Effect.runFork(
-        Effect.sleep(Duration.millis(timeout)).pipe(
+        Effect.sleep(timeout).pipe(
           Effect.andThen(Effect.sync(() => {
             this.timerFibers.delete(session.id);
             const currentSession = this.registry.get(browser);
@@ -122,73 +183,12 @@ export class SessionLifecycleManager {
       this.timerFibers.set(session.id, fiber);
     }
 
-    let replayMetadata: ReplayCompleteParams | null = null;
-
     if (!keepOpen) {
       this.log.info(`KILLING browser session ${session.id}: numbConnected=${connected} keepUntil=${keepUntil} force=${force}`);
-
-      // FIRST: Remove from registry immediately — prevents stale accumulation in /sessions
-      // This is the critical fix: registry removal must happen before any cleanup that can hang
-      this.registry.remove(browser);
-
-      // Record session duration for Prometheus histogram (p50/p95 trend detection)
-      const durationSec = (Date.now() - session.startedOn) / 1000;
-      sessionDuration.observe(durationSec);
-
-      // Effect pipeline: replay cleanup with layered timeouts
-      // If anything hangs, the fiber gets interrupted and Map cleanup runs via Effect.ensuring
-      const coordinator = this.sessionCoordinator;
-      const sessionId = session.id;
-
-      const cleanupEffect = Effect.gen(function*() {
-        // Emit cf.solved for any unresolved CF detections (session-close fallback)
-        if (coordinator) {
-          const solver = coordinator.getCloudflareSolver(sessionId);
-          if (solver) {
-            yield* Effect.tryPromise(() => solver.emitUnresolvedDetections()).pipe(Effect.ignore);
-          }
-        }
-
-        // Stop replay pipeline — flushes events to external replay server
-        if (session.replay && coordinator) {
-          yield* coordinator.stopReplayEffect(sessionId, {
-            browserType: browser.constructor.name,
-            routePath: Array.isArray(session.routePath)
-              ? session.routePath[0]
-              : session.routePath,
-            trackingId: session.trackingId,
-          }).pipe(
-            Effect.timeout('12 seconds'),
-            Effect.ignore,
-          );
-        }
-
-        return null;
-      }).pipe(
-        Effect.timeout('15 seconds'),
-        Effect.orElseSucceed(() => null),
-      );
-
-      replayMetadata = await Effect.runPromise(cleanupEffect).catch((e) => {
-        this.log.warn(`Cleanup Effect failed for ${session.id}: ${e instanceof Error ? e.message : String(e)}`);
-        return null;
-      });
-
-      // Browser close — ALWAYS runs, even if Effect timed out
-      await browser.close().catch((e: unknown) => {
-        this.log.debug(`browser.close() failed for ${session.id}: ${e instanceof Error ? (e as Error).message : String(e)}`);
-      });
-
-      // Temp directory cleanup
-      if (session.isTempDataDir) {
-        this.log.debug(
-          `Deleting "${session.userDataDir}" temp user-data-dir`,
-        );
-        await this.removeUserDataDir(session.userDataDir);
-      }
+      await Effect.runPromise(this.destroySession(browser, session));
     }
 
-    return replayMetadata;
+    return null;
   }
 
   /**
@@ -273,31 +273,41 @@ export class SessionLifecycleManager {
   /**
    * Start a watchdog that force-closes sessions older than maxSessionAgeMs.
    * Safety net for unknown leak paths — catches sessions that survive normal cleanup.
+   *
+   * Uses destroySession — the same cleanup pipeline as normal close.
+   * Impossible to diverge from the close() path.
    */
   startWatchdog(maxSessionAgeMs: number): void {
+    const lifecycle = this;
     this.watchdogFiber = Effect.runFork(
-      Effect.sync(() => {
+      Effect.fn('watchdog.tick')(function*() {
         const now = Date.now();
-        for (const [browser, session] of this.registry.toArray()) {
-          if (now - session.startedOn > maxSessionAgeMs) {
-            this.log.warn(`Watchdog: force-closing stale session ${session.id} (age=${Math.round((now - session.startedOn) / 1000)}s)`);
-            this.registry.remove(browser);
-            this.sessionCoordinator?.forceCleanup(session.id).catch((e) => {
-              this.log.warn(`Watchdog forceCleanup failed: ${e instanceof Error ? e.message : String(e)}`);
-            });
-            browser.close().catch((e) => {
-              this.log.debug(`Watchdog browser.close() failed: ${e instanceof Error ? e.message : String(e)}`);
-            });
-          }
+        const stale = lifecycle.registry.toArray()
+          .filter(([, s]) => now - s.startedOn > maxSessionAgeMs);
+
+        if (stale.length > 0) {
+          lifecycle.log.warn(`Watchdog: ${stale.length} stale session(s)`);
+          yield* Effect.all(
+            stale.map(([browser, session]) => {
+              lifecycle.log.warn(
+                `Watchdog: force-closing ${session.id} (age=${Math.round((now - session.startedOn) / 1000)}s)`,
+              );
+              return lifecycle.destroySession(browser, session).pipe(
+                Effect.timeout('20 seconds'),
+                Effect.ignore,
+              );
+            }),
+            { concurrency: 'unbounded' },
+          );
         }
-      }).pipe(
+      })().pipe(
         Effect.repeat(Schedule.fixed('60 seconds')),
       ),
     );
   }
 
   /**
-   * Shutdown: stop all replay sessions, close all browsers, clear timers.
+   * Shutdown: destroy all sessions via the single cleanup path, clear timers.
    */
   async shutdown(): Promise<void> {
     this.log.info('Closing down browser sessions');
@@ -308,20 +318,27 @@ export class SessionLifecycleManager {
       this.watchdogFiber = null;
     }
 
-    // Stop all replay sessions (screencast + rrweb + video encoder)
-    if (this.sessionCoordinator) {
-      await Effect.runPromise(this.sessionCoordinator.shutdown()).catch((e) => {
-        this.log.warn(`Replay coordinator shutdown failed: ${e instanceof Error ? e.message : String(e)}`);
-      });
+    // Destroy all sessions via the single cleanup path
+    const sessions = this.registry.toArray();
+    if (sessions.length > 0) {
+      this.log.info(`Destroying ${sessions.length} session(s)...`);
+      await Effect.runPromise(
+        Effect.all(
+          sessions.map(([browser, session]) =>
+            this.destroySession(browser, session).pipe(
+              Effect.timeout('20 seconds'),
+              Effect.ignore,
+            )
+          ),
+          { concurrency: 'unbounded' },
+        ),
+      );
     }
 
-    // Close all browsers
-    const sessions = this.registry.toArray();
-    await Promise.all(sessions.map(([b]) => b.close()));
+    // Dispose video encoder (not per-session, separate lifecycle)
+    this.sessionCoordinator?.getVideoEncoder().dispose();
 
-    // Clear all timers
     this.clearTimers();
-
     this.log.info('Session lifecycle shutdown complete');
   }
 }

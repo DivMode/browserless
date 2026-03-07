@@ -174,6 +174,48 @@ describe('SessionLifecycleManager', () => {
     lifecycle.clearTimers();
     expect(lifecycle.getTimers().size).toBe(0);
   });
+
+  it('close(force=true) removes temp data directory', async () => {
+    const removeDirSpy = vi.spyOn(lifecycle as any, 'removeUserDataDir').mockResolvedValue(undefined);
+    const browser = makeBrowser('b1');
+    const session = makeSession('s1', {
+      isTempDataDir: true,
+      userDataDir: '/tmp/test-dir',
+    });
+    registry.register(browser, session);
+
+    await lifecycle.close(browser, session, true);
+
+    expect(removeDirSpy).toHaveBeenCalledWith('/tmp/test-dir');
+  });
+
+  it('data dir cleanup runs even when browser.close() fails', async () => {
+    const removeDirSpy = vi.spyOn(lifecycle as any, 'removeUserDataDir').mockResolvedValue(undefined);
+    const browser = makeBrowser('b1', {
+      close: vi.fn().mockRejectedValue(new Error('hang')),
+    });
+    const session = makeSession('s1', {
+      isTempDataDir: true,
+      userDataDir: '/tmp/test-dir',
+    });
+    registry.register(browser, session);
+
+    await lifecycle.close(browser, session, true);
+
+    expect(registry.size()).toBe(0);
+    expect(removeDirSpy).toHaveBeenCalledWith('/tmp/test-dir');
+  });
+
+  it('close(force=true) skips data dir for non-temp sessions', async () => {
+    const removeDirSpy = vi.spyOn(lifecycle as any, 'removeUserDataDir').mockResolvedValue(undefined);
+    const browser = makeBrowser('b1');
+    const session = makeSession('s1', { isTempDataDir: false });
+    registry.register(browser, session);
+
+    await lifecycle.close(browser, session, true);
+
+    expect(removeDirSpy).not.toHaveBeenCalled();
+  });
 });
 
 effectDescribe('acquireSession', () => {

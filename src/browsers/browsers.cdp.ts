@@ -227,19 +227,28 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
         `Closing ${this.constructor.name} process and all listeners`,
       );
       this.emit('close');
-      // Store reference before nulling
       const browser = this.browser;
+      const chromeProcess = browser.process();
       this.running = false;
       this.browser = null;
       this.browserWSEndpoint = null;
-      // Close browser FIRST, then clean up listeners
-      // This ensures the 'close' event fires while listeners are still attached
-      try {
-        await browser.close();
-      } catch (e) {
-        this.logger.warn(`Error closing browser: ${e}`);
+
+      const closed = await Promise.race([
+        browser.close().then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 5_000)),
+      ]).catch(() => false);
+
+      if (!closed && chromeProcess?.pid) {
+        this.logger.warn(
+          `browser.close() timed out after 5s — SIGKILL Chrome pid ${chromeProcess.pid}`,
+        );
+        try {
+          chromeProcess.kill('SIGKILL');
+        } catch (e) {
+          this.logger.warn(`SIGKILL failed: ${e}`);
+        }
       }
-      // Clean up listeners AFTER browser is fully closed
+
       browser.removeAllListeners();
       this.cleanListeners();
     }
