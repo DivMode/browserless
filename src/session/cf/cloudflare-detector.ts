@@ -4,7 +4,7 @@ import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, Cloudfla
 import { isInterstitialType } from '../../shared/cloudflare-detection.js';
 import { DETECTION_POLL_DELAY, INTERSTITIAL_RESOLUTION_TIMEOUT, MAX_RECHALLENGES, RECHALLENGE_DELAY_MS } from './cf-schedules.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
-import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
+import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection, CFEvents } from './cloudflare-event-emitter.js';
 import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
 import type { CloudflareStateTracker } from './cloudflare-state-tracker.js';
 import type { CloudflareSolveStrategies, CFDetected, CFTargetMatch, TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
@@ -62,7 +62,7 @@ export class CloudflareDetector {
   private enabled = false;
 
   constructor(
-    private events: CloudflareEventEmitter,
+    private events: CFEvents,
     private state: CloudflareStateTracker,
     private strategies: CloudflareSolveStrategies,
     private sessionId: string = '',
@@ -80,7 +80,6 @@ export class CloudflareDetector {
     this.enabled = true;
     if (config) {
       this.state.config = { ...this.state.config, ...config };
-      this.events.recordingMarkers = this.state.config.recordingMarkers;
     }
     this.log.info('Cloudflare solver enabled (zero-injection mode)');
 
@@ -498,14 +497,21 @@ export class CloudflareDetector {
           // handles interstitials (URL-pattern detection). Interstitial solves don't
           // produce phantom OOPIFs. Adding to solvedPages would block the embedded
           // Turnstile detection in multi-phase (Int→Emb) flows.
-          self.events.emitSolved(active, resolved.result);
+          self.state.pushPhase(targetId, resolved.result.type, resolved.result.phase_label || '→');
+          const label = self.state.buildCompoundLabel(targetId);
+          self.events.emitSolved(active, resolved.result, label);
         } else {
-          self.events.emitFailed(active, resolved.reason, resolved.duration_ms, resolved.phase_label);
+          const phase_label = resolved.phase_label ?? `✗ ${resolved.reason}`;
+          self.state.pushPhase(targetId, active.info.type, phase_label);
+          const label = self.state.buildCompoundLabel(targetId);
+          self.events.emitFailed(active, resolved.reason, resolved.duration_ms, resolved.phase_label, label);
         }
       } else {
         // Timeout — no path completed the Resolution within 10s
         const duration = Date.now() - active.startTime;
-        self.events.emitFailed(active, 'solver_exit', duration);
+        self.state.pushPhase(targetId, active.info.type, '✗ solver_exit');
+        const label = self.state.buildCompoundLabel(targetId);
+        self.events.emitFailed(active, 'solver_exit', duration, undefined, label);
       }
       if (self.state.registry.has(targetId)) {
         yield* self.state.registry.resolve(targetId);
@@ -707,10 +713,15 @@ export class CloudflareDetector {
         self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=solved method=${resolved.result.method} elapsed_ms=${Date.now() - active.startTime}`);
         // PHANTOM GUARD: Mark page as solved to block post-solve OOPIF re-detection.
         self.state.solvedPages.add(targetId);
-        self.events.emitSolved(active, resolved.result);
+        self.state.pushPhase(targetId, resolved.result.type, resolved.result.phase_label || '→');
+        const label = self.state.buildCompoundLabel(targetId);
+        self.events.emitSolved(active, resolved.result, label);
       } else {
         self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=failed reason=${resolved.reason} elapsed_ms=${resolved.duration_ms}`);
-        self.events.emitFailed(active, resolved.reason, resolved.duration_ms, resolved.phase_label);
+        const phase_label = resolved.phase_label ?? `✗ ${resolved.reason}`;
+        self.state.pushPhase(targetId, active.info.type, phase_label);
+        const label = self.state.buildCompoundLabel(targetId);
+        self.events.emitFailed(active, resolved.reason, resolved.duration_ms, resolved.phase_label, label);
       }
       if (self.state.registry.has(targetId)) {
         yield* self.state.registry.resolve(targetId);

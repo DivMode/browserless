@@ -3,9 +3,9 @@ import { Effect, Schedule } from 'effect';
 import {
   activityLoopSchedule,
 } from './cf-schedules.js';
-import type { CdpSessionId, TargetId, CloudflareConfig } from '../../shared/cloudflare-detection.js';
+import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareType } from '../../shared/cloudflare-detection.js';
 import { isInterstitialType } from '../../shared/cloudflare-detection.js';
-import type { ReadonlyActiveDetection, ReadonlyEmbeddedDetection, ReadonlyInterstitialDetection, CloudflareEventEmitter } from './cloudflare-event-emitter.js';
+import type { ReadonlyActiveDetection, ReadonlyEmbeddedDetection, ReadonlyInterstitialDetection, CFEvents } from './cloudflare-event-emitter.js';
 import { DetectionRegistry } from './cf-detection-registry.js';
 import { OOPIFChecker } from './cf-services.js';
 
@@ -106,19 +106,23 @@ export class CloudflareStateTracker {
   readonly pendingRechallengeCount = new Map<TargetId, number>();
   config: Required<CloudflareConfig> = { maxAttempts: 3, attemptTimeout: 30000, recordingMarkers: true };
   destroyed = false;
+  /** Per-page accumulator of solved/failed phases for compound summary labels. */
+  private readonly summaryPhases = new Map<TargetId, { type: string; label: string }[]>();
 
   constructor(
-    private events: CloudflareEventEmitter,
+    private events: CFEvents,
   ) {
     this.registry = new DetectionRegistry((active, signal) => {
       const duration = Date.now() - active.startTime;
       const attr = deriveSolveAttribution(signal, !!active.clickDelivered);
       this.log.info(`Scope finalizer fallback: emitting solved for orphaned detection on ${active.pageTargetId}`);
+      this.pushPhase(active.pageTargetId, active.info.type, attr.label);
+      const label = this.buildCompoundLabel(active.pageTargetId);
       this.events.emitSolved(active, {
         solved: true, type: active.info.type, method: attr.method,
         duration_ms: duration, attempts: 0, auto_resolved: attr.autoResolved,
         signal, token_length: 0, phase_label: attr.label,
-      });
+      }, label);
     });
   }
 
@@ -474,6 +478,7 @@ export class CloudflareStateTracker {
       tracker.solvedPages.delete(targetId);
       tracker.pendingIframes.delete(targetId);
       tracker.pendingRechallengeCount.delete(targetId);
+      tracker.summaryPhases.delete(targetId);
     })();
   }
 
@@ -483,6 +488,31 @@ export class CloudflareStateTracker {
 
   findPageByIframeSession(iframeCdpSessionId: CdpSessionId): TargetId | undefined {
     return this.registry.findByIframeSession(iframeCdpSessionId);
+  }
+
+  pushPhase(targetId: TargetId, type: string, label: string): void {
+    if (!this.summaryPhases.has(targetId)) this.summaryPhases.set(targetId, []);
+    this.summaryPhases.get(targetId)!.push({ type, label });
+  }
+
+  /**
+   * Build compound summary label from accumulated phases.
+   * Interstitial phases concatenated without space: Int✓Int→
+   * Embedded phases concatenated without space: Emb→
+   * Space between groups: Int✓Int→ Emb→
+   */
+  buildCompoundLabel(targetId: TargetId): string {
+    const phases = this.summaryPhases.get(targetId) || [];
+    const intParts = phases
+      .filter(p => isInterstitialType(p.type as CloudflareType))
+      .map(p => `Int${p.label}`);
+    const embParts = phases
+      .filter(p => !isInterstitialType(p.type as CloudflareType))
+      .map(p => `Emb${p.label}`);
+    const parts: string[] = [];
+    if (intParts.length) parts.push(intParts.join(''));
+    if (embParts.length) parts.push(embParts.join(''));
+    return parts.join(' ');
   }
 
   destroy(): Effect.Effect<void> {
@@ -496,6 +526,7 @@ export class CloudflareStateTracker {
       this.solvedCFTargetIds.clear();
       this.solvedPages.clear();
       this.pendingIframes.clear();
+      this.summaryPhases.clear();
     }).bind(this));
   }
 }
