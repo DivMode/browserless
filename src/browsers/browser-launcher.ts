@@ -144,8 +144,9 @@ export class BrowserLauncher {
       return this.handlePageConnection(req);
     }
 
-    // Parse launch options
+    // Parse launch options and per-session timeout
     const launchOptions = this.parseLaunchOptions(req, router);
+    const timeout = req.parsed.searchParams.get('timeout');
 
     // Determine user data directory
     const manualUserDataDir = this.getManualUserDataDir(launchOptions);
@@ -196,7 +197,7 @@ export class BrowserLauncher {
       routePath: router.path,
       startedOn: Date.now(),
       trackingId,
-      ttl: 0,
+      ttl: timeout ? +timeout : 0,
       userDataDir,
     };
 

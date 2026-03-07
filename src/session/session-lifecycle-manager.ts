@@ -184,7 +184,7 @@ export class SessionLifecycleManager {
     }
 
     if (!keepOpen) {
-      this.log.info(`KILLING browser session ${session.id}: numbConnected=${connected} keepUntil=${keepUntil} force=${force}`);
+      this.log.warn(`KILLING browser session ${session.id}: numbConnected=${connected} keepUntil=${keepUntil} force=${force}`);
       await Effect.runPromise(this.destroySession(browser, session));
     }
 
@@ -277,20 +277,24 @@ export class SessionLifecycleManager {
    * Uses destroySession — the same cleanup pipeline as normal close.
    * Impossible to diverge from the close() path.
    */
-  startWatchdog(maxSessionAgeMs: number): void {
+  startWatchdog(defaultMaxAgeMs: number): void {
     const lifecycle = this;
     this.watchdogFiber = Effect.runFork(
       Effect.fn('watchdog.tick')(function*() {
         const now = Date.now();
         const stale = lifecycle.registry.toArray()
-          .filter(([, s]) => now - s.startedOn > maxSessionAgeMs);
+          .filter(([, s]) => {
+            // Use per-session TTL if set, otherwise fall back to global default
+            const maxAge = s.ttl > 0 ? s.ttl + 60_000 : defaultMaxAgeMs;
+            return now - s.startedOn > maxAge;
+          });
 
         if (stale.length > 0) {
           lifecycle.log.warn(`Watchdog: ${stale.length} stale session(s)`);
           yield* Effect.all(
             stale.map(([browser, session]) => {
               lifecycle.log.warn(
-                `Watchdog: force-closing ${session.id} (age=${Math.round((now - session.startedOn) / 1000)}s)`,
+                `Watchdog: force-closing ${session.id} (age=${Math.round((now - session.startedOn) / 1000)}s, ttl=${session.ttl}ms, numbConnected=${session.numbConnected})`,
               );
               return lifecycle.destroySession(browser, session).pipe(
                 Effect.timeout('20 seconds'),

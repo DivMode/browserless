@@ -15,6 +15,7 @@ export default defineConfig({
           include: ['src/**/*.test.ts'],
           exclude: ['src/**/*.integration.test.ts'],
           globals: false,
+          env: { DEBUG: '' },
           fakeTimers: {
             toFake: undefined,
           },

@@ -218,6 +218,80 @@ describe('SessionLifecycleManager', () => {
   });
 });
 
+describe('watchdog per-session TTL', () => {
+  let registry: SessionRegistry;
+  let lifecycle: SessionLifecycleManager;
+
+  beforeEach(() => {
+    registry = new SessionRegistry();
+    lifecycle = new SessionLifecycleManager(registry);
+  });
+
+  it('watchdog respects per-session TTL over global default', async () => {
+    const browser = makeBrowser('b1');
+    // Session with ttl=3600000 (1 hour), 400s old — past global default but within TTL
+    const session = makeSession('s1', {
+      ttl: 3_600_000,
+      startedOn: Date.now() - 400_000,
+    });
+    registry.register(browser, session);
+
+    // Global default would kill at 360s, but session TTL is 1 hour + 60s buffer
+    lifecycle.startWatchdog(360_000);
+
+    // Wait for one watchdog tick (60s schedule, but first tick fires immediately)
+    await new Promise((r) => setTimeout(r, 1_500));
+
+    // Session should still be alive (ttl=1h, only 400s old)
+    expect(registry.size()).toBe(1);
+
+    // Cleanup
+    lifecycle.clearTimers();
+    await lifecycle.shutdown();
+  });
+
+  it('watchdog kills session with no TTL using global default', async () => {
+    const browser = makeBrowser('b1');
+    // Session with ttl=0 (no per-session TTL), 400s old — past global 360s default
+    const session = makeSession('s1', {
+      ttl: 0,
+      startedOn: Date.now() - 400_000,
+    });
+    registry.register(browser, session);
+
+    lifecycle.startWatchdog(360_000);
+
+    // Wait for one watchdog tick
+    await new Promise((r) => setTimeout(r, 1_500));
+
+    // Session should be killed (no per-session TTL, 400s > 360s global default)
+    expect(registry.size()).toBe(0);
+
+    lifecycle.clearTimers();
+  });
+
+  it('watchdog kills session that exceeds its own TTL', async () => {
+    const browser = makeBrowser('b1');
+    // Session with ttl=300000 (5 min), but 400s old (past ttl + 60s buffer = 360s)
+    const session = makeSession('s1', {
+      ttl: 300_000,
+      startedOn: Date.now() - 400_000,
+    });
+    registry.register(browser, session);
+
+    // Global default is much larger, but per-session TTL should take priority
+    lifecycle.startWatchdog(7_200_000);
+
+    // Wait for one watchdog tick
+    await new Promise((r) => setTimeout(r, 1_500));
+
+    // Session should be killed (400s > ttl 300s + 60s buffer = 360s)
+    expect(registry.size()).toBe(0);
+
+    lifecycle.clearTimers();
+  });
+});
+
 effectDescribe('acquireSession', () => {
   effectIt.effect('registers on acquire, removes on scope close', () =>
     Effect.gen(function*() {

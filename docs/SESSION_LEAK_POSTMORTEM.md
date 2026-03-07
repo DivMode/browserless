@@ -115,6 +115,51 @@ If you see memory climbing again:
    ```
    Safe — active sessions reference dirs by handle, not path.
 
+## Part 2: Watchdog vs Per-Session Timeout (2026-03-06)
+
+### Summary
+
+After deploying the `destroySession` fix (Part 1), the watchdog correctly cleaned up sessions. But sessions were STILL going stale — the watchdog fired every 60s, killing ~2 sessions aged 367-420s. The `destroySession` fix treated the symptom (orphaned data dirs); this fix addresses the root cause (why sessions go stale in the first place).
+
+### Root Cause
+
+The watchdog used global `TIMEOUT` env var (300s = 5 min) instead of per-session `ttl`.
+
+Pydoll's AhrefsSessionManager creates persistent Chrome sessions with `timeout=3600000` (1 hour) via the WebSocket query param. The limiter (queue library) correctly used this as the job timeout. But the watchdog ignored it entirely and used `TIMEOUT + 60s` = 360s as the kill threshold.
+
+**The math:**
+- Watchdog threshold: `TIMEOUT + 60s` = 360s
+- Watchdog poll interval: 60s
+- Expected stale age: 360-420s (threshold + poll variance)
+- Observed stale ages: 367-420s — exact match
+
+### The Cascade
+
+```
+t=0:     Pydoll connects with timeout=3600000 (1 hour)
+t=0-5m:  Session alive, scrapes running normally
+t=6m:    Watchdog kills session (360s threshold + poll variance)
+t=6m:    Pydoll's WebSocket closes → "browser_session_closed"
+t=6m:    Any in-flight scrape fails → "Turnstile timeout" / "workflow failed"
+t=6m+:   Pydoll recreates session (AhrefsSessionManager._ensure_session)
+t=12m:   Watchdog kills again...
+```
+
+### Fix
+
+1. **Store per-session timeout**: `session.ttl = timeout` query param (was hardcoded to `0`)
+2. **Watchdog respects TTL**: `maxAge = s.ttl > 0 ? s.ttl + 60_000 : defaultMaxAgeMs`
+3. **Upgraded log levels**: `KILLING browser session` → `warn` (was `info`, invisible in prod)
+
+Sessions with no explicit timeout (`ttl=0`) still use the global `TIMEOUT + 60s` default (unchanged behavior). Persistent sessions (e.g., Ahrefs `ttl=3600000`) now have watchdog threshold of 3,660s (1 hour + 60s buffer).
+
+### Corrected Causal Chain
+
+The Part 1 postmortem incorrectly attributed scrape failures to "10+ GB working set starving Chrome for memory." The VM has 50 GB RAM and the container has no memory limit. The real cause of scrape failures was the watchdog killing persistent sessions every ~6 minutes:
+
+1. Orphaned data dirs → memory growth (real, but not the cause of scrape failures)
+2. Watchdog killing persistent sessions → scrape failures (the actual root cause)
+
 ## Effect v4 Lesson Learned
 
 `Effect.promise` treats rejections as DEFECTS (unrecoverable). `Effect.ignore` only catches typed ERRORS.
