@@ -10,7 +10,7 @@
  * Test groups:
  *   1. solveTurnstile core paths (6 tests)
  *   2. Bridge push resolution (3 tests)
- *   3. postClickWait (3 tests)
+ *   3. Pure push wait (3 tests)
  *   4. Race condition regressions (5 tests)
  */
 import { describe, expect, it } from '@effect/vitest';
@@ -306,10 +306,10 @@ describe('Bridge push resolution', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// Group 3: postClickWait
+// Group 3: Pure push wait
 // ═══════════════════════════════════════════════════════════════════════
 
-describe('postClickWait', () => {
+describe('Pure push wait', () => {
   it.effect('10. Phase A navigation — latch opens before NAV_WAIT', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
@@ -344,12 +344,12 @@ describe('postClickWait', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      // Bridge push resolves after click loop wins the race and enters postClickWait
+      // Bridge push resolves after click loop wins the race and enters push wait
       yield* simulateBridgePush(active, '3 seconds').pipe(Effect.forkChild);
       yield* TestClock.adjust('15 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      // Either click wins race (then bridge resolves in postClickWait), or
+      // Either click wins race (then bridge resolves in push wait), or
       // bridge push wins the race directly. Either way, resolution is done.
       expect(['Clicked', 'Aborted']).toContain(tag(outcome));
       expect(active.resolution.isDone).toBe(true);
@@ -591,7 +591,7 @@ describe('Exhaustive ClickResult handling', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      // Click succeeds on attempt 1 → postClickWait runs → bridge push resolves
+      // Click succeeds on attempt 1 → push wait runs → bridge push resolves
       yield* simulateBridgePush(active, '3 seconds').pipe(Effect.forkChild);
       yield* TestClock.adjust('45 seconds');
       const outcome = yield* Fiber.join(fiber);
