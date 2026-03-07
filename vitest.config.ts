@@ -6,12 +6,20 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const mode = process.env.TEST_ENV || 'dev';
 
+const resolveConfig = {
+  alias: {
+    '@browserless.io/browserless': path.resolve(__dirname, 'src/exports.ts'),
+  },
+};
+
 export default defineConfig({
   test: {
+    bail: 1,
     projects: [
       {
+        resolve: resolveConfig,
         test: {
-          name: 'unit',
+          bail: 1,
           include: ['src/**/*.test.ts'],
           exclude: ['src/**/*.integration.test.ts'],
           globals: false,
@@ -22,11 +30,12 @@ export default defineConfig({
         },
       },
       {
+        resolve: resolveConfig,
         test: {
-          name: 'integration',
+          bail: 1,
           include: ['src/**/*.integration.test.ts'],
           globals: false,
-          testTimeout: 60_000,
+          testTimeout: 20_000,
           maxConcurrency: 50,
           globalSetup: ['./vitest.integration.setup.ts'],
           reporters: ['verbose'],
@@ -35,9 +44,5 @@ export default defineConfig({
       },
     ],
   },
-  resolve: {
-    alias: {
-      '@browserless.io/browserless': path.resolve(__dirname, 'src/exports.ts'),
-    },
-  },
+  resolve: resolveConfig,
 });

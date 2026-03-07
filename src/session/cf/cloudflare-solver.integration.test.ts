@@ -41,7 +41,6 @@ import {
 
 const BROWSERLESS_WS = buildWsUrl();
 const NOPECHA_URL = 'https://nopecha.com/demo/cloudflare';
-const SOLVE_TIMEOUT_MS = 60_000;
 
 // ── Shared session state ────────────────────────────────────────────
 
@@ -118,10 +117,20 @@ const runSession: Effect.Effect<
 
   console.log(`  [${Date.now() - testStartTs}ms] goto start`);
   yield* Effect.promise(() =>
-    page.goto(NOPECHA_URL, { waitUntil: 'load', timeout: 30_000 }).catch(() => {}),
+    page.goto(NOPECHA_URL, { waitUntil: 'load', timeout: 10_000 }).catch(() => {}),
   );
   console.log(`  [${Date.now() - testStartTs}ms] goto done, waiting for solver...`);
-  yield* Effect.sleep('15 seconds');
+  // Wait for turnstile solve — early exit when token appears, max 10s
+  yield* Effect.promise(() =>
+    page.waitForFunction(
+      () => {
+        const t = (window as any).turnstile;
+        return t && typeof t.getResponse === 'function' && !!t.getResponse();
+      },
+      { timeout: 10_000, polling: 500 },
+    ).catch(() => {}),
+  );
+  yield* Effect.sleep('1500 millis'); // buffer for final markers
   console.log(`  [${Date.now() - testStartTs}ms] wait done`);
 
   // Close browser to flush replay data
@@ -184,7 +193,7 @@ describe('CF Solver Integration (real nopecha.com)', () => {
       expect(session.markers.length).toBeGreaterThan(0);
       console.log(`  session ready: ${session.markers.length} markers, replay ${session.replayId}`);
     }),
-  { timeout: SOLVE_TIMEOUT_MS + 15_000 });
+  { timeout: 20_000 });
 
   // 2. No rechallenge — P0 gate
   //

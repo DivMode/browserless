@@ -8,13 +8,10 @@ import { CloudflareEventEmitter } from './cf/cloudflare-event-emitter.js';
 import type { ActiveDetection, EmitClientEvent, InjectMarker } from './cf/cloudflare-event-emitter.js';
 import type { SendCommand } from './cf/cloudflare-state-tracker.js';
 import {
-  CdpSender, TokenChecker, SolverEvents, SolveDeps,
+  CdpSender, SolverEvents, SolveDeps,
   SolveDispatcher, DetectionLoopStarter, OOPIFChecker, SolverConfig,
 } from './cf/cf-services.js';
 import { CdpSessionGone } from './cf/cf-errors.js';
-import {
-  getTokenEffect, isSolvedEffect, isWidgetErrorEffect, isStillDetectedEffect,
-} from './cf/cf-cdp-queries.js';
 import { solveDetection as solveDetectionEffect } from './cf/cloudflare-solver.effect.js';
 import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
 import { OtelLayer } from '../otel-layer.js';
@@ -33,7 +30,6 @@ type IsolatedConnection = {
 /** Service union type — the R channel of the Effect solver runtime. */
 type SolverR =
   | typeof CdpSender.Identifier
-  | typeof TokenChecker.Identifier
   | typeof SolverEvents.Identifier
   | typeof SolveDeps.Identifier
   | typeof SolveDispatcher.Identifier
@@ -71,7 +67,7 @@ export class CloudflareSolver {
     this.events = new CloudflareEventEmitter(injectMarker, (...args) => realEmit(...args), sessionId ?? '');
     this._setRealEmit = (fn) => { realEmit = fn; };
     this.strategies = new CloudflareSolveStrategies(chromePort);
-    this.stateTracker = new CloudflareStateTracker(sendCommand, this.events);
+    this.stateTracker = new CloudflareStateTracker(this.events);
     this.detector = new CloudflareDetector(
       this.events, this.stateTracker, this.strategies, sessionId ?? '',
     );
@@ -119,21 +115,6 @@ export class CloudflareSolver {
         }),
     }));
 
-    // TokenChecker routes through CdpSender.sendViaProxy (CDPProxy browser WS)
-    // instead of stateTracker.sendCommand (CdpSession.sendCommand).
-    // CdpSession.send routes Runtime.evaluate through per-page WS which can die
-    // during page navigation/rechallenge, causing ALL getToken polls to fail with
-    // CdpSessionGone at 500ms — the root cause of no_resolution failures.
-    // CDPProxy browser WS is always alive (proven: detectTurnstileViaCDP works).
-    const proxyCmd: SendCommand = (method, params, sid, timeoutMs) =>
-      (self.sendViaProxy || sendCommand)(method, params ?? {}, sid, timeoutMs);
-    const tokenCheckerLayer = Layer.succeed(TokenChecker, TokenChecker.of({
-      getToken: (sessionId) => getTokenEffect(proxyCmd, sessionId),
-      isSolved: (sessionId) => isSolvedEffect(proxyCmd, sessionId),
-      isWidgetError: (sessionId) => isWidgetErrorEffect(proxyCmd, sessionId),
-      isStillDetected: (sessionId) => isStillDetectedEffect(proxyCmd, sessionId),
-    }));
-
     const solverEventsLayer = Layer.succeed(SolverEvents, SolverEvents.of({
       emitDetected: (active) => Effect.sync(() => events.emitDetected(active)),
       emitProgress: (active, state, extra) => Effect.sync(() => events.emitProgress(active, state, extra)),
@@ -172,14 +153,12 @@ export class CloudflareSolver {
     // Per-solve isolated WS: each solve gets its own WebSocket to Chrome,
     // Each solve gets its own isolated WS connection, so no concurrency limit needed.
     const solveDispatcherLayer = Layer.effect(SolveDispatcher, Effect.gen(function*() {
-      const tokenChecker = yield* TokenChecker;
       const solverEvents = yield* SolverEvents;
       const solveDeps = yield* SolveDeps;
       const originalSender = yield* CdpSender;
 
       const provideServices = (active: ActiveDetection, sender: Parameters<typeof CdpSender.of>[0]) =>
         solveDetectionEffect(active).pipe(
-          Effect.provideService(TokenChecker, tokenChecker),
           Effect.provideService(SolverEvents, solverEvents),
           Effect.provideService(SolveDeps, solveDeps),
           Effect.provideService(CdpSender, sender),
@@ -252,10 +231,10 @@ export class CloudflareSolver {
     // Wire dependencies:
     // - oopifCheckerLayer needs CdpSender
     // - solveDepsLayer needs OOPIFChecker + CdpSender + SolverEvents
-    // - solveDispatcherLayer needs TokenChecker + SolverEvents + SolveDeps + CdpSender
+    // - solveDispatcherLayer needs SolverEvents + SolveDeps + CdpSender
     // Base layers (no deps) are merged first, then dependent layers are provided.
     const baseLayers = Layer.mergeAll(
-      cdpSenderLayer, tokenCheckerLayer, solverEventsLayer,
+      cdpSenderLayer, solverEventsLayer,
       detectionStarterLayer, solverConfigLayer, lifecycleLayer,
       OtelLayer,
     );
@@ -264,7 +243,7 @@ export class CloudflareSolver {
     const withOOPIF = Layer.merge(baseLayers, Layer.provide(oopifCheckerLayer, cdpSenderLayer));
     // solveDepsLayer needs OOPIFChecker + CdpSender + SolverEvents
     const withSolveDeps = Layer.merge(withOOPIF, Layer.provide(solveDepsLayer, withOOPIF));
-    // solveDispatcherLayer needs TokenChecker + SolverEvents + SolveDeps + CdpSender (for isolated WS override)
+    // solveDispatcherLayer needs SolverEvents + SolveDeps + CdpSender (for isolated WS override)
     return Layer.merge(withSolveDeps, Layer.provide(solveDispatcherLayer, withSolveDeps));
   }
 
@@ -386,9 +365,9 @@ export class CloudflareSolver {
     ));
   }
 
-  onAutoSolveBinding(cdpSessionId: CdpSessionId): Effect.Effect<void> {
+  onBridgeEvent(cdpSessionId: CdpSessionId, event: unknown): Effect.Effect<void> {
     return Effect.promise(() => this.runtime.runPromise(
-      this.stateTracker.onAutoSolveBinding(cdpSessionId),
+      this.stateTracker.onBridgeEvent(cdpSessionId, event),
     ));
   }
 

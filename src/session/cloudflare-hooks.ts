@@ -16,7 +16,7 @@ export interface CloudflareHooks {
   onPageNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void>;
   onIframeAttached(targetId: TargetId, cdpSessionId: CdpSessionId, url: string, parentCdpSessionId: CdpSessionId): Effect.Effect<void>;
   onIframeNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void>;
-  onAutoSolveBinding(cdpSessionId: CdpSessionId): Effect.Effect<void>;
+  onBridgeEvent(cdpSessionId: CdpSessionId, event: unknown): Effect.Effect<void>;
   /** Awaited — ensures detection fiber is interrupted before target cleanup. */
   onTargetDestroyed(targetId: TargetId): Effect.Effect<void>;
   destroy(): void;

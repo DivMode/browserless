@@ -4,15 +4,15 @@
  * Replaces constructor callback injection with typed services
  * that are provided via Layer at construction time.
  *
- * Service scope restriction enforces safety rules at compile time:
- *   - firstClickAttempt only has CdpSender (no TokenChecker → no Runtime.evaluate)
- *   - retryClickAttempt has CdpSender + TokenChecker (safe after first click)
+ * TokenChecker was removed — replaced by CF bridge push events.
+ * The bridge pushes solved/error/detected events multiplexed through __rrwebPush,
+ * eliminating all Runtime.evaluate polling.
  */
 import type { Effect } from 'effect';
 import { ServiceMap } from 'effect';
 import type { CdpSessionId, TargetId, CloudflareResult, CloudflareConfig } from '../../shared/cloudflare-detection.js';
 import type { CdpSessionGone, CdpTimeout } from './cf-errors.js';
-import type { ActiveDetection, ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
+import type { ActiveDetection, ReadonlyActiveDetection, ReadonlyEmbeddedDetection, ReadonlyInterstitialDetection } from './cloudflare-event-emitter.js';
 import type { ClickResult } from './cloudflare-solve-strategies.js';
 import type { SolveDetectionResult } from './cloudflare-solver.effect.js';
 
@@ -47,24 +47,6 @@ export const CdpSender = ServiceMap.Service<{
 }>('CdpSender');
 
 // ═══════════════════════════════════════════════════════════════════════
-// TokenChecker — getToken/isSolved via Runtime.evaluate
-//
-// NOT available in firstClickAttempt's R channel.
-// Available in retryClickAttempt (safe after first click).
-// ═══════════════════════════════════════════════════════════════════════
-
-export const TokenChecker = ServiceMap.Service<{
-  /** Get Turnstile token from page. Uses Runtime.evaluate — NEVER call before first click. */
-  readonly getToken: (sessionId: CdpSessionId) => Effect.Effect<string | null, CdpSessionGone>;
-  /** Check if Turnstile is solved. Uses Runtime.evaluate — NEVER call before first click. */
-  readonly isSolved: (sessionId: CdpSessionId) => Effect.Effect<boolean, CdpSessionGone>;
-  /** Check widget error state. */
-  readonly isWidgetError: (sessionId: CdpSessionId) => Effect.Effect<{ type: string; has_token: boolean } | null, CdpSessionGone>;
-  /** Re-run CF detection to check for false positives. */
-  readonly isStillDetected: (sessionId: CdpSessionId) => Effect.Effect<boolean, CdpSessionGone>;
-}>('TokenChecker');
-
-// ═══════════════════════════════════════════════════════════════════════
 // SolverEvents — emit detection/solve/fail events + recording markers
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -87,9 +69,9 @@ export const SolveDeps = ServiceMap.Service<{
   readonly findAndClickViaCDP: (active: ReadonlyActiveDetection, attempt: number) => Effect.Effect<ClickResult>;
   readonly simulatePresence: (active: ReadonlyActiveDetection) => Effect.Effect<void>;
   /** Activity loop for embedded types (turnstile/non_interactive/invisible). Runtime.evaluate is safe. */
-  readonly startActivityLoopEmbedded: (active: ReadonlyActiveDetection) => Effect.Effect<void>;
+  readonly startActivityLoopEmbedded: (active: ReadonlyEmbeddedDetection) => Effect.Effect<void>;
   /** Activity loop for interstitial/managed types. Runtime.evaluate is FORBIDDEN. */
-  readonly startActivityLoopInterstitial: (active: ReadonlyActiveDetection) => Effect.Effect<void>;
+  readonly startActivityLoopInterstitial: (active: ReadonlyInterstitialDetection) => Effect.Effect<void>;
 }>('SolveDeps');
 
 // ═══════════════════════════════════════════════════════════════════════

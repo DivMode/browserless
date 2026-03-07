@@ -4,9 +4,12 @@
  * Uses @effect/vitest's it.effect + TestClock for deterministic fiber timing.
  * All CDP/browser dependencies are replaced with mock services via Layer.succeed.
  *
+ * Token resolution is push-based via CF bridge — no TokenChecker service.
+ * Tests simulate bridge push by externally completing Resolution + opening abortLatch.
+ *
  * Test groups:
  *   1. solveTurnstile core paths (6 tests)
- *   2. pollToken (3 tests)
+ *   2. Bridge push resolution (3 tests)
  *   3. postClickWait (3 tests)
  *   4. Race condition regressions (5 tests)
  */
@@ -18,11 +21,10 @@ import type { CloudflareInfo, CloudflareResult } from '../../shared/cloudflare-d
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
 import type { ActiveDetection } from './cloudflare-event-emitter.js';
 import { Resolution } from './cf-resolution.js';
-import { TokenChecker, SolverEvents, SolveDeps } from './cf-services.js';
+import { SolverEvents, SolveDeps } from './cf-services.js';
 import { ClickResult } from './cloudflare-solve-strategies.js';
-import type { SolveDetectionResult, TurnstileResult } from './cloudflare-solver.effect.js';
+import type { SolveDetectionResult } from './cloudflare-solver.effect.js';
 import { MAX_CLICK_ATTEMPTS } from './cf-schedules.js';
-import { CdpSessionGone } from './cf-errors.js';
 import { DetectionContext } from './cf-detection-context.js';
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -45,13 +47,24 @@ const makeActive = (overrides?: Partial<ActiveDetection>): ActiveDetection => {
   };
 };
 
+/** Simulate bridge push resolving the detection — mirrors onBridgeEvent → resolveAutoSolved. */
+const simulateBridgePush = (active: ActiveDetection, delay: string = '2 seconds') =>
+  Effect.sleep(delay).pipe(
+    Effect.flatMap(() => active.resolution.solve({
+      solved: true, type: 'turnstile', method: 'bridge_solved',
+      duration_ms: 100, attempts: 1, auto_resolved: true,
+      signal: 'bridge_push', phase_label: '→',
+    })),
+    Effect.tap((won) => {
+      if (won) DetectionContext.setAborted(active);
+      return Effect.void;
+    }),
+    Effect.asVoid,
+  );
+
 interface TestLayerConfig {
-  token?: string | null;
-  tokenAfterPolls?: number;
   clickSuccess?: boolean;
   clickSuccessOnAttempt?: number;
-  isSolved?: boolean;
-  isStillDetected?: boolean;
   /** Override ClickResult per attempt. Default: Verified/NoCheckbox based on clickSuccess. */
   clickResultFn?: (attempt: number) => ClickResult;
 }
@@ -60,7 +73,6 @@ interface TestCaptures {
   markers: Array<{ tag: string; payload?: object }>;
   emissions: Array<{ type: 'solved' | 'failed'; result?: CloudflareResult; reason?: string }>;
   clickAttempts: number;
-  pollCount: number;
 }
 
 const makeTestLayer = (config: TestLayerConfig = {}) => {
@@ -68,26 +80,7 @@ const makeTestLayer = (config: TestLayerConfig = {}) => {
     markers: [],
     emissions: [],
     clickAttempts: 0,
-    pollCount: 0,
   };
-
-  const tokenLayer = Layer.succeed(TokenChecker, TokenChecker.of({
-    getToken: () => {
-      captures.pollCount++;
-      if (config.tokenAfterPolls) {
-        // When tokenAfterPolls is set, return null until threshold, then return token
-        return Effect.succeed(
-          captures.pollCount >= config.tokenAfterPolls
-            ? (config.token ?? 'mock-token-abc123')
-            : null,
-        );
-      }
-      return Effect.succeed(config.token ?? null);
-    },
-    isSolved: () => Effect.succeed(config.isSolved ?? false),
-    isWidgetError: () => Effect.succeed(null),
-    isStillDetected: () => Effect.succeed(config.isStillDetected ?? true),
-  }));
 
   const eventsLayer = Layer.succeed(SolverEvents, SolverEvents.of({
     emitDetected: () => Effect.void,
@@ -122,7 +115,7 @@ const makeTestLayer = (config: TestLayerConfig = {}) => {
     startActivityLoopInterstitial: () => Effect.void,
   }));
 
-  const layer = Layer.mergeAll(tokenLayer, eventsLayer, depsLayer);
+  const layer = Layer.mergeAll(eventsLayer, depsLayer);
 
   return { layer, captures };
 };
@@ -138,69 +131,67 @@ const tag = (result: SolveDetectionResult): string =>
 // ═══════════════════════════════════════════════════════════════════════
 
 describe('solveTurnstile', () => {
-  it.effect('1. early token found — resolves immediately', () =>
+  it.effect('1. bridge pre-resolved — solver exits immediately', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      const { layer } = makeTestLayer({ token: 'early-token-xyz' });
+      const { layer } = makeTestLayer();
       const active = makeActive();
 
-      const outcome = yield* solveDetection(active).pipe(Effect.provide(layer));
+      // Pre-resolve before solver starts (bridge solved before solver fiber ran)
+      yield* active.resolution.solve({
+        solved: true, type: 'turnstile', method: 'bridge_solved',
+        duration_ms: 50, attempts: 1, auto_resolved: true,
+        signal: 'bridge_push', phase_label: '→',
+      });
 
-      expect(tag(outcome)).toBe('TokenFound');
+      const outcome = yield* solveDetection(active).pipe(Effect.provide(layer));
+      expect(tag(outcome)).toBe('Aborted');
       expect(active.resolution.isDone).toBe(true);
     }));
 
-  it.effect('2. token during click loop — token poll wins race', () =>
+  it.effect('2. bridge push during click loop — abortLatch wins race', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      const { layer } = makeTestLayer({
-        clickSuccess: false,
-        tokenAfterPolls: 3,
-        token: 'concurrent-token',
-      });
+      const { layer } = makeTestLayer({ clickSuccess: false });
       const active = makeActive();
 
       const fiber = yield* solveDetection(active).pipe(
         Effect.provide(layer),
         Effect.forkChild,
       );
+      // Fork bridge push that resolves after 2s
+      yield* simulateBridgePush(active, '2 seconds').pipe(Effect.forkChild);
       yield* TestClock.adjust('5 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      expect(tag(outcome)).toBe('TokenFound');
+      expect(tag(outcome)).toBe('Aborted');
       expect(active.resolution.isDone).toBe(true);
     }));
 
-  it.effect('3. click succeeds OR token found — either concurrent path resolves', () =>
+  it.effect('3. click succeeds OR bridge push — either concurrent path resolves', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      // Both click (attempt 1) and token (after poll 3) can succeed.
-      // Under raceFirst, whichever fiber resolves first wins.
-      // With TestClock, both fibers advance together — either outcome is valid.
-      const { layer } = makeTestLayer({
-        clickSuccessOnAttempt: 1,
-        tokenAfterPolls: 3,
-        token: 'concurrent-token',
-      });
+      const { layer } = makeTestLayer({ clickSuccessOnAttempt: 1 });
       const active = makeActive();
 
       const fiber = yield* solveDetection(active).pipe(
         Effect.provide(layer),
         Effect.forkChild,
       );
+      // Fork bridge push — race with click loop
+      yield* simulateBridgePush(active, '3 seconds').pipe(Effect.forkChild);
       yield* TestClock.adjust('15 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      // Either the click or the token poll resolves first
-      expect(['TokenFound', 'Clicked']).toContain(tag(outcome));
-      // Resolution gateway must be completed
+      // Either click or bridge push resolves first
+      expect(['Clicked', 'Aborted']).toContain(tag(outcome));
       expect(active.resolution.isDone).toBe(true);
     }));
 
-  it.effect('4. no click, no token → returns no_click after deadline', () =>
+  it.effect('4. no click, no bridge push → returns no_click after deadline', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      const { layer } = makeTestLayer({ clickSuccess: false, token: null });
+      const { layer } = makeTestLayer({ clickSuccess: false });
       const active = makeActive();
 
       const fiber = yield* solveDetection(active).pipe(
@@ -216,7 +207,7 @@ describe('solveTurnstile', () => {
   it.effect('5. external abort — latch opens mid-solve', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      const { layer } = makeTestLayer({ clickSuccess: false, token: null });
+      const { layer } = makeTestLayer({ clickSuccess: false });
       const active = makeActive();
 
       const fiber = yield* solveDetection(active).pipe(
@@ -232,13 +223,10 @@ describe('solveTurnstile', () => {
       expect(tag(outcome)).toBe('Aborted');
     }));
 
-  it.effect('6. click but no token in postClickWait → click_no_token', () =>
+  it.effect('6. click but no bridge push in postClickWait → click_no_token', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      const { layer, captures } = makeTestLayer({
-        clickSuccessOnAttempt: 1,
-        token: null,
-      });
+      const { layer, captures } = makeTestLayer({ clickSuccessOnAttempt: 1 });
       const active = makeActive();
 
       const fiber = yield* solveDetection(active).pipe(
@@ -254,39 +242,33 @@ describe('solveTurnstile', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// Group 2: pollToken
+// Group 2: Bridge push resolution
 // ═══════════════════════════════════════════════════════════════════════
 
-describe('pollToken', () => {
-  it.effect('7. token found via polling — no click needed', () =>
+describe('Bridge push resolution', () => {
+  it.effect('7. bridge push resolves while clicking fails — solver exits via abortLatch', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      // tokenAfterPolls: 2 — early check (poll 1) returns null, concurrent
-      // tokenPoll (poll 2+) finds token. Click always fails.
-      const { layer } = makeTestLayer({
-        clickSuccess: false,
-        tokenAfterPolls: 2,
-        token: 'delayed-token',
-      });
+      const { layer } = makeTestLayer({ clickSuccess: false });
       const active = makeActive();
 
       const fiber = yield* solveDetection(active).pipe(
         Effect.provide(layer),
         Effect.forkChild,
       );
+      // Bridge push after 1s — click loop is still retrying
+      yield* simulateBridgePush(active, '1 second').pipe(Effect.forkChild);
       yield* TestClock.adjust('10 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      // Token found via either early check retry or concurrent poll
-      expect(tag(outcome)).toBe('TokenFound');
-      // Resolution must be completed via resolveTokenFound
+      expect(tag(outcome)).toBe('Aborted');
       expect(active.resolution.isDone).toBe(true);
     }));
 
-  it.effect('8. abort during poll — returns gracefully', () =>
+  it.effect('8. abort during solve — returns gracefully', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      const { layer } = makeTestLayer({ clickSuccess: false, token: null });
+      const { layer } = makeTestLayer({ clickSuccess: false });
       const active = makeActive();
 
       const fiber = yield* solveDetection(active).pipe(
@@ -302,45 +284,10 @@ describe('pollToken', () => {
       expect(tag(outcome)).toBe('Aborted');
     }));
 
-  it.effect('9. CdpSessionGone — exits poll gracefully without crash', () =>
+  it.effect('9. no bridge push, no click — times out cleanly', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      let callCount = 0;
-
-      // CdpSessionGone means the OOPIF is dead — the poll SHOULD exit immediately.
-      // PR #49 added sessionGone early exit: once a CDP session is gone, no token
-      // will ever arrive, so burning the remaining deadline is waste.
-      // This test verifies CdpSessionGone is caught gracefully (no defect/crash)
-      // and the solver exits cleanly with 'no_click'.
-      const tokenLayer = Layer.succeed(TokenChecker, TokenChecker.of({
-        getToken: () => {
-          callCount++;
-          if (callCount === 2) {
-            return Effect.fail(new CdpSessionGone({ sessionId: CdpSessionId.makeUnsafe('test'), method: 'getToken' }));
-          }
-          return Effect.succeed(null);
-        },
-        isSolved: () => Effect.succeed(false),
-        isWidgetError: () => Effect.succeed(null),
-        isStillDetected: () => Effect.succeed(true),
-      }));
-
-      const eventsLayer = Layer.succeed(SolverEvents, SolverEvents.of({
-        emitDetected: () => Effect.void,
-        emitProgress: () => Effect.void,
-        emitSolved: () => Effect.void,
-        emitFailed: () => Effect.void,
-        marker: () => Effect.void,
-      }));
-
-      const depsLayer = Layer.succeed(SolveDeps, SolveDeps.of({
-        findAndClickViaCDP: () => Effect.succeed(ClickResult.NoCheckbox()),
-        simulatePresence: () => Effect.void,
-        startActivityLoopEmbedded: () => Effect.void,
-        startActivityLoopInterstitial: () => Effect.void,
-      }));
-
-      const layer = Layer.mergeAll(tokenLayer, eventsLayer, depsLayer);
+      const { layer } = makeTestLayer({ clickSuccess: false });
       const active = makeActive();
 
       const fiber = yield* solveDetection(active).pipe(
@@ -350,10 +297,7 @@ describe('pollToken', () => {
       yield* TestClock.adjust('35 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      // CdpSessionGone exits the poll → no token → no_click (not a crash)
       expect(tag(outcome)).toBe('NoClick');
-      // getToken was called at least twice: early check + one poll that hit CdpSessionGone
-      expect(callCount).toBeGreaterThanOrEqual(2);
     }));
 });
 
@@ -365,10 +309,7 @@ describe('postClickWait', () => {
   it.effect('10. Phase A navigation — latch opens before NAV_WAIT', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      const { layer } = makeTestLayer({
-        clickSuccessOnAttempt: 1,
-        token: null,
-      });
+      const { layer } = makeTestLayer({ clickSuccessOnAttempt: 1 });
       const active = makeActive();
 
       const fiber = yield* solveDetection(active).pipe(
@@ -379,65 +320,41 @@ describe('postClickWait', () => {
       // Let the click happen
       yield* TestClock.adjust('1 second');
 
-      // Simulate page navigation during Phase A (< NAV_WAIT_MS=3s)
-      // Navigation sets aborted=true + opens latch. The solver fiber detects
-      // this in postClickWait and exits. From the solver's perspective, this
-      // is a successful solve via click — the page navigated because our click
-      // worked. The solver returns click_dispatched because the click DID land
-      // (postClickWait returns true when aborted=true in Phase A).
+      // Simulate page navigation during Phase A (< NAV_WAIT_MS=3s).
+      // Opening abortLatch during the race triggers the abort racer.
       DetectionContext.setAborted(active);
       yield* TestClock.adjust('5 seconds');
 
       const outcome = yield* Fiber.join(fiber);
-      // The solver returns 'click_dispatched' for the click success path.
-      // However, the abort also terminates the raceFirst in solveTurnstile.
-      // If the abort arrives during the initial race (before postClickWait),
-      // we get 'aborted'. If it arrives during postClickWait Phase A, we get
-      // 'click_dispatched'. With TestClock, timing is deterministic — the
-      // click succeeds (attempt 1), then the race resolves with 'clicked',
-      // then postClickWait runs. The 1s advance lets the click happen; the
-      // abort arrives during postClickWait Phase A.
-      // But because the concurrent tokenPoll and abortLatch racer are all in
-      // the same raceFirst, opening abortLatch during the race triggers the
-      // abort path. The click result hasn't propagated yet.
-      // Accept 'aborted' — this is correct: the external signal arrived.
+      // Abort arrives during the race → abortLatch racer wins
       expect(tag(outcome)).toBe('Aborted');
     }));
 
-  it.effect('11. Phase B token found — click or token wins in concurrent race', () =>
+  it.effect('11. Phase B bridge push — click succeeds then bridge resolves', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      // Both click (attempt 1) and token (poll 2) can succeed.
-      // The concurrent raceFirst in solveTurnstile means either path wins.
-      // If token wins: resolveTokenFound completes Resolution, outcome = click_dispatched.
-      // If click wins: postClickWait runs, Phase B finds token.
-      const { layer } = makeTestLayer({
-        clickSuccessOnAttempt: 1,
-        tokenAfterPolls: 2,
-        token: 'phase-b-token',
-      });
+      const { layer } = makeTestLayer({ clickSuccessOnAttempt: 1 });
       const active = makeActive();
 
       const fiber = yield* solveDetection(active).pipe(
         Effect.provide(layer),
         Effect.forkChild,
       );
+      // Bridge push resolves after click loop wins the race and enters postClickWait
+      yield* simulateBridgePush(active, '3 seconds').pipe(Effect.forkChild);
       yield* TestClock.adjust('15 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      // Either concurrent path resolves
-      expect(['TokenFound', 'Clicked']).toContain(tag(outcome));
-      // Resolution gateway must be completed
+      // Either click wins race (then bridge resolves in postClickWait), or
+      // bridge push wins the race directly. Either way, resolution is done.
+      expect(['Clicked', 'Aborted']).toContain(tag(outcome));
       expect(active.resolution.isDone).toBe(true);
     }));
 
-  it.effect('12. Phase B timeout — no token within POST_CLICK_DEADLINE', () =>
+  it.effect('12. Phase B timeout — no bridge push within POST_CLICK_DEADLINE', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      const { layer } = makeTestLayer({
-        clickSuccessOnAttempt: 1,
-        token: null,
-      });
+      const { layer } = makeTestLayer({ clickSuccessOnAttempt: 1 });
       const active = makeActive();
 
       const fiber = yield* solveDetection(active).pipe(
@@ -586,7 +503,6 @@ describe('Exhaustive ClickResult handling', () => {
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer, captures } = makeTestLayer({
-        token: null,
         clickResultFn: () => ClickResult.ClickFailed(),
       });
       const active = makeActive();
@@ -615,7 +531,6 @@ describe('Exhaustive ClickResult handling', () => {
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer, captures } = makeTestLayer({
-        token: null,
         clickResultFn: () => ClickResult.NotVerified({ reason: 'oopif_gone' }),
       });
       const active = makeActive();
@@ -639,7 +554,6 @@ describe('Exhaustive ClickResult handling', () => {
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer, captures } = makeTestLayer({
-        token: null,
         clickResultFn: () => ClickResult.NotVerified({ reason: 'not_confirmed' }),
       });
       const active = makeActive();
@@ -660,8 +574,6 @@ describe('Exhaustive ClickResult handling', () => {
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer, captures } = makeTestLayer({
-        tokenAfterPolls: 3,
-        token: 'post-click-token',
         clickResultFn: (attempt) =>
           attempt === 0 ? ClickResult.ClickFailed() : ClickResult.Verified(),
       });
@@ -671,13 +583,14 @@ describe('Exhaustive ClickResult handling', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      // Click succeeds on attempt 1 → postClickWait runs → token poll finds token
+      // Click succeeds on attempt 1 → postClickWait runs → bridge push resolves
+      yield* simulateBridgePush(active, '3 seconds').pipe(Effect.forkChild);
       yield* TestClock.adjust('45 seconds');
       const outcome = yield* Fiber.join(fiber);
 
       // Attempt 0 → ClickFailed (reduces to 2), attempt 1 → Verified
       expect(captures.clickAttempts).toBe(2);
-      expect(['TokenFound', 'Clicked']).toContain(tag(outcome));
+      expect(['Clicked', 'Aborted']).toContain(tag(outcome));
     }));
 
   it.effect('22. NoCheckbox and ClickFailed both reduce attempts equally', () =>
@@ -686,7 +599,6 @@ describe('Exhaustive ClickResult handling', () => {
 
       // Run 1: NoCheckbox
       const noCheckbox = makeTestLayer({
-        token: null,
         clickResultFn: () => ClickResult.NoCheckbox(),
       });
       const active1 = makeActive();
@@ -699,7 +611,6 @@ describe('Exhaustive ClickResult handling', () => {
 
       // Run 2: ClickFailed
       const clickFailed = makeTestLayer({
-        token: null,
         clickResultFn: () => ClickResult.ClickFailed(),
       });
       const active2 = makeActive();
@@ -724,27 +635,21 @@ describe('Click latency tracking', () => {
   it.effect('23. cf.oopif_click marker emitted with timing fields', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      const { layer, captures } = makeTestLayer({
-        clickSuccessOnAttempt: 1,
-        tokenAfterPolls: 2,
-        token: 'latency-token',
-      });
+      const { layer, captures } = makeTestLayer({ clickSuccessOnAttempt: 1 });
       const active = makeActive();
 
       const fiber = yield* solveDetection(active).pipe(
         Effect.provide(layer),
         Effect.forkChild,
       );
+      // Bridge push resolves after click
+      yield* simulateBridgePush(active, '2 seconds').pipe(Effect.forkChild);
       yield* TestClock.adjust('15 seconds');
       yield* Fiber.join(fiber);
 
-      // The mock SolveDeps.findAndClickViaCDP doesn't emit cf.oopif_click markers
-      // (it just returns ClickResult). The real phase4Click emits markers, but our
-      // mock bypasses it. Instead, verify the click succeeded via captures.
       expect(captures.clickAttempts).toBeGreaterThanOrEqual(1);
       expect(active.resolution.isDone).toBe(true);
 
-      // Verify the marker layer captured tags correctly
       const allTags = captures.markers.map(m => m.tag);
       expect(allTags.length).toBeGreaterThan(0);
     }));
@@ -752,17 +657,15 @@ describe('Click latency tracking', () => {
   it.effect('24. click happens on first attempt — clickAttempts === 1', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
-      const { layer, captures } = makeTestLayer({
-        clickSuccessOnAttempt: 1,
-        tokenAfterPolls: 2,
-        token: 'first-attempt-token',
-      });
+      const { layer, captures } = makeTestLayer({ clickSuccessOnAttempt: 1 });
       const active = makeActive();
 
       const fiber = yield* solveDetection(active).pipe(
         Effect.provide(layer),
         Effect.forkChild,
       );
+      // Bridge push resolves after click
+      yield* simulateBridgePush(active, '2 seconds').pipe(Effect.forkChild);
       yield* TestClock.adjust('15 seconds');
       yield* Fiber.join(fiber);
 
@@ -775,8 +678,6 @@ describe('Click latency tracking', () => {
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer, captures } = makeTestLayer({
-        tokenAfterPolls: 3,
-        token: 'retry-token',
         clickResultFn: (attempt) =>
           attempt === 0 ? ClickResult.ClickFailed() : ClickResult.Verified(),
       });
@@ -786,12 +687,14 @@ describe('Click latency tracking', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
+      // Bridge push resolves after click succeeds
+      yield* simulateBridgePush(active, '3 seconds').pipe(Effect.forkChild);
       yield* TestClock.adjust('45 seconds');
       const outcome = yield* Fiber.join(fiber);
 
       // Attempt 0: ClickFailed (reduces max to 2), attempt 1: Verified
       expect(captures.clickAttempts).toBe(2);
-      expect(['TokenFound', 'Clicked']).toContain(tag(outcome));
+      expect(['Clicked', 'Aborted']).toContain(tag(outcome));
       // Verify the cf.reduced_attempts marker was emitted
       const reducedMarker = captures.markers.find(m => m.tag === 'cf.reduced_attempts');
       expect(reducedMarker).toBeDefined();

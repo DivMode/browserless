@@ -8,14 +8,12 @@
  * The CloudflareSolver bridge (cloudflare-solver.ts) provides the services
  * via ManagedRuntime and calls these via runtime.runPromise().
  */
-import { Cause, Data, Effect, Option, Ref } from 'effect';
+import { Cause, Data, Effect, Option } from 'effect';
 import type { SolveOutcome } from './cloudflare-solve-strategies.js';
 import { DetectionContext } from './cf-detection-context.js';
 import { ClickResult } from './cloudflare-solve-strategies.js';
-import type { ActiveDetection, ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
-import { TokenChecker, SolverEvents, SolveDeps } from './cf-services.js';
-import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
-import type { SolveSignal } from './cloudflare-state-tracker.js';
+import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection, InterstitialDetection } from './cloudflare-event-emitter.js';
+import { SolverEvents, SolveDeps } from './cf-services.js';
 
 /** Annotate the current span with ActiveDetection context for Tempo filtering. */
 const annotateActive = (active: ReadonlyActiveDetection) =>
@@ -31,49 +29,11 @@ type SolveDepsI = typeof SolveDeps.Service;
 
 import {
   CLICK_RETRY_DELAY,
-  TOKEN_POLL_DELAY,
-  AUTO_SOLVE_POLL_DELAY,
   SOLVE_DEADLINE,
-  SOLVE_DEADLINE_MS,
   POST_CLICK_DEADLINE_MS,
   NAV_WAIT_MS,
   MAX_CLICK_ATTEMPTS,
 } from './cf-schedules.js';
-
-// ═══════════════════════════════════════════════════════════════════════
-// resolveTokenFound — build CloudflareResult and complete Resolution
-//
-// Called when the solver finds a token via polling. Constructs the result,
-// opens abortLatch for fiber cancellation, and completes the Resolution
-// gateway directly — no indirection through SolveDeps.
-// ═══════════════════════════════════════════════════════════════════════
-
-/**
- * Build CloudflareResult and complete Resolution gateway directly.
- *
- * Does NOT set active.aborted or open abortLatch — those are for external
- * abort signals (page navigated, session destroyed). The solver's raceFirst
- * handles fiber cancellation; the Resolution gateway signals the external
- * consumer (handleTurnstileDetection) that a result is ready.
- */
-const resolveTokenFound = (active: ReadonlyActiveDetection, signal: SolveSignal, token: string | null) =>
-  Effect.gen(function*() {
-    const attr = deriveSolveAttribution(signal, !!active.clickDelivered);
-    const result = {
-      solved: true as const, type: active.info.type, method: attr.method,
-      token: token || undefined, duration_ms: Date.now() - active.startTime,
-      attempts: active.attempt, auto_resolved: attr.autoResolved, signal,
-      phase_label: attr.label,
-    };
-    const won = yield* active.resolution.solve(result);
-    // Only emit marker if we won the race — avoids duplicate cf.auto_solved
-    // markers when multiple resolution paths (solver + activity loop) complete
-    // concurrently. Deferred.succeed returns false for second+ callers.
-    if (won) {
-      const events = yield* SolverEvents;
-      yield* events.marker(active.pageTargetId, 'cf.auto_solved', { signal, method: attr.method });
-    }
-  });
 
 // ═══════════════════════════════════════════════════════════════════════
 // solveDetection — top-level dispatcher
@@ -82,9 +42,8 @@ const resolveTokenFound = (active: ReadonlyActiveDetection, signal: SolveSignal,
 /**
  * Dispatch to the appropriate solve strategy based on CF type.
  *
- * R channel includes TokenChecker + SolverEvents.
- * solveByClicking deliberately does NOT yield TokenChecker,
- * enforcing Rule 1: no Runtime.evaluate before first click.
+ * Token resolution is push-based via CF bridge — no Runtime.evaluate polling.
+ * Bridge pushes solved/error events through onBridgeEvent → resolution.solve().
  */
 /** Return type of solveDetection — SolveOutcome for interstitial/auto, TurnstileResult for turnstile. */
 export type SolveDetectionResult = SolveOutcome | TurnstileResult;
@@ -102,10 +61,12 @@ export const solveDetection = (
     switch (active.info.type) {
       case 'managed':
       case 'interstitial': {
+        // TypeScript narrows active.info.type to 'managed' | 'interstitial' here
+        const interstitial = active as InterstitialDetection;
         // Interstitial activity loop — NO Runtime.evaluate (page IS the CF challenge)
         if (!active.activityLoopStarted) {
           active.activityLoopStarted = true;
-          yield* deps.startActivityLoopInterstitial(active).pipe(Effect.forkChild);
+          yield* deps.startActivityLoopInterstitial(interstitial).pipe(Effect.forkChild);
         }
 
         const clicked = yield* solveByClicking(active, deps);
@@ -122,10 +83,12 @@ export const solveDetection = (
       }
 
       case 'turnstile': {
+        // TypeScript narrows active.info.type to 'turnstile' here
+        const embedded = active as EmbeddedDetection;
         // Embedded activity loop — Runtime.evaluate is safe (page is embedding site)
         if (!active.activityLoopStarted) {
           active.activityLoopStarted = true;
-          yield* deps.startActivityLoopEmbedded(active).pipe(Effect.forkChild);
+          yield* deps.startActivityLoopEmbedded(embedded).pipe(Effect.forkChild);
         }
 
         // Outer-scope SOLVE_DEADLINE timeout propagates via fiber interruption
@@ -142,10 +105,12 @@ export const solveDetection = (
 
       case 'non_interactive':
       case 'invisible': {
+        // TypeScript narrows active.info.type to 'non_interactive' | 'invisible' here
+        const embedded = active as EmbeddedDetection;
         // Embedded activity loop — Runtime.evaluate is safe (page is embedding site)
         if (!active.activityLoopStarted) {
           active.activityLoopStarted = true;
-          yield* deps.startActivityLoopEmbedded(active).pipe(Effect.forkChild);
+          yield* deps.startActivityLoopEmbedded(embedded).pipe(Effect.forkChild);
         }
 
         yield* solveAutomatic(active, deps);
@@ -181,8 +146,7 @@ export const solveDetection = (
 // ═══════════════════════════════════════════════════════════════════════
 // solveByClicking — click-based solve for managed/interstitial
 //
-// Does NOT yield TokenChecker — enforces Rule 1 at compile time:
-// no Runtime.evaluate before first click.
+// No Runtime.evaluate — click only, push-based resolution via bridge.
 // ═══════════════════════════════════════════════════════════════════════
 
 const solveByClicking = (
@@ -255,13 +219,11 @@ const TR = TurnstileResult;
 // ═══════════════════════════════════════════════════════════════════════
 // solveTurnstile — embedded Turnstile widget solve
 //
-// Uses Effect.raceFirst for concurrent click-attempt + token-poll.
-// The race guarantees both fibers run concurrently — if the token arrives
-// during findAndClickViaCDP's ~5s checkbox polling, the tokenPoll fiber
-// resolves the race immediately. No mutable flags, no forgotten checks.
+// Click-based solving with push-based resolution. No Runtime.evaluate
+// polling — the CF bridge pushes solved/error events via onBridgeEvent,
+// which completes the Resolution gateway and opens abortLatch.
 //
-// TokenChecker is yielded because Runtime.evaluate is safe for embedded
-// types (page is the embedding site, not the CF OOPIF).
+// Race: clickLoop vs abortLatch.await (bridge push opens abortLatch)
 // ═══════════════════════════════════════════════════════════════════════
 
 const solveTurnstile = (
@@ -272,16 +234,9 @@ const solveTurnstile = (
     yield* annotateActive(active);
     if (active.aborted) return TR.Aborted();
 
-    const { pageCdpSessionId, pageTargetId } = active;
+    const { pageTargetId } = active;
     const events = yield* SolverEvents;
-    const tokens = yield* TokenChecker;
 
-    // Pre-loop token check — safe because 'turnstile' case is always EMBEDDED
-    // (interstitial routes to solveByClicking via case 'interstitial').
-    // Runtime.evaluate targets the embedding page (e.g. ahrefs.com), not the
-    // CF OOPIF, so it doesn't trigger CF's WASM V8 detection.
-    // Non-interactive widgets auto-solve within ~1-3s — catch them immediately
-    // instead of wasting 27s on checkbox polling that will always fail.
     const solveEntryMs = Date.now();
     yield* Effect.annotateCurrentSpan({
       'cf.sitekey': active.oopifMeta?.sitekey ?? 'none',
@@ -289,22 +244,14 @@ const solveTurnstile = (
       'cf.elapsed_since_detection_ms': solveEntryMs - active.startTime,
     });
 
-    const earlyToken = yield* tokens.getToken(pageCdpSessionId).pipe(
-      Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
-    );
-    if (earlyToken) {
-      yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: earlyToken.length, early: true });
-      yield* resolveTokenFound(active, 'token_poll', earlyToken);
-      return TR.TokenFound({ pollCount: 0, tokenLength: earlyToken.length, token: earlyToken });
+    // Check if bridge already resolved (auto-solve before solver started)
+    if (active.resolution.isDone) {
+      yield* events.marker(pageTargetId, 'cf.bridge_pre_resolved');
+      return TR.Aborted();
     }
 
-    yield* events.marker(pageTargetId, 'cf.concurrent_poll_start', { deadline_ms: SOLVE_DEADLINE_MS });
-
-    // ── Two concurrent strategies — first one to succeed wins ──────────
-
-    // Strategy 1: Click loop — try to find and click the Turnstile checkbox.
-    // Non-interactive widgets never render a checkbox. First attempt determines
-    // whether to reduce max attempts (6→2) to preserve deadline for token polling.
+    // Click loop — try to find and click the Turnstile checkbox.
+    // Non-interactive widgets never render a checkbox.
     const handleClickResult = (result: ClickResult, attempt: number) =>
       Effect.fn('cf.handleClickResult')(function*() {
         switch (result._tag) {
@@ -318,10 +265,10 @@ const solveTurnstile = (
               yield* events.marker(pageTargetId, 'cf.oopif_dead_on_verify', { attempt });
               return TR.OopifDead({ attempt }) as TurnstileResult | null;
             }
-            return null as TurnstileResult | null; // continue retrying
+            return null as TurnstileResult | null;
           case 'NoCheckbox':
           case 'ClickFailed':
-            return null as TurnstileResult | null; // continue retrying
+            return null as TurnstileResult | null;
           default: {
             const _exhaustive: never = result;
             throw new Error(`Unhandled ClickResult: ${(_exhaustive as any)._tag}`);
@@ -332,14 +279,12 @@ const solveTurnstile = (
     const clickLoop = Effect.fn('cf.clickLoop')(function*() {
       const clickLoopStart = Date.now();
 
-      // First attempt — determines retry strategy
       const firstResult = yield* deps.findAndClickViaCDP(active, 0).pipe(
         Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
       );
       const firstExit = yield* handleClickResult(firstResult, 0);
       if (firstExit) return firstExit;
 
-      // Reduce remaining attempts if first attempt found no checkbox or CDP errored
       const shouldReduce = firstResult._tag === 'NoCheckbox' || firstResult._tag === 'ClickFailed';
       const remainingAttempts = shouldReduce ? 1 : MAX_CLICK_ATTEMPTS - 1;
 
@@ -353,7 +298,6 @@ const solveTurnstile = (
         });
       }
 
-      // Remaining attempts (fixed count, no mutation)
       for (let attempt = 1; attempt <= remainingAttempts; attempt++) {
         yield* Effect.sleep(CLICK_RETRY_DELAY);
         const result = yield* deps.findAndClickViaCDP(active, attempt).pipe(
@@ -372,70 +316,12 @@ const solveTurnstile = (
       return TR.NoClick();
     })();
 
-    // Strategy 2: Concurrent token poll — catches auto-solves that complete
-    // during the click loop's checkbox polling. Non-interactive widgets (Ahrefs)
-    // auto-solve in ~3-5s. SAFE because turnstile = EMBEDDED — Runtime.evaluate
-    // targets the embedding page (e.g. ahrefs.com), NOT the CF OOPIF.
-    //
-    // IMPORTANT: Do NOT call resolveTokenFound() inside the race. It opens the
-    // abortLatch, which triggers the abort racer in the outer raceFirst —
-    // causing the tokenPoll fiber to be interrupted before completion.
-    // Side effects that modify shared state belong AFTER the race resolves.
-    const tokenPoll = Effect.fn('cf.tokenPoll')(function*() {
-      const count = yield* Ref.make(0);
-      const consecutiveGone = yield* Ref.make(0);
-
-      const poll = Effect.suspend(() => {
-        if (active.resolution.isDone) return Effect.fail(TR.Aborted() as TurnstileResult);
-        return Effect.sleep(AUTO_SOLVE_POLL_DELAY).pipe(
-          Effect.flatMap(() => Ref.updateAndGet(count, (n) => n + 1)),
-          Effect.flatMap((pollCount) =>
-            tokens.getToken(pageCdpSessionId).pipe(
-              Effect.catchTag('CdpSessionGone', () =>
-                Ref.updateAndGet(consecutiveGone, (n) => n + 1).pipe(
-                  Effect.flatMap((gone) => gone >= 3
-                    ? Effect.fail(TR.Aborted() as TurnstileResult)
-                    : events.marker(pageTargetId, 'cf.poll_session_retry', { poll_count: pollCount, consecutive_gone: gone }).pipe(
-                        Effect.map(() => null),
-                      ),
-                  ),
-                ),
-              ),
-              Effect.tap(() => Ref.set(consecutiveGone, 0)),
-              Effect.flatMap((token) => {
-                if (token) {
-                  return events.marker(pageTargetId, 'cf.token_polled', {
-                    token_length: token.length,
-                    concurrent: true,
-                    concurrent_polls: pollCount,
-                  }).pipe(
-                    Effect.flatMap(() => Effect.fail(
-                      TR.TokenFound({ pollCount, tokenLength: token.length, token }) as TurnstileResult,
-                    )),
-                  );
-                }
-                return Effect.void; // continue polling
-              }),
-            ),
-          ),
-        );
-      });
-
-      return yield* Effect.forever(poll).pipe(
-        Effect.catch((exit: TurnstileResult) => Effect.succeed(exit)),
-      );
-    })();
-
-    // raceFirst: both run concurrently, loser auto-interrupted via fiber cancellation.
-    // abortLatch.await races alongside — if the detection is aborted externally
-    // (page navigated, session destroyed), both fibers are interrupted immediately.
-    // No per-race timeout — outer-scope SOLVE_DEADLINE_MS handles it via fiber interruption.
+    // Race: click loop vs bridge push (abortLatch opens when bridge resolves)
     const raceResult = yield* Effect.raceFirst(
-      Effect.raceFirst(clickLoop, tokenPoll),
+      clickLoop,
       active.abortLatch.await.pipe(Effect.map(() => TR.Aborted())),
     );
 
-    // Handle post-race outcomes
     const raceElapsedMs = Date.now() - solveEntryMs;
     yield* Effect.annotateCurrentSpan({
       'cf.race_result': raceResult._tag,
@@ -450,141 +336,35 @@ const solveTurnstile = (
       return TR.Aborted();
     }
 
-    if (raceResult._tag === 'TokenFound') {
-      // Resolve AFTER race completes — resolveTokenFound opens abortLatch,
-      // which would self-interrupt the tokenPoll fiber if called inside the race.
-      yield* resolveTokenFound(active, 'token_poll', raceResult.token);
-      return raceResult;
-    }
-
     if (raceResult._tag === 'Clicked') {
-      // Click dispatched — wait for resolution.
-      // Two possible outcomes:
-      //   1. Page navigates → active.aborted set by onPageNavigated()
-      //   2. Token appears in turnstile.getResponse()
-      //
-      // Wait for navigation first; only start token polling if no navigation.
-      // Pass Date.now() as clickTime so postClickWait anchors its Phase B
-      // deadline to when the click actually happened, not detection start.
+      // Click dispatched — wait for bridge push to resolve.
       const clickTime = Date.now();
       const postResult = yield* postClickWait(active, clickTime);
       if (postResult) {
-        return raceResult;  // clicked + token found or navigation
+        return raceResult;
       }
-      // Click landed but token never arrived during post-click polling
       return TR.ClickNoToken({ attempt: raceResult.attempt });
     }
 
-    // OopifDead — OOPIF died during verify, exit immediately (no auto-solve poll)
     if (raceResult._tag === 'OopifDead') {
       yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox', { oopif_dead: true });
       return raceResult;
     }
 
-    // NoClick — widget not found. May be non-interactive (auto-solves without click).
+    // NoClick — widget not found. Wait for bridge push (auto-solve).
     yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox');
 
-    // Poll for token — no per-poll timeout needed. The outer-scope
-    // SOLVE_DEADLINE_MS timeout handles it via fiber interruption.
-    let tokenResult = yield* pollToken(active, AUTO_SOLVE_POLL_DELAY, 'cf.pollForAutoSolveToken');
-
-    // Final token check — non-interactive/invisible widgets may auto-solve right as
-    // the OOPIF is destroyed. The poll above gets cancelled by abortLatch, but the
-    // token may already be on the page. One last getToken catches this race.
-    if (!tokenResult && active.aborted && !active.clickDelivered) {
-      const lastToken = yield* tokens.getToken(pageCdpSessionId).pipe(
-        Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
-      );
-      if (lastToken) {
-        yield* events.marker(pageTargetId, 'cf.token_polled', { token_length: lastToken.length, after_abort: true });
-        yield* resolveTokenFound(active, 'token_poll', lastToken);
-        tokenResult = TR.TokenFound({ pollCount: 0, tokenLength: lastToken.length, token: lastToken });
-      }
-    }
+    // Wait for bridge push to resolve — abortLatch opens when bridge
+    // pushes solved event through onBridgeEvent → resolveAutoSolved.
+    // Outer SOLVE_DEADLINE timeout handles it via fiber interruption.
+    yield* active.abortLatch.await.pipe(Effect.ignore);
 
     yield* Effect.annotateCurrentSpan({
       'cf.solve_total_ms': Date.now() - solveEntryMs,
-      'cf.post_race_result': tokenResult?._tag ?? 'NoClick',
+      'cf.post_race_result': active.resolution.isDone ? 'BridgeResolved' : 'NoClick',
     });
-    return tokenResult ?? TR.NoClick();
+    return active.resolution.isDone ? TR.Aborted() : TR.NoClick();
   })();
-
-// ═══════════════════════════════════════════════════════════════════════
-// pollToken — reusable token polling with abort-aware Effect patterns
-//
-// Replaces both postClickWait's Phase B and pollForAutoSolveToken with
-// a single implementation. Uses Effect.raceFirst(poll, abortLatch.await)
-// instead of manual while(!aborted && Date.now() < deadline) loops.
-// ═══════════════════════════════════════════════════════════════════════
-
-const pollToken = (
-  active: ActiveDetection,
-  pollDelay: typeof TOKEN_POLL_DELAY | typeof AUTO_SOLVE_POLL_DELAY,
-  spanName: string,
-) =>
-  Effect.fn(spanName)(function*() {
-    yield* annotateActive(active);
-    const { pageCdpSessionId, pageTargetId } = active;
-    const events = yield* SolverEvents;
-    const tokens = yield* TokenChecker;
-    const count = yield* Ref.make(0);
-    const consecutiveGone = yield* Ref.make(0);
-
-    // Poll loop — exits via Effect.fail when token found or resolution completed.
-    // IMPORTANT: Do NOT call resolveTokenFound inside the race — it opens the
-    // abortLatch, which would trigger the abort racer and interrupt this fiber
-    // before the marker emission completes.
-    const poll = Effect.suspend(() => {
-      if (active.resolution.isDone) {
-        return Effect.fail(null as TurnstileResult | null);
-      }
-      return Effect.sleep(pollDelay).pipe(
-        Effect.flatMap(() => Ref.updateAndGet(count, (n) => n + 1)),
-        Effect.flatMap((pollCount) =>
-          tokens.getToken(pageCdpSessionId).pipe(
-            Effect.catchTag('CdpSessionGone', () =>
-              Ref.updateAndGet(consecutiveGone, (n) => n + 1).pipe(
-                Effect.flatMap((gone) => gone >= 3
-                  ? Effect.fail(null as TurnstileResult | null)
-                  : events.marker(pageTargetId, 'cf.poll_session_retry', { poll_count: pollCount, consecutive_gone: gone }).pipe(
-                      Effect.map(() => null),
-                    ),
-                ),
-              ),
-            ),
-            Effect.tap(() => Ref.set(consecutiveGone, 0)),
-            Effect.flatMap((token) => {
-              if (token) {
-                return Effect.annotateCurrentSpan({ 'cf.token_found': true, 'cf.token_length': token.length }).pipe(
-                  Effect.flatMap(() => events.marker(pageTargetId, 'cf.token_polled', { token_length: token.length })),
-                  Effect.flatMap(() => Effect.fail(
-                    TR.TokenFound({ pollCount, tokenLength: token.length, token }) as TurnstileResult | null,
-                  )),
-                );
-              }
-              return Effect.void; // continue polling
-            }),
-          ),
-        ),
-      );
-    });
-
-    // Race poll against abort — abort wins if detection is cancelled externally
-    const result = yield* Effect.raceFirst(
-      Effect.forever(poll).pipe(
-        Effect.catch((exit: TurnstileResult | null) => Effect.succeed(exit)),
-      ),
-      active.abortLatch.await.pipe(Effect.map(() => null as TurnstileResult | null)),
-    );
-
-    // Resolve AFTER the race — resolveTokenFound opens abortLatch, so it
-    // must run outside the raceFirst to avoid self-interruption.
-    if (result && result._tag === 'TokenFound') {
-      yield* resolveTokenFound(active, 'token_poll', result.token);
-    }
-
-    return result;
-  })() as Effect.Effect<TurnstileResult | null, never, typeof TokenChecker.Identifier | typeof SolverEvents.Identifier>;
 
 // ═══════════════════════════════════════════════════════════════════════
 // postClickWait — wait for navigation (interstitial) or token (embedded)
@@ -632,35 +412,29 @@ const postClickWait = (
       return true;
     }
 
-    // Phase B: No navigation — this is an embedded widget. Poll for token.
-    // Runtime.evaluate is safe here: the page is NOT a CF challenge page,
-    // it's the embedding page (e.g. nopecha.com, peet.ws).
-    //
-    // BUG FIX: Use clickTime as baseline instead of active.startTime.
-    // In the concurrent raceFirst design, the click loop can consume ~5-8s
-    // before postClickWait starts. Using active.startTime left Phase B with
-    // only ~0-2s — not enough to poll for the token. Using clickTime gives
-    // Phase B the full POST_CLICK_DEADLINE_MS minus Phase A duration (~7s).
+    // Phase B: No navigation — this is an embedded widget. Wait for bridge push.
+    // The CF bridge pushes solved/error events via onBridgeEvent → resolveAutoSolved
+    // → resolution.solve() → ctx.abort() → abortLatch.open.
     const remainingMs = Math.max(0, clickTime + POST_CLICK_DEADLINE_MS - Date.now());
 
     yield* events.marker(active.pageTargetId, 'cf.postclick_phase_b', {
       remaining_ms: remainingMs,
     });
 
-    const result = yield* pollToken(active, TOKEN_POLL_DELAY, 'cf.postClickWait.tokenPoll').pipe(
+    yield* active.abortLatch.await.pipe(
       Effect.timeout(remainingMs),
-      Effect.orElseSucceed(() => null),
+      Effect.ignore,
     );
 
-    const resolved = result != null && result._tag === 'TokenFound';
+    const resolved = active.resolution.isDone;
     yield* events.marker(active.pageTargetId, 'cf.postclick_result', {
       resolved,
-      signal: resolved ? 'token_poll' : 'timeout',
+      signal: resolved ? 'bridge_push' : 'timeout',
       total_ms: Date.now() - entryTime,
     });
 
     if (resolved) {
-      yield* Effect.annotateCurrentSpan({ 'cf.resolved': true, 'cf.resolution_signal': 'token_poll', 'cf.token_length': result!.tokenLength });
+      yield* Effect.annotateCurrentSpan({ 'cf.resolved': true, 'cf.resolution_signal': 'bridge_push' });
       return true;
     }
 

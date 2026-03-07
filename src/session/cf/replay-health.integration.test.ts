@@ -24,7 +24,7 @@ import {
 describe('Replay Recording Health', () => {
   const wsUrl = buildWsUrl();
 
-  it('per-tab replays store events and CF markers', { timeout: 60_000 }, async () => {
+  it('per-tab replays store events and CF markers', { timeout: 20_000 }, async () => {
     const testStartTs = Date.now();
 
     const browser = await puppeteer.connect({
@@ -40,7 +40,7 @@ describe('Replay Recording Health', () => {
 
       await page.goto('https://peet.ws/turnstile-test/non-interactive.html', {
         waitUntil: 'load',
-        timeout: 30_000,
+        timeout: 10_000,
       }).catch(() => {});
       // Wait for Turnstile auto-solve (non-interactive) instead of fixed 15s
       await page
@@ -50,7 +50,7 @@ describe('Replay Recording Health', () => {
             const t = (window as any).turnstile;
             return t && typeof t.getResponse === 'function' && !!t.getResponse();
           },
-          { timeout: 15_000, polling: 500 },
+          { timeout: 10_000, polling: 500 },
         )
         .catch(() => {});
       await new Promise((r) => setTimeout(r, 1500));
@@ -58,7 +58,7 @@ describe('Replay Recording Health', () => {
       await browser.close().catch(() => {});
     }
 
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 2000));
 
     // ── 1. Replay existence ────────────────────────────────────────
     const replays = await findAllReplays(testStartTs);

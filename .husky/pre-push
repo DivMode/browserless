@@ -1,3 +1,2 @@
-# Run unit tests before push.
-# Integration tests require real CF sites + proxy — run separately.
-npx vitest run --project=unit
+# Run all tests before push (unit + integration).
+npx vitest run

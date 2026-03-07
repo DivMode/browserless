@@ -1,7 +1,7 @@
 import { Logger } from '@browserless.io/browserless';
 import { Latch } from 'effect';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
-import type { TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot } from '../../shared/cloudflare-detection.js';
+import type { TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot, InterstitialInfo, EmbeddedInfo } from '../../shared/cloudflare-detection.js';
 import type { TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
 import { Resolution } from './cf-resolution.js';
 
@@ -190,6 +190,12 @@ export interface ActiveDetection {
  * because Readonly<T> is shallow — it only prevents property reassignment.
  */
 export type ReadonlyActiveDetection = Readonly<ActiveDetection>;
+
+/** Narrowed detection variants — methods that only apply to one category use these. */
+export type InterstitialDetection = ActiveDetection & { readonly info: InterstitialInfo };
+export type EmbeddedDetection = ActiveDetection & { readonly info: EmbeddedInfo };
+export type ReadonlyInterstitialDetection = Readonly<InterstitialDetection>;
+export type ReadonlyEmbeddedDetection = Readonly<EmbeddedDetection>;
 
 /** Handles all CDP event emission for Cloudflare detection/solving. */
 export class CloudflareEventEmitter {
