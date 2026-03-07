@@ -432,17 +432,27 @@ describe.concurrent('CF Solver Multi-Site', () => {
 
 const PYDOLL_DIR = '/Users/peter/Developer/catchseo/packages/pydoll-scraper';
 
-/** Run a command with proxy env var and return stdout. */
+/** Run a command with proxy env var and return stdout. Stderr is captured and only surfaced on failure. */
 function runWithProxy(args: string[], timeoutMs: number): string {
   const proxy = process.env.LOCAL_MOBILE_PROXY;
   if (!proxy) throw new Error('LOCAL_MOBILE_PROXY required for pydoll tests');
-  return execFileSync('uv', ['run', 'pydoll', ...args], {
-    cwd: PYDOLL_DIR,
-    env: { ...process.env, LOCAL_MOBILE_PROXY: proxy },
-    encoding: 'utf-8',
-    timeout: timeoutMs,
-    maxBuffer: 10 * 1024 * 1024,
-  });
+  try {
+    return execFileSync('uv', ['run', 'pydoll', ...args], {
+      cwd: PYDOLL_DIR,
+      env: { ...process.env, LOCAL_MOBILE_PROXY: proxy },
+      encoding: 'utf-8',
+      timeout: timeoutMs,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 10 * 1024 * 1024,
+    });
+  } catch (err: unknown) {
+    const execErr = err as { stderr?: string; stdout?: string; message?: string };
+    const stderr = execErr.stderr || '';
+    const stdout = execErr.stdout || '';
+    throw new Error(
+      `pydoll ${args[0]} failed:\n${stderr}\n\nstdout:\n${stdout}`,
+    );
+  }
 }
 
 describe('Pydoll Pipeline', () => {
