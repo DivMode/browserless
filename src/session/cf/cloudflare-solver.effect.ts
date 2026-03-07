@@ -29,7 +29,6 @@ type SolveDepsI = typeof SolveDeps.Service;
 
 import {
   CLICK_RETRY_DELAY,
-  SOLVE_DEADLINE,
   MAX_CLICK_ATTEMPTS,
 } from './cf-schedules.js';
 
@@ -89,9 +88,9 @@ export const solveDetection = (
           yield* deps.startActivityLoopEmbedded(embedded).pipe(Effect.forkChild);
         }
 
-        // No outer timeout. Each path inside solveTurnstile has its own bound:
+        // No outer timeout. All paths wait for push signal or session close:
         // - Clicked: pure push, no timeout (session close is structural bound)
-        // - NoClick: latch await bounded by SOLVE_DEADLINE (30s for bridge auto-solve)
+        // - NoClick: pure push, no timeout (session close is structural bound)
         const result = yield* solveTurnstile(active, deps);
         if (active.aborted) return TR.Aborted();
         // Return TurnstileResult directly — detector pattern-matches on _tag
@@ -339,16 +338,14 @@ const solveTurnstile = (
 
     if (raceResult._tag === 'OopifDead') {
       yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox', { oopif_dead: true });
-      return raceResult;
+      yield* active.abortLatch.await.pipe(Effect.ignore);
+      return active.resolution.isDone ? TR.Aborted() : raceResult;
     }
 
     // NoClick — widget not found. Bridge is installed — auto-solve might push.
-    // Give bridge SOLVE_DEADLINE (30s) to auto-resolve, then give up.
+    // Pure push wait — session close is the structural bound (scope finalizer).
     yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox');
-    yield* active.abortLatch.await.pipe(
-      Effect.timeout(SOLVE_DEADLINE),
-      Effect.ignore,
-    );
+    yield* active.abortLatch.await.pipe(Effect.ignore);
 
     yield* Effect.annotateCurrentSpan({
       'cf.solve_total_ms': Date.now() - solveEntryMs,

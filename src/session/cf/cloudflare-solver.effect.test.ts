@@ -14,7 +14,7 @@
  *   4. Race condition regressions (5 tests)
  */
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Fiber, Latch, Layer } from 'effect';
+import { Duration, Effect, Fiber, Latch, Layer } from 'effect';
 import * as TestClock from 'effect/testing/TestClock';
 import { CdpSessionId, TargetId } from '../../shared/cloudflare-detection.js';
 import type { CloudflareInfo, CloudflareResult } from '../../shared/cloudflare-detection.js';
@@ -48,7 +48,7 @@ const makeActive = (overrides?: Partial<ActiveDetection>): ActiveDetection => {
 };
 
 /** Simulate bridge push resolving the detection — mirrors onBridgeEvent → resolveAutoSolved. */
-const simulateBridgePush = (active: ActiveDetection, delay: string = '2 seconds') =>
+const simulateBridgePush = (active: ActiveDetection, delay: Duration.Input = '2 seconds') =>
   Effect.sleep(delay).pipe(
     Effect.flatMap(() => active.resolution.solve({
       solved: true, type: 'turnstile', method: 'bridge_solved',
@@ -106,9 +106,9 @@ const makeTestLayer = (config: TestLayerConfig = {}) => {
         return Effect.succeed(config.clickResultFn(attempt));
       }
       if (config.clickSuccessOnAttempt && captures.clickAttempts >= config.clickSuccessOnAttempt) {
-        return Effect.succeed(ClickResult.Verified());
+        return Effect.succeed(ClickResult.Verified({ clickDeliveredAt: Date.now() }));
       }
-      return Effect.succeed(config.clickSuccess ? ClickResult.Verified() : ClickResult.NoCheckbox());
+      return Effect.succeed(config.clickSuccess ? ClickResult.Verified({ clickDeliveredAt: Date.now() }) : ClickResult.NoCheckbox());
     },
     simulatePresence: () => Effect.void,
     startActivityLoopEmbedded: () => Effect.void,
@@ -188,7 +188,7 @@ describe('solveTurnstile', () => {
       expect(active.resolution.isDone).toBe(true);
     }));
 
-  it.effect('4. no click, no bridge push → returns no_click after deadline', () =>
+  it.effect('4. no click, no bridge push → waits until session close', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer } = makeTestLayer({ clickSuccess: false });
@@ -198,10 +198,12 @@ describe('solveTurnstile', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('35 seconds');
+      yield* TestClock.adjust('5 seconds');   // click loop finishes
+      DetectionContext.setAborted(active);     // simulate session close
+      yield* TestClock.adjust('1 second');
       const outcome = yield* Fiber.join(fiber);
 
-      expect(tag(outcome)).toBe('NoClick');
+      expect(tag(outcome)).toBe('Aborted');
     }));
 
   it.effect('5. external abort — latch opens mid-solve', () =>
@@ -288,7 +290,7 @@ describe('Bridge push resolution', () => {
       expect(tag(outcome)).toBe('Aborted');
     }));
 
-  it.effect('9. no bridge push, no click — times out cleanly', () =>
+  it.effect('9. no bridge push, no click — waits until session close', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer } = makeTestLayer({ clickSuccess: false });
@@ -298,10 +300,12 @@ describe('Bridge push resolution', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('35 seconds');
+      yield* TestClock.adjust('5 seconds');   // click loop finishes
+      DetectionContext.setAborted(active);     // simulate session close
+      yield* TestClock.adjust('1 second');
       const outcome = yield* Fiber.join(fiber);
 
-      expect(tag(outcome)).toBe('NoClick');
+      expect(tag(outcome)).toBe('Aborted');
     }));
 });
 
@@ -519,12 +523,14 @@ describe('Exhaustive ClickResult handling', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('35 seconds');
+      yield* TestClock.adjust('5 seconds');   // click loop finishes
+      DetectionContext.setAborted(active);     // simulate session close
+      yield* TestClock.adjust('1 second');
       const outcome = yield* Fiber.join(fiber);
 
       // ClickFailed reduces maxAttempts from 6 to 2 on first attempt
       expect(captures.clickAttempts).toBe(2);
-      expect(tag(outcome)).toBe('NoClick');
+      expect(tag(outcome)).toBe('Aborted');
       // Verify the cf.reduced_attempts marker was emitted with cdp_error reason
       const reducedMarker = captures.markers.find(m => m.tag === 'cf.reduced_attempts');
       expect(reducedMarker).toBeDefined();
@@ -535,7 +541,7 @@ describe('Exhaustive ClickResult handling', () => {
       });
     }));
 
-  it.effect('19. OopifDead exits clickLoop immediately', () =>
+  it.effect('19. OopifDead waits for push or session close', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer, captures } = makeTestLayer({
@@ -547,18 +553,20 @@ describe('Exhaustive ClickResult handling', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('35 seconds');
+      yield* TestClock.adjust('5 seconds');   // click loop finishes
+      DetectionContext.setAborted(active);     // simulate session close
+      yield* TestClock.adjust('1 second');
       const outcome = yield* Fiber.join(fiber);
 
-      // OopifDead exits on first attempt — no retries
+      // OopifDead exits on first attempt — no retries, then waits on latch
       expect(captures.clickAttempts).toBe(1);
-      expect(tag(outcome)).toBe('OopifDead');
+      expect(tag(outcome)).toBe('Aborted');
       // Verify oopif_dead marker
       const oopifMarker = captures.markers.find(m => m.tag === 'cf.oopif_dead_on_verify');
       expect(oopifMarker).toBeDefined();
     }));
 
-  it.effect('20. NotVerified(not_confirmed) retries full attempts', () =>
+  it.effect('20. NotVerified(not_confirmed) retries full attempts then waits', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer, captures } = makeTestLayer({
@@ -570,12 +578,14 @@ describe('Exhaustive ClickResult handling', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('35 seconds');
+      yield* TestClock.adjust('5 seconds');   // click loop finishes
+      DetectionContext.setAborted(active);     // simulate session close
+      yield* TestClock.adjust('1 second');
       const outcome = yield* Fiber.join(fiber);
 
       // not_confirmed retries all MAX_CLICK_ATTEMPTS — it doesn't reduce
       expect(captures.clickAttempts).toBe(MAX_CLICK_ATTEMPTS);
-      expect(tag(outcome)).toBe('NoClick');
+      expect(tag(outcome)).toBe('Aborted');
     }));
 
   it.effect('21. ClickFailed then Verified on attempt 2', () =>
@@ -583,7 +593,7 @@ describe('Exhaustive ClickResult handling', () => {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer, captures } = makeTestLayer({
         clickResultFn: (attempt) =>
-          attempt === 0 ? ClickResult.ClickFailed() : ClickResult.Verified(),
+          attempt === 0 ? ClickResult.ClickFailed() : ClickResult.Verified({ clickDeliveredAt: Date.now() }),
       });
       const active = makeActive();
 
@@ -614,7 +624,9 @@ describe('Exhaustive ClickResult handling', () => {
         Effect.provide(noCheckbox.layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('35 seconds');
+      yield* TestClock.adjust('5 seconds');
+      DetectionContext.setAborted(active1);
+      yield* TestClock.adjust('1 second');
       yield* Fiber.join(fiber1);
 
       // Run 2: ClickFailed
@@ -626,7 +638,9 @@ describe('Exhaustive ClickResult handling', () => {
         Effect.provide(clickFailed.layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('35 seconds');
+      yield* TestClock.adjust('5 seconds');
+      DetectionContext.setAborted(active2);
+      yield* TestClock.adjust('1 second');
       yield* Fiber.join(fiber2);
 
       // Both should reduce to exactly 2 attempts
@@ -687,7 +701,7 @@ describe('Click latency tracking', () => {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer, captures } = makeTestLayer({
         clickResultFn: (attempt) =>
-          attempt === 0 ? ClickResult.ClickFailed() : ClickResult.Verified(),
+          attempt === 0 ? ClickResult.ClickFailed() : ClickResult.Verified({ clickDeliveredAt: Date.now() }),
       });
       const active = makeActive();
 

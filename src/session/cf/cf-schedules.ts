@@ -34,12 +34,6 @@ export const AUTO_SOLVE_POLL_DELAY = '500 millis' as const;
 
 // ── Numeric constants (for imperative deadline calculations) ──────────
 
-/** Top-level solveTurnstile deadline (ms). */
-export const SOLVE_DEADLINE_MS = 30_000;
-
-/** Duration-string version of SOLVE_DEADLINE_MS for Effect.timeoutOption. */
-export const SOLVE_DEADLINE = '30 seconds' as const;
-
 /** Interstitial resolution timeout — max time after click for page navigation.
  * CF can take 10-15s to verify interstitial clicks before redirecting.
  * Proven: bsctjs.com ahrefs scrape — CF took 12.4s to verify, 10s timeout missed by 1.4s. */

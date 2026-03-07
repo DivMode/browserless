@@ -1,7 +1,7 @@
 import { Logger } from '@browserless.io/browserless';
 import { Latch } from 'effect';
-import { CdpSessionId } from '../../shared/cloudflare-detection.js';
-import type { TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot, InterstitialInfo, EmbeddedInfo } from '../../shared/cloudflare-detection.js';
+import { CdpSessionId, isInterstitialType } from '../../shared/cloudflare-detection.js';
+import type { TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot, CloudflareType, InterstitialInfo, EmbeddedInfo } from '../../shared/cloudflare-detection.js';
 import type { TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
 import { Resolution } from './cf-resolution.js';
 
@@ -201,12 +201,33 @@ export type ReadonlyEmbeddedDetection = Readonly<EmbeddedDetection>;
 export class CloudflareEventEmitter {
   private log = new Logger('cf-events');
   recordingMarkers = true;
+  /** Running accumulator of all solved/failed phases in this session. */
+  private summaryPhases: { type: string; label: string }[] = [];
 
   constructor(
     private injectMarker: InjectMarker,
     private emitClientEvent: EmitClientEvent = async () => {},
     readonly sessionId: string = '',
   ) {}
+
+  /**
+   * Build compound summary label from accumulated phases.
+   * Interstitial phases concatenated without space: Int✓Int→
+   * Embedded phases concatenated without space: Emb→
+   * Space between groups: Int✓Int→ Emb→
+   */
+  private buildCompoundLabel(): string {
+    const intParts = this.summaryPhases
+      .filter(p => isInterstitialType(p.type as CloudflareType))
+      .map(p => `Int${p.label}`);
+    const embParts = this.summaryPhases
+      .filter(p => !isInterstitialType(p.type as CloudflareType))
+      .map(p => `Emb${p.label}`);
+    const parts: string[] = [];
+    if (intParts.length) parts.push(intParts.join(''));
+    if (embParts.length) parts.push(embParts.join(''));
+    return parts.join(' ');
+  }
 
   emitDetected(active: ReadonlyActiveDetection): void {
     this.emitClientEvent('Browserless.cloudflareDetected', {
@@ -233,6 +254,8 @@ export class CloudflareEventEmitter {
   }
 
   emitSolved(active: ReadonlyActiveDetection, result: CloudflareResult): void {
+    this.summaryPhases.push({ type: result.type, label: result.phase_label || '→' });
+    const cf_summary_label = this.buildCompoundLabel();
     const snap = active.tracker.snapshot();
     const timingStr = snap.checkbox_to_click_ms != null
       ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
@@ -243,6 +266,7 @@ export class CloudflareEventEmitter {
       token_length: result.token_length ?? result.token?.length ?? 0,
       targetId: active.pageTargetId,
       summary: active.tracker.snapshot(),
+      cf_summary_label,
     }).catch((e) => this.log.debug(`emitSolved failed: ${e instanceof Error ? e.message : String(e)}`));
     this.marker(active.pageTargetId, 'cf.solved', {
       type: result.type, method: result.method, duration_ms: result.duration_ms,
@@ -252,6 +276,8 @@ export class CloudflareEventEmitter {
 
   emitFailed(active: ReadonlyActiveDetection, reason: string, duration: number, phaseLabel?: string): void {
     const phase_label = phaseLabel ?? `✗ ${reason}`;
+    this.summaryPhases.push({ type: active.info.type, label: phase_label });
+    const cf_summary_label = this.buildCompoundLabel();
     const snap = active.tracker.snapshot();
     const isRechallenge = (active.rechallengeCount ?? 0) > 0;
     const diag = snap.widget_diag;
@@ -266,6 +292,7 @@ export class CloudflareEventEmitter {
       oopif_url: active.info.url,
       summary: snap,
       phase_label,
+      cf_summary_label,
     }).catch((e) => this.log.debug(`emitFailed failed: ${e instanceof Error ? e.message : String(e)}`));
     this.marker(active.pageTargetId, 'cf.failed', { reason, duration_ms: duration, phase_label, oopif_url: active.info.url, rechallenge: isRechallenge });
   }

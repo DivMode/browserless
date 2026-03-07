@@ -14,7 +14,7 @@ import type { CloudflareResult } from '../../shared/cloudflare-detection.js';
 
 export type ResolvedOutcome =
   | { readonly _tag: 'solved'; readonly result: CloudflareResult }
-  | { readonly _tag: 'failed'; readonly reason: string; readonly duration_ms: number };
+  | { readonly _tag: 'failed'; readonly reason: string; readonly duration_ms: number; readonly phase_label?: string };
 
 export class Resolution {
   private constructor(private readonly deferred: Deferred.Deferred<ResolvedOutcome>) {}
@@ -41,8 +41,8 @@ export class Resolution {
    * Complete with failure. Returns true if this was the winning completion.
    * Second+ calls return false and are no-ops.
    */
-  fail(reason: string, duration_ms: number): Effect.Effect<boolean> {
-    return Deferred.succeed(this.deferred, { _tag: 'failed', reason, duration_ms });
+  fail(reason: string, duration_ms: number, phase_label?: string): Effect.Effect<boolean> {
+    return Deferred.succeed(this.deferred, { _tag: 'failed', reason, duration_ms, phase_label });
   }
 
   /** Await resolution — blocks until solve() or fail() is called. */
