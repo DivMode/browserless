@@ -57,8 +57,9 @@ export class DetectionRegistry {
       const context = new DetectionContext(active, scope);
       self.entries.set(targetId, context);
 
-      // Register the finalizer — runs when scope closes
-      yield* Scope.addFinalizer(scope, Effect.sync(() => {
+      // Register the finalizer — runs when scope closes.
+      // Now settles Resolution so the solver's latch await unblocks.
+      yield* Scope.addFinalizer(scope, Effect.gen(function*() {
         // Remove from map (idempotent — may already be gone if destroyAll iterates)
         self.entries.delete(targetId);
 
@@ -66,8 +67,10 @@ export class DetectionRegistry {
         self.log.warn(`CF lifecycle: scope_finalizer target=${targetId.slice(0,8)} resolved=${context.resolved} aborted=${active.aborted} action=${action}`);
 
         if (!context.resolved && !active.aborted) {
-          // Orphaned detection — abort + emit session_close fallback
+          // Orphaned detection — abort + settle Resolution + emit session_close fallback
           DetectionContext.setAborted(active);
+          const duration = Date.now() - active.startTime;
+          yield* active.resolution.fail('session_close', duration);
           self.log.info(`Scope finalizer: emitting session_close fallback for orphaned detection on ${targetId}`);
           self.emitFallback(active, 'session_close');
         }

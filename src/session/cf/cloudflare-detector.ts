@@ -195,14 +195,16 @@ export class CloudflareDetector {
                 rechallenge_count: rechallengeCount,
               });
 
+              const rechallengeLabel = active.clickDelivered ? '✓' : '→';
+
               if (rechallengeCount >= MAX_RECHALLENGES) {
                 self.log.info(`Rechallenge limit reached (${rechallengeCount}) for ${active.info.type} — emitting cf.failed`);
-                yield* active.resolution.fail('rechallenge_limit', duration);
+                yield* active.resolution.fail('rechallenge_limit', duration, rechallengeLabel);
                 self.state.bindingSolvedTargets.add(targetId);
                 return;
               }
 
-              yield* active.resolution.fail('rechallenge', duration);
+              yield* active.resolution.fail('rechallenge', duration, rechallengeLabel);
               self.log.info(`Navigation from ${active.info.type} landed on another CF challenge (rechallenge ${rechallengeCount}/${MAX_RECHALLENGES}) — suppressing cf.solved`);
               self.state.pendingRechallengeCount.set(targetId, rechallengeCount);
             } else {
@@ -498,7 +500,7 @@ export class CloudflareDetector {
           // Turnstile detection in multi-phase (Int→Emb) flows.
           self.events.emitSolved(active, resolved.result);
         } else {
-          self.events.emitFailed(active, resolved.reason, resolved.duration_ms);
+          self.events.emitFailed(active, resolved.reason, resolved.duration_ms, resolved.phase_label);
         }
       } else {
         // Timeout — no path completed the Resolution within 10s
@@ -685,58 +687,20 @@ export class CloudflareDetector {
       );
       const outcomeTag = typeof outcome === 'string' ? outcome : outcome._tag;
       self.log.warn(`CF lifecycle: dispatch_end target=${targetId.slice(0,8)} session=${self.sid} outcome=${outcomeTag} aborted=${active.aborted} elapsed_ms=${Date.now() - dispatchStartMs}`);
-      // Complete Resolution for immediate failures — pattern match on TurnstileResult
+      // Solver is advisory — its exit does NOT kill the detection.
+      // Resolution comes from push signals (beacon/bridge/navigation) or session close.
       if (typeof outcome !== 'string') {
-        switch (outcome._tag) {
-          case 'NoClick':
-            self.log.warn(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=widget_not_found`);
-            yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
-            break;
-          case 'Clicked':
-            // Click delivered. Push signal (bridge/beacon/navigation) already resolved
-            // the detection inside solveTurnstile. Fall through to resolution.await
-            // which returns immediately.
-            break;
-          case 'OopifDead':
-            // OOPIF died during solve — complete Resolution immediately.
-            // Activity loop (forkChild) was interrupted when solve scope closed,
-            // so nobody else can complete Resolution.
-            if (!active.resolution.isDone) {
-              yield* active.resolution.fail('oopif_dead', Date.now() - active.startTime);
-            }
-            break;
-          case 'Aborted':
-            // Yield to let concurrent fibers (onPageNavigated) complete the Resolution.
-            if (active.aborted && !active.resolution.isDone) {
-              yield* Effect.yieldNow;
-            }
-            // If concurrent fibers didn't complete Resolution (e.g. turnstile
-            // navigation to CF URL aborts but doesn't resolve), fail it explicitly.
-            // Without this, Resolution.await times out after 10s → solver_exit →
-            // no_resolution on pydoll side (P0). With this, failure emits immediately.
-            if (!active.resolution.isDone) {
-              yield* active.resolution.fail('aborted', Date.now() - active.startTime);
-            }
-            break;
-          // TokenFound — no immediate action needed, Resolution.await handles it
-        }
+        self.log.warn(`CF lifecycle: solver_exit target=${targetId.slice(0,8)} session=${self.sid} result=${outcome._tag} resolution_done=${active.resolution.isDone}`);
       } else if (outcome === 'aborted') {
-        // String 'aborted' from catchCause — same gap fix
-        if (active.aborted && !active.resolution.isDone) {
-          yield* Effect.yieldNow;
-        }
-        if (!active.resolution.isDone) {
-          yield* active.resolution.fail('aborted', Date.now() - active.startTime);
-        }
+        // String 'aborted' from catchCause — solver crashed, but detection stays alive.
+        self.log.warn(`CF lifecycle: solver_exit target=${targetId.slice(0,8)} session=${self.sid} result=aborted(catch) resolution_done=${active.resolution.isDone}`);
       }
 
       // Await Resolution — single emission consumer.
-      // Resolution is ALWAYS settled before we reach here:
-      // - Clicked: push resolved it inside solveTurnstile (latch await returned)
-      // - NoClick: emitSolveFailure → resolution.fail() in the switch above
-      // - OopifDead: resolution.fail() in the switch above
-      // - Aborted: resolution.fail() in the switch above
-      // Safety net: if somehow unsettled, blocks until session close (scope finalizer).
+      // Solver exit no longer settles Resolution. It's settled by:
+      // - Push signals: bridge/beacon/navigation → resolution.solve()
+      // - Session close: scope finalizer → resolution.fail('session_close')
+      // This blocks until one of those paths fires.
       self.log.warn(`CF lifecycle: resolution_await target=${targetId.slice(0,8)} session=${self.sid} resolution_done=${active.resolution.isDone} aborted=${active.aborted}`);
       const resolved = yield* active.resolution.await;
       if (resolved._tag === 'solved') {
@@ -746,7 +710,7 @@ export class CloudflareDetector {
         self.events.emitSolved(active, resolved.result);
       } else {
         self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=failed reason=${resolved.reason} elapsed_ms=${resolved.duration_ms}`);
-        self.events.emitFailed(active, resolved.reason, resolved.duration_ms);
+        self.events.emitFailed(active, resolved.reason, resolved.duration_ms, resolved.phase_label);
       }
       if (self.state.registry.has(targetId)) {
         yield* self.state.registry.resolve(targetId);
