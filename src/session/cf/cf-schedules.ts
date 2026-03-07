@@ -40,12 +40,8 @@ export const SOLVE_DEADLINE_MS = 30_000;
 /** Duration-string version of SOLVE_DEADLINE_MS for Effect.timeoutOption. */
 export const SOLVE_DEADLINE = '30 seconds' as const;
 
-/** Post-click wait — max time after click dispatch to wait for resolution. */
-export const POST_CLICK_DEADLINE_MS = 10_000;
-
 /** Interstitial resolution timeout — max time after click for page navigation.
  * CF can take 10-15s to verify interstitial clicks before redirecting.
- * Must exceed POST_CLICK_DEADLINE_MS to avoid premature solver_exit on slow CF verifications.
  * Proven: bsctjs.com ahrefs scrape — CF took 12.4s to verify, 10s timeout missed by 1.4s. */
 export const INTERSTITIAL_RESOLUTION_TIMEOUT = '30 seconds' as const;
 

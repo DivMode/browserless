@@ -692,9 +692,10 @@ export class CloudflareDetector {
             self.log.warn(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=widget_not_found`);
             yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
             break;
-          case 'ClickNoToken':
-            self.log.warn(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=timeout`);
-            yield* self.emitSolveFailure(active, targetId, 'timeout');
+          case 'Clicked':
+            // Click delivered. Push signal (bridge/beacon/navigation) already resolved
+            // the detection inside solveTurnstile. Fall through to resolution.await
+            // which returns immediately.
             break;
           case 'OopifDead':
             // OOPIF died during solve — complete Resolution immediately.
@@ -717,7 +718,7 @@ export class CloudflareDetector {
               yield* active.resolution.fail('aborted', Date.now() - active.startTime);
             }
             break;
-          // TokenFound, Clicked — no immediate action needed, Resolution.await handles it
+          // TokenFound — no immediate action needed, Resolution.await handles it
         }
       } else if (outcome === 'aborted') {
         // String 'aborted' from catchCause — same gap fix
@@ -730,28 +731,22 @@ export class CloudflareDetector {
       }
 
       // Await Resolution — single emission consumer.
-      // For turnstile: token poll, beacon, or state change completes it.
-      // For no_click/click_no_token: emitSolveFailure already completed it.
-      // 10s timeout is generous fallback.
+      // Resolution is ALWAYS settled before we reach here:
+      // - Clicked: push resolved it inside solveTurnstile (latch await returned)
+      // - NoClick: emitSolveFailure → resolution.fail() in the switch above
+      // - OopifDead: resolution.fail() in the switch above
+      // - Aborted: resolution.fail() in the switch above
+      // Safety net: if somehow unsettled, blocks until session close (scope finalizer).
       self.log.warn(`CF lifecycle: resolution_await target=${targetId.slice(0,8)} session=${self.sid} resolution_done=${active.resolution.isDone} aborted=${active.aborted}`);
-      const maybeResolved = yield* active.resolution.await.pipe(
-        Effect.timeoutOption('10 seconds'),
-      );
-      if (maybeResolved._tag === 'Some') {
-        const resolved = maybeResolved.value;
-        if (resolved._tag === 'solved') {
-          self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=solved method=${resolved.result.method} elapsed_ms=${Date.now() - active.startTime}`);
-          // PHANTOM GUARD: Mark page as solved to block post-solve OOPIF re-detection.
-          self.state.solvedPages.add(targetId);
-          self.events.emitSolved(active, resolved.result);
-        } else {
-          self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=failed reason=${resolved.reason} elapsed_ms=${resolved.duration_ms}`);
-          self.events.emitFailed(active, resolved.reason, resolved.duration_ms);
-        }
+      const resolved = yield* active.resolution.await;
+      if (resolved._tag === 'solved') {
+        self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=solved method=${resolved.result.method} elapsed_ms=${Date.now() - active.startTime}`);
+        // PHANTOM GUARD: Mark page as solved to block post-solve OOPIF re-detection.
+        self.state.solvedPages.add(targetId);
+        self.events.emitSolved(active, resolved.result);
       } else {
-        const duration = Date.now() - active.startTime;
-        self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=timeout elapsed_ms=${duration}`);
-        self.events.emitFailed(active, 'solver_exit', duration);
+        self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=failed reason=${resolved.reason} elapsed_ms=${resolved.duration_ms}`);
+        self.events.emitFailed(active, resolved.reason, resolved.duration_ms);
       }
       if (self.state.registry.has(targetId)) {
         yield* self.state.registry.resolve(targetId);
