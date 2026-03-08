@@ -168,3 +168,199 @@ The Part 1 postmortem incorrectly attributed scrape failures to "10+ GB working 
 - `Effect.tryPromise(() => mightReject()).pipe(Effect.ignore)` — error caught
 
 Use `Effect.promise` only for promises that NEVER reject. Use `Effect.tryPromise` when rejection is possible.
+
+## Part 3: WebSocket Connection Leak (2026-03-08)
+
+### Summary
+
+Per-solve WebSocket connections (`clean_page`, `solver_isolated`, `proxy_isolated`) leak ~47% of the time. Session-level teardown is healthy — page WS, proxy_browser, proxy_client, session_browser all clean up correctly. The leak is specifically in `Effect.scoped` / `acquireRelease` blocks wrapping individual CF solve operations.
+
+Active sockets grow linearly across scrape batches: 118 → 160 → 197 → 256 → 295 → 334 (pre-fix baseline over ~25 minutes). After container restart, sockets stabilize at ~59 idle but ratchet up with each batch.
+
+### Evidence
+
+#### Prometheus: `browserless_ws_lifecycle_total` delta (create - destroy)
+
+Frozen deltas after all scraping stopped (no new creates or destroys for 5+ minutes):
+
+| Type | Create | Destroy | Delta | Leak Rate |
+|------|--------|---------|-------|-----------|
+| `clean_page` | 168 | 83 | **85** | ~51% never released |
+| `solver_isolated` | 81 | 43 | **38** | ~47% never released |
+| `proxy_isolated` | 81 | 43 | **38** | ~47% never released |
+| `page` | 61 | 58 | **3** | Healthy (active sessions) |
+| `proxy_browser` | 11 | 8 | **3** | Healthy (active sessions) |
+| `proxy_client` | 11 | 8 | **3** | Healthy (active sessions) |
+| `session_browser` | 11 | 8 | **3** | Healthy (active sessions) |
+
+**Key ratio:** 38 solver_isolated × ~2.2 = ~84 clean_page leaked. Each solve creates 1 `solver_isolated` + 1 `proxy_isolated` + ~2 `clean_page` (one in `phase1PageDomTraversal`, one in `getIframePageCoords`). The proportional leak confirms all three leak from the SAME scope failure.
+
+#### Prometheus: `browserless_active_handles_by_type{type="Socket"}` trend
+
+```
+Old container: 118 → 160 → 197 → 256 → 295 → 334   (linear growth = leak)
+                                                       ↓ deploy restart
+New container: 52 → 82 → 59 → 59 → 59 → 69           (batch spike → partial drain)
+```
+
+Socket count does drain partially between batches (82 → 59), suggesting SOME leaked WS objects get garbage-collected. But the baseline ratchets up over time — the previous container hit 334 sockets before restart.
+
+#### Loki: Console.error teardown logs (deployed 2026-03-08)
+
+Session teardown pipeline DOES run fully. For session `f6adc448`:
+
+```
+cf.solver.destroy.start          → ...21649 ns
+cf.solver.lifecycle.release      → ...24651 ns
+cf.solver.destroy.end            → ...30999 ns
+session.close.decision (false)   → ...31565 ns
+session.destroy.start            → ...32120 ns
+coordinator.stopReplay.start     → ...33816 ns
+coordinator.stopReplay.cleanup.start → ...63643 ns
+cf.solver.destroy.start (2nd)    → ...63913 ns  (no-op, already disposed)
+cf.solver.destroy.end (2nd)      → ...63983 ns
+coordinator.stopReplay.cleanup.end   → ...64038 ns
+session.destroy.end              → ...86911 ns
+```
+
+**Observation:** `cf.solver.destroy` fires TWICE — once before `session.destroy.start` (from somewhere in the pre-destroy path), once in the coordinator cleanup. The second is a fast no-op. Session-level teardown is NOT the problem.
+
+**`session.acquireRelease.release` — zero hits.** Effect scope-based cleanup (`acquireSession`) is never the active cleanup path. All sessions clean up via `close()` → `destroySession()`.
+
+### Where the leak IS
+
+The leak is in `SolveDispatcher.dispatch` (`cloudflare-solver.ts:183-203`):
+
+```typescript
+// This acquireRelease + Effect.scoped wraps each solve operation
+return Effect.acquireRelease(
+  Effect.sync(() => { wsLifecycle.labels('solver_isolated', 'create').inc(); return self.createIsolatedConn!(); }),
+  (c) => Effect.fn('ws.release.solver_isolated')(function*() { c.cleanup(); wsLifecycle.labels('solver_isolated', 'destroy').inc(); })(),
+).pipe(
+  Effect.tap((isolated) => isolated.waitForOpen...),
+  Effect.flatMap((isolated) => provideServices(active, ...)),
+  Effect.scoped,  // ← This scope SHOULD guarantee cleanup
+);
+```
+
+And in `openCleanPageWsScoped` (`cf-coords.ts:58-91`):
+
+```typescript
+return Effect.acquireRelease(
+  // acquire: create WS, connect, wrap in CdpConnection
+  ...,
+  (conn) => Effect.fn('ws.release.clean_page')(function*() { conn.drainPending(...); conn.dispose(); ws.terminate(); wsLifecycle...inc(); })(),
+);
+// Used in getIframePageCoords (has Effect.scoped) and phase1PageDomTraversal (scope from dispatch)
+```
+
+Both use `Effect.acquireRelease` with `Effect.scoped`. The release handlers fire for ~53% of connections but NOT for ~47%.
+
+### Where the leak is NOT
+
+- **Session teardown:** Runs fully, all logs fire in sequence. `destroySession`, `stopReplayEffect`, `solver.destroyEffect` all complete.
+- **Per-session WS:** `page`, `proxy_browser`, `proxy_client`, `session_browser` all have healthy deltas (only active sessions outstanding).
+- **Prometheus counter bug:** Possible partial contributor (release handler might throw before counter increment), but the growing socket count proves REAL socket leak.
+
+### Hypothesis: Fiber interruption during `ManagedRuntime.dispose`
+
+Detection fibers run via `runtime.runFork(FiberMap.run(...))`. When session teardown calls `runtime.disposeEffect`, the ManagedRuntime scope closes, interrupting all detection fibers. The question: **does `disposeEffect` wait for interrupted fibers' `acquireRelease` finalizers to complete?**
+
+If `disposeEffect` returns before the interrupted fiber's `Effect.scoped` finalizers run, the scope's release handlers are orphaned. The WS acquire ran (counter incremented) but the release never fires.
+
+The teardown timeout chain also creates pressure:
+```
+destroySession timeout: 15s overall
+  └── stopReplayEffect timeout: 12s
+        └── cdpSession.destroy timeout: 8s
+              └── solver.destroyEffect: runtime.disposeEffect (no explicit timeout)
+                    └── fiber interruption + finalizer execution (unbounded)
+```
+
+If `runtime.disposeEffect` interrupts 5 fibers, each with an `Effect.scoped` block that needs to close a WS connection, and Chrome is slow to respond, the 8s/12s/15s timeouts may fire before all finalizers complete.
+
+### Fix Attempt 1: FiberMap.clear before disposeEffect (deployed 2026-03-08)
+
+Added `FiberMap.clear()` before `runtime.disposeEffect` in the `destroyEffect` getter. `FiberMap.clear` calls `Fiber.interrupt()` per fiber and awaits each fiber's full exit including all `acquireRelease` finalizers — unlike `disposeEffect` which fire-and-forgets the interrupt.
+
+```typescript
+get destroyEffect(): Effect.Effect<void> {
+  return Effect.fn('cf.solver.destroy')({ self: this }, function*() {
+    console.error(JSON.stringify({ message: 'cf.solver.destroy.start' }));
+    if (this._detectionFiberMap) {
+      const fiberCount = yield* FiberMap.size(this._detectionFiberMap);
+      yield* Effect.tryPromise(
+        () => this.runtime.runPromise(FiberMap.clear(this._detectionFiberMap!)),
+      ).pipe(Effect.timeout('10 seconds'), Effect.ignore);
+      console.error(JSON.stringify({ message: 'cf.solver.destroy.drained', fibers: fiberCount }));
+    }
+    yield* this.runtime.disposeEffect;
+    console.error(JSON.stringify({ message: 'cf.solver.destroy.end' }));
+  })();
+}
+```
+
+Also removed diagnostic `console.error` logs added during Part 3 investigation:
+- `solver.dispatch.acquire` / `solver.dispatch.release` in `cloudflare-solver.ts`
+- `ws.acquire.clean_page` / `ws.release.clean_page` in `cf-coords.ts`
+
+**Tests:** `npx tsc --noEmit` clean, `npx vitest run` 212 passed (10 files, 6/6 CF sites).
+
+**Result: PARTIALLY EFFECTIVE — session-destroy leak fixed, per-solve leak persists.**
+
+Post-deploy Prometheus data (idle, all counters frozen, zero activity for 5+ min):
+
+| Type | Create | Destroy | Delta | Leak Rate |
+|------|--------|---------|-------|-----------|
+| `solver_isolated` | 327 | 174 | **153** | **47%** |
+| `proxy_isolated` | 327 | 174 | **153** | **47%** |
+| `clean_page` | 591 | 341 | **250** | **42%** |
+| `page` | 159 | 156 | 3 | healthy |
+| `proxy_browser` | 3 | 0 | 3 | 3 sessions alive |
+
+Socket count: **182** (frozen at idle). Timeline: 27 → 67 → 151 → 182 → 182 → 182 (grew during batch, froze at idle, confirmed stable across 3 checks ~5min apart).
+
+**Conclusion:** `FiberMap.clear` addresses fibers still running at destroy time. But the primary leak (~47%) happens DURING session lifetime — per-solve `Effect.scoped` release handlers don't fire for nearly half of all solves. This is a separate code path from destroy-time cleanup.
+
+### Next Steps (Path 2: per-solve leak)
+
+The per-solve leak is in `SolveDispatcher.dispatch` (`Effect.acquireRelease` + `Effect.scoped`) and `openCleanPageWsScoped`. The `Effect.scoped` release handlers fire for ~53% of connections but NOT for ~47%.
+
+**Hypotheses:**
+1. **Fiber interruption mid-scope:** `FiberMap.run` auto-interrupts existing fiber for same key (re-detection of same page). If interruption lands after `acquireRelease` acquire but before `Effect.scoped` closes, the release handler is orphaned.
+2. **Effect.scoped + fiber interruption semantics:** Does `Effect.scoped` properly run release on fiber interruption? Needs Effect v4 source verification.
+3. **Missing `Effect.scoped` on some callers:** `openCleanPageWsScoped` returns `Scope.Scope` in R — callers must apply `Effect.scoped`. Any caller that forgets leaks.
+
+**Fix options:**
+1. **Ensure `disposeEffect` awaits all fiber finalizers** — `FiberMap.clear` addresses this (done)
+2. **Move WS cleanup out of Effect scope** — use a plain `Set<WebSocket>` tracker on the `CloudflareSolver` class, close all WS in `destroyEffect` explicitly (not relying on scope finalizers). Belt-and-suspenders.
+3. **Add explicit WS cleanup in `stopReplayEffect`** — after `solver.destroyEffect`, iterate any remaining open WS and force-terminate them
+
+Option 2 is the most robust — it doesn't depend on Effect scope semantics at all. Track every isolated WS in a `Set`, and in `destroyEffect` force-terminate any that are still open.
+
+### Loki Queries for Monitoring
+
+```logql
+# Teardown pipeline
+{service_name="flatcar-browserless"} |= "session.destroy" | json
+{service_name="flatcar-browserless"} |= "session.close.decision" | json
+{service_name="flatcar-browserless"} |= "coordinator.stopReplay" | json
+{service_name="flatcar-browserless"} |= "cf.solver" | json
+{service_name="flatcar-browserless"} |= "session.acquireRelease" | json
+
+# Per-solve dispatch (after adding dispatch logs)
+{service_name="flatcar-browserless"} |= "solver.dispatch" | json
+
+# WS release handlers
+{service_name="flatcar-browserless"} |= "ws.release" | json
+```
+
+### PromQL for Dashboard
+
+```promql
+# Create-destroy delta per type (should be 0 at idle, small during batches)
+browserless_ws_lifecycle_total{action="create"} - ignoring(action) browserless_ws_lifecycle_total{action="destroy"}
+
+# Socket count trend (ground truth)
+browserless_active_handles_by_type{type="Socket"}
+```

@@ -234,6 +234,7 @@ export class CloudflareSolver {
           self._detectionFiberMap = yield* FiberMap.make<TargetId>();
         }),
         () => Effect.fn('cf.solver.lifecycle.release')(function*() {
+          console.error(JSON.stringify({ message: 'cf.solver.lifecycle.release' }));
           yield* stateTracker.destroy();
           self._detectionFiberMap = null;
         })(),
@@ -396,7 +397,23 @@ export class CloudflareSolver {
   /** Pure Effect disposal — callers yield* this directly. No boundary crossing. */
   get destroyEffect(): Effect.Effect<void> {
     return Effect.fn('cf.solver.destroy')({ self: this }, function*() {
+      console.error(JSON.stringify({ message: 'cf.solver.destroy.start' }));
+
+      // Gracefully drain all detection fibers BEFORE disposing the runtime.
+      // FiberMap.clear() → Fiber.interrupt() per fiber → awaits fiber exit
+      // including all acquireRelease finalizers (WS cleanup).
+      // Without this, disposeEffect races — Scope.close(scope, Exit.void)
+      // returns before fiber finalizers complete, leaking ~45% of WS connections.
+      if (this._detectionFiberMap) {
+        const fiberCount = yield* FiberMap.size(this._detectionFiberMap);
+        yield* Effect.tryPromise(
+          () => this.runtime.runPromise(FiberMap.clear(this._detectionFiberMap!)),
+        ).pipe(Effect.timeout('10 seconds'), Effect.ignore);
+        console.error(JSON.stringify({ message: 'cf.solver.destroy.drained', fibers: fiberCount }));
+      }
+
       yield* this.runtime.disposeEffect;
+      console.error(JSON.stringify({ message: 'cf.solver.destroy.end' }));
     })();
   }
 }
