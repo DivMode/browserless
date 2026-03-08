@@ -194,12 +194,12 @@ export class SessionCoordinator {
     })().pipe(
       // Guaranteed Map cleanup — runs even if Effect times out or fails.
       // solver.destroy() is awaited to ensure ManagedRuntime disposal completes.
-      Effect.ensuring(Effect.gen(function*() {
+      Effect.ensuring(Effect.fn('coordinator.stopReplay.cleanup')(function*() {
         coordinator.cdpSessions.delete(sessionId);
         const solver = coordinator.cloudflareSolvers.get(sessionId);
         if (solver) yield* solver.destroyEffect;
         coordinator.cloudflareSolvers.delete(sessionId);
-      })),
+      })()),
     );
   }
 
