@@ -16,6 +16,7 @@ import { solveDetection as solveDetectionEffect } from './cf/cloudflare-solver.e
 import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
 import { OtelLayer } from '../otel-layer.js';
 
+import { wsLifecycle } from '../prom-metrics.js';
 import type { CdpConnection } from '../shared/cdp-rpc.js';
 import type WebSocket from 'ws';
 
@@ -180,8 +181,14 @@ export class CloudflareSolver {
           // remain on the direct page session WS.
           // sendViaBrowser → CDPProxy browser WS (pre-warmed compositor for Input events).
           return Effect.acquireRelease(
-            Effect.sync(() => self.createIsolatedConn!()),
-            (c) => Effect.sync(() => c.cleanup()),
+            Effect.sync(() => {
+              wsLifecycle.labels('solver_isolated', 'create').inc();
+              return self.createIsolatedConn!();
+            }),
+            (c) => Effect.sync(() => {
+              c.cleanup();
+              wsLifecycle.labels('solver_isolated', 'destroy').inc();
+            }),
           ).pipe(
             Effect.tap((isolated) => isolated.waitForOpen.pipe(
               Effect.catch(() => Effect.succeed(undefined as void)),

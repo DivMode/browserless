@@ -6,6 +6,7 @@ import { IncomingMessage } from 'http';
 import { Config, Logger } from '@browserless.io/browserless';
 import { Duration, Effect, Exit, FiberSet, Schedule, Schema, Scope } from 'effect';
 
+import { wsLifecycle } from './prom-metrics.js';
 import { CloudflareConfig } from './shared/cloudflare-detection.js';
 import { CdpSessionId, TargetId } from './shared/cloudflare-detection.js';
 import { BROWSER_WS_PING_INTERVAL, BROWSER_WS_PONG_TIMEOUT_MS } from './session/cf/cf-schedules.js';
@@ -142,19 +143,26 @@ export class CDPProxy {
       this.proxyConn?.dispose();
       this.proxyConn = null;
       // 2. Close client WS
-      this.clientWs?.removeAllListeners();
-      this.clientWs?.terminate();
-      this.clientWs = null;
+      if (this.clientWs) {
+        this.clientWs.removeAllListeners();
+        this.clientWs.terminate();
+        this.clientWs = null;
+        wsLifecycle.labels('proxy_client', 'destroy').inc();
+      }
       (this as any).clientSocket = null;
       // 3. Close browser WS last
-      this.browserWs?.removeAllListeners();
-      this.browserWs?.terminate();
-      this.browserWs = null;
+      if (this.browserWs) {
+        this.browserWs.removeAllListeners();
+        this.browserWs.terminate();
+        this.browserWs = null;
+        wsLifecycle.labels('proxy_browser', 'destroy').inc();
+      }
     })));
 
     // Step 1: Connect to Chrome's CDP endpoint FIRST
     await new Promise<void>((resolve, reject) => {
       this.browserWs = new WebSocket(this.browserWsEndpoint);
+      wsLifecycle.labels('proxy_browser', 'create').inc();
 
       this.browserWs.on('open', () => {
         this.log.trace(`Connected to browser: ${this.browserWsEndpoint}`);
@@ -177,6 +185,7 @@ export class CDPProxy {
         this.clientHead,
         (clientWs: WebSocket) => {
           this.clientWs = clientWs;
+          wsLifecycle.labels('proxy_client', 'create').inc();
           this.log.trace('Client WebSocket upgraded');
 
           // Set up bidirectional proxying
@@ -546,6 +555,7 @@ export class CDPProxy {
   } {
     const endpoint = this.browserWsEndpoint;
     const ws = new WebSocket(endpoint);
+    wsLifecycle.labels('proxy_isolated', 'create').inc();
     const conn = new CdpConnection(ws, { startId: 300_000, defaultTimeout: 30_000 });
     let connected = false;
     const openPromise = new Promise<void>((resolve, reject) => {
@@ -570,6 +580,7 @@ export class CDPProxy {
       conn.dispose();
       ws.removeAllListeners();
       ws.terminate();
+      wsLifecycle.labels('proxy_isolated', 'destroy').inc();
     };
 
     return { conn, ws, waitForOpen, cleanup };
