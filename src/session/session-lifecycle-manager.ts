@@ -340,7 +340,8 @@ export class SessionLifecycleManager {
     }
 
     // Dispose video encoder (not per-session, separate lifecycle)
-    this.sessionCoordinator?.getVideoEncoder().dispose();
+    const encoder = this.sessionCoordinator?.getVideoEncoder();
+    if (encoder) await Effect.runPromise(encoder.disposeEffect);
 
     this.clearTimers();
     this.log.info('Session lifecycle shutdown complete');
