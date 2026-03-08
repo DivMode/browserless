@@ -606,6 +606,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
         this.logger.error(
           `Error proxying session to ${this.constructor.name}: ${error}`,
         );
+        this.cdpProxy?.close();  // Triggers scope close → cleans up partial WS connections
         this.cdpProxy = null;
         this.close();
         reject(error);

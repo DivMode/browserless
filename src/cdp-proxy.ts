@@ -134,6 +134,24 @@ export class CDPProxy {
    * This ensures no messages are dropped during the connection race.
    */
   async connect(): Promise<void> {
+    // Register scope finalizer UPFRONT — safe even if connect() fails halfway
+    // (all fields are null-checked, so partially-created state is handled)
+    Effect.runSync(Scope.addFinalizer(this.proxyScope, Effect.sync(() => {
+      // 1. Drain proxy connection (pending commands get error callbacks)
+      this.proxyConn?.drainPending('scope_close');
+      this.proxyConn?.dispose();
+      this.proxyConn = null;
+      // 2. Close client WS
+      this.clientWs?.removeAllListeners();
+      this.clientWs?.terminate();
+      this.clientWs = null;
+      (this as any).clientSocket = null;
+      // 3. Close browser WS last
+      this.browserWs?.removeAllListeners();
+      this.browserWs?.terminate();
+      this.browserWs = null;
+    })));
+
     // Step 1: Connect to Chrome's CDP endpoint FIRST
     await new Promise<void>((resolve, reject) => {
       this.browserWs = new WebSocket(this.browserWsEndpoint);
@@ -531,8 +549,8 @@ export class CDPProxy {
     const conn = new CdpConnection(ws, { startId: 300_000, defaultTimeout: 30_000 });
     let connected = false;
     const openPromise = new Promise<void>((resolve, reject) => {
-      ws.on('open', () => { connected = true; resolve(); });
-      ws.on('error', (err) => { if (!connected) reject(err); });
+      ws.once('open', () => { connected = true; resolve(); });
+      ws.once('error', (err) => { if (!connected) reject(err); });
     });
 
     ws.on('message', (data) => {
@@ -652,9 +670,6 @@ export class CDPProxy {
     if (this.isClosing) return;
     this.isClosing = true;
 
-    // Close proxy scope → interrupts ALL managed fibers (heartbeat + page-close delays)
-    Effect.runFork(Scope.close(this.proxyScope, Exit.void));
-
     const clientState = this.clientWs?.readyState;
     const browserState = this.browserWs?.readyState;
     this.log.info(
@@ -662,20 +677,8 @@ export class CDPProxy {
       `browserWs=${browserState === WebSocket.OPEN ? 'OPEN' : browserState}`
     );
 
-    // Close client WebSocket
-    this.clientWs?.removeAllListeners();
-    this.clientWs?.terminate();
-    this.clientWs = null;
-
-    // Clean up proxy CdpConnection before closing browser WS
-    this.proxyConn?.drainPending('proxy_close');
-    this.proxyConn?.dispose();
-    this.proxyConn = null;
-
-    // Close browser WebSocket
-    this.browserWs?.removeAllListeners();
-    this.browserWs?.terminate();
-    this.browserWs = null;
+    // Single line: close scope → fibers interrupted + all WS cleaned up via finalizer
+    Effect.runFork(Scope.close(this.proxyScope, Exit.void));
 
     this.onClose?.();
   }

@@ -14,7 +14,7 @@ import {
   type TabReplayCompleteParams,
 } from '@browserless.io/browserless';
 
-import { Cause, Effect, Fiber, FiberMap, Layer, ManagedRuntime, Queue, Schedule } from 'effect';
+import { Cause, Effect, Exit, Fiber, FiberMap, Layer, ManagedRuntime, Queue, Schedule, Scope } from 'effect';
 import { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 import { decodeCDPMessage, decodeRrwebEventBatch } from '../shared/cdp-schemas.js';
 import { CdpConnection } from '../shared/cdp-rpc.js';
@@ -88,6 +88,7 @@ export class CdpSession {
   private ws: InstanceType<any> | null = null;
   private WebSocket: any = null;
   private unregisterGauges: (() => void) | null = null;
+  private readonly browserWsScope = Scope.makeUnsafe();
 
   // Declarative CDP message routing — Effect-native handlers dispatched as tracked fibers
   private readonly effectHandlers = new Map<string, (msg: any) => Effect.Effect<void>>();
@@ -189,9 +190,7 @@ export class CdpSession {
         () => Effect.sync(() => {
           // Close all per-page WebSockets (scope-guaranteed cleanup)
           self.targets.clear();
-          // Drain browser connection
-          self.browserConn?.dispose();
-          self.browserConn = null;
+          // browserConn cleanup handled by browserWsScope finalizer
           self._fiberMap = null;
         }),
       ),
@@ -251,6 +250,15 @@ export class CdpSession {
     // Create CdpConnection for browser-level WS
     this.browserConn = new CdpConnection(ws, { startId: 1, defaultTimeout: 30_000 });
 
+    // Register guaranteed cleanup — scope close handles WS teardown
+    Effect.runSync(Scope.addFinalizer(this.browserWsScope, Effect.sync(() => {
+      this.browserConn?.dispose();
+      this.browserConn = null;
+      this.ws?.removeAllListeners();
+      this.ws?.terminate();
+      this.ws = null;
+    })));
+
     // Wire up WS message handler
     ws.on('message', (data: Buffer) => this.handleCDPMessage(data));
 
@@ -265,7 +273,7 @@ export class CdpSession {
       const setupTimeout = setTimeout(() => {
         resume(Effect.fail(new Error('WebSocket open + setAutoAttach timed out after 10s')));
       }, 10_000);
-      ws.on('open', () => {
+      ws.once('open', () => {
         clearTimeout(setupTimeout);
         resume(Effect.void);
       });
@@ -687,9 +695,8 @@ export class CdpSession {
       this.runtime = null;
     }
 
-    // Close main WS (no-op if already closed via ws_close)
-    try { this.ws?.removeAllListeners(); this.ws?.terminate(); } catch {}
-    this.ws = null;
+    // Close main WS via scope finalizer (handles browserConn + WS cleanup)
+    await Effect.runPromise(Scope.close(this.browserWsScope, Exit.void));
     this.unregisterGauges = null;
 
     this.log.info(`CdpSession destroyed (${source}) for session ${this.sessionId}`);
