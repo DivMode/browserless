@@ -79,7 +79,10 @@ export function openCleanPageWsScoped(
     (conn) => Effect.sync(() => {
       conn.drainPending('cleanWs scope close');
       conn.dispose();
-      try { (conn as any).ws?.terminate(); } catch { /* already closed */ }
+      const ws = (conn as any).ws;
+      if (ws) {
+        try { ws.removeAllListeners(); ws.terminate(); } catch { /* already closed */ }
+      }
     }),
   );
 }

@@ -181,4 +181,26 @@ export const handlesByType = getOrCreateLabeledCollectGauge(
   },
 );
 
+export const socketHandleDetails = getOrCreateLabeledCollectGauge(
+  'browserless_socket_handles',
+  'Active socket handles by remote address (for leak diagnosis)',
+  ['remote'],
+  function (this: Gauge) {
+    this.reset();
+    const handles = (process as any)._getActiveHandles() as any[];
+    const counts = new Map<string, number>();
+    for (const h of handles) {
+      if (h?.constructor?.name === 'Socket') {
+        const remote = h.remoteAddress
+          ? `${h.remoteAddress}:${h.remotePort}`
+          : h.destroyed ? 'destroyed' : 'no-remote';
+        counts.set(remote, (counts.get(remote) || 0) + 1);
+      }
+    }
+    for (const [remote, count] of counts) {
+      this.labels(remote).set(count);
+    }
+  },
+);
+
 export { register };
