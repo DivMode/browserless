@@ -176,6 +176,15 @@ export const wsLifecycle = getOrCreateLabeledCounter(
   ['type', 'action'],
 );
 
+// Counter: fires when a WS scope exceeds its budget timeout.
+// Any non-zero value = immediate visibility in Grafana — indicates a solve
+// blocked too long inside a scoped region (exactly Bug #1 pattern).
+export const wsScopeBudgetExceeded = getOrCreateLabeledCounter(
+  'browserless_ws_scope_budget_exceeded_total',
+  'WS scope budget timeout exceeded (solve blocked too long)',
+  ['type'],
+);
+
 // Gauge: alive vs destroyed socket handles still in process._getActiveHandles()
 export const socketStateDetails = getOrCreateLabeledCollectGauge(
   'browserless_socket_state',

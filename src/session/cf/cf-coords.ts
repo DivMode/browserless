@@ -8,9 +8,9 @@ import { Effect, Scope } from 'effect';
 import type { TargetId } from '../../shared/cloudflare-detection.js';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
 import { CdpConnection } from '../../shared/cdp-rpc.js';
-import { wsLifecycle } from '../../prom-metrics.js';
 import { CdpSessionGone } from './cf-errors.js';
 import { CLEAN_WS_OPEN_TIMEOUT_MS, CLEAN_WS_CMD_TIMEOUT_MS } from './cf-schedules.js';
+import { openScopedWs } from './cf-ws-resource.js';
 
 /**
  * Get iframe page-space coordinates for translating iframe-relative
@@ -38,7 +38,9 @@ export function getIframePageCoords(
       return { x: q[0] as number, y: q[1] as number };
     }
     return { x: null, y: null };
-  })().pipe(Effect.scoped);
+  })().pipe(Effect.scoped, Effect.onInterrupt(() => Effect.sync(() => {
+    console.error(JSON.stringify({ message: 'ws.debug.getIframePageCoords.interrupted', targetId: pageTargetId }));
+  })));
 }
 
 /**
@@ -50,42 +52,23 @@ export function getIframePageCoords(
  *
  * Returns a scoped CdpConnection — callers use Effect.scoped to guarantee
  * WS cleanup even on fiber interruption.
+ *
+ * Delegates to openScopedWs factory — counter placement, acquireRelease
+ * wrapping, and cleanup are all structural (no way to get them wrong).
  */
 export function openCleanPageWsScoped(
   targetId: TargetId,
   chromePort: string,
 ): Effect.Effect<CdpConnection, CdpSessionGone, Scope.Scope> {
-  return Effect.acquireRelease(
-    Effect.gen(function*() {
-      const { default: WebSocket } = yield* Effect.promise(() => import('ws'));
-      const pageWsUrl = `ws://127.0.0.1:${chromePort}/devtools/page/${targetId}`;
-      const ws = new WebSocket(pageWsUrl);
-      wsLifecycle.labels('clean_page', 'create').inc();
-
-      yield* Effect.callback<void, Error>((resume) => {
-        const timer = setTimeout(() => { ws.terminate(); resume(Effect.fail(new Error('Clean page WS timeout'))); }, CLEAN_WS_OPEN_TIMEOUT_MS);
-        ws.on('open', () => { clearTimeout(timer); resume(Effect.void); });
-        ws.on('error', (err) => { clearTimeout(timer); resume(Effect.fail(err)); });
-        return Effect.sync(() => { clearTimeout(timer); ws.terminate(); });
-      });
-
-      const conn = new CdpConnection(ws, { startId: 500_000, defaultTimeout: CLEAN_WS_CMD_TIMEOUT_MS });
-
-      ws.on('message', (data: Buffer) => {
-        const msg = JSON.parse(data.toString());
-        conn.handleResponse(msg);
-      });
-
-      return conn;
-    }).pipe(Effect.mapError(() => new CdpSessionGone({ sessionId: CdpSessionId.makeUnsafe(''), method: 'openCleanPageWs' }))),
-    (conn) => Effect.fn('ws.release.clean_page')(function*() {
-      conn.drainPending('cleanWs scope close');
-      conn.dispose();
-      const ws = (conn as any).ws;
-      if (ws) {
-        try { ws.removeAllListeners(); ws.terminate(); } catch { /* already closed */ }
-      }
-      wsLifecycle.labels('clean_page', 'destroy').inc();
-    })(),
+  const pageWsUrl = `ws://127.0.0.1:${chromePort}/devtools/page/${targetId}`;
+  return openScopedWs('clean_page', pageWsUrl, {
+    startId: 500_000,
+    defaultTimeout: CLEAN_WS_CMD_TIMEOUT_MS,
+    openTimeoutMs: CLEAN_WS_OPEN_TIMEOUT_MS,
+  }).pipe(
+    Effect.mapError(() => new CdpSessionGone({
+      sessionId: CdpSessionId.makeUnsafe(''),
+      method: 'openCleanPageWs',
+    })),
   );
 }

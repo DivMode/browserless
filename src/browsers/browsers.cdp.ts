@@ -599,6 +599,10 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
           this.cloudflareSolver.setCreateIsolatedConnection(
             () => this.cdpProxy!.createIsolatedConnection(),
           );
+          // Scoped factory (structurally leak-proof) — preferred path
+          this.cloudflareSolver.setCreateIsolatedConnectionScoped(
+            () => this.cdpProxy!.createIsolatedConnectionScoped(),
+          );
         }
       };
 

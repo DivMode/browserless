@@ -15,9 +15,12 @@ import { CdpSessionGone } from './cf/cf-errors.js';
 import { solveDetection as solveDetectionEffect } from './cf/cloudflare-solver.effect.js';
 import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
 import { OtelLayer } from '../otel-layer.js';
+import { WS_SCOPE_BUDGET } from './cf/cf-ws-resource.js';
 
-import { wsLifecycle } from '../prom-metrics.js';
+import { wsLifecycle, wsScopeBudgetExceeded } from '../prom-metrics.js';
 import type { CdpConnection } from '../shared/cdp-rpc.js';
+
+let _solveIdCounter = 0;
 import type WebSocket from 'ws';
 
 /** Return type of CDPProxy.createIsolatedConnection(). */
@@ -27,6 +30,9 @@ type IsolatedConnection = {
   waitForOpen: Effect.Effect<void, Error>;
   cleanup: () => void;
 };
+
+/** Return type of CDPProxy.createIsolatedConnectionScoped(). */
+type IsolatedConnectionScoped = Effect.Effect<CdpConnection, Error, Scope.Scope>;
 
 /** Service union type — the R channel of the Effect solver runtime. */
 type SolverR =
@@ -56,9 +62,19 @@ export class CloudflareSolver {
   private sendCommand: SendCommand;
   private sendViaProxy: SendCommand | null = null;
   private createIsolatedConn: (() => IsolatedConnection) | null = null;
+  private createIsolatedConnScoped: (() => IsolatedConnectionScoped) | null = null;
   private _setRealEmit: (fn: EmitClientEvent) => void;
-  /** FiberMap for detection loop fibers — created inside the Layer scope. */
-  private _detectionFiberMap: FiberMap.FiberMap<TargetId> | null = null;
+
+  // ── Eager scope + scope-bound FiberMap (CDPProxy pattern) ──────────
+  // Never null, never late-initialized. Scope.close() drains all fibers
+  // atomically — no manual FiberMap.clear() needed before disposeEffect.
+  private readonly solverScope = Scope.makeUnsafe();
+  private readonly detectionFibers = Effect.runSync(
+    FiberMap.make<TargetId>().pipe(
+      Effect.provideService(Scope.Scope, this.solverScope),
+    ),
+  );
+
   private runtime: ManagedRuntime.ManagedRuntime<SolverR, never>;
 
   constructor(sendCommand: SendCommand, injectMarker: InjectMarker, chromePort?: string, sessionId?: string) {
@@ -77,6 +93,15 @@ export class CloudflareSolver {
     this.detector = new CloudflareDetector(
       this.events, this.stateTracker, this.strategies, sessionId ?? '',
     );
+
+    // Register upfront finalizer — stateTracker cleanup runs when solverScope closes.
+    // Same pattern as CDPProxy: register finalizer even before any work begins.
+    Effect.runSync(Scope.addFinalizer(this.solverScope,
+      Effect.fn('cf.solver.scope.finalizer')({ self: this }, function*() {
+        console.error(JSON.stringify({ message: 'cf.solver.scope.finalizer' }));
+        yield* this.stateTracker.destroy();
+      })(),
+    ));
 
     // Build the Effect runtime with service layers
     this.runtime = ManagedRuntime.make(this.buildLayer());
@@ -172,35 +197,80 @@ export class CloudflareSolver {
 
       return SolveDispatcher.of({
         dispatch: (active) => {
-          if (!self.createIsolatedConn) {
-            return provideServices(active, originalSender);
+          // Prefer scoped connection factory (structurally leak-proof).
+          // Fall back to legacy createIsolatedConn for backward compat,
+          // then to direct sender if no isolated connection is available.
+          if (self.createIsolatedConnScoped) {
+            const solveId = ++_solveIdCounter;
+            const tid = active.pageTargetId.slice(0, 8);
+            return self.createIsolatedConnScoped().pipe(
+              Effect.flatMap((isolated) => provideServices(active, CdpSender.of({
+                send: originalSender.send,
+                sendViaProxy: (method, params, sessionId, timeoutMs) =>
+                  isolated.send(method, params, sessionId, timeoutMs),
+                sendViaBrowser: originalSender.sendViaProxy,
+              }))),
+              Effect.scoped,
+              // Catch WS open errors — connection refused, handshake timeout, etc.
+              Effect.catch((err: unknown) => {
+                console.error(JSON.stringify({ message: 'ws.debug.solver_isolated.error', solveId, tid, error: String(err) }));
+                return Effect.succeed('aborted' as const);
+              }),
+              // Structural kill switch: even if future code introduces blocking
+              // inside the scoped region, the budget timeout kills the scope.
+              // Prevents Bug #1 (blocking inside scoped region) structurally.
+              Effect.timeout(`${WS_SCOPE_BUDGET} millis`),
+              // Catch timeout error — budget exceeded returns 'aborted' + logs for Grafana
+              Effect.catch(() => {
+                wsScopeBudgetExceeded.labels('solver_isolated').inc();
+                console.error(JSON.stringify({
+                  message: 'ws.scope_budget_exceeded',
+                  label: 'solver_isolated',
+                  budget_ms: WS_SCOPE_BUDGET,
+                  solveId,
+                  tid,
+                }));
+                return Effect.succeed('aborted' as const);
+              }),
+              Effect.onInterrupt(() => Effect.sync(() => {
+                console.error(JSON.stringify({ message: 'ws.debug.solver_isolated.interrupted', solveId, tid }));
+              })),
+            );
           }
-          // Each solve gets its own isolated WS connection to Chrome.
-          // Override sendViaProxy → isolated WS for DOM/Runtime commands.
-          // send (WS #1) stays unchanged — activity loops, token polling
-          // remain on the direct page session WS.
-          // sendViaBrowser → CDPProxy browser WS (pre-warmed compositor for Input events).
-          return Effect.acquireRelease(
-            Effect.sync(() => {
-              wsLifecycle.labels('solver_isolated', 'create').inc();
-              return self.createIsolatedConn!();
-            }),
-            (c) => Effect.fn('ws.release.solver_isolated')(function*() {
-              c.cleanup();
-              wsLifecycle.labels('solver_isolated', 'destroy').inc();
-            })(),
-          ).pipe(
-            Effect.tap((isolated) => isolated.waitForOpen.pipe(
-              Effect.catch(() => Effect.succeed(undefined as void)),
-            )),
-            Effect.flatMap((isolated) => provideServices(active, CdpSender.of({
-              send: originalSender.send,
-              sendViaProxy: (method, params, sessionId, timeoutMs) =>
-                isolated.conn.send(method, params, sessionId, timeoutMs),
-              sendViaBrowser: originalSender.sendViaProxy,
-            }))),
-            Effect.scoped,
-          );
+
+          if (self.createIsolatedConn) {
+            // Legacy path — kept for backward compatibility during migration.
+            const solveId = ++_solveIdCounter;
+            const tid = active.pageTargetId.slice(0, 8);
+            return Effect.acquireRelease(
+              Effect.sync(() => {
+                wsLifecycle.labels('solver_isolated', 'create').inc();
+                console.error(JSON.stringify({ message: 'ws.debug.solver_isolated.acquire', solveId, tid }));
+                return self.createIsolatedConn!();
+              }),
+              (c) => Effect.fn('ws.release.solver_isolated')(function*() {
+                c.cleanup();
+                wsLifecycle.labels('solver_isolated', 'destroy').inc();
+                console.error(JSON.stringify({ message: 'ws.debug.solver_isolated.release', solveId, tid }));
+              })(),
+            ).pipe(
+              Effect.tap((isolated) => isolated.waitForOpen.pipe(
+                Effect.catch(() => Effect.succeed(undefined as void)),
+              )),
+              Effect.flatMap((isolated) => provideServices(active, CdpSender.of({
+                send: originalSender.send,
+                sendViaProxy: (method, params, sessionId, timeoutMs) =>
+                  isolated.conn.send(method, params, sessionId, timeoutMs),
+                sendViaBrowser: originalSender.sendViaProxy,
+              }))),
+              Effect.scoped,
+              Effect.onInterrupt(() => Effect.sync(() => {
+                console.error(JSON.stringify({ message: 'ws.debug.solver_isolated.interrupted', solveId, tid }));
+              })),
+            );
+          }
+
+          return provideServices(active, originalSender);
         },
       });
     }));
@@ -226,20 +296,9 @@ export class CloudflareSolver {
       maxAttempts: 3, attemptTimeout: 30000, recordingMarkers: true,
     }));
 
-    // Lifecycle layer — FiberMap creation + state tracker cleanup.
-    // ManagedRuntime.dispose() closes its scope, triggering finalizers.
-    const lifecycleLayer = Layer.effectDiscard(
-      Effect.acquireRelease(
-        Effect.gen(function*() {
-          self._detectionFiberMap = yield* FiberMap.make<TargetId>();
-        }),
-        () => Effect.fn('cf.solver.lifecycle.release')(function*() {
-          console.error(JSON.stringify({ message: 'cf.solver.lifecycle.release' }));
-          yield* stateTracker.destroy();
-          self._detectionFiberMap = null;
-        })(),
-      ),
-    );
+    // lifecycleLayer REMOVED — replaced by eager solverScope + scope-bound FiberMap.
+    // FiberMap is created in the constructor (never null), stateTracker cleanup
+    // is registered as a scope finalizer. Scope.close() drains everything atomically.
 
     // Wire dependencies:
     // - oopifCheckerLayer needs CdpSender
@@ -248,7 +307,7 @@ export class CloudflareSolver {
     // Base layers (no deps) are merged first, then dependent layers are provided.
     const baseLayers = Layer.mergeAll(
       cdpSenderLayer, solverEventsLayer,
-      detectionStarterLayer, solverConfigLayer, lifecycleLayer,
+      detectionStarterLayer, solverConfigLayer,
       OtelLayer,
     );
 
@@ -296,7 +355,6 @@ export class CloudflareSolver {
   }
 
   private startDetectionFiber(targetId: TargetId, cdpSessionId: CdpSessionId): void {
-    if (!this._detectionFiberMap) return;
     // FiberMap.run auto-interrupts existing fiber for same key.
     // The detection effect is wrapped in catchAllCause to prevent silent fiber
     // death — without this, defects (NPE in emitClientEvent, etc.) kill the fiber
@@ -324,13 +382,12 @@ export class CloudflareSolver {
       ),
     );
     this.runtime.runFork(
-      FiberMap.run(this._detectionFiberMap, targetId, guarded),
+      FiberMap.run(this.detectionFibers, targetId, guarded),
     );
   }
 
   private stopDetectionFiber(targetId: TargetId): void {
-    if (!this._detectionFiberMap) return;
-    this.runtime.runFork(FiberMap.remove(this._detectionFiberMap, targetId));
+    this.runtime.runFork(FiberMap.remove(this.detectionFibers, targetId));
   }
 
   setSendViaProxy(fn: SendCommand): void {
@@ -339,6 +396,10 @@ export class CloudflareSolver {
 
   setCreateIsolatedConnection(fn: () => IsolatedConnection): void {
     this.createIsolatedConn = fn;
+  }
+
+  setCreateIsolatedConnectionScoped(fn: () => IsolatedConnectionScoped): void {
+    this.createIsolatedConnScoped = fn;
   }
 
   enable(config?: CloudflareConfig): void {
@@ -399,18 +460,17 @@ export class CloudflareSolver {
     return Effect.fn('cf.solver.destroy')({ self: this }, function*() {
       console.error(JSON.stringify({ message: 'cf.solver.destroy.start' }));
 
-      // Gracefully drain all detection fibers BEFORE disposing the runtime.
-      // FiberMap.clear() → Fiber.interrupt() per fiber → awaits fiber exit
-      // including all acquireRelease finalizers (WS cleanup).
-      // Without this, disposeEffect races — Scope.close(scope, Exit.void)
-      // returns before fiber finalizers complete, leaking ~45% of WS connections.
-      if (this._detectionFiberMap) {
-        const fiberCount = yield* FiberMap.size(this._detectionFiberMap);
-        yield* Effect.tryPromise(
-          () => this.runtime.runPromise(FiberMap.clear(this._detectionFiberMap!)),
-        ).pipe(Effect.timeout('10 seconds'), Effect.ignore);
-        console.error(JSON.stringify({ message: 'cf.solver.destroy.drained', fibers: fiberCount }));
-      }
+      // Close the solver scope — this atomically:
+      // 1. Drains ALL detection fibers (FiberMap is scope-bound)
+      // 2. Runs stateTracker.destroy() (registered as scope finalizer)
+      // No manual FiberMap.clear() needed — scope close handles it.
+      // This prevents Bug #2 (disposeEffect race) structurally.
+      const fiberCount = yield* FiberMap.size(this.detectionFibers);
+      yield* Scope.close(this.solverScope, Exit.void).pipe(
+        Effect.timeout('10 seconds'),
+        Effect.ignore,
+      );
+      console.error(JSON.stringify({ message: 'cf.solver.destroy.drained', fibers: fiberCount }));
 
       yield* this.runtime.disposeEffect;
       console.error(JSON.stringify({ message: 'cf.solver.destroy.end' }));

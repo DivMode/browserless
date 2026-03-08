@@ -12,6 +12,7 @@ import { CdpSessionId, TargetId } from './shared/cloudflare-detection.js';
 import { BROWSER_WS_PING_INTERVAL, BROWSER_WS_PONG_TIMEOUT_MS } from './session/cf/cf-schedules.js';
 import { decodeCDPCommand, decodeCDPMessage, decodeAddReplayMarkerParams } from './shared/cdp-schemas.js';
 import { CdpConnection } from './shared/cdp-rpc.js';
+import { openScopedWs } from './session/cf/cf-ws-resource.js';
 
 /**
  * Replay metadata sent via CDP event.
@@ -89,8 +90,12 @@ export function isReplayCapable(browser: unknown): browser is ReplayCapableBrows
  * Timeout in milliseconds for onBeforeClose callback.
  * After this timeout, Browser.close is forwarded to the browser
  * regardless of whether onBeforeClose completed.
+ *
+ * Must be >= the replay flush timeout (60s in session-lifecycle-manager).
+ * GeoGuessr/Street View sessions produce 20-30MB of rrweb events;
+ * the previous 15s timeout killed the POST mid-flight.
  */
-const ON_BEFORE_CLOSE_TIMEOUT_MS = 15000;
+const ON_BEFORE_CLOSE_TIMEOUT_MS = 75000;
 
 export class CDPProxy {
   private clientWs: WebSocket | null = null;
@@ -584,6 +589,25 @@ export class CDPProxy {
     };
 
     return { conn, ws, waitForOpen, cleanup };
+  }
+
+  /**
+   * Create a scoped isolated WS connection using the centralized factory.
+   *
+   * Returns Effect<CdpConnection, Error, Scope.Scope> — callers use Effect.scoped
+   * or provide their own scope. Counter placement, cleanup, and acquireRelease
+   * are all handled by the factory.
+   *
+   * Preferred over createIsolatedConnection() for new code — the scoped version
+   * makes it structurally impossible to leak the WS connection.
+   *
+   * @deprecated Use this instead of createIsolatedConnection() for new code.
+   */
+  createIsolatedConnectionScoped(): Effect.Effect<CdpConnection, Error, Scope.Scope> {
+    return openScopedWs('solver_isolated', this.browserWsEndpoint, {
+      startId: 300_000,
+      defaultTimeout: 30_000,
+    });
   }
 
   /** Handle responses for proxy-injected commands (called from browser WS message handler) */

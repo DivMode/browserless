@@ -322,21 +322,96 @@ Socket count: **182** (frozen at idle). Timeline: 27 → 67 → 151 → 182 → 
 
 **Conclusion:** `FiberMap.clear` addresses fibers still running at destroy time. But the primary leak (~47%) happens DURING session lifetime — per-solve `Effect.scoped` release handlers don't fire for nearly half of all solves. This is a separate code path from destroy-time cleanup.
 
-### Next Steps (Path 2: per-solve leak)
+### Fix Attempt 2: Remove abortLatch.await from solveTurnstile (deployed 2026-03-08) — FIXED
 
-The per-solve leak is in `SolveDispatcher.dispatch` (`Effect.acquireRelease` + `Effect.scoped`) and `openCleanPageWsScoped`. The `Effect.scoped` release handlers fire for ~53% of connections but NOT for ~47%.
+**Root cause found:** `solveTurnstile` in `cloudflare-solver.effect.ts` was blocking indefinitely on `abortLatch.await` INSIDE the dispatch scope after the click race completed. The dispatch scope holds an `acquireRelease`'d `solver_isolated` WS. Blocking on `abortLatch.await` keeps that scope open for the ENTIRE session lifetime — leaking ~47% of WS connections (targets not re-detected in subsequent batches are never interrupted, so their WS persist until container restart).
 
-**Hypotheses:**
-1. **Fiber interruption mid-scope:** `FiberMap.run` auto-interrupts existing fiber for same key (re-detection of same page). If interruption lands after `acquireRelease` acquire but before `Effect.scoped` closes, the release handler is orphaned.
-2. **Effect.scoped + fiber interruption semantics:** Does `Effect.scoped` properly run release on fiber interruption? Needs Effect v4 source verification.
-3. **Missing `Effect.scoped` on some callers:** `openCleanPageWsScoped` returns `Scope.Scope` in R — callers must apply `Effect.scoped`. Any caller that forgets leaks.
+The hypotheses from Fix Attempt 1 were wrong — the issue was NOT fiber interruption semantics or missing `Effect.scoped`. The `Effect.acquireRelease` + `Effect.scoped` guarantee works perfectly. The problem was that `solveTurnstile` deliberately blocked after solving, waiting for the bridge push signal. This kept the dispatch scope open indefinitely.
 
-**Fix options:**
-1. **Ensure `disposeEffect` awaits all fiber finalizers** — `FiberMap.clear` addresses this (done)
-2. **Move WS cleanup out of Effect scope** — use a plain `Set<WebSocket>` tracker on the `CloudflareSolver` class, close all WS in `destroyEffect` explicitly (not relying on scope finalizers). Belt-and-suspenders.
-3. **Add explicit WS cleanup in `stopReplayEffect`** — after `solver.destroyEffect`, iterate any remaining open WS and force-terminate them
+**The fix:** Removed all `abortLatch.await` calls from `solveTurnstile`. The solver returns immediately after the click race. Detection lifecycle is managed independently by scope finalizers in `DetectionRegistry` — the solver does NOT need to wait for resolution.
 
-Option 2 is the most robust — it doesn't depend on Effect scope semantics at all. Track every isolated WS in a `Set`, and in `destroyEffect` force-terminate any that are still open.
+```typescript
+// BEFORE (leaked): After click race, blocked indefinitely
+if (raceResult._tag === 'Clicked') {
+  yield* active.abortLatch.await.pipe(Effect.ignore);  // ← BLOCKS FOREVER
+  return raceResult;
+}
+
+// AFTER (fixed): Return immediately, detection awaits push signals independently
+if (raceResult._tag === 'Clicked') {
+  return raceResult;  // dispatch scope closes → WS released
+}
+```
+
+**Files changed:**
+- `src/session/cf/cloudflare-solver.effect.ts` — removed 3 `abortLatch.await` calls (Clicked, OopifDead, NoClick paths)
+- `src/session/cf/cloudflare-solver.effect.test.ts` — updated 11 tests to match new immediate-return behavior
+
+**Tests:** `npx tsc --noEmit` clean, `npx vitest run` 212 passed (10 files, 6/6 CF sites).
+
+**Result: FULLY EFFECTIVE — per-solve leak eliminated.**
+
+Post-deploy Prometheus data across 5+ batches, 101 solver_isolated connections:
+
+| Type | Create | Destroy | Delta | Leak Rate |
+|------|--------|---------|-------|-----------|
+| `solver_isolated` | 101 | 101 | **0** | **0%** |
+| `proxy_isolated` | 101 | 101 | **0** | **0%** |
+| `clean_page` | 166 | 104 | 62 | counter gap* |
+| `page` | 51 | 50 | 1 | 1 active tab |
+| `proxy_browser` | 1 | 0 | 1 | 1 active session |
+
+Socket count: **13** during active session (3 session sockets + active tab/page), **3** at true idle. Stable across 10+ consecutive monitoring checks over ~1.5 hours. No growth.
+
+*`clean_page` delta 62: counter instrumentation gap, NOT a socket leak — see Fix Attempt 3 below.
+
+**Before vs After:**
+```
+Before fix: Sockets 118 → 160 → 197 → 256 → 295 → 334  (linear growth, leak)
+After fix:  Sockets  3 →  13 →  13 →  13 →  13 →   3  (batch spike → full drain)
+```
+
+**Extended monitoring:** Over 9+ hours and 9480 solver_isolated connections, delta held at 0 at idle. 21 sessions created, 20 fully torn down. Zero leaks.
+
+### Fix Attempt 3: clean_page counter instrumentation bug (deployed 2026-03-08) — FIXED
+
+**Problem:** `clean_page` delta grew linearly (62 → 92 → 145 → 1949 → 6089 → 7554) while socket count stayed flat at 13. Not a socket leak — a counter instrumentation bug.
+
+**Root cause:** In `cf-coords.ts`, `openCleanPageWsScoped` incremented `wsLifecycle.labels('clean_page', 'create')` immediately on `new WebSocket()` (before the `open` event). If the fiber was interrupted during the handshake or the WS failed to connect (timeout/error):
+1. `Effect.callback` cleanup ran → `ws.terminate()` → socket freed
+2. But `acquireRelease` acquire never completed → release handler never ran
+3. `destroy` counter never incremented → permanent counter gap
+
+~44% of clean_page WS constructions failed to open (page already navigated, target gone, etc.), creating a growing gap between create and destroy counters despite zero actual socket leaks.
+
+**The fix:** Moved `create` counter from before `Effect.callback` to after it. Now `create` only fires for successfully opened connections, and every opened connection is guaranteed to hit `destroy` in the release handler.
+
+```typescript
+// BEFORE (counter gap): create fires before open, destroy only fires on success
+const ws = new WebSocket(pageWsUrl);
+wsLifecycle.labels('clean_page', 'create').inc();  // ← fires even if WS fails to open
+yield* Effect.callback(/* wait for open */);
+
+// AFTER (fixed): create fires only after successful open
+const ws = new WebSocket(pageWsUrl);
+yield* Effect.callback(/* wait for open */);
+wsLifecycle.labels('clean_page', 'create').inc();  // ← only counts successful opens
+```
+
+**Files changed:**
+- `src/session/cf/cf-coords.ts` — moved `create` counter after `Effect.callback` completion
+
+**Post-deploy verification (first tick, counters reset):**
+
+| Type | Create | Destroy | Delta |
+|------|--------|---------|-------|
+| `solver_isolated` | 383 | 383 | **0** |
+| `proxy_isolated` | 383 | 383 | **0** |
+| `clean_page` | 412 | 412 | **0** |
+| `page` | 183 | 180 | 3 (active tabs) |
+| `proxy_browser` | 4 | 2 | 2 (active sessions) |
+
+All three WS types now track to delta 0 at idle. The counter gap is eliminated.
 
 ### Loki Queries for Monitoring
 
@@ -364,3 +439,60 @@ browserless_ws_lifecycle_total{action="create"} - ignoring(action) browserless_w
 # Socket count trend (ground truth)
 browserless_active_handles_by_type{type="Socket"}
 ```
+
+---
+
+## Lessons Learned
+
+### Why Effect v4 Didn't Prevent the Leaks
+
+Effect's `acquireRelease` + `scoped` guarantees are structurally sound — release ALWAYS fires when scope closes. The bugs were developer errors, not Effect bugs:
+
+| Bug | Why Effect Couldn't Prevent It |
+|-----|-------------------------------|
+| `solveTurnstile` blocking on `abortLatch.await` inside dispatch scope | Effect CAN'T release a resource you're still using. Blocking inside a scope = scope stays open. By design. |
+| `disposeEffect` racing fiber finalizers | `ManagedRuntime.disposeEffect` fires `Scope.close(scope, Exit.void)` — fire-and-forget interrupt. Fibers get interrupted but `disposeEffect` returns before they unwind. This is an Effect design choice. Need `FiberMap.clear` to explicitly await fiber exit. |
+| `clean_page` counter before `open` | Pure counter placement error. `acquireRelease` acquire failed (WS never opened), so release never ran, so `destroy` counter never fired. The WS itself was properly cleaned up by `Effect.callback` cleanup. |
+
+**Takeaway:** Effect v4 provides structural guarantees for resource cleanup, but those guarantees require the developer to:
+1. Not block indefinitely inside scoped regions
+2. Explicitly drain fibers before disposing runtimes (`FiberMap.clear` before `disposeEffect`)
+3. Place counters/metrics after acquire completes, not before
+
+### Why Traces Were Invisible for Lifecycle Events
+
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4318` is set in production. Effect's `OtlpTracer` layer is active. Normal `Effect.fn()` spans DO appear in Tempo — the solve path (detection → click → resolved) is fully traced.
+
+But lifecycle events critical for leak debugging are invisible in Tempo because they fall outside active span context:
+
+- **`acquireRelease` release during fiber interruption:** Release handler runs AFTER parent span closes. Span context is dead.
+- **`Effect.forkChild` activity loops:** Forked fibers don't inherit parent span context (Effect v4 design — isolation for concurrency safety).
+- **`FiberMap.clear` finalizer execution:** Fibers interrupted during `disposeEffect` — runtime teardown races span flush.
+- **Timeout-interrupted cleanup (15s > 12s > 8s cascade):** Nested `Effect.timeout` breaks scope propagation.
+
+This is why `console.error(JSON.stringify({...}))` logs to Loki are the ground truth for leak debugging — they fire regardless of span context, survive runtime disposal, and can be correlated by monotonic IDs (`solveId`, `cleanPageId`).
+
+**Rule:** For leak debugging, use Loki + Prometheus. Tempo traces show the happy path (solve timing), not the unhappy path (interrupted finalizers, orphaned scopes).
+
+### Investigation Timeline — What Took So Long
+
+The investigation spanned 3 days (2026-03-06 to 2026-03-08) and 3 fix attempts. Most time was spent on wrong hypotheses:
+
+| Phase | Time Spent | What Happened |
+|-------|-----------|---------------|
+| Part 1: Session registry leak (OOM) | ~4 hours | Found quickly via disk inspection. Watchdog missing `removeUserDataDir()`. |
+| Part 2: Watchdog timeout bug | ~1 hour | Quick: `TIMEOUT` constant vs per-session `ttl`. |
+| Part 3, Fix 1: `FiberMap.clear` hypothesis | ~6 hours | Wrong hypothesis: assumed `disposeEffect` fire-and-forget was the sole cause. Fixed destroy-time leak but not per-solve leak. |
+| Part 3, Fix 2: `abortLatch.await` root cause | ~4 hours | Correct hypothesis: `solveTurnstile` blocking inside dispatch scope. 47% leak rate → 0%. |
+| Part 3, Fix 3: Counter instrumentation | ~30 min | Quick: `create` counter before `open` event. |
+| Monitoring verification | ~9 hours | 9480 connections, 21 sessions, 0 leaks confirmed. |
+
+**Key lesson:** Fix 1 partially worked (destroy-time leak fixed) which made it harder to identify Fix 2 was needed. The ~47% per-solve leak rate was consistent and immediately identifiable via Prometheus deltas, but we initially attributed ALL leaks to the destroy-time race.
+
+### Debugging Methodology That Worked
+
+1. **Prometheus counter deltas at idle** — the definitive signal. Delta > 0 at idle = leak. Takes 10 seconds. Should always be the first check.
+2. **Socket count trend as corroboration** — confirms leak direction but doesn't prove absence (GC can partially clean).
+3. **Loki acquire/release correlation by monotonic ID** — pinpoints WHICH connections leaked. `solveId` without matching release = leaking code path.
+4. **Code path analysis** — trace the `Effect.scoped` / `acquireRelease` block, look for blocking operations inside the scope.
+5. **Continuous monitoring loop** — `/loop 10m` with automated detection. Don't just check once and assume healthy.
