@@ -91,6 +91,20 @@ export const isInterstitialType = (t: CloudflareType): t is InterstitialCFType =
 export const isEmbeddedType = (t: CloudflareType): t is EmbeddedCFType =>
   t === 'turnstile' || t === 'non_interactive' || t === 'invisible';
 
+/** Known CF interstitial page title prefixes (zero-injection detection signal).
+ *  Verified from production replays — 100% of Ahrefs CF interstitials use "Just a moment...".
+ *  Others included for coverage of non-Ahrefs CF deployments. */
+export const CF_INTERSTITIAL_TITLE_PREFIXES = [
+  'Just a moment',          // Dominant (verified in 4/4 Ahrefs replays)
+  'Attention Required',     // CF captcha/block pages
+  'One more step',          // Legacy CF challenge
+  'Checking your browser',  // Explicit browser check
+] as const;
+
+/** Returns true if the page title matches known CF interstitial patterns. */
+export const isCFInterstitialTitle = (title: string): boolean =>
+  CF_INTERSTITIAL_TITLE_PREFIXES.some(prefix => title.startsWith(prefix));
+
 export const CloudflareInfo = Schema.Struct({
   type: CloudflareType,
   url: Schema.String,

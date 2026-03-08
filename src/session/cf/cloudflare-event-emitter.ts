@@ -168,7 +168,7 @@ export interface ActiveDetection {
   /**
    * Resolution gateway — exactly-once emission for CF solve/fail outcomes.
    * Multiple concurrent fibers race to complete it via Deferred.succeed (idempotent).
-   * The single consumer (handleTurnstileDetection / triggerSolveFromUrl) awaits
+   * The single consumer (handleEmbeddedDetection / triggerSolveFromUrl) awaits
    * the result and performs the actual emission.
    * Always present — created at detection registration.
    */

@@ -5,7 +5,7 @@
  * single Deferred-based gateway. Any number of concurrent fibers can race to
  * complete the Resolution — Deferred.succeed is idempotent, so exactly one wins.
  *
- * The single consumer (handleTurnstileDetection / triggerSolveFromUrl) awaits
+ * The single consumer (handleEmbeddedDetection / triggerSolveFromUrl) awaits
  * `resolution.result` and performs the actual emission. No fiber can be
  * interrupted mid-emission because the emission isn't inside a raceFirst.
  */
