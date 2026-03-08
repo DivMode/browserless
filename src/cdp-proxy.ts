@@ -676,7 +676,11 @@ export class CDPProxy {
 
   /**
    * Close both WebSocket connections.
+   * Scope close is awaited so all acquireRelease finalizers (WS cleanup)
+   * complete before onClose fires. Stored as a promise for close() callers.
    */
+  private closePromise: Promise<void> | null = null;
+
   private handleClose(): void {
     if (this.isClosing) return;
     this.isClosing = true;
@@ -688,10 +692,10 @@ export class CDPProxy {
       `browserWs=${browserState === WebSocket.OPEN ? 'OPEN' : browserState}`
     );
 
-    // Single line: close scope → fibers interrupted + all WS cleaned up via finalizer
-    Effect.runFork(Scope.close(this.proxyScope, Exit.void));
-
-    this.onClose?.();
+    // Await scope close so all acquireRelease finalizers fire before onClose
+    this.closePromise = Effect.runPromise(Scope.close(this.proxyScope, Exit.void))
+      .catch(() => {})
+      .then(() => { this.onClose?.(); });
   }
 
   /**
@@ -699,6 +703,7 @@ export class CDPProxy {
    */
   async close(): Promise<void> {
     this.handleClose();
+    await this.closePromise;
   }
 
   /**

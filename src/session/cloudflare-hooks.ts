@@ -19,5 +19,6 @@ export interface CloudflareHooks {
   onBridgeEvent(cdpSessionId: CdpSessionId, event: unknown): Effect.Effect<void>;
   /** Awaited — ensures detection fiber is interrupted before target cleanup. */
   onTargetDestroyed(targetId: TargetId): Effect.Effect<void>;
-  destroy(): void;
+  /** Awaited — ensures ManagedRuntime disposal completes before session teardown. */
+  destroy(): Effect.Effect<void>;
 }

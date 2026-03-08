@@ -120,7 +120,7 @@ export class SessionCoordinator {
       onIframeNavigated: (tid, sid, url) => cloudflareSolver.onIframeNavigated(tid, sid, url),
       onBridgeEvent: (sid, event) => cloudflareSolver.onBridgeEvent(sid, event),
       onTargetDestroyed: (tid) => cloudflareSolver.stopTargetDetection(tid),
-      destroy: () => cloudflareSolver.destroy(),
+      destroy: () => cloudflareSolver.destroyEffect,
     };
 
     const cdpSession = new CdpSession({
@@ -192,11 +192,12 @@ export class SessionCoordinator {
       // No local metadata to return — replay data is on the external replay server
       return null;
     })().pipe(
-      // Guaranteed Map cleanup — runs even if Effect times out or fails
-      Effect.ensuring(Effect.sync(() => {
+      // Guaranteed Map cleanup — runs even if Effect times out or fails.
+      // solver.destroy() is awaited to ensure ManagedRuntime disposal completes.
+      Effect.ensuring(Effect.gen(function*() {
         coordinator.cdpSessions.delete(sessionId);
         const solver = coordinator.cloudflareSolvers.get(sessionId);
-        if (solver) solver.destroy();
+        if (solver) yield* solver.destroyEffect;
         coordinator.cloudflareSolvers.delete(sessionId);
       })),
     );
@@ -218,7 +219,7 @@ export class SessionCoordinator {
     }
     this.cdpSessions.delete(sessionId);
     const solver = this.cloudflareSolvers.get(sessionId);
-    if (solver) solver.destroy();
+    if (solver) await Effect.runPromise(solver.destroyEffect);
     this.cloudflareSolvers.delete(sessionId);
   }
 
@@ -250,7 +251,7 @@ export class SessionCoordinator {
         yield* coordinator.stopReplayEffect(sessionId).pipe(Effect.ignore);
       }
 
-      coordinator.videoEncoder.dispose();
+      yield* coordinator.videoEncoder.disposeEffect;
       coordinator.log.info('Session coordinator shutdown complete');
     })();
   }

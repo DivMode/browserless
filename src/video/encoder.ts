@@ -100,8 +100,8 @@ export class VideoEncoder {
    * Graceful shutdown — ends queue, interrupts consumer fiber (kills any running ffmpeg).
    * ManagedRuntime.dispose() interrupts the consumer → interrupts ffmpeg callback → kills proc.
    */
-  dispose(): void {
-    this.runtime.dispose();
+  get disposeEffect(): Effect.Effect<void> {
+    return this.runtime.disposeEffect;
   }
 
   /**

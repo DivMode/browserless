@@ -628,8 +628,9 @@ export class CdpSession {
       session.unregisterGauges?.();
       session.log.info(`CdpSession gauges unregistered (had=${hadGauges}) for session ${session.sessionId}`);
 
-      // 1. Clean up CF solver (sync — triggers ManagedRuntime.dispose on solver)
-      session.cloudflareHooks.destroy();
+      // 1. Clean up CF solver (awaited — ensures ManagedRuntime disposal + acquireRelease
+      //    release handlers complete before session teardown closes browser WS)
+      yield* session.cloudflareHooks.destroy();
 
       // 2. Finalize all tabs — flush page buffers into the Queue (3s timeout per target)
       if (source === 'cleanup') {

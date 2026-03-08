@@ -393,15 +393,8 @@ export class CloudflareSolver {
       .catch((e) => console.error(JSON.stringify({ message: 'CF runtime defect', method: 'emitUnresolvedDetections', error: String(e) })));
   }
 
-  /**
-   * Destroy — disposes ManagedRuntime which:
-   *   1. Interrupts all running fibers (detection loops, solve attempts)
-   *   2. Runs Layer finalizers (FiberMap cleanup, state tracker destroy)
-   * Disposed runtime rejects new runPromise calls — no need to null it.
-   */
-  destroy(): void {
-    this.runtime.dispose().catch((e) => {
-      console.error(JSON.stringify({ message: 'CloudflareSolver runtime dispose error', error: String(e) }));
-    });
+  /** Pure Effect disposal — callers yield* this directly. No boundary crossing. */
+  get destroyEffect(): Effect.Effect<void> {
+    return this.runtime.disposeEffect;
   }
 }
