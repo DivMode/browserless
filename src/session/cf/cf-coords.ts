@@ -8,6 +8,7 @@ import { Effect, Scope } from 'effect';
 import type { TargetId } from '../../shared/cloudflare-detection.js';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
 import { CdpConnection } from '../../shared/cdp-rpc.js';
+import { wsLifecycle } from '../../prom-metrics.js';
 import { CdpSessionGone } from './cf-errors.js';
 import { CLEAN_WS_OPEN_TIMEOUT_MS, CLEAN_WS_CMD_TIMEOUT_MS } from './cf-schedules.js';
 
@@ -59,6 +60,7 @@ export function openCleanPageWsScoped(
       const { default: WebSocket } = yield* Effect.promise(() => import('ws'));
       const pageWsUrl = `ws://127.0.0.1:${chromePort}/devtools/page/${targetId}`;
       const ws = new WebSocket(pageWsUrl);
+      wsLifecycle.labels('clean_page', 'create').inc();
 
       yield* Effect.callback<void, Error>((resume) => {
         const timer = setTimeout(() => { ws.terminate(); resume(Effect.fail(new Error('Clean page WS timeout'))); }, CLEAN_WS_OPEN_TIMEOUT_MS);
@@ -83,6 +85,7 @@ export function openCleanPageWsScoped(
       if (ws) {
         try { ws.removeAllListeners(); ws.terminate(); } catch { /* already closed */ }
       }
+      wsLifecycle.labels('clean_page', 'destroy').inc();
     }),
   );
 }

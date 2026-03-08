@@ -1,5 +1,6 @@
 import type { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 import type { StopTabRecordingResult } from './cdp-session-types.js';
+import { wsLifecycle } from '../prom-metrics.js';
 
 /** All state for a single tracked CDP page target. */
 export class TargetState {
@@ -60,6 +61,7 @@ export class TargetRegistry {
     if (state.pageWebSocket) {
       try { state.pageWebSocket.removeAllListeners(); state.pageWebSocket.terminate(); } catch {}
       state.pageWebSocket = null;
+      wsLifecycle.labels('page_registry', 'destroy').inc();
     }
     // Clean iframe refs that reference this target's cdpSessionId
     this.iframeToCdpSession.delete(state.cdpSessionId);

@@ -118,6 +118,12 @@ function getOrCreateCounter(name: string, help: string): Counter {
   return new Counter({ name, help });
 }
 
+function getOrCreateLabeledCounter(name: string, help: string, labelNames: string[]): Counter {
+  const existing = register.getSingleMetric(name);
+  if (existing) return existing as Counter;
+  return new Counter({ name, help, labelNames });
+}
+
 function getOrCreateHistogram(name: string, help: string, buckets: number[]): Histogram {
   const existing = register.getSingleMetric(name);
   if (existing) return existing as Histogram;
@@ -161,6 +167,34 @@ export const replayEstimatedBytes = getOrCreateCollectGauge(
 export const replayOverflowsTotal = getOrCreateCounter(
   'browserless_replay_overflows_total',
   'Total replay overflow events (replay exceeded max size and stopped merged capture)',
+);
+
+// Counter: tracks every WS create/destroy per type — rate(create) - rate(destroy) = leak rate
+export const wsLifecycle = getOrCreateLabeledCounter(
+  'browserless_ws_lifecycle_total',
+  'WebSocket create/destroy events by type',
+  ['type', 'action'],
+);
+
+// Gauge: alive vs destroyed socket handles still in process._getActiveHandles()
+export const socketStateDetails = getOrCreateLabeledCollectGauge(
+  'browserless_socket_state',
+  'Socket handle states (alive/destroyed/half-open)',
+  ['state'],
+  function (this: Gauge) {
+    this.reset();
+    let alive = 0, destroyed = 0, halfOpen = 0;
+    for (const h of (process as any)._getActiveHandles() as any[]) {
+      if (h?.constructor?.name === 'Socket') {
+        if (h.destroyed) destroyed++;
+        else if (!h.remoteAddress) halfOpen++;
+        else alive++;
+      }
+    }
+    this.labels('alive').set(alive);
+    this.labels('destroyed').set(destroyed);
+    this.labels('half_open').set(halfOpen);
+  },
 );
 
 export const handlesByType = getOrCreateLabeledCollectGauge(

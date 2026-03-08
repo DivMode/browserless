@@ -19,7 +19,7 @@ import { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 import { decodeCDPMessage, decodeRrwebEventBatch } from '../shared/cdp-schemas.js';
 import { CdpConnection } from '../shared/cdp-rpc.js';
 import { CdpSessionGone as CdpSessionGoneError, CdpTimeout as CdpTimeoutError } from './cf/cf-errors.js';
-import { registerSessionState, tabDuration, replayEventsTotal } from '../prom-metrics.js';
+import { registerSessionState, tabDuration, replayEventsTotal, wsLifecycle } from '../prom-metrics.js';
 import { TargetRegistry } from './target-state.js';
 import { SessionId } from '../shared/replay-schemas.js';
 import { ReplayStoreError } from '../shared/replay-schemas.js';
@@ -230,6 +230,7 @@ export class CdpSession {
 
     const ws = new this.WebSocket(this.wsEndpoint);
     this.ws = ws;
+    wsLifecycle.labels('session_browser', 'create').inc();
 
     // CRITICAL: Attach error handler synchronously before any async work
     ws.on('error', (err: Error) => {
@@ -257,6 +258,7 @@ export class CdpSession {
       this.ws?.removeAllListeners();
       this.ws?.terminate();
       this.ws = null;
+      wsLifecycle.labels('session_browser', 'destroy').inc();
     })));
 
     // Wire up WS message handler
@@ -511,6 +513,7 @@ export class CdpSession {
       const pageWs = yield* Effect.acquireRelease(
         Effect.gen(function*() {
           const pageWs = new WebSocket(pageWsUrl);
+          wsLifecycle.labels('page', 'create').inc();
 
           pageWs.on('message', (data: Buffer) => {
             try {
@@ -557,6 +560,7 @@ export class CdpSession {
           conn?.dispose();
           pageWs.removeAllListeners();
           pageWs.terminate();
+          wsLifecycle.labels('page', 'destroy').inc();
         }),
       );
 
