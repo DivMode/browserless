@@ -169,6 +169,16 @@ export class CloudflareSolveStrategies {
 
   constructor(private chromePort?: string) {}
 
+  /** Look up a page target's title from the cached Target.getTargets response. */
+  getPageInfo(targetId: string): { title: string; url: string } | null {
+    if (!this.targetCache) return null;
+    const target = this.targetCache.targets.find(
+      (t: any) => t.type === 'page' && t.targetId === targetId,
+    );
+    if (!target) return null;
+    return { title: target.title ?? '', url: target.url ?? '' };
+  }
+
   // ── CDP-based Shadow DOM Discovery + Trusted Click ──────────────────
 
   /**

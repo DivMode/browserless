@@ -1,7 +1,7 @@
-import { Cause, Effect, Latch } from 'effect';
+import { Cause, Data, Effect, Latch } from 'effect';
 import { Logger } from '@browserless.io/browserless';
 import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, CloudflareType, EmbeddedInfo, InterstitialCFType } from '../../shared/cloudflare-detection.js';
-import { isInterstitialType } from '../../shared/cloudflare-detection.js';
+import { isInterstitialType, isCFInterstitialTitle } from '../../shared/cloudflare-detection.js';
 import { DETECTION_POLL_DELAY, INTERSTITIAL_RESOLUTION_TIMEOUT, MAX_RECHALLENGES, RECHALLENGE_DELAY_MS } from './cf-schedules.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
 import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection, CFEvents } from './cloudflare-event-emitter.js';
@@ -35,6 +35,54 @@ export function filterOwnedTargets(
     const owner = iframeToPage.get(t.targetId as TargetId);
     return !owner || owner === pageTargetId;
   });
+}
+
+/**
+ * Classification result for OOPIF detections.
+ * Forces exhaustive matching — adding a variant is a compile error
+ * until all dispatch sites handle it.
+ */
+export type ClassifiedOOPIF = Data.TaggedEnum<{
+  /** Genuine embedded Turnstile — safe to inject bridge via Runtime.evaluate. */
+  EmbeddedTurnstile: {
+    readonly detection: CFDetected;
+    readonly meta: TurnstileOOPIFMeta | undefined;
+  };
+  /** CF interstitial served inline — Runtime.evaluate FORBIDDEN. */
+  InlineInterstitial: {
+    readonly pageUrl: string;
+    readonly pageTitle: string;
+    readonly oopifUrl: string | undefined;
+    readonly meta: TurnstileOOPIFMeta | undefined;
+  };
+}>;
+export const ClassifiedOOPIF = Data.taggedEnum<ClassifiedOOPIF>();
+
+/**
+ * Classify an OOPIF detection using all available signals.
+ * Pure function — no side effects, no CDP calls, fully testable.
+ *
+ * Null pageInfo defaults to EmbeddedTurnstile (safe fallback — false negative
+ * would skip bridge injection entirely → guaranteed no_resolution, which is worse
+ * than false positive which gets caught by existing oopif_dead path).
+ */
+export function classifyOOPIFDetection(
+  detection: CFDetected,
+  pageInfo: { title: string; url: string } | null,
+): ClassifiedOOPIF {
+  const firstTarget = detection.targets[0];
+  const meta: TurnstileOOPIFMeta | undefined = firstTarget?.meta;
+
+  if (pageInfo && isCFInterstitialTitle(pageInfo.title)) {
+    return ClassifiedOOPIF.InlineInterstitial({
+      pageUrl: pageInfo.url,
+      pageTitle: pageInfo.title,
+      oopifUrl: firstTarget?.url,
+      meta,
+    });
+  }
+
+  return ClassifiedOOPIF.EmbeddedTurnstile({ detection, meta });
 }
 
 /**
@@ -584,9 +632,29 @@ export class CloudflareDetector {
           }
 
           const filteredDetection = { ...detection, targets: ownedTargets };
-          yield* self.handleTurnstileDetection(targetId, cdpSessionId, filteredDetection, startTime);
-          // After solve completes (success or failure), mark these CF OOPIFs as handled
-          // so future detection polls on this session won't re-detect the stale targets
+
+          // Classify using all signals BEFORE dispatching to handler
+          const pageInfo = self.strategies.getPageInfo(targetId as string);
+          const classified = classifyOOPIFDetection(filteredDetection, pageInfo);
+
+          switch (classified._tag) {
+            case 'EmbeddedTurnstile':
+              yield* self.handleEmbeddedDetection(
+                targetId, cdpSessionId, classified.detection, classified.meta, startTime,
+              );
+              break;
+            case 'InlineInterstitial':
+              self.events.marker(targetId, 'cf.inline_interstitial_detected', {
+                title: classified.pageTitle.substring(0, 50),
+                page_url: classified.pageUrl.substring(0, 100),
+                oopif_url: classified.oopifUrl?.substring(0, 100),
+                sitekey: classified.meta?.sitekey ?? null,
+              });
+              yield* self.triggerSolveFromUrlEffect(targetId, cdpSessionId, classified.pageUrl, 'managed');
+              break;
+          }
+
+          // Common cleanup
           for (const t of filteredDetection.targets) {
             self.state.solvedCFTargetIds.add(t.targetId);
           }
@@ -599,17 +667,20 @@ export class CloudflareDetector {
   }
 
   /**
-   * Handle a positive Turnstile detection — create ActiveDetection, emit events, start solve.
+   * Handle a verified embedded Turnstile detection — create ActiveDetection, emit events, start solve.
+   * Only receives EmbeddedTurnstile classifications — inline interstitials are dispatched
+   * to triggerSolveFromUrlEffect before this method is reached.
    * Returns Effect<void>.
    */
-  private handleTurnstileDetection(
+  private handleEmbeddedDetection(
     targetId: TargetId,
     cdpSessionId: CdpSessionId,
     detection: CFDetected,
+    meta: TurnstileOOPIFMeta | undefined,
     startTime: number,
   ): Effect.Effect<void, never, DetectorR> {
     const self = this;
-    return Effect.fn('cf.handleTurnstileDetection')(function*() {
+    return Effect.fn('cf.handleEmbeddedDetection')(function*() {
       yield* Effect.annotateCurrentSpan({
         'cf.target_id': targetId,
         'cf.type': 'turnstile',
@@ -618,9 +689,9 @@ export class CloudflareDetector {
       const rechallengeCount = self.state.pendingRechallengeCount.get(targetId) || 0;
       self.state.pendingRechallengeCount.delete(targetId);
 
-      // CDP detection is always turnstile — interstitials are caught by URL pattern
+      // Classification already verified this is a genuine embedded Turnstile.
+      // No runtime title check needed — classifyOOPIFDetection handles it.
       const firstTarget = detection.targets[0];
-      const meta: TurnstileOOPIFMeta | undefined = firstTarget?.meta;
       const info: EmbeddedInfo = {
         type: 'turnstile', url: firstTarget?.url ?? '', detectionMethod: 'cdp_dom_walk',
         iframeUrl: firstTarget?.url,

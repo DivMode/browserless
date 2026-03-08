@@ -6,8 +6,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { TargetId } from '../../shared/cloudflare-detection.js';
-import { filterOwnedTargets } from './cloudflare-detector.js';
-import type { CFTargetMatch } from './cloudflare-solve-strategies.js';
+import { filterOwnedTargets, classifyOOPIFDetection } from './cloudflare-detector.js';
+import type { CFTargetMatch, CFDetected } from './cloudflare-solve-strategies.js';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Helpers
@@ -82,5 +82,82 @@ describe('filterOwnedTargets', () => {
 
     const result = filterOwnedTargets([t1, t2], pageA, map);
     expect(result).toEqual([]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// classifyOOPIFDetection
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('classifyOOPIFDetection', () => {
+  const makeDetection = (): CFDetected => ({
+    _tag: 'detected',
+    targets: [{
+      targetId: 'oopif-1',
+      url: 'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2/av0/rcv0/0xTestKey',
+      type: 'iframe',
+      meta: { sitekey: '0xTestKey', mode: 'normal', theme: null, appearance: null },
+    }],
+  });
+
+  it('returns EmbeddedTurnstile when pageInfo is null (cache miss)', () => {
+    const result = classifyOOPIFDetection(makeDetection(), null);
+    expect(result._tag).toBe('EmbeddedTurnstile');
+  });
+
+  it('returns EmbeddedTurnstile when page title is normal', () => {
+    const result = classifyOOPIFDetection(makeDetection(), {
+      title: 'Ahrefs - SEO Tools', url: 'https://ahrefs.com',
+    });
+    expect(result._tag).toBe('EmbeddedTurnstile');
+  });
+
+  it('returns InlineInterstitial for "Just a moment..." title', () => {
+    const result = classifyOOPIFDetection(makeDetection(), {
+      title: 'Just a moment...', url: 'https://oyvana.com/',
+    });
+    expect(result._tag).toBe('InlineInterstitial');
+    if (result._tag === 'InlineInterstitial') {
+      expect(result.pageUrl).toBe('https://oyvana.com/');
+      expect(result.pageTitle).toBe('Just a moment...');
+    }
+  });
+
+  it('returns InlineInterstitial for "Attention Required" title', () => {
+    const result = classifyOOPIFDetection(makeDetection(), {
+      title: 'Attention Required! | Cloudflare', url: 'https://example.com',
+    });
+    expect(result._tag).toBe('InlineInterstitial');
+  });
+
+  it('returns EmbeddedTurnstile for "Verifying" (Ahrefs loading state)', () => {
+    const result = classifyOOPIFDetection(makeDetection(), {
+      title: 'Verifying', url: 'https://oyvana.com/',
+    });
+    expect(result._tag).toBe('EmbeddedTurnstile');
+  });
+
+  it('preserves detection object in EmbeddedTurnstile variant', () => {
+    const detection = makeDetection();
+    const result = classifyOOPIFDetection(detection, { title: 'Normal', url: 'https://x.com' });
+    if (result._tag === 'EmbeddedTurnstile') {
+      expect(result.detection).toBe(detection);
+      expect(result.meta?.sitekey).toBe('0xTestKey');
+    }
+  });
+
+  it('preserves OOPIF metadata in InlineInterstitial variant', () => {
+    const result = classifyOOPIFDetection(makeDetection(), {
+      title: 'Just a moment...', url: 'https://x.com',
+    });
+    if (result._tag === 'InlineInterstitial') {
+      expect(result.meta?.sitekey).toBe('0xTestKey');
+      expect(result.oopifUrl).toContain('challenges.cloudflare.com');
+    }
+  });
+
+  it('returns EmbeddedTurnstile for empty page title', () => {
+    const result = classifyOOPIFDetection(makeDetection(), { title: '', url: 'https://x.com' });
+    expect(result._tag).toBe('EmbeddedTurnstile');
   });
 });

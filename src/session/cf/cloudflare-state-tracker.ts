@@ -93,7 +93,7 @@ export class CloudflareStateTracker {
    * line ~193 adds to solvedPages, then the detection loop guard at line ~250
    * blocks the embedded Turnstile detection from starting.
    *
-   * Set in: handleTurnstileDetection (Resolution consumer), onPageNavigatedEffect
+   * Set in: handleEmbeddedDetection (Resolution consumer), onPageNavigatedEffect
    *         (turnstile branch only — NOT interstitial branch).
    * Checked in: detectTurnstileWidgetEffect (entry + per-iteration),
    *             onPageNavigatedEffect (before starting detection loop).
