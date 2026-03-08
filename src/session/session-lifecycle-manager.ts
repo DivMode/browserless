@@ -69,6 +69,7 @@ export class SessionLifecycleManager {
     })();
 
     return Effect.fn('session.destroy')(function*() {
+      console.error(JSON.stringify({ message: 'session.destroy.start', session_id: session.id }));
       yield* Effect.annotateCurrentSpan({ 'session.id': session.id });
 
       // Step 1: Registry removal (immediate — prevents stale /sessions)
@@ -93,9 +94,15 @@ export class SessionLifecycleManager {
       // Step 5: Data dir cleanup — GUARANTEED by Effect.ensuring
       // Runs even if steps 1-4 throw, timeout, or get interrupted
       Effect.ensuring(
-        session.isTempDataDir
-          ? Effect.tryPromise(() => lifecycle.removeUserDataDir(session.userDataDir)).pipe(Effect.ignore)
-          : Effect.void,
+        Effect.sync(() => {
+          console.error(JSON.stringify({ message: 'session.destroy.end', session_id: session.id }));
+        }).pipe(
+          Effect.andThen(
+            session.isTempDataDir
+              ? Effect.tryPromise(() => lifecycle.removeUserDataDir(session.userDataDir)).pipe(Effect.ignore)
+              : Effect.void,
+          ),
+        ),
       ),
     );
   }
@@ -116,7 +123,10 @@ export class SessionLifecycleManager {
         this.registry.register(browser, session);
         return browser;
       }),
-      () => this.destroySession(browser, session).pipe(Effect.ignore),
+      () => {
+        console.error(JSON.stringify({ message: 'session.acquireRelease.release', session_id: session.id }));
+        return this.destroySession(browser, session).pipe(Effect.ignore);
+      },
     );
   }
 
@@ -158,6 +168,15 @@ export class SessionLifecycleManager {
       this.log.debug(`Deleting prior keep-until timer for "${session.id}"`);
       Effect.runFork(Fiber.interrupt(priorFiber));
     }
+
+    console.error(JSON.stringify({
+      message: 'session.close.decision',
+      session_id: session.id,
+      keep_open: keepOpen,
+      connected,
+      has_keep_until: hasKeepUntil,
+      force,
+    }));
 
     this.log.debug(
       `close() check: session=${session.id} numbConnected=${session.numbConnected} keepUntil=${keepUntil} keepOpen=${keepOpen} force=${force}`,
