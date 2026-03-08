@@ -185,10 +185,10 @@ export class CloudflareSolver {
               wsLifecycle.labels('solver_isolated', 'create').inc();
               return self.createIsolatedConn!();
             }),
-            (c) => Effect.sync(() => {
+            (c) => Effect.fn('ws.release.solver_isolated')(function*() {
               c.cleanup();
               wsLifecycle.labels('solver_isolated', 'destroy').inc();
-            }),
+            })(),
           ).pipe(
             Effect.tap((isolated) => isolated.waitForOpen.pipe(
               Effect.catch(() => Effect.succeed(undefined as void)),
@@ -233,10 +233,10 @@ export class CloudflareSolver {
         Effect.gen(function*() {
           self._detectionFiberMap = yield* FiberMap.make<TargetId>();
         }),
-        () => Effect.gen(function*() {
+        () => Effect.fn('cf.solver.lifecycle.release')(function*() {
           yield* stateTracker.destroy();
           self._detectionFiberMap = null;
-        }),
+        })(),
       ),
     );
 
@@ -395,6 +395,8 @@ export class CloudflareSolver {
 
   /** Pure Effect disposal — callers yield* this directly. No boundary crossing. */
   get destroyEffect(): Effect.Effect<void> {
-    return this.runtime.disposeEffect;
+    return Effect.fn('cf.solver.destroy')({ self: this }, function*() {
+      yield* this.runtime.disposeEffect;
+    })();
   }
 }

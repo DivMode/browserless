@@ -78,7 +78,7 @@ export function openCleanPageWsScoped(
 
       return conn;
     }).pipe(Effect.mapError(() => new CdpSessionGone({ sessionId: CdpSessionId.makeUnsafe(''), method: 'openCleanPageWs' }))),
-    (conn) => Effect.sync(() => {
+    (conn) => Effect.fn('ws.release.clean_page')(function*() {
       conn.drainPending('cleanWs scope close');
       conn.dispose();
       const ws = (conn as any).ws;
@@ -86,6 +86,6 @@ export function openCleanPageWsScoped(
         try { ws.removeAllListeners(); ws.terminate(); } catch { /* already closed */ }
       }
       wsLifecycle.labels('clean_page', 'destroy').inc();
-    }),
+    })(),
   );
 }
