@@ -1,7 +1,7 @@
 import { Data, Effect } from 'effect';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
-import type { TargetId } from '../../shared/cloudflare-detection.js';
 import type { ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
+import type { CdpConnection } from '../../shared/cdp-rpc.js';
 
 /** Effect-returning CDP sender — eliminates the Promise bridge. */
 type EffectSend = (
@@ -38,7 +38,7 @@ import { TARGET_GET_TIMEOUT_MS } from './cf-schedules.js';
 // Extracted modules
 import { phase2OOPIFResolution } from './cf-phase-oopif.js';
 import { phase3CheckboxFind, getAttr } from './cf-phase-checkbox.js';
-import { getIframePageCoords, openCleanPageWsScoped } from './cf-coords.js';
+import { openCleanPageWsScoped } from './cf-coords.js';
 
 /** Parsed metadata from a CF Turnstile OOPIF URL. */
 export interface TurnstileOOPIFMeta {
@@ -286,32 +286,35 @@ export class CloudflareSolveStrategies {
       //   Phase 4: Click (OOPIF session via send)
       // ──────────────────────────────────────────────────────────────────
 
-      // ── Phase 1: Page-side DOM traversal (CLEAN page WS) ──────────────
-      //
-      // WHY A CLEAN WS IS CRITICAL:
-      // CdpSession's WS has accumulated V8 state from recording setup:
-      //   - Page.addScriptToEvaluateOnNewDocument (rrweb injection)
-      //   - Runtime.addBinding (__csrfp, __perf)
-      // When ANY command — even safe ones like Runtime.callFunctionOn —
-      // executes through this tainted WS, CF's WASM detects the accumulated
-      // V8 modifications and permanently poisons the session. All subsequent
-      // clicks get rejected, no matter how they're delivered.
-      //
-      // Pydoll succeeds with the SAME commands because its page-level WS
-      // (/devtools/page/{targetId}) is a fresh connection with zero V8 state.
-      // We match that by opening our own clean page WS per solve attempt.
-      //
-      // See CLOUDFLARE_SOLVER.md "Rule 2" for the full investigation.
-      //
+      // ── Open shared clean_page WS for Phase 1 + Phase 4a ─────────────
+      // Both phases use read-only DOM commands on the same page target.
+      // Reusing one WS saves ~200-400ms per solve (one fewer WS open).
+      // A clean WS is critical — CdpSession's WS is tainted by rrweb's
+      // addScriptToEvaluateOnNewDocument + Runtime.addBinding. CF's WASM
+      // detects that accumulated V8 state. See CLOUDFLARE_SOLVER.md "Rule 2".
+      const cleanConn = (strategies.chromePort && active.pageTargetId)
+        ? yield* openCleanPageWsScoped(active.pageTargetId, strategies.chromePort!).pipe(
+            Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
+          )
+        : null;
+
+      // ── Phase 1: Page-side DOM traversal (shared clean_page WS) ───────
       let iframeBackendNodeId: number | null = null;
       let iframeFrameId: string | null = null;
       let phase1Ms = 0;
 
-      if (strategies.chromePort && active.pageTargetId) {
+      if (cleanConn) {
         const phase1Start = Date.now();
-        const phase1Result = yield* strategies.phase1PageDomTraversal(active.pageTargetId);
-        iframeBackendNodeId = phase1Result.backendNodeId;
-        iframeFrameId = phase1Result.frameId;
+        const doc = yield* cleanConn.send('DOM.getDocument', { depth: -1, pierce: true }).pipe(
+          Effect.orElseSucceed(() => null),
+        );
+        if (doc?.root) {
+          const iframe = strategies.findCFIframeInTree(doc.root);
+          if (iframe) {
+            iframeBackendNodeId = iframe.backendNodeId;
+            iframeFrameId = iframe.frameId ?? null;
+          }
+        }
         phase1Ms = Date.now() - phase1Start;
       }
 
@@ -356,9 +359,10 @@ export class CloudflareSolveStrategies {
       // All Input events on isolated WS (same as DOM/Runtime).
       return yield* strategies.phase4Click(
         send, send, send, oopifSessionId, active,
-        checkbox, cbMethod, iframeBackendNodeId, via, attempt, solveStart, checkboxFoundAt,
+        checkbox, cbMethod, iframeBackendNodeId, cleanConn, via, attempt, solveStart, checkboxFoundAt,
       );
     })().pipe(
+      Effect.scoped,
       Effect.catch((err: unknown) =>
         Effect.gen(function*() {
           const events = yield* SolverEvents;
@@ -372,49 +376,6 @@ export class CloudflareSolveStrategies {
     );
   }
 
-  // ── Phase 1: Page-side shadow root traversal (PAGE session) ──────
-  // Pydoll calls find_shadow_roots(deep=False) → DOM.getDocument(depth=-1, pierce=true)
-  // then checks each shadow root's inner_html for challenges.cloudflare.com,
-  // then querySelector('iframe[src*="challenges.cloudflare.com"]') on the shadow root,
-  // then DOM.describeNode on the iframe element to get frameId + backendNodeId.
-
-  private phase1PageDomTraversal(
-    pageTargetId: TargetId,
-  ): Effect.Effect<{ backendNodeId: number | null; frameId: string | null }> {
-    const strategies = this;
-    return Effect.fn('cf.phase1PageDomTraversal')(function*() {
-      yield* Effect.annotateCurrentSpan({ 'cf.target_id': pageTargetId });
-      let backendNodeId: number | null = null;
-      let frameId: string | null = null;
-
-      // acquireRelease guarantees WS cleanup even on fiber interruption
-      const conn = yield* openCleanPageWsScoped(pageTargetId, strategies.chromePort!).pipe(
-        Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
-      );
-      if (!conn) return { backendNodeId, frameId };
-
-      // DOM.getDocument(depth:-1, pierce:true) — C++ layer, finds shadow roots
-      const doc = yield* conn.send('DOM.getDocument', { depth: -1, pierce: true }).pipe(
-        Effect.orElseSucceed(() => null),
-      );
-      if (doc?.root) {
-        // Walk tree for iframe[src*="challenges.cloudflare.com"]
-        const iframe = strategies.findCFIframeInTree(doc.root);
-        if (iframe) {
-          backendNodeId = iframe.backendNodeId;
-          frameId = iframe.frameId ?? null;
-        }
-      }
-
-      // Phase 1 failure is non-fatal — Phase 2 fallback handles it.
-      // acquireRelease guarantees WS cleanup even on fiber interruption.
-      return { backendNodeId, frameId };
-    })().pipe(Effect.scoped, Effect.onInterrupt(() => Effect.sync(() => {
-      console.error(JSON.stringify({ message: 'ws.debug.phase1.interrupted', targetId: pageTargetId }));
-    })));
-  }
-
-
 
   // ── Phase 4: Click dispatch ───────────────────────────────────────
 
@@ -427,12 +388,12 @@ export class CloudflareSolveStrategies {
     checkbox: { objectId: string; backendNodeId: number },
     method: string,
     iframeBackendNodeId: number | null,
+    cleanConn: CdpConnection | null,
     via: string,
     attempt: number,
     solveStart: number,
     checkboxFoundAt: number,
   ): Effect.Effect<ClickResult, never, typeof SolverEvents.Identifier> {
-    const strategies = this;
     const pageTargetId = active.pageTargetId;
     return Effect.fn('cf.phase4Click')(function*() {
       yield* Effect.annotateCurrentSpan({
@@ -528,10 +489,15 @@ export class CloudflareSolveStrategies {
       // Non-fatal — page coords just won't be available if this fails.
       let iframePageX: number | null = null;
       let iframePageY: number | null = null;
-      if (iframeBackendNodeId && strategies.chromePort && active.pageTargetId) {
-        const iframeCoords = yield* getIframePageCoords(active.pageTargetId, iframeBackendNodeId, strategies.chromePort!);
-        iframePageX = iframeCoords.x;
-        iframePageY = iframeCoords.y;
+      if (iframeBackendNodeId && cleanConn) {
+        const iframeBox = yield* cleanConn.send('DOM.getBoxModel', {
+          backendNodeId: iframeBackendNodeId,
+        }).pipe(Effect.orElseSucceed(() => null));
+        if (iframeBox?.model?.content) {
+          const q = iframeBox.model.content;
+          iframePageX = q[0] as number;
+          iframePageY = q[1] as number;
+        }
       }
 
       const clickX = Math.round(x);

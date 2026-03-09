@@ -247,6 +247,20 @@ export class CloudflareStateTracker {
           tracker.events.marker(pageTargetId, 'cf.bridge.detected', {
             method: parsed.method,
           });
+          // CF error page (1020 banned, access denied) — terminal failure.
+          // Emit cf.failed marker DIRECTLY so it's timestamped before any subsequent
+          // cf.detected (embedded turnstile). buildSummaryFromMarkers pairs markers
+          // chronologically — if the marker arrives after the next cf.detected, the
+          // first detection becomes orphaned as "Int?".
+          // Also settle resolution so the consumer doesn't block for 30s.
+          if (parsed.method === 'cf_error_page') {
+            const active = tracker.registry.get(pageTargetId);
+            if (active && !active.aborted) {
+              const duration = Date.now() - active.startTime;
+              // resolution.fail() triggers onSettle which emits cf.failed marker immediately
+              yield* active.resolution.fail('cf_error_page', duration);
+            }
+          }
           break;
         }
       }

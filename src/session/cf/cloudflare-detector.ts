@@ -12,7 +12,6 @@ import { SolveDispatcher, DetectionLoopStarter, CdpSender } from './cf-services.
 import { Resolution } from './cf-resolution.js';
 import { DetectionContext } from './cf-detection-context.js';
 import type { SolveDetectionResult } from './cloudflare-solver.effect.js';
-import { CF_BRIDGE_JS } from '../../generated/cf-bridge.js';
 
 /** R channel requirements for detector methods that yield services. */
 type DetectorR = typeof SolveDispatcher.Identifier | typeof DetectionLoopStarter.Identifier | typeof CdpSender.Identifier;
@@ -92,9 +91,9 @@ export function classifyOOPIFDetection(
  * no Runtime.addBinding on CF challenge pages. This matches what happens when pydoll's
  * native solver runs (which succeeds) — zero server-side JS execution on CF pages.
  *
- * For EMBEDDED types (turnstile on third-party pages), the bridge is injected via
- * Runtime.evaluate AFTER detection confirms the type. This is safe because the page
- * is the embedding site (e.g. peet.ws, ahrefs.com), not a CF challenge page.
+ * For EMBEDDED types (turnstile on third-party pages), the bridge is pre-injected via
+ * Page.addScriptToEvaluateOnNewDocument at session start. It has an isChallengeUrl guard
+ * that makes it a no-op on CF challenge pages (defense-in-depth).
  *
  * Detection paths:
  *   1. URL pattern matching — challenges.cloudflare.com in page URL (interstitials)
@@ -371,24 +370,6 @@ export class CloudflareDetector {
     })();
   }
 
-  /**
-   * Inject CF bridge on the EMBEDDING page. Requires EmbeddedDetection proof —
-   * calling this on an interstitial (CF challenge page) would trigger CF's WASM
-   * V8 detection via Runtime.evaluate. The type system prevents this at compile time.
-   */
-  private injectBridge(
-    cdpSessionId: CdpSessionId,
-    _proof: EmbeddedDetection,
-  ): Effect.Effect<void, never, typeof CdpSender.Identifier> {
-    return Effect.fn('cf.injectBridge')(function*() {
-      const cdpSender = yield* CdpSender;
-      yield* cdpSender.send('Runtime.evaluate', {
-        expression: CF_BRIDGE_JS,
-        returnByValue: true,
-      }, cdpSessionId).pipe(Effect.ignore);
-    })();
-  }
-
   private emitSolveFailure(active: ReadonlyActiveDetection, targetId: TargetId, reason: string): Effect.Effect<void> {
     if (active.aborted) {
       const ctx = this.state.registry.getContext(targetId);
@@ -485,7 +466,24 @@ export class CloudflareDetector {
         tracker: new CloudflareTracker(info),
         rechallengeCount,
         abortLatch: Latch.makeUnsafe(false),
-        resolution: Resolution.makeUnsafe(),
+        resolution: Resolution.makeUnsafe((outcome) => {
+          // Guard: if aborted, scope finalizer or emitSolveFailure handles emission
+          if (active.aborted) return;
+          if (outcome._tag === 'solved') {
+            self.state.pushPhase(targetId, outcome.result.type, outcome.result.phase_label || '→');
+            self.events.marker(targetId, 'cf.solved', {
+              type: outcome.result.type, method: outcome.result.method,
+              duration_ms: outcome.result.duration_ms,
+              phase_label: outcome.result.phase_label, signal: outcome.result.signal,
+            });
+          } else {
+            const phase_label = outcome.phase_label ?? `✗ ${outcome.reason}`;
+            self.state.pushPhase(targetId, active.info.type, phase_label);
+            self.events.marker(targetId, 'cf.failed', {
+              reason: outcome.reason, duration_ms: outcome.duration_ms, phase_label,
+            });
+          }
+        }),
       };
 
       const ctx = yield* self.state.registry.register(targetId, active);
@@ -545,14 +543,18 @@ export class CloudflareDetector {
           // handles interstitials (URL-pattern detection). Interstitial solves don't
           // produce phantom OOPIFs. Adding to solvedPages would block the embedded
           // Turnstile detection in multi-phase (Int→Emb) flows.
-          self.state.pushPhase(targetId, resolved.result.type, resolved.result.phase_label || '→');
+          if (!active.resolution.markerEmitted) {
+            self.state.pushPhase(targetId, resolved.result.type, resolved.result.phase_label || '→');
+          }
           const label = self.state.buildCompoundLabel(targetId);
-          self.events.emitSolved(active, resolved.result, label);
+          self.events.emitSolved(active, resolved.result, label, { skipMarker: active.resolution.markerEmitted });
         } else {
-          const phase_label = resolved.phase_label ?? `✗ ${resolved.reason}`;
-          self.state.pushPhase(targetId, active.info.type, phase_label);
+          if (!active.resolution.markerEmitted) {
+            const phase_label = resolved.phase_label ?? `✗ ${resolved.reason}`;
+            self.state.pushPhase(targetId, active.info.type, phase_label);
+          }
           const label = self.state.buildCompoundLabel(targetId);
-          self.events.emitFailed(active, resolved.reason, resolved.duration_ms, resolved.phase_label, label);
+          self.events.emitFailed(active, resolved.reason, resolved.duration_ms, resolved.phase_label, label, { skipMarker: active.resolution.markerEmitted });
         }
       } else {
         // Timeout — no path completed the Resolution within 10s
@@ -703,7 +705,24 @@ export class CloudflareDetector {
         rechallengeCount,
         abortLatch: Latch.makeUnsafe(false),
         oopifMeta: meta,
-        resolution: Resolution.makeUnsafe(),
+        resolution: Resolution.makeUnsafe((outcome) => {
+          // Guard: if aborted, scope finalizer or emitSolveFailure handles emission
+          if (active.aborted) return;
+          if (outcome._tag === 'solved') {
+            self.state.pushPhase(targetId, outcome.result.type, outcome.result.phase_label || '→');
+            self.events.marker(targetId, 'cf.solved', {
+              type: outcome.result.type, method: outcome.result.method,
+              duration_ms: outcome.result.duration_ms,
+              phase_label: outcome.result.phase_label, signal: outcome.result.signal,
+            });
+          } else {
+            const phase_label = outcome.phase_label ?? `✗ ${outcome.reason}`;
+            self.state.pushPhase(targetId, active.info.type, phase_label);
+            self.events.marker(targetId, 'cf.failed', {
+              reason: outcome.reason, duration_ms: outcome.duration_ms, phase_label,
+            });
+          }
+        }),
       };
 
       // Guard: another detection path (e.g. triggerSolveFromUrl) may have
@@ -748,8 +767,8 @@ export class CloudflareDetector {
         return;
       }
 
-      // Inject CF bridge — type-safe: only accepts EmbeddedDetection proof
-      yield* self.injectBridge(cdpSessionId, active);
+      // Bridge is pre-injected via Page.addScriptToEvaluateOnNewDocument at session start.
+      // No per-detection Runtime.evaluate needed — hooks are already loaded.
 
       // Dispatch solve via Effect service — no more Promise bridge
       self.log.warn(`CF lifecycle: dispatch_start target=${targetId.slice(0,8)} session=${self.sid}`);
@@ -784,15 +803,19 @@ export class CloudflareDetector {
         self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=solved method=${resolved.result.method} elapsed_ms=${Date.now() - active.startTime}`);
         // PHANTOM GUARD: Mark page as solved to block post-solve OOPIF re-detection.
         self.state.solvedPages.add(targetId);
-        self.state.pushPhase(targetId, resolved.result.type, resolved.result.phase_label || '→');
+        if (!active.resolution.markerEmitted) {
+          self.state.pushPhase(targetId, resolved.result.type, resolved.result.phase_label || '→');
+        }
         const label = self.state.buildCompoundLabel(targetId);
-        self.events.emitSolved(active, resolved.result, label);
+        self.events.emitSolved(active, resolved.result, label, { skipMarker: active.resolution.markerEmitted });
       } else {
         self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=failed reason=${resolved.reason} elapsed_ms=${resolved.duration_ms}`);
-        const phase_label = resolved.phase_label ?? `✗ ${resolved.reason}`;
-        self.state.pushPhase(targetId, active.info.type, phase_label);
+        if (!active.resolution.markerEmitted) {
+          const phase_label = resolved.phase_label ?? `✗ ${resolved.reason}`;
+          self.state.pushPhase(targetId, active.info.type, phase_label);
+        }
         const label = self.state.buildCompoundLabel(targetId);
-        self.events.emitFailed(active, resolved.reason, resolved.duration_ms, resolved.phase_label, label);
+        self.events.emitFailed(active, resolved.reason, resolved.duration_ms, resolved.phase_label, label, { skipMarker: active.resolution.markerEmitted });
       }
       if (self.state.registry.has(targetId)) {
         yield* self.state.registry.resolve(targetId);
