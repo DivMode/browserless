@@ -181,11 +181,12 @@ export class SessionCoordinator {
       ).pipe(Effect.orElseSucceed(() => 0));
 
       // Phase 2: Destroy the CdpSession — ends Queue, waits for pipeline to flush to external replay server
-      // 8s timeout prevents hung CDP targets from blocking the entire pipeline
+      // 50s timeout: consumer fibers get 45s for large replay POSTs (GeoGuessr/Street View = 20-30MB).
+      // The previous 8s timeout was killing the write before it could complete.
       const session = coordinator.cdpSessions.get(sessionId);
       if (session) {
         yield* Effect.tryPromise(() => session.destroy('cleanup')).pipe(
-          Effect.timeout('8 seconds'),
+          Effect.timeout('50 seconds'),
           Effect.ignore,
         );
       }

@@ -49,6 +49,9 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   // CDP-aware proxy for injecting events before close
   protected cdpProxy: CDPProxy | null = null;
   protected onBeforeClose?: () => Promise<void>;
+  // Tracks in-flight onBeforeClose execution so the close handler can await it
+  // before nulling cdpProxy (which onBeforeClose needs to send tabReplayComplete)
+  protected onBeforeClosePromise: Promise<void> | null = null;
   protected keepUntilMS = 0;
   private cloudflareSolver?: CloudflareSolver;
 
@@ -82,7 +85,11 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   }
 
   public setOnBeforeClose(handler: () => Promise<void>): void {
-    this.onBeforeClose = handler;
+    this.onBeforeClose = async () => {
+      this.onBeforeClosePromise = handler();
+      await this.onBeforeClosePromise;
+      this.onBeforeClosePromise = null;
+    };
   }
 
   public keepUntil() {
@@ -537,7 +544,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
     );
 
     return new Promise<void>((resolve, reject) => {
-      const close = once(() => {
+      const close = once(async () => {
         this.logger.debug(
           `proxyWebSocket close triggered: browser=${!!this.browser} cdpProxy=${!!this.cdpProxy}`,
         );
@@ -546,6 +553,12 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
         socket.off('close', close);
         socket.off('end', close);
         socket.off('error', close);
+        // Wait for any in-flight onBeforeClose — it needs cdpProxy to send tabReplayComplete.
+        // This races with Chrome exit when browser.close() is called: onBeforeClose starts
+        // flushing replay data while Chrome's process exit triggers this close handler.
+        if (this.onBeforeClosePromise) {
+          await this.onBeforeClosePromise;
+        }
         // Close CDPProxy BEFORE nulling — sends WS close frame to pydoll
         // so it detects the dead session immediately instead of waiting 60s+.
         // handleClose() is idempotent (isClosing guard), safe to call here
