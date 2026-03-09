@@ -72,6 +72,9 @@ export const SolveDeps = ServiceMap.Service<{
   readonly startActivityLoopEmbedded: (active: ReadonlyEmbeddedDetection) => Effect.Effect<void>;
   /** Activity loop for interstitial/managed types. Runtime.evaluate is FORBIDDEN. */
   readonly startActivityLoopInterstitial: (active: ReadonlyInterstitialDetection) => Effect.Effect<void>;
+  /** Controlled mutations — solver calls these instead of direct property assignment. */
+  readonly setClickDelivered: (clickDeliveredAt: number) => Effect.Effect<void>;
+  readonly markActivityLoopStarted: () => Effect.Effect<void>;
 }>('SolveDeps');
 
 // ═══════════════════════════════════════════════════════════════════════

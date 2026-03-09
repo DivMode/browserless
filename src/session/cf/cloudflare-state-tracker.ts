@@ -5,7 +5,7 @@ import {
 } from './cf-schedules.js';
 import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareType } from '../../shared/cloudflare-detection.js';
 import { isInterstitialType } from '../../shared/cloudflare-detection.js';
-import type { ReadonlyActiveDetection, ReadonlyEmbeddedDetection, ReadonlyInterstitialDetection, CFEvents } from './cloudflare-event-emitter.js';
+import type { ReadonlyActiveDetection, ReadonlyEmbeddedDetection, ReadonlyInterstitialDetection, EmbeddedDetection, CFEvents } from './cloudflare-event-emitter.js';
 import { DetectionRegistry } from './cf-detection-registry.js';
 import { OOPIFChecker } from './cf-services.js';
 
@@ -137,7 +137,7 @@ export class CloudflareStateTracker {
       const pageTargetId = tracker.registry.findByIframeSession(iframeCdpSessionId);
       if (!pageTargetId) return;
 
-      const active = tracker.registry.get(pageTargetId);
+      const active = tracker.registry.getActive(pageTargetId);
       if (!active || active.aborted) return;
 
       tracker.log.info(`Turnstile state change: ${state} for page ${pageTargetId}`);
@@ -212,14 +212,14 @@ export class CloudflareStateTracker {
         case 'solved': {
           const token = parsed.token as string;
           const tokenLength = parsed.tokenLength as number;
-          const active = tracker.registry.get(pageTargetId);
+          const active = tracker.registry.getActive(pageTargetId);
 
           if (active && !active.aborted) {
             // Bridge solved events only resolve embedded types (turnstile/non_interactive/invisible).
             // Interstitials solve via page navigation — bridge events on the CF challenge page
             // must not steal the resolution from the page_navigated signal.
             if (isInterstitialType(active.info.type)) return;
-            yield* tracker.resolveAutoSolved(active as ReadonlyEmbeddedDetection, 'bridge_solved', token);
+            yield* tracker.resolveAutoSolved(active as EmbeddedDetection, 'bridge_solved', token);
             return;
           }
 
@@ -254,7 +254,7 @@ export class CloudflareStateTracker {
           // first detection becomes orphaned as "Int?".
           // Also settle resolution so the consumer doesn't block for 30s.
           if (parsed.method === 'cf_error_page') {
-            const active = tracker.registry.get(pageTargetId);
+            const active = tracker.registry.getActive(pageTargetId);
             if (active && !active.aborted) {
               const duration = Date.now() - active.startTime;
               // resolution.fail() triggers onSettle which emits cf.failed marker immediately
@@ -278,7 +278,7 @@ export class CloudflareStateTracker {
         'cf.target_id': targetId,
         'cf.token_length': tokenLength,
       });
-      const active = tracker.registry.get(targetId);
+      const active = tracker.registry.getActive(targetId);
 
       if (active && !active.aborted) {
         const duration = Date.now() - active.startTime;
@@ -326,7 +326,7 @@ export class CloudflareStateTracker {
    * Resolve an active detection as auto-solved (token appeared without navigation).
    * Token is provided by the CF bridge push event — no Runtime.evaluate fallback.
    */
-  resolveAutoSolved(active: ReadonlyEmbeddedDetection, signal: string, token?: string): Effect.Effect<void> {
+  resolveAutoSolved(active: EmbeddedDetection, signal: string, token?: string): Effect.Effect<void> {
     const tracker = this;
     return Effect.fn('cf.state.resolveAutoSolved')(function*() {
       yield* Effect.annotateCurrentSpan({

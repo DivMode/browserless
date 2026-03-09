@@ -4,6 +4,7 @@ import { CdpSessionId } from '../../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot, InterstitialInfo, EmbeddedInfo } from '../../shared/cloudflare-detection.js';
 import type { TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
 import { Resolution } from './cf-resolution.js';
+import type { ReadonlyResolution } from './cf-resolution.js';
 
 export type EmitClientEvent = (method: string, params: object) => Promise<void>;
 export type InjectMarker = (targetId: TargetId, tag: string, payload?: object) => void;
@@ -179,23 +180,38 @@ export interface ActiveDetection {
  * Public read-only view of an active detection.
  *
  * All top-level properties are readonly — prevents accidental mutation.
+ * Resolution is narrowed to ReadonlyResolution — prevents calling solve/fail.
+ * Code that needs to settle resolution must accept ActiveDetection directly.
+ *
  * Mutations go through controlled methods on DetectionContext:
  *   - abort() / setAborted() — aborted + abortLatch
  *   - setClickDelivered() — clickDelivered + clickDeliveredAt
  *   - markActivityLoopStarted() — activityLoopStarted
  *   - bindOOPIF() / clearOOPIF() — iframe fields
  *   - resetForRetry() — attempt + aborted
- *
- * Sub-object method calls (resolution.solve(), tracker.onProgress()) still work
- * because Readonly<T> is shallow — it only prevents property reassignment.
  */
-export type ReadonlyActiveDetection = Readonly<ActiveDetection>;
+export type ReadonlyActiveDetection = Omit<Readonly<ActiveDetection>, 'resolution'> & {
+  readonly resolution: ReadonlyResolution;
+};
 
 /** Narrowed detection variants — methods that only apply to one category use these. */
 export type InterstitialDetection = ActiveDetection & { readonly info: InterstitialInfo };
 export type EmbeddedDetection = ActiveDetection & { readonly info: EmbeddedInfo };
-export type ReadonlyInterstitialDetection = Readonly<InterstitialDetection>;
-export type ReadonlyEmbeddedDetection = Readonly<EmbeddedDetection>;
+export type ReadonlyInterstitialDetection = Omit<Readonly<InterstitialDetection>, 'resolution'> & {
+  readonly resolution: ReadonlyResolution;
+};
+export type ReadonlyEmbeddedDetection = Omit<Readonly<EmbeddedDetection>, 'resolution'> & {
+  readonly resolution: ReadonlyResolution;
+};
+
+/** Solver-visible view. Resolution is read-only — solver cannot settle. */
+export type SolverActiveDetection = Omit<Readonly<ActiveDetection>, 'resolution'> & {
+  readonly resolution: ReadonlyResolution;
+};
+
+/** Solver-visible narrowed variants. */
+export type SolverInterstitialDetection = SolverActiveDetection & { readonly info: InterstitialInfo };
+export type SolverEmbeddedDetection = SolverActiveDetection & { readonly info: EmbeddedInfo };
 
 /** Creates a frozen record of CF event emission methods. No class = no fields = no per-page state. */
 export function createCFEvents(

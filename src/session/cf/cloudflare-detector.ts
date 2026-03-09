@@ -4,9 +4,10 @@ import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, Cloudfla
 import { isInterstitialType, isCFInterstitialTitle } from '../../shared/cloudflare-detection.js';
 import { DETECTION_POLL_DELAY, INTERSTITIAL_RESOLUTION_TIMEOUT, MAX_RECHALLENGES, RECHALLENGE_DELAY_MS } from './cf-schedules.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
-import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection, CFEvents } from './cloudflare-event-emitter.js';
+import type { ActiveDetection, EmbeddedDetection, CFEvents } from './cloudflare-event-emitter.js';
 import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
 import type { CloudflareStateTracker } from './cloudflare-state-tracker.js';
+import { SolveOutcome } from './cloudflare-solve-strategies.js';
 import type { CloudflareSolveStrategies, CFDetected, CFTargetMatch, TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
 import { SolveDispatcher, DetectionLoopStarter, CdpSender } from './cf-services.js';
 import { Resolution } from './cf-resolution.js';
@@ -178,7 +179,7 @@ export class CloudflareDetector {
       });
       self.state.registerPage(targetId, cdpSessionId);
 
-      const active = self.state.registry.get(targetId);
+      const active = self.state.registry.getActive(targetId);
       if (active) {
         const navCtx = self.state.registry.getContext(targetId);
         if (navCtx) yield* navCtx.abort();
@@ -370,7 +371,7 @@ export class CloudflareDetector {
     })();
   }
 
-  private emitSolveFailure(active: ReadonlyActiveDetection, targetId: TargetId, reason: string): Effect.Effect<void> {
+  private emitSolveFailure(active: ActiveDetection, targetId: TargetId, reason: string): Effect.Effect<void> {
     if (active.aborted) {
       const ctx = this.state.registry.getContext(targetId);
       this.log.warn(`CF lifecycle: emit_failure_skipped target=${targetId.slice(0,8)} session=${this.sid} reason=abort_guard resolution_done=${ctx?.resolved ?? 'no_ctx'}`);
@@ -501,26 +502,31 @@ export class CloudflareDetector {
         Effect.catchCause((cause) => {
           const err = Cause.squash(cause);
           console.error(JSON.stringify({ message: 'cf.triggerSolve dispatch defect', error: String(err) }));
-          return Effect.succeed('aborted' as const);
+          return Effect.succeed(SolveOutcome.Aborted());
         }),
       );
-      // Interstitials always get SolveOutcome strings (not TurnstileResult)
-      const outcome = rawOutcome as string;
       // Complete Resolution for immediate failures — these are known outcomes
       // that don't require waiting for async signals.
-      if (outcome === 'no_click') {
-        self.log.warn(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=widget_not_found`);
-        yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
-      } else if (outcome === 'click_no_token') {
-        self.log.warn(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=timeout`);
-        yield* self.emitSolveFailure(active, targetId, 'timeout');
-      } else if (outcome === 'aborted' && !active.aborted) {
-        // Solver returned 'aborted' but no external abort signal (abortLatch didn't fire).
-        // This happens when tokenPoll gets CdpSessionGone or resolution?.isDone is true.
-        // Complete the Resolution immediately instead of waiting 10s for timeout.
-        const reason = active.clickDelivered ? 'session_gone_after_click' : 'session_gone';
-        self.log.warn(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=${reason} click_delivered=${!!active.clickDelivered}`);
-        yield* self.emitSolveFailure(active, targetId, reason);
+      if (typeof rawOutcome === 'object' && '_tag' in rawOutcome) {
+        switch (rawOutcome._tag) {
+          case 'NoClick':
+            self.log.warn(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=widget_not_found`);
+            yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
+            break;
+          case 'NoCheckbox':
+            // Interstitial: no checkbox ever rendered. Don't fast-fail —
+            // wait for bridge cf_error_page or auto-nav via resolution.await below.
+            self.log.warn(`CF lifecycle: no_checkbox target=${targetId.slice(0,8)} — waiting for bridge/auto-nav`);
+            break;
+          case 'Aborted':
+            if (!active.aborted) {
+              const reason = active.clickDelivered ? 'session_gone_after_click' : 'session_gone';
+              self.log.warn(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=${reason} click_delivered=${!!active.clickDelivered}`);
+              yield* self.emitSolveFailure(active, targetId, reason);
+            }
+            break;
+          // ClickDispatched, AutoHandled — no action, fall through to resolution.await
+        }
       }
 
       // NOTE: No gap fix here for interstitials. When outcome='aborted' && active.aborted,
@@ -778,19 +784,14 @@ export class CloudflareDetector {
         Effect.catchCause((cause) => {
           const err = Cause.squash(cause);
           console.error(JSON.stringify({ message: 'cf.handleTurnstile dispatch defect', error: String(err) }));
-          return Effect.succeed('aborted' as const);
+          return Effect.succeed(SolveOutcome.Aborted());
         }),
       );
-      const outcomeTag = typeof outcome === 'string' ? outcome : outcome._tag;
+      const outcomeTag = outcome._tag;
       self.log.warn(`CF lifecycle: dispatch_end target=${targetId.slice(0,8)} session=${self.sid} outcome=${outcomeTag} aborted=${active.aborted} elapsed_ms=${Date.now() - dispatchStartMs}`);
       // Solver is advisory — its exit does NOT kill the detection.
       // Resolution comes from push signals (beacon/bridge/navigation) or session close.
-      if (typeof outcome !== 'string') {
-        self.log.warn(`CF lifecycle: solver_exit target=${targetId.slice(0,8)} session=${self.sid} result=${outcome._tag} resolution_done=${active.resolution.isDone}`);
-      } else if (outcome === 'aborted') {
-        // String 'aborted' from catchCause — solver crashed, but detection stays alive.
-        self.log.warn(`CF lifecycle: solver_exit target=${targetId.slice(0,8)} session=${self.sid} result=aborted(catch) resolution_done=${active.resolution.isDone}`);
-      }
+      self.log.warn(`CF lifecycle: solver_exit target=${targetId.slice(0,8)} session=${self.sid} result=${outcomeTag} resolution_done=${active.resolution.isDone}`);
 
       // Await Resolution — single emission consumer.
       // Solver exit no longer settles Resolution. It's settled by:

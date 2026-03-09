@@ -92,12 +92,14 @@ export interface CFDetected {
 /** Discriminated union for CF detection — forces callers to pattern match on _tag. */
 export type CFDetectionResult = CFNotDetected | CFDetected;
 
-export type SolveOutcome =
-  | 'click_dispatched'
-  | 'click_no_token'
-  | 'no_click'
-  | 'auto_handled'
-  | 'aborted';
+export type SolveOutcome = Data.TaggedEnum<{
+  ClickDispatched: {}
+  NoClick: {}
+  NoCheckbox: {}
+  AutoHandled: {}
+  Aborted: {}
+}>;
+export const SolveOutcome = Data.taggedEnum<SolveOutcome>();
 
 /**
  * Structured result from findAndClickViaCDP — replaces boolean return.

@@ -128,6 +128,11 @@ export class DetectionRegistry {
     return this.entries.get(targetId)?.active;
   }
 
+  /** Get the mutable ActiveDetection — for resolution owners (detector/state-tracker). */
+  getActive(targetId: TargetId): ActiveDetection | undefined {
+    return this.entries.get(targetId)?.mutableActive;
+  }
+
   /** Get the full DetectionContext for a target. */
   getContext(targetId: TargetId): DetectionContext | undefined {
     return this.entries.get(targetId);

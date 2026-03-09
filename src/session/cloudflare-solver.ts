@@ -2,7 +2,7 @@ import { Cause, Effect, Exit, FiberMap, Layer, ManagedRuntime, Scope } from 'eff
 import { CdpSessionId } from '../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareConfig } from '../shared/cloudflare-detection.js';
 import { CloudflareDetector } from './cf/cloudflare-detector.js';
-import { CloudflareSolveStrategies } from './cf/cloudflare-solve-strategies.js';
+import { CloudflareSolveStrategies, SolveOutcome } from './cf/cloudflare-solve-strategies.js';
 import { CloudflareStateTracker } from './cf/cloudflare-state-tracker.js';
 import { createCFEvents } from './cf/cloudflare-event-emitter.js';
 import type { ActiveDetection, CFEvents, EmitClientEvent, InjectMarker } from './cf/cloudflare-event-emitter.js';
@@ -177,6 +177,9 @@ export class CloudflareSolver {
         startActivityLoopInterstitial: (active) => stateTracker.activityLoopInterstitial(active).pipe(
           Effect.provideService(OOPIFChecker, oopifChecker),
         ),
+        // Stubs — overridden per-dispatch in provideServices with active-scoped implementations
+        setClickDelivered: () => Effect.void,
+        markActivityLoopStarted: () => Effect.void,
       });
     }));
 
@@ -188,12 +191,25 @@ export class CloudflareSolver {
       const solveDeps = yield* SolveDeps;
       const originalSender = yield* CdpSender;
 
-      const provideServices = (active: ActiveDetection, sender: Parameters<typeof CdpSender.of>[0]) =>
-        solveDetectionEffect(active).pipe(
+      const provideServices = (active: ActiveDetection, sender: Parameters<typeof CdpSender.of>[0]) => {
+        // Per-dispatch SolveDeps override — wire mutation methods to this active's DetectionContext
+        const perDispatchDeps = SolveDeps.of({
+          ...solveDeps,
+          setClickDelivered: (clickDeliveredAt) => Effect.sync(() => {
+            const ctx = self.stateTracker.registry.getContext(active.pageTargetId);
+            if (ctx) ctx.setClickDelivered(clickDeliveredAt);
+          }),
+          markActivityLoopStarted: () => Effect.sync(() => {
+            const ctx = self.stateTracker.registry.getContext(active.pageTargetId);
+            if (ctx) ctx.markActivityLoopStarted();
+          }),
+        });
+        return solveDetectionEffect(active).pipe(
           Effect.provideService(SolverEvents, solverEvents),
-          Effect.provideService(SolveDeps, solveDeps),
+          Effect.provideService(SolveDeps, perDispatchDeps),
           Effect.provideService(CdpSender, sender),
         );
+      };
 
       return SolveDispatcher.of({
         dispatch: (active) => {
@@ -214,7 +230,7 @@ export class CloudflareSolver {
               // Catch WS open errors — connection refused, handshake timeout, etc.
               Effect.catch((err: unknown) => {
                 console.error(JSON.stringify({ message: 'ws.debug.solver_isolated.error', solveId, tid, error: String(err) }));
-                return Effect.succeed('aborted' as const);
+                return Effect.succeed(SolveOutcome.Aborted());
               }),
               // Structural kill switch: even if future code introduces blocking
               // inside the scoped region, the budget timeout kills the scope.
@@ -230,7 +246,7 @@ export class CloudflareSolver {
                   solveId,
                   tid,
                 }));
-                return Effect.succeed('aborted' as const);
+                return Effect.succeed(SolveOutcome.Aborted());
               }),
               Effect.onInterrupt(() => Effect.sync(() => {
                 console.error(JSON.stringify({ message: 'ws.debug.solver_isolated.interrupted', solveId, tid }));
