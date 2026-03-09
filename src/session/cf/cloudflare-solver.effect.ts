@@ -9,11 +9,21 @@
  * via ManagedRuntime and calls these via runtime.runPromise().
  */
 import { Cause, Data, Effect } from 'effect';
-import type { SolveOutcome } from './cloudflare-solve-strategies.js';
+import { SolveOutcome } from './cloudflare-solve-strategies.js';
 import { DetectionContext } from './cf-detection-context.js';
 import { ClickResult } from './cloudflare-solve-strategies.js';
-import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection, InterstitialDetection } from './cloudflare-event-emitter.js';
+import type { ReadonlyActiveDetection, SolverActiveDetection, SolverInterstitialDetection, SolverEmbeddedDetection } from './cloudflare-event-emitter.js';
 import { SolverEvents, SolveDeps } from './cf-services.js';
+
+const SO = SolveOutcome;
+
+/** Narrowing helpers — switch narrows active.info.type but TS can't prove nested discriminant. */
+function narrowInterstitial(a: SolverActiveDetection): SolverInterstitialDetection {
+  return a as SolverInterstitialDetection;
+}
+function narrowEmbedded(a: SolverActiveDetection): SolverEmbeddedDetection {
+  return a as SolverEmbeddedDetection;
+}
 
 /** Annotate the current span with ActiveDetection context for Tempo filtering. */
 const annotateActive = (active: ReadonlyActiveDetection) =>
@@ -46,11 +56,11 @@ import {
 export type SolveDetectionResult = SolveOutcome | TurnstileResult;
 
 export const solveDetection = (
-  active: ActiveDetection,
+  active: SolverActiveDetection,
 ) =>
   Effect.fn('cf.solveDetection')(function*() {
     yield* annotateActive(active);
-    if (active.aborted) return 'aborted' as SolveOutcome;
+    if (active.aborted) return SO.Aborted();
 
     const events = yield* SolverEvents;
     const deps = yield* SolveDeps;
@@ -58,17 +68,16 @@ export const solveDetection = (
     switch (active.info.type) {
       case 'managed':
       case 'interstitial': {
-        // TypeScript narrows active.info.type to 'managed' | 'interstitial' here
-        const interstitial = active as InterstitialDetection;
+        const interstitial = narrowInterstitial(active);
         // Interstitial activity loop — NO Runtime.evaluate (page IS the CF challenge)
         if (!active.activityLoopStarted) {
-          active.activityLoopStarted = true;
+          yield* deps.markActivityLoopStarted();
           yield* deps.startActivityLoopInterstitial(interstitial).pipe(Effect.forkChild);
         }
 
         const clicked = yield* solveByClicking(active, deps);
-        if (active.aborted) return 'aborted' as SolveOutcome;
-        if (clicked) return 'click_dispatched' as SolveOutcome;
+        if (active.aborted) return SO.Aborted();
+        if (clicked) return SO.ClickDispatched();
 
         yield* events.marker(active.pageTargetId, 'cf.waiting_auto_nav', {
           type: active.info.type,
@@ -76,15 +85,14 @@ export const solveDetection = (
         });
 
         yield* waitForAutoNav(active);
-        return (active.aborted ? 'aborted' : 'no_click') as SolveOutcome;
+        return active.aborted ? SO.Aborted() : SO.NoClick();
       }
 
       case 'turnstile': {
-        // TypeScript narrows active.info.type to 'turnstile' here
-        const embedded = active as EmbeddedDetection;
+        const embedded = narrowEmbedded(active);
         // Embedded activity loop — Runtime.evaluate is safe (page is embedding site)
         if (!active.activityLoopStarted) {
-          active.activityLoopStarted = true;
+          yield* deps.markActivityLoopStarted();
           yield* deps.startActivityLoopEmbedded(embedded).pipe(Effect.forkChild);
         }
 
@@ -99,16 +107,15 @@ export const solveDetection = (
 
       case 'non_interactive':
       case 'invisible': {
-        // TypeScript narrows active.info.type to 'non_interactive' | 'invisible' here
-        const embedded = active as EmbeddedDetection;
+        const embedded = narrowEmbedded(active);
         // Embedded activity loop — Runtime.evaluate is safe (page is embedding site)
         if (!active.activityLoopStarted) {
-          active.activityLoopStarted = true;
+          yield* deps.markActivityLoopStarted();
           yield* deps.startActivityLoopEmbedded(embedded).pipe(Effect.forkChild);
         }
 
         yield* solveAutomatic(active, deps);
-        return (active.aborted ? 'aborted' : 'auto_handled') as SolveOutcome;
+        return active.aborted ? SO.Aborted() : SO.AutoHandled();
       }
 
       case 'block':
@@ -132,7 +139,7 @@ export const solveDetection = (
           // context.abort() at the registry level will handle scope cleanup.
           DetectionContext.setAborted(active);
         }
-        return 'aborted' as SolveOutcome;
+        return SO.Aborted();
       })();
     }),
   );
@@ -144,7 +151,7 @@ export const solveDetection = (
 // ═══════════════════════════════════════════════════════════════════════
 
 const solveByClicking = (
-  active: ActiveDetection,
+  active: SolverActiveDetection,
   deps: SolveDepsI,
 ) =>
   Effect.fn('cf.solveByClicking')(function*() {
@@ -164,8 +171,7 @@ const solveByClicking = (
 
       switch (result._tag) {
         case 'Verified':
-          active.clickDelivered = true;
-          active.clickDeliveredAt = result.clickDeliveredAt;
+          yield* deps.setClickDelivered(result.clickDeliveredAt);
           yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
           return true;
 
@@ -182,8 +188,8 @@ const solveByClicking = (
           continue;
 
         default: {
-          const _exhaustive: never = result;
-          throw new Error(`Unhandled ClickResult: ${(_exhaustive as any)._tag}`);
+          result satisfies never;
+          throw new Error('Unhandled ClickResult');
         }
       }
     }
@@ -220,7 +226,7 @@ const TR = TurnstileResult;
 // ═══════════════════════════════════════════════════════════════════════
 
 const solveTurnstile = (
-  active: ActiveDetection,
+  active: SolverActiveDetection,
   deps: SolveDepsI,
 ) =>
   Effect.fn('cf.solveTurnstile')(function*() {
@@ -245,26 +251,25 @@ const solveTurnstile = (
 
     // Click loop — try to find and click the Turnstile checkbox.
     // Non-interactive widgets never render a checkbox.
-    const handleClickResult = (result: ClickResult, attempt: number) =>
+    const handleClickResult = (result: ClickResult, attempt: number): Effect.Effect<TurnstileResult | null> =>
       Effect.fn('cf.handleClickResult')(function*() {
         switch (result._tag) {
           case 'Verified':
-            active.clickDelivered = true;
-            active.clickDeliveredAt = result.clickDeliveredAt;
+            yield* deps.setClickDelivered(result.clickDeliveredAt);
             yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
-            return TR.Clicked({ attempt }) as TurnstileResult | null;
+            return TR.Clicked({ attempt });
           case 'NotVerified':
             if (result.reason === 'oopif_gone') {
               yield* events.marker(pageTargetId, 'cf.oopif_dead_on_verify', { attempt });
-              return TR.OopifDead({ attempt }) as TurnstileResult | null;
+              return TR.OopifDead({ attempt });
             }
-            return null as TurnstileResult | null;
+            return null;
           case 'NoCheckbox':
           case 'ClickFailed':
-            return null as TurnstileResult | null;
+            return null;
           default: {
-            const _exhaustive: never = result;
-            throw new Error(`Unhandled ClickResult: ${(_exhaustive as any)._tag}`);
+            result satisfies never;
+            throw new Error('Unhandled ClickResult');
           }
         }
       })();
@@ -360,7 +365,7 @@ const solveTurnstile = (
 // there's only one code path — no polling fallback needed.
 // ═══════════════════════════════════════════════════════════════════════
 
-const waitForAutoNav = (active: ActiveDetection) =>
+const waitForAutoNav = (active: SolverActiveDetection) =>
   Effect.fn('cf.waitForAutoNav')(function*() {
     yield* annotateActive(active);
     if (active.aborted) return;
@@ -376,7 +381,7 @@ const waitForAutoNav = (active: ActiveDetection) =>
 // ═══════════════════════════════════════════════════════════════════════
 
 const solveAutomatic = (
-  active: ActiveDetection,
+  active: SolverActiveDetection,
   deps: SolveDepsI,
 ) =>
   Effect.fn('cf.solveAutomatic')(function*() {

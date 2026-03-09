@@ -83,3 +83,10 @@ export class Resolution {
     return Deferred.isDoneUnsafe(this.deferred);
   }
 }
+
+/** Read-only view of Resolution — can observe but cannot settle. */
+export interface ReadonlyResolution {
+  readonly isDone: boolean;
+  readonly await: Effect.Effect<ResolvedOutcome>;
+  readonly markerEmitted: boolean;
+}

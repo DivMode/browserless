@@ -113,6 +113,8 @@ const makeTestLayer = (config: TestLayerConfig = {}) => {
     simulatePresence: () => Effect.void,
     startActivityLoopEmbedded: () => Effect.void,
     startActivityLoopInterstitial: () => Effect.void,
+    setClickDelivered: () => Effect.void,
+    markActivityLoopStarted: () => Effect.void,
   }));
 
   const layer = Layer.mergeAll(eventsLayer, depsLayer);
@@ -123,8 +125,7 @@ const makeTestLayer = (config: TestLayerConfig = {}) => {
 const importSolver = () => import('./cloudflare-solver.effect.js');
 
 /** Extract the tag from a SolveDetectionResult for assertion readability. */
-const tag = (result: SolveDetectionResult): string =>
-  typeof result === 'string' ? result : result._tag;
+const tag = (result: SolveDetectionResult): string => result._tag;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Group 1: solveTurnstile core paths

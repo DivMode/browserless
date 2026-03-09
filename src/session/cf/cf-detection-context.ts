@@ -46,6 +46,9 @@ export class DetectionContext {
   /** Public read-only view of the active detection. Mutations go through controlled methods. */
   get active(): ReadonlyActiveDetection { return this._active; }
 
+  /** Mutable active detection — for resolution settlement by detector/state-tracker. */
+  get mutableActive(): ActiveDetection { return this._active; }
+
   /**
    * Set aborted state on an ActiveDetection — THE ONLY way to set aborted=true.
    * Used by code paths that don't have a DetectionContext reference.
@@ -64,9 +67,9 @@ export class DetectionContext {
    * Mark click as delivered after verified checkbox dispatch.
    * Sets clickDelivered=true and records the timestamp.
    */
-  setClickDelivered(): void {
+  setClickDelivered(clickDeliveredAt?: number): void {
     this._active.clickDelivered = true;
-    this._active.clickDeliveredAt = Date.now();
+    this._active.clickDeliveredAt = clickDeliveredAt ?? Date.now();
   }
 
   /**
