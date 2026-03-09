@@ -209,7 +209,7 @@ const CF_TEST_SITES: CfTestSite[] = [
     url: 'https://2captcha.com/demo/cloudflare-turnstile-challenge',
     expectedTypes: ['interstitial', 'turnstile'],
     waitStrategy: 'interstitial', // safe for both — no Runtime.evaluate
-    expectedSummaries: ['Int→', 'Int✓', 'Emb→', 'Emb✓'],
+    expectedSummaries: ['Int→', 'Int✓', 'Emb→', 'Emb✓', 'Int→ Emb→', 'Int→ Emb✓', 'Int✓ Emb→', 'Int✓ Emb✓'],
   },
   {
     name: 'nopecha-ts',
@@ -244,7 +244,7 @@ const CF_TEST_SITES: CfTestSite[] = [
     url: 'https://cfschl.peet.ws/',
     expectedTypes: ['interstitial', 'managed'],
     waitStrategy: 'interstitial',
-    expectedSummaries: ['Int→', 'Int✓', 'Emb→', 'Emb✓', 'Int✗ cf_error_page', 'Int✗ cf_error_page Emb→'],
+    expectedSummaries: ['Int→', 'Int✓', 'Emb→', 'Emb✓', 'Int→ Emb→', 'Int→ Emb✓', 'Int✓ Emb→', 'Int✓ Emb✓'],
     maySkip: true, // CF may not always serve a challenge on this site
   },
 ];

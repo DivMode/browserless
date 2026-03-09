@@ -361,8 +361,23 @@ export class CloudflareSolver {
         parentCtx.clearOOPIF();
       }
     } else {
-      // This is a PAGE target being destroyed (tab close) — kill the fiber.
-      this.stopDetectionFiber(targetId);
+      // This is a PAGE target being destroyed (tab close) — kill the fiber,
+      // then unregister the page. Sequential order matters: fiber interrupt
+      // must complete before scope close so the catchCause handler (which
+      // would set aborted=true for defects) runs first. For interrupts,
+      // the catchCause bails early → aborted stays false → scope finalizer
+      // emits session_close fallback marker.
+      const runtime = this.runtime;
+      const fibers = this.detectionFibers;
+      const tracker = this.stateTracker;
+      return Effect.gen(function*() {
+        yield* Effect.promise(() => runtime.runPromise(
+          FiberMap.remove(fibers, targetId).pipe(Effect.ignore),
+        ));
+        yield* Effect.promise(() => runtime.runPromise(
+          tracker.unregisterPage(targetId),
+        ));
+      });
     }
 
     return Effect.promise(() => this.runtime.runPromise(
@@ -378,6 +393,10 @@ export class CloudflareSolver {
     const guarded = this.detector.detectTurnstileWidgetEffect(targetId, cdpSessionId).pipe(
       Effect.catchCause((cause) =>
         Effect.fn('cf.detectionFiberGuard')({ self: this }, function*() {
+          // Interrupt = normal shutdown (target destroyed / FiberMap.remove).
+          // The scope finalizer in unregisterPage handles fallback emission.
+          if (Cause.hasInterruptsOnly(cause)) return;
+
           const pretty = Cause.pretty(cause);
           console.error(JSON.stringify({
             message: 'Detection fiber crashed — emitting fallback failure',
@@ -400,10 +419,6 @@ export class CloudflareSolver {
     this.runtime.runFork(
       FiberMap.run(this.detectionFibers, targetId, guarded),
     );
-  }
-
-  private stopDetectionFiber(targetId: TargetId): void {
-    this.runtime.runFork(FiberMap.remove(this.detectionFibers, targetId));
   }
 
   setSendViaProxy(fn: SendCommand): void {
@@ -432,9 +447,9 @@ export class CloudflareSolver {
     ));
   }
 
-  onPageNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void> {
+  onPageNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string, title: string): Effect.Effect<void> {
     return Effect.promise(() => this.runtime.runPromise(
-      this.detector.onPageNavigatedEffect(targetId, cdpSessionId, url),
+      this.detector.onPageNavigatedEffect(targetId, cdpSessionId, url, title),
     ));
   }
 

@@ -15,7 +15,6 @@
  */
 
 import { Effect, Exit, Scope } from 'effect';
-import { Logger } from '@browserless.io/browserless';
 import type { TargetId } from '../../shared/cloudflare-detection.js';
 import type { ActiveDetection, ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
 import type { SolveSignal } from './cloudflare-state-tracker.js';
@@ -25,7 +24,6 @@ import { DetectionContext } from './cf-detection-context.js';
 export type EmitFallback = (active: ReadonlyActiveDetection, signal: SolveSignal) => void;
 
 export class DetectionRegistry {
-  private log = new Logger('cf-registry');
   private entries = new Map<TargetId, DetectionContext>();
 
   constructor(private emitFallback: EmitFallback) {}
@@ -63,15 +61,11 @@ export class DetectionRegistry {
         // Remove from map (idempotent — may already be gone if destroyAll iterates)
         self.entries.delete(targetId);
 
-        const action = (!context.resolved && !active.aborted) ? 'emit' : 'skip';
-        self.log.warn(`CF lifecycle: scope_finalizer target=${targetId.slice(0,8)} resolved=${context.resolved} aborted=${active.aborted} action=${action}`);
-
         if (!context.resolved && !active.aborted) {
           // Orphaned detection — abort + settle Resolution + emit session_close fallback
           DetectionContext.setAborted(active);
           const duration = Date.now() - active.startTime;
           yield* active.resolution.fail('session_close', duration);
-          self.log.info(`Scope finalizer: emitting session_close fallback for orphaned detection on ${targetId}`);
           self.emitFallback(active, 'session_close');
         }
       }));
@@ -94,13 +88,30 @@ export class DetectionRegistry {
 
   /**
    * Close a detection's scope WITHOUT marking it resolved.
-   * Finalizer fires and emits session_close fallback for the orphan.
+   *
+   * If the detection is unresolved, emit session_close fallback BEFORE closing
+   * the scope. This handles the case where abort() was already called (setting
+   * aborted=true) — the scope finalizer would skip, but we still need the
+   * marker for the replay since the tab is being destroyed.
    */
   unregister(targetId: TargetId): Effect.Effect<void> {
     const context = this.entries.get(targetId);
     if (!context) return Effect.void;
 
-    return Scope.close(context.scope, Exit.void);
+    const self = this;
+    return Effect.gen(function*() {
+      // Emit fallback if unresolved — even if aborted (abort doesn't emit markers)
+      if (!context.resolved) {
+        const mutable = context.mutableActive;
+        const duration = Date.now() - mutable.startTime;
+        if (!mutable.resolution.isDone) {
+          yield* mutable.resolution.fail('session_close', duration);
+        }
+        self.emitFallback(context.active, 'session_close');
+        context.resolved = true;
+      }
+      yield* Scope.close(context.scope, Exit.void);
+    });
   }
 
   /**

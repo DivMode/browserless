@@ -469,7 +469,16 @@ export class CdpSession {
   /** Offer rrweb events to a tab's Queue. */
   private offerEvents(targetId: TargetId, events: readonly { type: number; timestamp: number; data: unknown }[]): void {
     const queue = this.tabQueues.get(targetId);
-    if (!queue) return;
+    if (!queue) {
+      console.error(JSON.stringify({
+        message: 'offerEvents: tab queue missing — events dropped',
+        session_id: this.sessionId,
+        target_id: targetId,
+        event_count: events.length,
+        event_types: events.map(e => e.type),
+      }));
+      return;
+    }
     const sid = SessionId.makeUnsafe(this.sessionId);
     for (const event of events) {
       Queue.offerUnsafe(queue, {
@@ -1218,10 +1227,14 @@ export class CdpSession {
       if (target) {
         tabDuration.observe((Date.now() - target.startTime) / 1000);
 
-        // Replay: finalize + end Queue + await consumer + fire callback
+        // Replay: flush rrweb buffer
         yield* session.finalizeTabEffect(targetId).pipe(Effect.ignore);
 
-        // End this tab's Queue — consumer fiber drains remaining events + writes file
+        // CF: scope finalizer injects fallback markers while queue is still open
+        yield* session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
+          Effect.timeout('3 seconds'), Effect.ignore);
+
+        // End this tab's Queue — consumer fiber drains remaining events (including CF markers) + writes file
         const tabQueue = session.tabQueues.get(targetId);
         if (tabQueue) {
           Queue.endUnsafe(tabQueue);
@@ -1257,11 +1270,11 @@ export class CdpSession {
 
         // Video: clean up screencast
         session.videoHooks?.onTargetDestroyed(session.sessionId, target.cdpSessionId);
+      } else {
+        // Non-tab target (e.g. iframe) — still need CF cleanup
+        yield* session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
+          Effect.timeout('3 seconds'), Effect.ignore);
       }
-
-      // CF: interrupt detection fiber (with timeout)
-      yield* session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
-        Effect.timeout('3 seconds'), Effect.ignore);
       // Atomic cleanup — removes from all indices, closes per-page WS, cleans iframe refs
       session.targets.remove(targetId);
       session.targets.removeIframeTarget(targetId);
@@ -1296,7 +1309,7 @@ export class CdpSession {
           ], { concurrency: 'unbounded' }).pipe(Effect.ignore);
 
           // Page navigated — no-op for replay (extension handles re-injection)
-          yield* session.cloudflareHooks.onPageNavigated(changedTargetId, target.cdpSessionId, targetInfo.url).pipe(Effect.ignore);
+          yield* session.cloudflareHooks.onPageNavigated(changedTargetId, target.cdpSessionId, targetInfo.url, targetInfo.title ?? '').pipe(Effect.ignore);
         }
       }
 

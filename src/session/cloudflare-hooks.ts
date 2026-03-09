@@ -13,7 +13,7 @@ import type { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 
 export interface CloudflareHooks {
   onPageAttached(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void>;
-  onPageNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void>;
+  onPageNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string, title: string): Effect.Effect<void>;
   onIframeAttached(targetId: TargetId, cdpSessionId: CdpSessionId, url: string, parentCdpSessionId: CdpSessionId): Effect.Effect<void>;
   onIframeNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void>;
   onBridgeEvent(cdpSessionId: CdpSessionId, event: unknown): Effect.Effect<void>;

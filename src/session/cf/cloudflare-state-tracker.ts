@@ -8,6 +8,7 @@ import { isInterstitialType } from '../../shared/cloudflare-detection.js';
 import type { ReadonlyActiveDetection, ReadonlyEmbeddedDetection, ReadonlyInterstitialDetection, EmbeddedDetection, CFEvents } from './cloudflare-event-emitter.js';
 import { DetectionRegistry } from './cf-detection-registry.js';
 import { OOPIFChecker } from './cf-services.js';
+import { classifyBridgeDetected } from './cloudflare-detector.js';
 
 /** CDP send command — returns any because CDP response shapes vary per method. */
 export type SendCommand = (method: string, params?: object, cdpSessionId?: CdpSessionId, timeoutMs?: number) => Promise<any>;
@@ -247,19 +248,26 @@ export class CloudflareStateTracker {
           tracker.events.marker(pageTargetId, 'cf.bridge.detected', {
             method: parsed.method,
           });
-          // CF error page (1020 banned, access denied) — terminal failure.
-          // Emit cf.failed marker DIRECTLY so it's timestamped before any subsequent
-          // cf.detected (embedded turnstile). buildSummaryFromMarkers pairs markers
-          // chronologically — if the marker arrives after the next cf.detected, the
-          // first detection becomes orphaned as "Int?".
-          // Also settle resolution so the consumer doesn't block for 30s.
-          if (parsed.method === 'cf_error_page') {
-            const active = tracker.registry.getActive(pageTargetId);
-            if (active && !active.aborted) {
-              const duration = Date.now() - active.startTime;
-              // resolution.fail() triggers onSettle which emits cf.failed marker immediately
-              yield* active.resolution.fail('cf_error_page', duration);
+          const active = tracker.registry.getActive(pageTargetId);
+          const outcome = classifyBridgeDetected(active, parsed.method as string);
+
+          switch (outcome._tag) {
+            case 'InterstitialPostSolveErrorPage': {
+              const attr = deriveSolveAttribution('page_navigated', outcome.clickDelivered);
+              yield* active!.resolution.solve({
+                solved: true, type: outcome.type, method: attr.method,
+                duration_ms: outcome.duration, attempts: outcome.attempts,
+                auto_resolved: attr.autoResolved, signal: 'page_navigated',
+                phase_label: attr.label,
+              });
+              break;
             }
+            case 'EmbeddedErrorPage':
+              yield* active!.resolution.fail('cf_error_page', outcome.duration);
+              break;
+            case 'Informational':
+            case 'NoActiveDetection':
+              break; // marker already emitted above
           }
           break;
         }

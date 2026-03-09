@@ -49,10 +49,9 @@ export class SessionLifecycleManager {
       const coordinator = lifecycle.sessionCoordinator;
       if (!coordinator) return;
 
-      const solver = coordinator.getCloudflareSolver(session.id);
-      if (solver) {
-        yield* Effect.tryPromise(() => solver.emitUnresolvedDetections()).pipe(Effect.ignore);
-      }
+      // Fallback CF markers are injected per-tab in handleTargetDestroyedEffect
+      // (BEFORE Queue.endUnsafe). No session-wide emitUnresolvedDetections needed —
+      // it races with per-tab cleanup and drops markers into deleted queues.
 
       if (session.replay) {
         yield* coordinator.stopReplayEffect(session.id, {
