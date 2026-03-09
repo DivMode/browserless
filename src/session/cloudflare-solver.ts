@@ -432,9 +432,9 @@ export class CloudflareSolver {
     ));
   }
 
-  onPageNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void> {
+  onPageNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string, title: string): Effect.Effect<void> {
     return Effect.promise(() => this.runtime.runPromise(
-      this.detector.onPageNavigatedEffect(targetId, cdpSessionId, url),
+      this.detector.onPageNavigatedEffect(targetId, cdpSessionId, url, title),
     ));
   }
 

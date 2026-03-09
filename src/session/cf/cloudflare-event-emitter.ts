@@ -159,6 +159,14 @@ export interface ActiveDetection {
   /** Number of CF rechallenges on this target so far. */
   rechallengeCount?: number;
   /**
+   * One-shot flag: set to true after the first CosmeticUrlChange classification.
+   * Prevents the same detection from being classified as cosmetic twice —
+   * the second targetInfoChanged (title update) falls through to InterstitialSolved.
+   * Without this, Chrome's stale title on real cross-document navigations
+   * would be misclassified as cosmetic, leaving the detection unresolved (Int?).
+   */
+  cosmeticNavSeen?: boolean;
+  /**
    * Latch for abort coordination — opens when active.aborted is set to true.
    * Allows Effect fibers to block on `latch.await` instead of polling `aborted`.
    * Initialized closed (not aborted). Open = aborted.

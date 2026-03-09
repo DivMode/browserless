@@ -4,7 +4,7 @@ import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, Cloudfla
 import { isInterstitialType, isCFInterstitialTitle } from '../../shared/cloudflare-detection.js';
 import { DETECTION_POLL_DELAY, INTERSTITIAL_RESOLUTION_TIMEOUT, MAX_RECHALLENGES, RECHALLENGE_DELAY_MS } from './cf-schedules.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
-import type { ActiveDetection, EmbeddedDetection, CFEvents } from './cloudflare-event-emitter.js';
+import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection, CFEvents } from './cloudflare-event-emitter.js';
 import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
 import type { CloudflareStateTracker } from './cloudflare-state-tracker.js';
 import { SolveOutcome } from './cloudflare-solve-strategies.js';
@@ -84,6 +84,168 @@ export function classifyOOPIFDetection(
 
   return ClassifiedOOPIF.EmbeddedTurnstile({ detection, meta });
 }
+
+/**
+ * Classification result for page navigation events.
+ * Forces exhaustive matching — adding a variant is a compile error
+ * until all dispatch sites handle it.
+ */
+export type NavigationOutcome = Data.TaggedEnum<{
+  /** CF stripped tokens from URL via history.replaceState — page still showing challenge. */
+  CosmeticUrlChange: { readonly title: string; readonly url: string };
+  /** Turnstile host page navigated to CF URL — discard (not a rechallenge). */
+  TurnstileToCF: {};
+  /** Turnstile host page navigated to clean URL — widget solved. */
+  TurnstileSolved: {
+    readonly duration: number;
+    readonly clickDelivered: boolean;
+    readonly clickDeliveredAt: number | undefined;
+  };
+  /** Interstitial navigated to another CF URL — rechallenge. */
+  Rechallenge: {
+    readonly duration: number;
+    readonly clickDelivered: boolean;
+    readonly rechallengeCount: number;
+  };
+  /** Rechallenge limit exceeded. */
+  RechallengeLimitReached: {
+    readonly duration: number;
+    readonly rechallengeCount: number;
+    readonly clickDelivered: boolean;
+  };
+  /** Interstitial navigated to clean URL with changed title — solved. */
+  InterstitialSolved: {
+    readonly duration: number;
+    readonly clickDelivered: boolean;
+    readonly clickDeliveredAt: number | undefined;
+    readonly emitType: CloudflareType;
+  };
+  /** Non-interactive/invisible — navigation means CF went away. */
+  NonInteractiveFailed: { readonly duration: number };
+}>;
+export const NavigationOutcome = Data.taggedEnum<NavigationOutcome>();
+
+// ═══════════════════════════════════════════════════════════════════════
+// BridgeDetectedOutcome — tagged enum for bridge 'detected' events
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * Classification result for bridge 'detected' events (cf_error_page, etc.).
+ * Same pattern as NavigationOutcome — classify first, then dispatch with
+ * exhaustive matching. Prevents the inline if/else anti-pattern that caused
+ * the cf_error_page misdiagnosis.
+ */
+export type BridgeDetectedOutcome = Data.TaggedEnum<{
+  /** CF error page (.cf-error-details) on DESTINATION after interstitial auto-solve.
+   *  Same-URL POST doesn't trigger targetInfoChanged — this is the only signal. */
+  InterstitialPostSolveErrorPage: {
+    readonly duration: number;
+    readonly clickDelivered: boolean;
+    readonly attempts: number;
+    readonly type: CloudflareType;
+  };
+  /** CF error page on embedded page — CF blocked us, no challenge to solve. */
+  EmbeddedErrorPage: {
+    readonly duration: number;
+  };
+  /** Any other bridge detection method — informational only, no resolution. */
+  Informational: {
+    readonly method: string;
+  };
+  /** No active detection exists for this target (or detection is aborted). */
+  NoActiveDetection: {};
+}>;
+export const BridgeDetectedOutcome = Data.taggedEnum<BridgeDetectedOutcome>();
+
+/**
+ * Classify a bridge 'detected' event into a BridgeDetectedOutcome.
+ * Pure function — no side effects, no Effect needed. Trivially unit-testable.
+ */
+export const classifyBridgeDetected = (
+  active: ReadonlyActiveDetection | undefined,
+  method: string,
+): BridgeDetectedOutcome => {
+  if (!active || active.aborted) return BridgeDetectedOutcome.NoActiveDetection();
+  if (method !== 'cf_error_page') return BridgeDetectedOutcome.Informational({ method });
+
+  const duration = Date.now() - active.startTime;
+  if (isInterstitialType(active.info.type)) {
+    return BridgeDetectedOutcome.InterstitialPostSolveErrorPage({
+      duration,
+      clickDelivered: !!active.clickDelivered,
+      attempts: active.attempt,
+      type: active.info.type,
+    });
+  }
+  return BridgeDetectedOutcome.EmbeddedErrorPage({ duration });
+};
+
+/**
+ * Classify a page navigation into a NavigationOutcome.
+ * Pure-ish function — reads active detection state but has NO side effects
+ * on detection lifecycle. The only impurity is Effect.sleep for rechallenge
+ * detection (interstitial path).
+ *
+ * Title-based cosmetic URL change detection: when CF strips __cf_chl_rt_tk
+ * from the URL via history.replaceState, the page title stays "Just a moment..."
+ * but the URL looks clean. Without this check, the old code unconditionally
+ * aborted the solver fiber, killing the click that would have solved it.
+ */
+export const classifyNavigationOutcome = (
+  active: ActiveDetection,
+  url: string,
+  title: string,
+  detectCFFromUrl: (url: string) => InterstitialCFType | null,
+): Effect.Effect<NavigationOutcome> =>
+  Effect.fn('cf.classifyNavigation')(function*() {
+    const duration = Date.now() - active.startTime;
+    const clickBased = isInterstitialType(active.info.type) || active.info.type === 'turnstile';
+
+    if (!clickBased) return NavigationOutcome.NonInteractiveFailed({ duration });
+
+    const destinationIsCF = !!detectCFFromUrl(url);
+
+    // TURNSTILE (embedded) — no sleep, no rechallenge via page nav
+    if (active.info.type === 'turnstile') {
+      if (destinationIsCF) return NavigationOutcome.TurnstileToCF();
+      return NavigationOutcome.TurnstileSolved({
+        duration, clickDelivered: !!active.clickDelivered,
+        clickDeliveredAt: active.clickDeliveredAt,
+      });
+    }
+
+    // INTERSTITIAL / MANAGED — sleep to check for rechallenge
+    yield* Effect.sleep(`${RECHALLENGE_DELAY_MS} millis`);
+    const destinationIsCFAfterSleep = !!detectCFFromUrl(url);
+
+    if (destinationIsCFAfterSleep) {
+      const rechallengeCount = (active.rechallengeCount || 0) + 1;
+      if (rechallengeCount >= MAX_RECHALLENGES) {
+        return NavigationOutcome.RechallengeLimitReached({
+          duration, rechallengeCount, clickDelivered: !!active.clickDelivered,
+        });
+      }
+      return NavigationOutcome.Rechallenge({
+        duration, clickDelivered: !!active.clickDelivered, rechallengeCount,
+      });
+    }
+
+    // Clean URL — verify title to distinguish real nav from cosmetic strip.
+    // One-shot guard: only classify as cosmetic ONCE per detection. Chrome fires
+    // targetInfoChanged with stale title ("Just a moment...") during REAL navigations
+    // too — the URL updates before the new page's <title> is parsed. Without the
+    // one-shot guard, real navigation events get swallowed as cosmetic, leaving
+    // the detection unresolved (the Int? bug in 2captcha-cf integration test).
+    if (isCFInterstitialTitle(title) && !active.cosmeticNavSeen) {
+      return NavigationOutcome.CosmeticUrlChange({ title, url });
+    }
+
+    return NavigationOutcome.InterstitialSolved({
+      duration, clickDelivered: !!active.clickDelivered,
+      clickDeliveredAt: active.clickDeliveredAt,
+      emitType: active.info.type,
+    });
+  })();
 
 /**
  * Detection lifecycle for Cloudflare challenges.
@@ -166,11 +328,15 @@ export class CloudflareDetector {
   /**
    * Effect-native page navigation handler.
    *
-   * Replaces the async method with Effect.sleep instead of raw setTimeout,
-   * making delays interruptible via fiber cancellation.
-   * Bridge in CloudflareSolver.onPageNavigated runs this via runtime.runPromise.
+   * Three clean phases:
+   *   A) Classification — call classifyNavigationOutcome (no side effects on detection state)
+   *   B) Dispatch — pattern match on NavigationOutcome._tag
+   *   C) Post-navigation detection — URL-based or DOM walk
+   *
+   * Key fix: CosmeticUrlChange does NOT abort the solver — CF stripping
+   * __cf_chl_rt_tk from the URL via history.replaceState is not a real navigation.
    */
-  onPageNavigatedEffect(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void, never, DetectorR> {
+  onPageNavigatedEffect(targetId: TargetId, cdpSessionId: CdpSessionId, url: string, title: string): Effect.Effect<void, never, DetectorR> {
     const self = this;
     return Effect.fn('cf.detector.onPageNavigated')(function*() {
       yield* Effect.annotateCurrentSpan({
@@ -179,115 +345,115 @@ export class CloudflareDetector {
       });
       self.state.registerPage(targetId, cdpSessionId);
 
+      // ── Phase A: Classification ──────────────────────────────────────
       const active = self.state.registry.getActive(targetId);
-      if (active) {
+
+      const abortAndResolve = Effect.fn('cf.nav.abortAndResolve')(function*() {
         const navCtx = self.state.registry.getContext(targetId);
         if (navCtx) yield* navCtx.abort();
         yield* self.state.registry.resolve(targetId);
-        const duration = Date.now() - active.startTime;
+      });
 
-        // For click-based types (interstitial, turnstile, managed), check if the
-        // destination is ALSO a CF page before emitting solved/failed.
-        const clickBased = isInterstitialType(active.info.type) || active.info.type === 'turnstile';
-        if (clickBased) {
-          const destinationIsCF = !!self.detectCFFromUrl(url);
+      if (active) {
+        const outcome = yield* classifyNavigationOutcome(
+          active, url, title, self.detectCFFromUrl.bind(self),
+        );
 
-          if (active.info.type === 'turnstile') {
-            // EMBEDDED TURNSTILE FAST PATH — emit immediately, no sleep.
-            //
-            // The 500ms RECHALLENGE_DELAY_MS sleep exists for interstitial rechallenge
-            // detection. Embedded turnstile never rechallenges via page navigation.
-            //
-            // WHY IMMEDIATE: When the hosting page navigates after Turnstile solve
-            // (e.g. peet.ws form submission, nopecha.com demo redirect), the sleep
-            // races against pydoll closing the tab. If pydoll closes first, the fiber
-            // is interrupted mid-sleep and cf.solved is never emitted → no_resolution.
-            if (destinationIsCF) {
-              self.log.info(`Turnstile detection interrupted by navigation to CF URL — discarding (not a rechallenge)`);
-              self.state.bindingSolvedTargets.add(targetId);
-              // Fall through to post-navigation URL detection (triggerSolveFromUrl)
-            } else {
-              // Clean URL — turnstile solved, page navigated after widget completion.
-              // Keep type as 'turnstile' to match the original detection — pydoll tracks
-              // phases by type, so mismatch causes no_resolution.
-              // PHANTOM GUARD: Set solvedPages HERE (producer side) before falling through
-              // to detection loop. triggerSolveFromUrlEffect sets it on the consumer side
-              // but runs in a separate fiber that hasn't woken up yet.
-              self.state.solvedPages.add(targetId);
-              const attr = deriveSolveAttribution('page_navigated', !!active.clickDelivered);
-              const result = {
-                solved: true as const, type: 'turnstile' as const, method: attr.method,
-                signal: 'page_navigated', duration_ms: duration,
-                attempts: active.attempt, auto_resolved: attr.autoResolved,
-                phase_label: attr.label,
-              };
-              yield* active.resolution.solve(result);
-              if (attr.method === 'click_navigation' && active.clickDeliveredAt) {
-                self.events.marker(targetId, 'cf.click_to_nav', {
-                  click_to_nav_ms: Date.now() - active.clickDeliveredAt, type: 'turnstile',
-                });
-              }
-            }
-          } else {
-            // INTERSTITIAL / MANAGED PATH — sleep to check for rechallenge.
-            yield* Effect.sleep(`${RECHALLENGE_DELAY_MS} millis`);
-            const destinationIsCFAfterSleep = !!self.detectCFFromUrl(url);
+        // ── Phase B: Dispatch ────────────────────────────────────────
+        switch (outcome._tag) {
+          case 'CosmeticUrlChange':
+            // DO NOT abort, DO NOT resolve — solver keeps running.
+            // CF stripped __cf_chl_rt_tk from URL but page is still "Just a moment..."
+            // Set one-shot flag so the NEXT targetInfoChanged (title update or real nav)
+            // falls through to InterstitialSolved instead of being swallowed here again.
+            active.cosmeticNavSeen = true;
+            self.events.marker(targetId, 'cf.cosmetic_url_change', {
+              title: outcome.title.substring(0, 50), url: outcome.url.substring(0, 200),
+            });
+            return; // skip Phase C entirely
 
-            if (destinationIsCFAfterSleep) {
-              const rechallengeCount = (active.rechallengeCount || 0) + 1;
+          case 'TurnstileToCF':
+            yield* abortAndResolve();
+            self.log.info(`Turnstile detection interrupted by navigation to CF URL — discarding (not a rechallenge)`);
+            self.state.bindingSolvedTargets.add(targetId);
+            break; // fall through to Phase C
 
-              self.events.marker(targetId, 'cf.rechallenge', {
-                type: active.info.type, duration_ms: duration,
-                click_delivered: !!active.clickDelivered,
-                rechallenge_count: rechallengeCount,
+          case 'TurnstileSolved': {
+            yield* abortAndResolve();
+            // PHANTOM GUARD: Set solvedPages HERE (producer side) before falling through
+            // to detection loop. triggerSolveFromUrlEffect sets it on the consumer side
+            // but runs in a separate fiber that hasn't woken up yet.
+            self.state.solvedPages.add(targetId);
+            const attr = deriveSolveAttribution('page_navigated', outcome.clickDelivered);
+            const result = {
+              solved: true as const, type: 'turnstile' as const, method: attr.method,
+              signal: 'page_navigated', duration_ms: outcome.duration,
+              attempts: active.attempt, auto_resolved: attr.autoResolved,
+              phase_label: attr.label,
+            };
+            yield* active.resolution.solve(result);
+            if (attr.method === 'click_navigation' && outcome.clickDeliveredAt) {
+              self.events.marker(targetId, 'cf.click_to_nav', {
+                click_to_nav_ms: Date.now() - outcome.clickDeliveredAt, type: 'turnstile',
               });
-
-              const rechallengeLabel = active.clickDelivered ? '✓' : '→';
-
-              if (rechallengeCount >= MAX_RECHALLENGES) {
-                self.log.info(`Rechallenge limit reached (${rechallengeCount}) for ${active.info.type} — emitting cf.failed`);
-                yield* active.resolution.fail('rechallenge_limit', duration, rechallengeLabel);
-                self.state.bindingSolvedTargets.add(targetId);
-                return;
-              }
-
-              yield* active.resolution.fail('rechallenge', duration, rechallengeLabel);
-              self.log.info(`Navigation from ${active.info.type} landed on another CF challenge (rechallenge ${rechallengeCount}/${MAX_RECHALLENGES}) — suppressing cf.solved`);
-              self.state.pendingRechallengeCount.set(targetId, rechallengeCount);
-            } else {
-              // Clean destination — interstitial solved.
-              // NOTE: Do NOT add to solvedPages here. Interstitial solves don't produce
-              // phantom OOPIFs (they redirect to the real page). Only TURNSTILE solves
-              // produce phantom token-refresh OOPIFs. Adding interstitial solves to
-              // solvedPages blocks the embedded Turnstile detection in multi-phase
-              // (Int→Emb) flows — a P0 regression proven in production 2026-03-02.
-              const attr = deriveSolveAttribution('page_navigated', !!active.clickDelivered);
-              const clickToNavMs = active.clickDeliveredAt
-                ? Date.now() - active.clickDeliveredAt
-                : null;
-              const emitType = active.info.type;
-
-              const result = {
-                solved: true as const, type: emitType, method: attr.method,
-                signal: 'page_navigated', duration_ms: duration,
-                attempts: active.attempt, auto_resolved: attr.autoResolved,
-                phase_label: attr.label,
-              };
-              yield* active.resolution.solve(result);
-
-              if (attr.method === 'click_navigation' && clickToNavMs !== null) {
-                self.events.marker(targetId, 'cf.click_to_nav', {
-                  click_to_nav_ms: clickToNavMs, type: emitType,
-                });
-              }
             }
+            break;
           }
-        } else {
-          // Non-interactive, invisible — navigation means something else happened
-          yield* active.resolution.fail('page_navigated', duration);
+
+          case 'Rechallenge': {
+            yield* abortAndResolve();
+            self.events.marker(targetId, 'cf.rechallenge', {
+              type: active.info.type, duration_ms: outcome.duration,
+              click_delivered: outcome.clickDelivered,
+              rechallenge_count: outcome.rechallengeCount,
+            });
+            const rechallengeLabel = outcome.clickDelivered ? '✓' : '→';
+            yield* active.resolution.fail('rechallenge', outcome.duration, rechallengeLabel);
+            self.log.info(`Navigation from ${active.info.type} landed on another CF challenge (rechallenge ${outcome.rechallengeCount}/${MAX_RECHALLENGES}) — suppressing cf.solved`);
+            self.state.pendingRechallengeCount.set(targetId, outcome.rechallengeCount);
+            break;
+          }
+
+          case 'RechallengeLimitReached': {
+            yield* abortAndResolve();
+            self.log.info(`Rechallenge limit reached (${outcome.rechallengeCount}) for ${active.info.type} — emitting cf.failed`);
+            const rechallengeLabel = outcome.clickDelivered ? '✓' : '→';
+            yield* active.resolution.fail('rechallenge_limit', outcome.duration, rechallengeLabel);
+            self.state.bindingSolvedTargets.add(targetId);
+            return; // skip Phase C
+          }
+
+          case 'InterstitialSolved': {
+            yield* abortAndResolve();
+            // NOTE: Do NOT add to solvedPages here. Interstitial solves don't produce
+            // phantom OOPIFs (they redirect to the real page). Only TURNSTILE solves
+            // produce phantom token-refresh OOPIFs. Adding interstitial solves to
+            // solvedPages blocks the embedded Turnstile detection in multi-phase
+            // (Int→Emb) flows — a P0 regression proven in production 2026-03-02.
+            const attr = deriveSolveAttribution('page_navigated', outcome.clickDelivered);
+            const result = {
+              solved: true as const, type: outcome.emitType, method: attr.method,
+              signal: 'page_navigated', duration_ms: outcome.duration,
+              attempts: active.attempt, auto_resolved: attr.autoResolved,
+              phase_label: attr.label,
+            };
+            yield* active.resolution.solve(result);
+            if (attr.method === 'click_navigation' && outcome.clickDeliveredAt) {
+              self.events.marker(targetId, 'cf.click_to_nav', {
+                click_to_nav_ms: Date.now() - outcome.clickDeliveredAt, type: outcome.emitType,
+              });
+            }
+            break;
+          }
+
+          case 'NonInteractiveFailed':
+            yield* abortAndResolve();
+            yield* active.resolution.fail('page_navigated', outcome.duration);
+            break;
         }
       }
 
+      // ── Phase C: Post-navigation detection ─────────────────────────
       if (!self.enabled || !url || url.startsWith('about:')) return;
 
       // URL-based detection first (instant, zero CDP calls)
@@ -379,14 +545,14 @@ export class CloudflareDetector {
     }
     const duration = Date.now() - active.startTime;
     const ctx = this.state.registry.getContext(targetId);
-    return Effect.gen(function*() {
+    return Effect.fn('cf.emitSolveFailure')(function*() {
       if (ctx) {
         yield* ctx.abort();
       } else {
         DetectionContext.setAborted(active);
       }
       yield* active.resolution.fail(reason, duration);
-    });
+    })();
   }
 
   // ─── Private detection methods ──────────────────────────────────────

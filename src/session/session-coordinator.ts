@@ -115,7 +115,7 @@ export class SessionCoordinator {
     // CloudflareHooks adapter — direct passthrough (solver methods now return Effect)
     const cloudflareHooks: CloudflareHooks = {
       onPageAttached: (tid, sid, url) => cloudflareSolver.onPageAttached(tid, sid, url),
-      onPageNavigated: (tid, sid, url) => cloudflareSolver.onPageNavigated(tid, sid, url),
+      onPageNavigated: (tid, sid, url, title) => cloudflareSolver.onPageNavigated(tid, sid, url, title),
       onIframeAttached: (tid, sid, url, parent) => cloudflareSolver.onIframeAttached(tid, sid, url, parent),
       onIframeNavigated: (tid, sid, url) => cloudflareSolver.onIframeNavigated(tid, sid, url),
       onBridgeEvent: (sid, event) => cloudflareSolver.onBridgeEvent(sid, event),
@@ -182,7 +182,18 @@ export class SessionCoordinator {
         () => Effect.runPromise(coordinator.screencast.stopCapture(sessionId)),
       ).pipe(Effect.orElseSucceed(() => 0));
 
-      // Phase 2: Destroy the CdpSession — ends Queue, waits for pipeline to flush to external replay server
+      // Phase 2a: Emit unresolved CF detection markers BEFORE destroying CDP.
+      // Scope finalizers in DetectionRegistry try to inject replay markers via CDP.
+      // If CdpSession is destroyed first, CDP is dead and markers silently drop → "Int?" in replays.
+      const solver = coordinator.cloudflareSolvers.get(sessionId);
+      if (solver) {
+        yield* Effect.tryPromise(() => solver.emitUnresolvedDetections()).pipe(
+          Effect.timeout('5 seconds'),
+          Effect.ignore,
+        );
+      }
+
+      // Phase 2b: Destroy the CdpSession — ends Queue, waits for pipeline to flush to external replay server
       // 50s timeout: consumer fibers get 45s for large replay POSTs (GeoGuessr/Street View = 20-30MB).
       // The previous 8s timeout was killing the write before it could complete.
       const session = coordinator.cdpSessions.get(sessionId);

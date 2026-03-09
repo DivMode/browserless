@@ -469,7 +469,16 @@ export class CdpSession {
   /** Offer rrweb events to a tab's Queue. */
   private offerEvents(targetId: TargetId, events: readonly { type: number; timestamp: number; data: unknown }[]): void {
     const queue = this.tabQueues.get(targetId);
-    if (!queue) return;
+    if (!queue) {
+      console.error(JSON.stringify({
+        message: 'offerEvents: tab queue missing — events dropped',
+        session_id: this.sessionId,
+        target_id: targetId,
+        event_count: events.length,
+        event_types: events.map(e => e.type),
+      }));
+      return;
+    }
     const sid = SessionId.makeUnsafe(this.sessionId);
     for (const event of events) {
       Queue.offerUnsafe(queue, {
@@ -1296,7 +1305,7 @@ export class CdpSession {
           ], { concurrency: 'unbounded' }).pipe(Effect.ignore);
 
           // Page navigated — no-op for replay (extension handles re-injection)
-          yield* session.cloudflareHooks.onPageNavigated(changedTargetId, target.cdpSessionId, targetInfo.url).pipe(Effect.ignore);
+          yield* session.cloudflareHooks.onPageNavigated(changedTargetId, target.cdpSessionId, targetInfo.url, targetInfo.title ?? '').pipe(Effect.ignore);
         }
       }
 
