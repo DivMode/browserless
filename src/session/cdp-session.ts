@@ -34,6 +34,7 @@ import type { VideoHooks } from './video-services.js';
 
 import { CF_BRIDGE_JS } from '../generated/cf-bridge.js';
 import { OtelLayer } from '../otel-layer.js';
+import { AntibotHandler, type AntibotBrowserReport } from './antibot/antibot-handler.js';
 
 // Capture at module load — defense-in-depth against stale `node --watch` zombies.
 // In March 2026, a zombie `node --watch build/index.js` (started via env-cmd which
@@ -71,6 +72,11 @@ export class CdpSession {
   private readonly replayBaseUrl: string;
   private readonly onTabReplayComplete?: (metadata: TabReplayCompleteParams) => void;
 
+  // Antibot detection
+  private readonly antibot: boolean;
+  private antibotHandler: AntibotHandler | null = null;
+  private readonly onAntibotReport?: (report: object) => void;
+
   // Unified target state
   readonly targets = new TargetRegistry();
 
@@ -105,6 +111,11 @@ export class CdpSession {
     this.chromePort = new URL(options.wsEndpoint).port;
     this.replayBaseUrl = options.replayBaseUrl;
     this.onTabReplayComplete = options.onTabReplayComplete;
+    this.antibot = options.antibot ?? false;
+    if (this.antibot) {
+      this.antibotHandler = new AntibotHandler();
+    }
+    this.onAntibotReport = options.onAntibotReport;
     this.setupMessageRouting();
   }
 
@@ -854,6 +865,28 @@ export class CdpSession {
 
         // Bridge event: non-array object with a type field
         if (!Array.isArray(parsed) && parsed && typeof parsed.type === 'string') {
+          // Antibot report — route to antibot handler, emit CDP event + replay marker
+          if (parsed.type === 'antibot_report' && this.antibotHandler) {
+            const result = this.antibotHandler.processReport(parsed as AntibotBrowserReport);
+            // Emit as replay marker (visible in replay player)
+            const targetId = this.targets.findTargetIdByCdpSession(cdpSessionId);
+            if (targetId) {
+              this.offerEvents(targetId, [{
+                type: 5, timestamp: Date.now(),
+                data: {
+                  tag: 'antibot.report',
+                  payload: result,
+                },
+              }]);
+            }
+            // Emit as custom CDP event for pydoll to consume
+            try {
+              this.onAntibotReport?.(result);
+            } catch (_) {}
+            return;
+          }
+
+          // CF bridge event — route to solver
           if (this.runtime && this._fiberMap) {
             this.runtime.runFork(
               FiberMap.run(this._fiberMap, `cf:bridge:${cdpSessionId}`,
@@ -945,6 +978,9 @@ export class CdpSession {
     // Network.requestWillBeSent → rrweb network.request
     if (method === 'Network.requestWillBeSent') {
       const req = p?.request;
+      if (req?.url && this.antibotHandler) {
+        this.antibotHandler.onRequest(req.url);
+      }
       if (req?.url) {
         this.offerEvents(pageTargetId, [{
           type: 5, timestamp: Date.now(),
@@ -962,6 +998,9 @@ export class CdpSession {
     // Network.responseReceived → rrweb network.response
     if (method === 'Network.responseReceived') {
       const resp = p?.response;
+      if (resp?.url && this.antibotHandler) {
+        this.antibotHandler.onResponse(resp.url, resp.headers || {});
+      }
       if (resp?.url) {
         this.offerEvents(pageTargetId, [{
           type: 5, timestamp: Date.now(),
@@ -1085,6 +1124,15 @@ export class CdpSession {
           source: CF_BRIDGE_JS,
           runImmediately: true,
         }, cdpSessionId).pipe(Effect.ignore);
+
+        // Antibot detection — lazy import + inject BEFORE page scripts
+        if (session.antibot) {
+          const { ANTIBOT_DETECT_JS } = yield* Effect.promise(() => import('../generated/antibot-detect.js'));
+          yield* session.send('Page.addScriptToEvaluateOnNewDocument', {
+            source: ANTIBOT_DETECT_JS,
+          }, cdpSessionId).pipe(Effect.ignore);
+          session.log.debug(`Antibot detection injected for target ${targetId}`);
+        }
 
         // Set session ID for extension
         yield* session.send('Runtime.evaluate', {

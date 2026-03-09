@@ -30,4 +30,8 @@ export interface CdpSessionOptions {
   /** Base URL for replay viewer links (e.g. https://replay.catchseo.com). Falls back to baseUrl. */
   replayBaseUrl: string;
   onTabReplayComplete?: (metadata: TabReplayCompleteParams) => void;
+  /** Enable antibot detection (injected via addScriptToEvaluateOnNewDocument). */
+  antibot?: boolean;
+  /** Callback when antibot report is ready — CDPProxy uses this to emit client event. */
+  onAntibotReport?: (report: object) => void;
 }

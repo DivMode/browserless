@@ -66,21 +66,10 @@ export const solveDetection = (
           yield* deps.startActivityLoopInterstitial(interstitial).pipe(Effect.forkChild);
         }
 
-        const clickOutcome = yield* solveByClicking(active, deps);
+        const clicked = yield* solveByClicking(active, deps);
         if (active.aborted) return 'aborted' as SolveOutcome;
-        if (clickOutcome === 'clicked') return 'click_dispatched' as SolveOutcome;
+        if (clicked) return 'click_dispatched' as SolveOutcome;
 
-        if (clickOutcome === 'no_checkbox') {
-          // Fast-fail: checkbox never rendered across all attempts.
-          // Nothing to wait for — fail resolution immediately instead of
-          // burning 30s in waitForAutoNav + remaining WS scope budget.
-          if (!active.resolution.isDone) {
-            yield* active.resolution.fail('no_checkbox', Date.now() - active.startTime);
-          }
-          return 'no_click' as SolveOutcome;
-        }
-
-        // Click was attempted but failed — wait for possible auto-navigation
         yield* events.marker(active.pageTargetId, 'cf.waiting_auto_nav', {
           type: active.info.type,
           attempts_exhausted: true,
@@ -154,8 +143,6 @@ export const solveDetection = (
 // No Runtime.evaluate — click only, push-based resolution via bridge.
 // ═══════════════════════════════════════════════════════════════════════
 
-type ClickOutcome = 'clicked' | 'no_click' | 'no_checkbox';
-
 const solveByClicking = (
   active: ActiveDetection,
   deps: SolveDepsI,
@@ -163,12 +150,11 @@ const solveByClicking = (
   Effect.fn('cf.solveByClicking')(function*() {
     yield* annotateActive(active);
     // Phase 1: Try to click the checkbox
-    if (active.aborted) return 'no_click' as ClickOutcome;
+    if (active.aborted) return false;
 
     const events = yield* SolverEvents;
-    let everFoundCheckbox = false;
     for (let attempt = 0; attempt < MAX_CLICK_ATTEMPTS; attempt++) {
-      if (active.aborted) return 'no_click' as ClickOutcome;
+      if (active.aborted) return false;
 
       if (attempt > 0) yield* Effect.sleep(CLICK_RETRY_DELAY);
 
@@ -181,20 +167,17 @@ const solveByClicking = (
           active.clickDelivered = true;
           active.clickDeliveredAt = result.clickDeliveredAt;
           yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
-          return 'clicked' as ClickOutcome;
+          return true;
 
         case 'NotVerified':
-          everFoundCheckbox = true;
           if (result.reason === 'oopif_gone') {
             yield* events.marker(active.pageTargetId, 'cf.oopif_dead_interstitial', { attempt });
             // OOPIF dead — break loop, fall through to waitForAutoNav
-            return 'no_click' as ClickOutcome;
+            return false;
           }
           continue;
 
         case 'NoCheckbox':
-          continue;
-
         case 'ClickFailed':
           continue;
 
@@ -206,7 +189,7 @@ const solveByClicking = (
     }
 
     yield* events.emitProgress(active, 'cdp_click_complete', { success: false, attempts: MAX_CLICK_ATTEMPTS });
-    return (everFoundCheckbox ? 'no_click' : 'no_checkbox') as ClickOutcome;
+    return false;
   })();
 
 // ═══════════════════════════════════════════════════════════════════════

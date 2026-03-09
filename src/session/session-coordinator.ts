@@ -76,7 +76,7 @@ export class SessionCoordinator {
   async setupSession(
     browser: BrowserInstance,
     sessionId: string,
-    options?: { video?: boolean; onTabReplayComplete?: (metadata: TabReplayCompleteParams) => void },
+    options?: { video?: boolean; onTabReplayComplete?: (metadata: TabReplayCompleteParams) => void; antibot?: boolean; onAntibotReport?: (report: object) => void },
   ): Promise<void> {
     const wsEndpoint = browser.wsEndpoint();
     if (!wsEndpoint) {
@@ -133,6 +133,8 @@ export class SessionCoordinator {
       baseUrl: this.baseUrl,
       replayBaseUrl: this.replayBaseUrl,
       onTabReplayComplete: options?.onTabReplayComplete,
+      antibot: options?.antibot,
+      onAntibotReport: options?.onAntibotReport,
     });
 
     try {
