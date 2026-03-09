@@ -92,6 +92,10 @@ export class CdpSession {
   private readonly tabQueues = new Map<string, Queue.Queue<TabEvent, Cause.Done>>();
   private readonly eventCounts = new Map<string, number>();
 
+  // Per-tab scopes: LIFO finalizers guarantee cleanup ordering
+  // (CF cleanup → queue drain → callback + target removal)
+  private readonly tabScopes = new Map<string, Scope.Closeable>();
+
   // WebSocket
   private ws: InstanceType<any> | null = null;
   private WebSocket: any = null;
@@ -701,64 +705,32 @@ export class CdpSession {
         'cdp.destroy_source': source,
       });
       session.state = 'DRAINING';
-      session.log.info(`CdpSession destroying (${source}) for session ${session.sessionId}, targets=${session.targets.size}`);
+      session.log.info(`CdpSession destroying (${source}) for session ${session.sessionId}, targets=${session.targets.size}, tabScopes=${session.tabScopes.size}`);
 
       // Unregister Prometheus gauges
       const hadGauges = !!session.unregisterGauges;
       session.unregisterGauges?.();
       session.log.info(`CdpSession gauges unregistered (had=${hadGauges}) for session ${session.sessionId}`);
 
-      // 1. Clean up CF solver (awaited — ensures ManagedRuntime disposal + acquireRelease
-      //    release handlers complete before session teardown closes browser WS)
-      yield* session.cloudflareHooks.destroy();
-
-      // 2. Finalize all tabs — flush page buffers into the Queue (3s timeout per target)
+      // 1. Finalize all tabs — flush rrweb buffers into queues (before scope close)
       if (source === 'cleanup') {
         for (const target of [...session.targets]) {
           yield* session.finalizeTabEffect(target.targetId, 3_000).pipe(Effect.ignore);
         }
       }
 
-      // 3. End all tab Queues — triggers consumer fibers to drain + write files
-      for (const [, queue] of session.tabQueues) {
-        Queue.endUnsafe(queue);
+      // 2. Close all tab scopes — each handles its own cleanup via LIFO finalizers:
+      //    CF cleanup → queue drain → callback + target removal
+      //    Scope.close is idempotent — already-closed scopes (from handleTargetDestroyed) are no-ops.
+      for (const [, scope] of session.tabScopes) {
+        yield* Scope.close(scope, Exit.void).pipe(Effect.ignore);
       }
-      session.tabQueues.clear();
+      session.tabScopes.clear();
 
-      // 4. Graceful drain — await tab consumer fibers (45s timeout each)
-      // GeoGuessr/Street View sessions produce 20-30MB of rrweb events.
-      // JSON.stringify + fetch POST over Docker networking can take 10-30s.
-      // The previous 5s timeout was the root cause of "fetch failed" for large recordings.
-      if (session._fiberMap) {
-        const targetIds = [...session.targets.targetIds];
-        for (const targetId of targetIds) {
-          const fiber = yield* FiberMap.get(session._fiberMap, `tab:${targetId}`);
-          if (fiber) {
-            yield* Fiber.await(fiber).pipe(Effect.timeout('45 seconds'), Effect.ignore);
-          }
-        }
-      }
-
-      // 5. Fire tab-complete callbacks — replay files now exist on disk
-      if (session.onTabReplayComplete) {
-        for (const target of [...session.targets]) {
-          const tabReplayId = `${session.sessionId}--tab-${target.targetId}`;
-          try {
-            session.onTabReplayComplete({
-              sessionId: session.sessionId,
-              targetId: target.targetId,
-              duration: Date.now() - target.startTime,
-              eventCount: session.eventCounts.get(target.targetId) ?? 0,
-              frameCount: 0,
-              encodingStatus: 'none',
-              replayUrl: `${session.replayBaseUrl}/replay/${tabReplayId}`,
-              videoUrl: undefined,
-            });
-          } catch (e) {
-            session.log.warn(`onTabReplayComplete callback failed: ${e instanceof Error ? e.message : String(e)}`);
-          }
-        }
-      }
+      // 3. Destroy CF solver — ManagedRuntime disposal.
+      //    Per-tab CF cleanup is already done (tab scope finalizers ran first).
+      //    Must happen AFTER tab scopes close: per-tab onTargetDestroyed uses the solver's runtime.
+      yield* session.cloudflareHooks.destroy();
     })().pipe(
       // Guaranteed cleanup — runs even if Effect times out or fails
       Effect.ensuring(Effect.sync(() => {
@@ -1073,6 +1045,64 @@ export class CdpSession {
         session.log.info(`Target attached (paused=${waitingForDebugger}): targetId=${targetId} url=${targetInfo.url} type=${targetInfo.type}`);
         session.targets.add(targetId, cdpSessionId);
 
+        // ── Per-tab scope: LIFO finalizers guarantee cleanup ordering ──
+        // Scope.close() replaces the manual 12-step cleanup in handleTargetDestroyedEffect.
+        // Registration order = reverse execution order (LIFO):
+        //   Registered 1st → runs LAST:  callback + video + target removal
+        //   Registered 2nd → runs 2nd:   queue end + consumer drain
+        //   Registered 3rd → runs FIRST: CF cleanup (markers land in still-open queue)
+        const tabScope = yield* Scope.make();
+        session.tabScopes.set(targetId, tabScope);
+
+        // FINALIZER 3 (registered first = runs LAST): callback + video + target removal
+        yield* Scope.addFinalizer(tabScope, Effect.gen(function*() {
+          const target = session.targets.getByTarget(targetId);
+          if (session.onTabReplayComplete && target) {
+            const tabReplayId = `${session.sessionId}--tab-${target.targetId}`;
+            try {
+              session.onTabReplayComplete({
+                sessionId: session.sessionId,
+                targetId: target.targetId,
+                duration: Date.now() - target.startTime,
+                eventCount: session.eventCounts.get(target.targetId) ?? 0,
+                frameCount: 0,
+                encodingStatus: 'none',
+                replayUrl: `${session.replayBaseUrl}/replay/${tabReplayId}`,
+                videoUrl: undefined,
+              });
+            } catch (e) {
+              session.log.warn(`onTabReplayComplete callback failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+          if (target) {
+            session.videoHooks?.onTargetDestroyed(session.sessionId, target.cdpSessionId);
+          }
+          session.targets.remove(targetId);
+          session.targets.removeIframeTarget(targetId);
+        }));
+
+        // FINALIZER 2 (registered second = runs SECOND): queue end + consumer drain
+        yield* Scope.addFinalizer(tabScope, Effect.gen(function*() {
+          const tabQueue = session.tabQueues.get(targetId);
+          if (tabQueue) {
+            Queue.endUnsafe(tabQueue);
+            session.tabQueues.delete(targetId);
+          }
+          // Await consumer fiber — guarantees replay file is written before callback
+          if (session._fiberMap) {
+            const fiber = yield* FiberMap.get(session._fiberMap, `tab:${targetId}`);
+            if (fiber) {
+              yield* Fiber.await(fiber).pipe(Effect.timeout('45 seconds'), Effect.ignore);
+            }
+          }
+        }));
+
+        // FINALIZER 1 (registered third = runs FIRST): CF cleanup
+        // Markers injected here land in the queue (still open — queue end is finalizer 2)
+        yield* Scope.addFinalizer(tabScope,
+          session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
+            Effect.timeout('3 seconds'), Effect.ignore));
+
         // Notify CF solver — tracked fiber
         if (session._fiberMap) {
           yield* FiberMap.run(session._fiberMap, `cf:attach:${targetId}`,
@@ -1224,60 +1254,28 @@ export class CdpSession {
     return Effect.fn('cdp.onTargetDestroyed')(function*() {
       yield* Effect.annotateCurrentSpan({ 'cdp.target_id': targetId });
       const target = session.targets.getByTarget(targetId);
+
       if (target) {
         tabDuration.observe((Date.now() - target.startTime) / 1000);
-
-        // Replay: flush rrweb buffer
+        // Flush rrweb buffer into queue BEFORE scope close (queue still open)
         yield* session.finalizeTabEffect(targetId).pipe(Effect.ignore);
-
-        // CF: scope finalizer injects fallback markers while queue is still open
-        yield* session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
-          Effect.timeout('3 seconds'), Effect.ignore);
-
-        // End this tab's Queue — consumer fiber drains remaining events (including CF markers) + writes file
-        const tabQueue = session.tabQueues.get(targetId);
-        if (tabQueue) {
-          Queue.endUnsafe(tabQueue);
-          session.tabQueues.delete(targetId);
-        }
-
-        // Await consumer fiber — guarantees replay file is written before callback fires
-        if (session._fiberMap) {
-          const fiber = yield* FiberMap.get(session._fiberMap, `tab:${targetId}`);
-          if (fiber) {
-            yield* Fiber.await(fiber).pipe(Effect.timeout('5 seconds'), Effect.ignore);
-          }
-        }
-
-        // Fire callback — replay file now exists on disk
-        if (session.onTabReplayComplete) {
-          const tabReplayId = `${session.sessionId}--tab-${target.targetId}`;
-          try {
-            session.onTabReplayComplete({
-              sessionId: session.sessionId,
-              targetId: target.targetId,
-              duration: Date.now() - target.startTime,
-              eventCount: session.eventCounts.get(target.targetId) ?? 0,
-              frameCount: 0,
-              encodingStatus: 'none',
-              replayUrl: `${session.replayBaseUrl}/replay/${tabReplayId}`,
-              videoUrl: undefined,
-            });
-          } catch (e) {
-            session.log.warn(`onTabReplayComplete callback failed: ${e instanceof Error ? e.message : String(e)}`);
-          }
-        }
-
-        // Video: clean up screencast
-        session.videoHooks?.onTargetDestroyed(session.sessionId, target.cdpSessionId);
-      } else {
-        // Non-tab target (e.g. iframe) — still need CF cleanup
-        yield* session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
-          Effect.timeout('3 seconds'), Effect.ignore);
       }
-      // Atomic cleanup — removes from all indices, closes per-page WS, cleans iframe refs
-      session.targets.remove(targetId);
-      session.targets.removeIframeTarget(targetId);
+
+      // Close per-tab scope — LIFO finalizers handle all cleanup:
+      //   1. CF cleanup (markers injected while queue is open)
+      //   2. Queue end + consumer drain (replay file written)
+      //   3. Callback + video + target removal
+      const tabScope = session.tabScopes.get(targetId);
+      if (tabScope) {
+        session.tabScopes.delete(targetId);
+        yield* Scope.close(tabScope, Exit.void);
+      } else {
+        // Non-tab target (iframe) or no scope — direct cleanup
+        yield* session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
+          Effect.timeout('3 seconds'), Effect.ignore);
+        session.targets.remove(targetId);
+        session.targets.removeIframeTarget(targetId);
+      }
     })();
   }
 
