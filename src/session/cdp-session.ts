@@ -142,30 +142,88 @@ export class CdpSession {
         Effect.tryPromise({
           try: async () => {
             const url = `${replayServerUrl}/replays`;
+            const body = JSON.stringify({
+              id: tabReplayId,
+              events,
+              metadata: {
+                duration: metadata.duration,
+                startedAt: metadata.startedAt,
+                endedAt: metadata.endedAt,
+                browserType: metadata.browserType,
+                parentSessionId: metadata.parentSessionId,
+                targetId: metadata.targetId,
+                source: 'browserless',
+              },
+            });
+            const sizeMB = (body.length / 1024 / 1024).toFixed(1);
+            console.error(JSON.stringify({
+              message: 'replay.write_start',
+              replay_id: tabReplayId,
+              event_count: events.length,
+              body_size_mb: sizeMB,
+            }));
             const resp = await fetch(url, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                id: tabReplayId,
-                events,
-                metadata: {
-                  duration: metadata.duration,
-                  startedAt: metadata.startedAt,
-                  endedAt: metadata.endedAt,
-                  browserType: metadata.browserType,
-                  parentSessionId: metadata.parentSessionId,
-                  targetId: metadata.targetId,
-                  source: 'browserless',
-                },
-              }),
+              body,
             });
             if (!resp.ok) throw new Error(`Replay server ${resp.status}: ${await resp.text()}`);
             const result = await resp.json() as { url: string };
+            console.error(JSON.stringify({
+              message: 'replay.write_done',
+              replay_id: tabReplayId,
+              event_count: events.length,
+              body_size_mb: sizeMB,
+            }));
             return result.url;
           },
-          catch: (e) => new ReplayStoreError({
-            message: e instanceof Error ? e.message : String(e),
-          }),
+          catch: (e) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            const cause = e instanceof Error && e.cause ? String(e.cause) : undefined;
+            console.error(JSON.stringify({
+              message: 'replay.write_error',
+              replay_id: tabReplayId,
+              error: msg,
+              cause,
+              error_name: e instanceof Error ? e.name : typeof e,
+            }));
+            return new ReplayStoreError({ message: msg });
+          },
+        }),
+      appendTabEvents: (tabReplayId, events) =>
+        Effect.tryPromise({
+          try: async () => {
+            const url = `${replayServerUrl}/replays/${tabReplayId}/events`;
+            const body = JSON.stringify({ events });
+            const sizeMB = (body.length / 1024 / 1024).toFixed(1);
+            console.error(JSON.stringify({
+              message: 'replay.append_start',
+              replay_id: tabReplayId,
+              event_count: events.length,
+              body_size_mb: sizeMB,
+            }));
+            const resp = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body,
+            });
+            if (!resp.ok) throw new Error(`Replay server ${resp.status}: ${await resp.text()}`);
+            console.error(JSON.stringify({
+              message: 'replay.append_done',
+              replay_id: tabReplayId,
+              event_count: events.length,
+              body_size_mb: sizeMB,
+            }));
+          },
+          catch: (e) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error(JSON.stringify({
+              message: 'replay.append_error',
+              replay_id: tabReplayId,
+              error: msg,
+            }));
+            return new ReplayStoreError({ message: msg });
+          },
         }),
       writeMetadata: (_metadata) => Effect.void, // Replay server stores metadata with events
     }));
@@ -645,13 +703,16 @@ export class CdpSession {
       }
       session.tabQueues.clear();
 
-      // 4. Graceful drain — await tab consumer fibers (5s timeout each)
+      // 4. Graceful drain — await tab consumer fibers (45s timeout each)
+      // GeoGuessr/Street View sessions produce 20-30MB of rrweb events.
+      // JSON.stringify + fetch POST over Docker networking can take 10-30s.
+      // The previous 5s timeout was the root cause of "fetch failed" for large recordings.
       if (session._fiberMap) {
         const targetIds = [...session.targets.targetIds];
         for (const targetId of targetIds) {
           const fiber = yield* FiberMap.get(session._fiberMap, `tab:${targetId}`);
           if (fiber) {
-            yield* Fiber.await(fiber).pipe(Effect.timeout('5 seconds'), Effect.ignore);
+            yield* Fiber.await(fiber).pipe(Effect.timeout('45 seconds'), Effect.ignore);
           }
         }
       }

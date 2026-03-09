@@ -62,7 +62,10 @@ export class SessionLifecycleManager {
             : session.routePath,
           trackingId: session.trackingId,
         }).pipe(
-          Effect.timeout('12 seconds'),
+          // 60s — GeoGuessr/Street View sessions can produce 20-30MB of rrweb events.
+          // The previous 12s timeout caused large replay POSTs to be interrupted,
+          // leaving orphaned NDJSON files on disk with no DB entry.
+          Effect.timeout('60 seconds'),
           Effect.ignore,
         );
       }
@@ -81,7 +84,7 @@ export class SessionLifecycleManager {
 
       // Step 3: Replay + CF cleanup (with timeout)
       yield* replayCleanup.pipe(
-        Effect.timeout('15 seconds'),
+        Effect.timeout('65 seconds'),
         Effect.ignore,
       );
 

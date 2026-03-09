@@ -409,7 +409,9 @@ export class CloudflareSolveStrategies {
       // Phase 1 failure is non-fatal — Phase 2 fallback handles it.
       // acquireRelease guarantees WS cleanup even on fiber interruption.
       return { backendNodeId, frameId };
-    })().pipe(Effect.scoped);
+    })().pipe(Effect.scoped, Effect.onInterrupt(() => Effect.sync(() => {
+      console.error(JSON.stringify({ message: 'ws.debug.phase1.interrupted', targetId: pageTargetId }));
+    })));
   }
 
 

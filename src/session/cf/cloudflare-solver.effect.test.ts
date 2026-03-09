@@ -159,8 +159,9 @@ describe('solveTurnstile', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      // Fork bridge push that resolves after 2s
-      yield* simulateBridgePush(active, '2 seconds').pipe(Effect.forkChild);
+      // Bridge push at 200ms — during the 500ms CLICK_RETRY_DELAY sleep.
+      // abortLatch opens before the click loop finishes → race won by abortLatch.
+      yield* simulateBridgePush(active, '200 millis').pipe(Effect.forkChild);
       yield* TestClock.adjust('5 seconds');
       const outcome = yield* Fiber.join(fiber);
 
@@ -188,7 +189,7 @@ describe('solveTurnstile', () => {
       expect(active.resolution.isDone).toBe(true);
     }));
 
-  it.effect('4. no click, no bridge push → waits until session close', () =>
+  it.effect('4. no click, no bridge push → solver returns NoClick immediately', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer } = makeTestLayer({ clickSuccess: false });
@@ -198,12 +199,13 @@ describe('solveTurnstile', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('5 seconds');   // click loop finishes
-      DetectionContext.setAborted(active);     // simulate session close
-      yield* TestClock.adjust('1 second');
+      // Solver returns immediately after click loop — does NOT block on
+      // abortLatch.await. This prevents leaking the solver_isolated WS
+      // that's held open by the dispatch scope.
+      yield* TestClock.adjust('5 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      expect(tag(outcome)).toBe('Aborted');
+      expect(tag(outcome)).toBe('NoClick');
     }));
 
   it.effect('5. external abort — latch opens mid-solve', () =>
@@ -225,7 +227,7 @@ describe('solveTurnstile', () => {
       expect(tag(outcome)).toBe('Aborted');
     }));
 
-  it.effect('6. click delivered — pure push wait resolves via bridge', () =>
+  it.effect('6. click delivered — solver returns Clicked immediately', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer, captures } = makeTestLayer({ clickSuccessOnAttempt: 1 });
@@ -235,14 +237,13 @@ describe('solveTurnstile', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      // Bridge push resolves after click (pure push — no timeout)
-      yield* simulateBridgePush(active, '5 seconds').pipe(Effect.forkChild);
-      yield* TestClock.adjust('10 seconds');
+      yield* TestClock.adjust('5 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      // Bridge push sets aborted → solveDetection returns Aborted
-      expect(tag(outcome)).toBe('Aborted');
-      expect(active.resolution.isDone).toBe(true);
+      // Solver returns Clicked immediately — does NOT block on abortLatch.
+      // The dispatch scope closes, releasing the solver_isolated WS.
+      // Detection fiber independently awaits Resolution (bridge/session close).
+      expect(tag(outcome)).toBe('Clicked');
       expect(captures.clickAttempts).toBeGreaterThanOrEqual(1);
     }));
 });
@@ -262,8 +263,9 @@ describe('Bridge push resolution', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      // Bridge push after 1s — click loop is still retrying
-      yield* simulateBridgePush(active, '1 second').pipe(Effect.forkChild);
+      // Bridge push at 200ms — during the 500ms CLICK_RETRY_DELAY sleep.
+      // NoCheckbox reduces to 2 attempts (500ms total), so 200ms is mid-loop.
+      yield* simulateBridgePush(active, '200 millis').pipe(Effect.forkChild);
       yield* TestClock.adjust('10 seconds');
       const outcome = yield* Fiber.join(fiber);
 
@@ -271,7 +273,7 @@ describe('Bridge push resolution', () => {
       expect(active.resolution.isDone).toBe(true);
     }));
 
-  it.effect('8. abort during solve — returns gracefully', () =>
+  it.effect('8. abort during click loop — returns gracefully', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer } = makeTestLayer({ clickSuccess: false });
@@ -282,7 +284,9 @@ describe('Bridge push resolution', () => {
         Effect.forkChild,
       );
 
-      yield* TestClock.adjust('2 seconds');
+      // Abort at 200ms — during the 500ms CLICK_RETRY_DELAY sleep.
+      // abortLatch opens → race won by abort racer → returns Aborted.
+      yield* TestClock.adjust('200 millis');
       DetectionContext.setAborted(active);
       yield* TestClock.adjust('1 second');
 
@@ -290,7 +294,7 @@ describe('Bridge push resolution', () => {
       expect(tag(outcome)).toBe('Aborted');
     }));
 
-  it.effect('9. no bridge push, no click — waits until session close', () =>
+  it.effect('9. no bridge push, no click — solver returns NoClick immediately', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer } = makeTestLayer({ clickSuccess: false });
@@ -300,12 +304,12 @@ describe('Bridge push resolution', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('5 seconds');   // click loop finishes
-      DetectionContext.setAborted(active);     // simulate session close
-      yield* TestClock.adjust('1 second');
+      // Solver returns NoClick immediately — does NOT block on abortLatch.
+      // Detection fiber independently awaits Resolution.
+      yield* TestClock.adjust('5 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      expect(tag(outcome)).toBe('Aborted');
+      expect(tag(outcome)).toBe('NoClick');
     }));
 });
 
@@ -314,7 +318,7 @@ describe('Bridge push resolution', () => {
 // ═══════════════════════════════════════════════════════════════════════
 
 describe('Pure push wait', () => {
-  it.effect('10. Phase A navigation — latch opens before NAV_WAIT', () =>
+  it.effect('10. click delivered — solver returns Clicked before navigation', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer } = makeTestLayer({ clickSuccessOnAttempt: 1 });
@@ -325,17 +329,12 @@ describe('Pure push wait', () => {
         Effect.forkChild,
       );
 
-      // Let the click happen
+      // Solver returns Clicked immediately (first attempt succeeds).
+      // Navigation/abort happens later — handled by detection, not solver.
       yield* TestClock.adjust('1 second');
 
-      // Simulate page navigation during Phase A (< NAV_WAIT_MS=3s).
-      // Opening abortLatch during the race triggers the abort racer.
-      DetectionContext.setAborted(active);
-      yield* TestClock.adjust('5 seconds');
-
       const outcome = yield* Fiber.join(fiber);
-      // Abort arrives during the race → abortLatch racer wins
-      expect(tag(outcome)).toBe('Aborted');
+      expect(tag(outcome)).toBe('Clicked');
     }));
 
   it.effect('11. Phase B bridge push — click succeeds then bridge resolves', () =>
@@ -359,7 +358,7 @@ describe('Pure push wait', () => {
       expect(active.resolution.isDone).toBe(true);
     }));
 
-  it.effect('12. click delivered — pure push waits indefinitely for bridge', () =>
+  it.effect('12. click delivered — solver returns immediately, does not hold WS', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer } = makeTestLayer({ clickSuccessOnAttempt: 1 });
@@ -369,14 +368,13 @@ describe('Pure push wait', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      // Bridge push after 120s — well past any old timeout. Pure push waits.
-      yield* simulateBridgePush(active, '120 seconds').pipe(Effect.forkChild);
-      yield* TestClock.adjust('125 seconds');
+      // Solver returns Clicked immediately — dispatch scope closes,
+      // releasing solver_isolated WS. Detection independently awaits
+      // bridge push via Resolution (no WS held open).
+      yield* TestClock.adjust('1 second');
       const outcome = yield* Fiber.join(fiber);
 
-      // No timeout — push resolves cleanly after 120s
-      expect(tag(outcome)).toBe('Aborted');
-      expect(active.resolution.isDone).toBe(true);
+      expect(tag(outcome)).toBe('Clicked');
     }));
 });
 
@@ -523,14 +521,12 @@ describe('Exhaustive ClickResult handling', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('5 seconds');   // click loop finishes
-      DetectionContext.setAborted(active);     // simulate session close
-      yield* TestClock.adjust('1 second');
+      yield* TestClock.adjust('5 seconds');
       const outcome = yield* Fiber.join(fiber);
 
       // ClickFailed reduces maxAttempts from 6 to 2 on first attempt
       expect(captures.clickAttempts).toBe(2);
-      expect(tag(outcome)).toBe('Aborted');
+      expect(tag(outcome)).toBe('NoClick');
       // Verify the cf.reduced_attempts marker was emitted with cdp_error reason
       const reducedMarker = captures.markers.find(m => m.tag === 'cf.reduced_attempts');
       expect(reducedMarker).toBeDefined();
@@ -541,7 +537,7 @@ describe('Exhaustive ClickResult handling', () => {
       });
     }));
 
-  it.effect('19. OopifDead waits for push or session close', () =>
+  it.effect('19. OopifDead — solver returns immediately', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer, captures } = makeTestLayer({
@@ -553,20 +549,18 @@ describe('Exhaustive ClickResult handling', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('5 seconds');   // click loop finishes
-      DetectionContext.setAborted(active);     // simulate session close
-      yield* TestClock.adjust('1 second');
+      yield* TestClock.adjust('5 seconds');
       const outcome = yield* Fiber.join(fiber);
 
-      // OopifDead exits on first attempt — no retries, then waits on latch
+      // OopifDead exits on first attempt — returns immediately
       expect(captures.clickAttempts).toBe(1);
-      expect(tag(outcome)).toBe('Aborted');
+      expect(tag(outcome)).toBe('OopifDead');
       // Verify oopif_dead marker
       const oopifMarker = captures.markers.find(m => m.tag === 'cf.oopif_dead_on_verify');
       expect(oopifMarker).toBeDefined();
     }));
 
-  it.effect('20. NotVerified(not_confirmed) retries full attempts then waits', () =>
+  it.effect('20. NotVerified(not_confirmed) retries full attempts then returns NoClick', () =>
     Effect.gen(function*() {
       const { solveDetection } = yield* Effect.promise(importSolver);
       const { layer, captures } = makeTestLayer({
@@ -578,14 +572,12 @@ describe('Exhaustive ClickResult handling', () => {
         Effect.provide(layer),
         Effect.forkChild,
       );
-      yield* TestClock.adjust('5 seconds');   // click loop finishes
-      DetectionContext.setAborted(active);     // simulate session close
-      yield* TestClock.adjust('1 second');
+      yield* TestClock.adjust('5 seconds');
       const outcome = yield* Fiber.join(fiber);
 
       // not_confirmed retries all MAX_CLICK_ATTEMPTS — it doesn't reduce
       expect(captures.clickAttempts).toBe(MAX_CLICK_ATTEMPTS);
-      expect(tag(outcome)).toBe('Aborted');
+      expect(tag(outcome)).toBe('NoClick');
     }));
 
   it.effect('21. ClickFailed then Verified on attempt 2', () =>

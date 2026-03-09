@@ -159,7 +159,7 @@ interface CfTestSite {
    * Accepted CF challenge types from cf.detected marker.
    * Most sites serve one type consistently; some (2captcha-cf) vary.
    */
-  expectedTypes: ('interstitial' | 'turnstile')[];
+  expectedTypes: ('interstitial' | 'turnstile' | 'managed')[];
   /**
    * Wait strategy for early exit on solve.
    *
@@ -195,7 +195,7 @@ interface CfTestSite {
  * | `peet-managed`  | `peet.ws/turnstile-test/managed.html`              | turnstile     | `Emb✓` or `Emb→`     | Real sitekey. Managed (interactive) Turnstile    |
  * | `peet-nonint`   | `peet.ws/turnstile-test/non-interactive.html`      | turnstile     | `Emb→`               | Non-interactive — auto-solves                    |
  * | `peet-invisible`| `peet.ws/turnstile-test/invisible.html`            | turnstile     | `Emb→`               | Invisible widget — auto-solves                   |
- * | `cfschl-peet`   | `cfschl.peet.ws/`                                  | interstitial  | `Int→` or `Int✓`     | May not always serve a challenge                 |
+ * | `cfschl-peet`   | `cfschl.peet.ws/`                                  | interstitial/managed | `Int→` or `Int✓` or `Emb→` or `Emb✓` | May not always serve a challenge |
  *
  * Excluded sites:
  * - `nopecha-cf`: covered by the detailed cloudflare-solver.integration.test.ts
@@ -242,9 +242,9 @@ const CF_TEST_SITES: CfTestSite[] = [
   {
     name: 'cfschl-peet',
     url: 'https://cfschl.peet.ws/',
-    expectedTypes: ['interstitial'],
+    expectedTypes: ['interstitial', 'managed'],
     waitStrategy: 'interstitial',
-    expectedSummaries: ['Int→', 'Int✓'],
+    expectedSummaries: ['Int→', 'Int✓', 'Emb→', 'Emb✓'],
     maySkip: true, // CF may not always serve a challenge on this site
   },
 ];

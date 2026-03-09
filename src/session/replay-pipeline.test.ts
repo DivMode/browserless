@@ -1,4 +1,4 @@
-import { expect } from 'chai';
+import { describe, expect, it } from 'vitest';
 import { Cause, Effect, Fiber, Layer, Queue } from 'effect';
 import type { ReplayEvent } from '../shared/replay-schemas.js';
 import { SessionId } from '../shared/replay-schemas.js';
@@ -23,6 +23,16 @@ const makeMockLayers = (written: Array<{ id: string; events: readonly ReplayEven
     writeTabReplay: (id, events, _meta) => {
       written.push({ id, events: [...events] });
       return Effect.succeed(`/tmp/${id}.json`);
+    },
+    appendTabEvents: (id, events) => {
+      const existing = written.find(w => w.id === id);
+      if (existing) {
+        written.push({ id, events: [...existing.events, ...events] });
+        written.splice(written.indexOf(existing), 1);
+      } else {
+        written.push({ id, events: [...events] });
+      }
+      return Effect.void;
     },
     writeMetadata: () => Effect.void,
   }));
@@ -132,6 +142,7 @@ describe('Replay Pipeline (per-tab Queue)', () => {
         written.push({ id, events: [...events] });
         return Effect.succeed(`/tmp/${id}.json`);
       },
+      appendTabEvents: (_id, _events) => Effect.void,
       writeMetadata: () => Effect.void,
     }));
 
@@ -174,6 +185,7 @@ describe('Replay Pipeline (per-tab Queue)', () => {
         timeline.push('file_written');
         return Effect.succeed(`/tmp/${id}.json`);
       },
+      appendTabEvents: (_id, _events) => Effect.void,
       writeMetadata: () => Effect.void,
     }));
 
@@ -256,6 +268,58 @@ describe('Replay Pipeline (per-tab Queue)', () => {
         expect(written).to.have.length(2);
         const tgtB = written.find(w => w.id.includes('tgt-B'))!;
         expect(tgtB.events).to.have.length(1);
+      }),
+    );
+  });
+
+  it('flushes in batches when events exceed BATCH_SIZE (200)', async () => {
+    const createCalls: Array<{ id: string; count: number }> = [];
+    const appendCalls: Array<{ id: string; count: number }> = [];
+
+    const writerLayer = Layer.succeed(ReplayWriter, ReplayWriter.of({
+      writeTabReplay: (id, events, _meta) => {
+        createCalls.push({ id, count: events.length });
+        return Effect.succeed(`/tmp/${id}.json`);
+      },
+      appendTabEvents: (id, events) => {
+        appendCalls.push({ id, count: events.length });
+        return Effect.void;
+      },
+      writeMetadata: () => Effect.void,
+    }));
+
+    const metricsLayer = Layer.succeed(ReplayMetrics, ReplayMetrics.of({
+      incEvents: () => Effect.void,
+      observeTabDuration: () => Effect.void,
+      registerSession: () => Effect.succeed(() => {}),
+    }));
+
+    const layer = Layer.mergeAll(writerLayer, metricsLayer);
+
+    await Effect.runPromise(
+      Effect.gen(function*() {
+        const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
+        const fiber = yield* tabConsumer(queue, SessionId.makeUnsafe('sess-batch'), TargetId.makeUnsafe('tgt-1')).pipe(
+          Effect.provide(layer),
+          Effect.forkChild,
+        );
+
+        // Push 500 events — should trigger 2 batch flushes (200 each) + final flush (100)
+        for (let i = 0; i < 500; i++) {
+          yield* Queue.offer(queue, makeTabEvent('sess-batch', 'tgt-1', 3, 1000 + i));
+        }
+
+        yield* Queue.end(queue);
+        yield* Fiber.await(fiber);
+
+        // First batch creates the replay
+        expect(createCalls).to.have.length(1);
+        expect(createCalls[0].count).to.equal(200);
+
+        // Two appends: 200 + 100 remaining
+        expect(appendCalls).to.have.length(2);
+        expect(appendCalls[0].count).to.equal(200);
+        expect(appendCalls[1].count).to.equal(100);
       }),
     );
   });

@@ -117,27 +117,27 @@ const runSession: Effect.Effect<
 
   console.log(`  [${Date.now() - testStartTs}ms] goto start`);
   yield* Effect.promise(() =>
-    page.goto(NOPECHA_URL, { waitUntil: 'load', timeout: 10_000 }).catch(() => {}),
+    page.goto(NOPECHA_URL, { waitUntil: 'load', timeout: 8_000 }).catch(() => {}),
   );
   console.log(`  [${Date.now() - testStartTs}ms] goto done, waiting for solver...`);
-  // Wait for turnstile solve — early exit when token appears, max 10s
+  // Wait for turnstile solve — early exit when token appears
   yield* Effect.promise(() =>
     page.waitForFunction(
       () => {
         const t = (window as any).turnstile;
         return t && typeof t.getResponse === 'function' && !!t.getResponse();
       },
-      { timeout: 10_000, polling: 500 },
+      { timeout: 8_000, polling: 500 },
     ).catch(() => {}),
   );
-  yield* Effect.sleep('1500 millis'); // buffer for final markers
+  yield* Effect.sleep('500 millis'); // buffer for final markers
   console.log(`  [${Date.now() - testStartTs}ms] wait done`);
 
   // Close browser to flush replay data
   yield* Effect.promise(() => browser.close()).pipe(
     Effect.catch(() => Effect.void),
   );
-  yield* Effect.sleep('2 seconds');
+  yield* Effect.sleep('1 second');
   console.log(`  [${Date.now() - testStartTs}ms] browser closed`);
 
   const api = yield* Effect.service(ReplayAPI);

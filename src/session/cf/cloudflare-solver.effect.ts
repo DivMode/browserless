@@ -329,29 +329,28 @@ const solveTurnstile = (
       return TR.Aborted();
     }
 
-    if (raceResult._tag === 'Clicked') {
-      // Click delivered. Pure push wait — bridge/beacon/navigation will resolve.
-      // No timeout. Session close is the structural bound (scope finalizer).
-      yield* active.abortLatch.await.pipe(Effect.ignore);
-      return raceResult;
-    }
+    // Return immediately — do NOT block on abortLatch.await here.
+    // The dispatch scope holds an acquireRelease'd solver_isolated WS.
+    // Blocking on abortLatch keeps that scope open for the entire session
+    // lifetime, leaking ~40-50% of WS connections. The detection fiber
+    // already awaits Resolution independently after dispatch returns.
+    yield* Effect.annotateCurrentSpan({
+      'cf.solve_total_ms': Date.now() - solveEntryMs,
+      'cf.race_result_tag': raceResult._tag,
+    });
 
     if (raceResult._tag === 'OopifDead') {
       yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox', { oopif_dead: true });
-      yield* active.abortLatch.await.pipe(Effect.ignore);
-      return active.resolution.isDone ? TR.Aborted() : raceResult;
+      return raceResult;
     }
 
-    // NoClick — widget not found. Bridge is installed — auto-solve might push.
-    // Pure push wait — session close is the structural bound (scope finalizer).
-    yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox');
-    yield* active.abortLatch.await.pipe(Effect.ignore);
+    if (raceResult._tag === 'NoClick') {
+      yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox');
+      return TR.NoClick();
+    }
 
-    yield* Effect.annotateCurrentSpan({
-      'cf.solve_total_ms': Date.now() - solveEntryMs,
-      'cf.post_race_result': active.resolution.isDone ? 'BridgeResolved' : 'NoClick',
-    });
-    return active.resolution.isDone ? TR.Aborted() : TR.NoClick();
+    // Clicked — return immediately, detection awaits push signals.
+    return raceResult;
   })();
 
 // ═══════════════════════════════════════════════════════════════════════

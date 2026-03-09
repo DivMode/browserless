@@ -25,6 +25,12 @@ export const ReplayWriter = ServiceMap.Service<{
     metadata: ReplayMetadata,
   ) => Effect.Effect<string, ReplayStoreError>;
 
+  /** Append a batch of events to an existing tab replay. */
+  readonly appendTabEvents: (
+    tabReplayId: string,
+    events: readonly ReplayEvent[],
+  ) => Effect.Effect<void, ReplayStoreError>;
+
   /** Insert metadata into SQLite (without events — for session-level records). */
   readonly writeMetadata: (
     metadata: ReplayMetadata,
