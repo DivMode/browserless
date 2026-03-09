@@ -4,9 +4,9 @@ const WebSocketServer = (WebSocket as any).Server as typeof import('ws').WebSock
 import { Duplex } from 'stream';
 import { IncomingMessage } from 'http';
 import { Config, Logger } from '@browserless.io/browserless';
-import { Duration, Effect, Exit, FiberSet, Schedule, Schema, Scope } from 'effect';
+import { Duration, Effect, Exit, FiberSet, Queue, Schedule, Schema, Scope, Stream } from 'effect';
 
-import { wsLifecycle } from './prom-metrics.js';
+import { proxyDroppedMessages, wsLifecycle } from './prom-metrics.js';
 import { CloudflareConfig } from './shared/cloudflare-detection.js';
 import { CdpSessionId, TargetId } from './shared/cloudflare-detection.js';
 import { BROWSER_WS_PING_INTERVAL, BROWSER_WS_PONG_TIMEOUT_MS } from './session/cf/cf-schedules.js';
@@ -97,9 +97,21 @@ export function isReplayCapable(browser: unknown): browser is ReplayCapableBrows
  */
 const ON_BEFORE_CLOSE_TIMEOUT_MS = 75000;
 
+/**
+ * Message queued for delivery to the client WebSocket.
+ * `string | Buffer` avoids unnecessary `.toString()` on the proxy forwarding hot path.
+ */
+type ClientOutboundMessage = {
+  data: string | Buffer;
+  binary?: boolean;
+  onSent?: () => void;
+  onError?: (err: Error) => void;
+};
+
 export class CDPProxy {
   private clientWs: WebSocket | null = null;
   private browserWs: WebSocket | null = null;
+  private clientOutbound: Queue.Queue<ClientOutboundMessage> | null = null;
   private isClosing = false;
   private closeRequested = false;
   private log = new Logger('cdp-proxy');
@@ -192,6 +204,34 @@ export class CDPProxy {
           this.clientWs = clientWs;
           wsLifecycle.labels('proxy_client', 'create').inc();
           this.log.trace('Client WebSocket upgraded');
+
+          // Scope-bound outbound queue: all client WS sends go through here.
+          // Queue.offerUnsafe is atomic — returns false when ended. No readyState race.
+          this.clientOutbound = Effect.runSync(Queue.unbounded<ClientOutboundMessage>());
+
+          // Register queue-end finalizer AFTER WS cleanup finalizer (line 145).
+          // Scope finalizers fire in reverse order → queue ends FIRST, WS terminates AFTER.
+          Effect.runSync(Scope.addFinalizer(this.proxyScope,
+            this.clientOutbound ? Queue.shutdown(this.clientOutbound) : Effect.void,
+          ));
+
+          // Consumer fiber: the ONLY code that calls clientWs.send()
+          this.forkManaged(
+            Effect.fn('cdp.clientOutbound')({ self: this }, function*() {
+              yield* Stream.fromQueue(this.clientOutbound!).pipe(
+                Stream.runForEach((msg) => Effect.sync(() => {
+                  try {
+                    this.clientWs?.send(msg.data, { binary: msg.binary ?? false }, (err) => {
+                      if (err) msg.onError?.(err);
+                      else msg.onSent?.();
+                    });
+                  } catch (e) {
+                    msg.onError?.(e instanceof Error ? e : new Error(String(e)));
+                  }
+                })),
+              );
+            })(),
+          );
 
           // Set up bidirectional proxying
           this.setupProxy();
@@ -381,8 +421,8 @@ export class CDPProxy {
           }
         } catch { /* ignore parse errors */ }
       }
-      if (this.clientWs?.readyState === WebSocket.OPEN) {
-        this.clientWs.send(data, { binary: isBinary });
+      if (this.clientOutbound) {
+        Queue.offerUnsafe(this.clientOutbound, { data: data as string | Buffer, binary: isBinary });
       }
     });
 
@@ -431,27 +471,32 @@ export class CDPProxy {
   }
 
   private async sendClientResponse(id: number, result: object = {}): Promise<void> {
-    if (this.clientWs?.readyState !== WebSocket.OPEN) return;
+    if (!this.clientOutbound) return;
     const message = JSON.stringify({ id, result });
-    await new Promise<void>((resolve, reject) => {
-      this.clientWs!.send(message, (err) => {
-        if (err) {
-          this.log.warn(`Failed to send CDP response id=${id}: ${err.message}`);
-          reject(err);
-        } else {
-          resolve();
-        }
-      });
+    return new Promise<void>((resolve, reject) => {
+      if (!Queue.offerUnsafe(this.clientOutbound!, {
+        data: message,
+        onSent: resolve,
+        onError: (err) => { this.log.warn(`Failed to send CDP response id=${id}: ${err.message}`); reject(err); },
+      })) {
+        proxyDroppedMessages.labels('client').inc();
+        resolve();
+      }
     });
   }
 
   private async sendClientError(id: number, code: number, message: string): Promise<void> {
-    if (this.clientWs?.readyState !== WebSocket.OPEN) return;
+    if (!this.clientOutbound) return;
     const payload = JSON.stringify({ id, error: { code, message } });
-    await new Promise<void>((resolve, reject) => {
-      this.clientWs!.send(payload, (err) => {
-        if (err) reject(err); else resolve();
-      });
+    return new Promise<void>((resolve, reject) => {
+      if (!Queue.offerUnsafe(this.clientOutbound!, {
+        data: payload,
+        onSent: resolve,
+        onError: (err) => { this.log.warn(`Failed to send CDP error id=${id}: ${err.message}`); reject(err); },
+      })) {
+        proxyDroppedMessages.labels('client').inc();
+        resolve();
+      }
     });
   }
 
@@ -492,23 +537,22 @@ export class CDPProxy {
    * clients (Pydoll) can listen for.
    */
   async emitClientEvent(method: string, params: object): Promise<void> {
-    if (this.clientWs?.readyState === WebSocket.OPEN) {
-      const message = JSON.stringify({ method, params });
-      // Await the send to ensure message is queued before returning
-      await new Promise<void>((resolve, reject) => {
-        this.clientWs!.send(message, (err) => {
-          if (err) {
-            this.log.warn(`Failed to inject CDP event ${method}: ${err.message}`);
-            reject(err);
-          } else {
-            this.log.trace(`Injected CDP event: ${method}`);
-            resolve();
-          }
-        });
-      });
-    } else {
-      this.log.warn(`Cannot inject event ${method}: client WebSocket not open`);
+    if (!this.clientOutbound) {
+      this.log.warn(`Cannot inject event ${method}: queue not initialized`);
+      return;
     }
+    const message = JSON.stringify({ method, params });
+    return new Promise<void>((resolve, reject) => {
+      const offered = Queue.offerUnsafe(this.clientOutbound!, {
+        data: message,
+        onSent: () => { this.log.trace(`Injected CDP event: ${method}`); resolve(); },
+        onError: (err) => { this.log.warn(`Failed to inject CDP event ${method}: ${err.message}`); reject(err); },
+      });
+      if (!offered) {
+        proxyDroppedMessages.labels('client').inc();
+        resolve(); // Silent no-op during shutdown
+      }
+    });
   }
 
   /**

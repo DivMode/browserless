@@ -246,4 +246,12 @@ export const socketHandleDetails = getOrCreateLabeledCollectGauge(
   },
 );
 
+// Counter: fires when a CDP message is safely dropped because the outbound queue
+// was already ended during session teardown. Replaces "write after end" errors.
+export const proxyDroppedMessages = getOrCreateLabeledCounter(
+  'browserless_proxy_dropped_messages_total',
+  'CDP messages dropped because outbound queue was closed during teardown',
+  ['direction'],
+);
+
 export { register };
