@@ -104,6 +104,11 @@ export class BrowserLauncher {
       'cfSolver',
       false,
     );
+    const antibot = parseBooleanParam(
+      req.parsed.searchParams,
+      'antibot',
+      false,
+    );
     const trackingId =
       parseStringParam(req.parsed.searchParams, 'trackingId', '') || undefined;
 
@@ -236,10 +241,18 @@ export class BrowserLauncher {
       try {
         await this.sessionCoordinator.setupSession(browser, sessionId, {
           video: !!session.video,
+          antibot,
           onTabReplayComplete: (metadata) => {
             if (isReplayCapable(browser)) {
               browser.sendTabReplayComplete(metadata).catch((e) => {
                 this.log.warn(`Failed to send tab replay event: ${e instanceof Error ? e.message : String(e)}`);
+              });
+            }
+          },
+          onAntibotReport: (report) => {
+            if (browser instanceof ChromiumCDP) {
+              browser.emitAntibotReport(report).catch((e) => {
+                this.log.warn(`Failed to emit antibot report: ${e instanceof Error ? e.message : String(e)}`);
               });
             }
           },
