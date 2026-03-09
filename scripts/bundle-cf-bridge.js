@@ -33,8 +33,8 @@ const result = buildSync({
 const code = result.outputFiles[0].text;
 
 const sizeKB = Math.round(Buffer.byteLength(code, 'utf8') / 1024);
-if (!DEV && sizeKB > 50) {
-  console.error(`CF bridge bundle too large: ${sizeKB}KB (limit: 50KB)`);
+if (!DEV && sizeKB > 15) {
+  console.error(`CF bridge bundle too large: ${sizeKB}KB (limit: 15KB)`);
   process.exit(1);
 }
 

@@ -74,15 +74,29 @@ function hookAndCheck(ts: NonNullable<Window['turnstile']>, emit: Emit): void {
   }
 }
 
+/**
+ * Check if this is a CF challenge page by detecting _cf_chl_opt.
+ * CF sets this via an inline <script> tag, which runs synchronously
+ * BEFORE window.turnstile is created by api.js (async). This means
+ * the polling loops will detect _cf_chl_opt and abort before ever
+ * hooking turnstile on a challenge page.
+ */
+function isCFChallengePage(): boolean {
+  return typeof window._cf_chl_opt !== 'undefined';
+}
+
 export function setupTurnstileHooks(emit: Emit): void {
   // If turnstile already exists (unlikely but possible), hook immediately
-  if (window.turnstile) {
+  // Guard: skip if this is a CF challenge page (deferred detection)
+  if (window.turnstile && !isCFChallengePage()) {
     hookAndCheck(window.turnstile, emit);
   }
 
   // Poll for turnstile creation — CF's api.js loads async and creates
   // window.turnstile. Fast poll (20ms) to hook render() before first call.
+  // Abort immediately if _cf_chl_opt detected (CF challenge page).
   const pollId = setInterval(() => {
+    if (isCFChallengePage()) { clearInterval(pollId); return; }
     if (window.turnstile) {
       hookAndCheck(window.turnstile, emit);
       if (window.turnstile.__cbHooked && window.turnstile.__grHooked) clearInterval(pollId);
@@ -94,6 +108,7 @@ export function setupTurnstileHooks(emit: Emit): void {
   // original callback (before our hooks were installed).
   const tokenPollId = setInterval(() => {
     if (tokenReported) { clearInterval(tokenPollId); return; }
+    if (isCFChallengePage()) { clearInterval(tokenPollId); return; }
     if (!window.turnstile?.getResponse) return;
     try {
       const token = window.turnstile.getResponse();

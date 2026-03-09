@@ -237,7 +237,7 @@ export function createCFEvents(
       marker(active.pageTargetId, 'cf.state_change', { state, ...extra });
     },
 
-    emitSolved(active: ReadonlyActiveDetection, result: CloudflareResult, cf_summary_label = ''): void {
+    emitSolved(active: ReadonlyActiveDetection, result: CloudflareResult, cf_summary_label = '', options?: { skipMarker?: boolean }): void {
       const snap = active.tracker.snapshot();
       const timingStr = snap.checkbox_to_click_ms != null
         ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
@@ -250,13 +250,15 @@ export function createCFEvents(
         summary: active.tracker.snapshot(),
         cf_summary_label,
       }).catch((e) => log.debug(`emitSolved failed: ${e instanceof Error ? e.message : String(e)}`));
-      marker(active.pageTargetId, 'cf.solved', {
-        type: result.type, method: result.method, duration_ms: result.duration_ms,
-        phase_label: result.phase_label, signal: result.signal,
-      });
+      if (!options?.skipMarker) {
+        marker(active.pageTargetId, 'cf.solved', {
+          type: result.type, method: result.method, duration_ms: result.duration_ms,
+          phase_label: result.phase_label, signal: result.signal,
+        });
+      }
     },
 
-    emitFailed(active: ReadonlyActiveDetection, reason: string, duration: number, phaseLabel?: string, cf_summary_label?: string): void {
+    emitFailed(active: ReadonlyActiveDetection, reason: string, duration: number, phaseLabel?: string, cf_summary_label?: string, options?: { skipMarker?: boolean }): void {
       const phase_label = phaseLabel ?? `✗ ${reason}`;
       const snap = active.tracker.snapshot();
       const isRechallenge = (active.rechallengeCount ?? 0) > 0;
@@ -274,7 +276,9 @@ export function createCFEvents(
         phase_label,
         cf_summary_label,
       }).catch((e) => log.debug(`emitFailed failed: ${e instanceof Error ? e.message : String(e)}`));
-      marker(active.pageTargetId, 'cf.failed', { reason, duration_ms: duration, phase_label, oopif_url: active.info.url, rechallenge: isRechallenge });
+      if (!options?.skipMarker) {
+        marker(active.pageTargetId, 'cf.failed', { reason, duration_ms: duration, phase_label, oopif_url: active.info.url, rechallenge: isRechallenge });
+      }
     },
 
     emitStandaloneAutoSolved(

@@ -31,6 +31,8 @@ import type { CdpSessionOptions } from './cdp-session-types.js';
 
 import type { CloudflareHooks } from './cloudflare-hooks.js';
 import type { VideoHooks } from './video-services.js';
+
+import { CF_BRIDGE_JS } from '../generated/cf-bridge.js';
 import { OtelLayer } from '../otel-layer.js';
 
 // Capture at module load — defense-in-depth against stale `node --watch` zombies.
@@ -1074,6 +1076,15 @@ export class CdpSession {
         yield* session.send('Page.enable', {}, cdpSessionId).pipe(Effect.ignore);
         yield* session.send('Runtime.enable', {}, cdpSessionId).pipe(Effect.ignore);
         yield* session.send('Network.enable', {}, cdpSessionId).pipe(Effect.ignore);
+
+        // Pre-inject CF bridge — runs on every page load, no-op on CF challenge pages
+        // (two-phase guard: URL check + deferred _cf_chl_opt check).
+        // Eliminates per-detection Runtime.evaluate overhead (~1-2s saved per detection).
+        // runImmediately: also inject on the current document (not just future navigations).
+        yield* session.send('Page.addScriptToEvaluateOnNewDocument', {
+          source: CF_BRIDGE_JS,
+          runImmediately: true,
+        }, cdpSessionId).pipe(Effect.ignore);
 
         // Set session ID for extension
         yield* session.send('Runtime.evaluate', {
