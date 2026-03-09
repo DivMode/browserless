@@ -128,6 +128,10 @@ export const solveDetection = (
     }
   })().pipe(
     Effect.catchCause((cause) => {
+      // Interrupt = normal shutdown (target destroyed / FiberMap.remove).
+      // Let the scope finalizer in DetectionRegistry handle fallback emission.
+      if (Cause.hasInterruptsOnly(cause)) return Effect.succeed(SO.Aborted());
+
       const err = Cause.squash(cause);
       console.error(JSON.stringify({ message: 'cf.solveDetection defect', error: String(err), type: active.info.type }));
       return Effect.fn('cf.solveDetection.errorFallback')(function*() {

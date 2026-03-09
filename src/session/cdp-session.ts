@@ -1227,10 +1227,14 @@ export class CdpSession {
       if (target) {
         tabDuration.observe((Date.now() - target.startTime) / 1000);
 
-        // Replay: finalize + end Queue + await consumer + fire callback
+        // Replay: flush rrweb buffer
         yield* session.finalizeTabEffect(targetId).pipe(Effect.ignore);
 
-        // End this tab's Queue — consumer fiber drains remaining events + writes file
+        // CF: scope finalizer injects fallback markers while queue is still open
+        yield* session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
+          Effect.timeout('3 seconds'), Effect.ignore);
+
+        // End this tab's Queue — consumer fiber drains remaining events (including CF markers) + writes file
         const tabQueue = session.tabQueues.get(targetId);
         if (tabQueue) {
           Queue.endUnsafe(tabQueue);
@@ -1266,11 +1270,11 @@ export class CdpSession {
 
         // Video: clean up screencast
         session.videoHooks?.onTargetDestroyed(session.sessionId, target.cdpSessionId);
+      } else {
+        // Non-tab target (e.g. iframe) — still need CF cleanup
+        yield* session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
+          Effect.timeout('3 seconds'), Effect.ignore);
       }
-
-      // CF: interrupt detection fiber (with timeout)
-      yield* session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
-        Effect.timeout('3 seconds'), Effect.ignore);
       // Atomic cleanup — removes from all indices, closes per-page WS, cleans iframe refs
       session.targets.remove(targetId);
       session.targets.removeIframeTarget(targetId);

@@ -424,12 +424,10 @@ export class CloudflareDetector {
           }
 
           case 'InterstitialSolved': {
-            yield* abortAndResolve();
-            // NOTE: Do NOT add to solvedPages here. Interstitial solves don't produce
-            // phantom OOPIFs (they redirect to the real page). Only TURNSTILE solves
-            // produce phantom token-refresh OOPIFs. Adding interstitial solves to
-            // solvedPages blocks the embedded Turnstile detection in multi-phase
-            // (Int→Emb) flows — a P0 regression proven in production 2026-03-02.
+            // Emit cf.solved marker BEFORE abortAndResolve — the abort closes the
+            // scope and by the time resolution.solve wakes up the consumer, a new
+            // cf.detected (turnstile) may already be in the replay. Emitting here
+            // ensures the interstitial's cf.solved precedes any turnstile cf.detected.
             const attr = deriveSolveAttribution('page_navigated', outcome.clickDelivered);
             const result = {
               solved: true as const, type: outcome.emitType, method: attr.method,
@@ -437,6 +435,17 @@ export class CloudflareDetector {
               attempts: active.attempt, auto_resolved: attr.autoResolved,
               phase_label: attr.label,
             };
+            self.state.pushPhase(targetId, outcome.emitType, attr.label);
+            const label = self.state.buildCompoundLabel(targetId);
+            self.events.emitSolved(active, result, label);
+            active.resolution.markerEmitted = true;
+
+            yield* abortAndResolve();
+            // NOTE: Do NOT add to solvedPages here. Interstitial solves don't produce
+            // phantom OOPIFs (they redirect to the real page). Only TURNSTILE solves
+            // produce phantom token-refresh OOPIFs. Adding interstitial solves to
+            // solvedPages blocks the embedded Turnstile detection in multi-phase
+            // (Int→Emb) flows — a P0 regression proven in production 2026-03-02.
             yield* active.resolution.solve(result);
             if (attr.method === 'click_navigation' && outcome.clickDeliveredAt) {
               self.events.marker(targetId, 'cf.click_to_nav', {
