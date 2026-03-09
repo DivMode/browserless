@@ -222,4 +222,11 @@ export interface SystemQueryParameters {
    * Equivalent to sending Browserless.enableCloudflareSolver CDP command.
    */
   cfSolver?: boolean;
+
+  /**
+   * Enable antibot detection for this session.
+   * Injects a detection IIFE that hooks browser APIs to identify
+   * antibot vendors, captcha providers, and fingerprinting libraries.
+   */
+  antibot?: boolean;
 }

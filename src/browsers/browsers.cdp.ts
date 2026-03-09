@@ -644,6 +644,12 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
       return false;
     }
   }
+
+  public async emitAntibotReport(report: object): Promise<void> {
+    if (this.cdpProxy) {
+      await this.cdpProxy.emitClientEvent('Browserless.antibotReport', report);
+    }
+  }
 }
 
 export class ChromeCDP extends ChromiumCDP {
