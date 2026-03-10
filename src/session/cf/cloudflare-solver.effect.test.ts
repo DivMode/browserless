@@ -405,7 +405,7 @@ describe('Race condition regressions', () => {
       expect(won1).toBe(true);
       expect(won2).toBe(false);
 
-      const outcome = yield* resolution.await;
+      const outcome = yield* resolution._unsafeAwait;
       expect(outcome._tag).toBe('solved');
       if (outcome._tag === 'solved') {
         expect(outcome.result.signal).toBe('token_poll');
@@ -428,7 +428,7 @@ describe('Race condition regressions', () => {
       expect(wonSolve).toBe(true);
       expect(wonFail).toBe(false);
 
-      const outcome = yield* resolution.await;
+      const outcome = yield* resolution._unsafeAwait;
       expect(outcome._tag).toBe('solved');
     }));
 
@@ -477,8 +477,8 @@ describe('Race condition regressions', () => {
       expect(resolution.isDone).toBe(true);
 
       // Multiple awaits return the same result
-      const r1 = yield* resolution.await;
-      const r2 = yield* resolution.await;
+      const r1 = yield* resolution._unsafeAwait;
+      const r2 = yield* resolution._unsafeAwait;
       expect(r1).toEqual(r2);
     }));
 
@@ -496,7 +496,7 @@ describe('Race condition regressions', () => {
       });
       expect(wonSolve).toBe(false);
 
-      const outcome = yield* resolution.await;
+      const outcome = yield* resolution._unsafeAwait;
       expect(outcome._tag).toBe('failed');
       if (outcome._tag === 'failed') {
         expect(outcome.reason).toBe('widget_not_found');

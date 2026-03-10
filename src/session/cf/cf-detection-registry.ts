@@ -11,7 +11,8 @@
  * can remove a detection without the finalizer running.
  *
  * Reads (get/has/findByIframeSession/findByIframeTarget) are synchronous via plain Map.
- * Only lifecycle operations (register/resolve/unregister/destroyAll) are Effect-returning.
+ * Only lifecycle operations (register/unregister/destroyAll) are Effect-returning.
+ * Resolution is identity-safe via DetectionContext.resolve() — no targetId-based resolve.
  */
 
 import { Effect, Exit, Scope } from 'effect';
@@ -74,18 +75,6 @@ export class DetectionRegistry {
 
       return context;
     })();
-  }
-
-  /**
-   * Mark a detection as resolved and close its scope.
-   * Finalizer sees resolved=true and skips emission.
-   */
-  resolve(targetId: TargetId): Effect.Effect<void> {
-    const context = this.entries.get(targetId);
-    if (!context) return Effect.void;
-
-    context.resolved = true;
-    return Scope.close(context.scope, Exit.void);
   }
 
   /**

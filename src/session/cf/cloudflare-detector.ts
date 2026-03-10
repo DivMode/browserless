@@ -352,7 +352,6 @@ export class CloudflareDetector {
       const abortAndResolve = Effect.fn('cf.nav.abortAndResolve')(function*() {
         const navCtx = self.state.registry.getContext(targetId);
         if (navCtx) yield* navCtx.abort();
-        yield* self.state.registry.resolve(targetId);
       });
 
       if (active) {
@@ -618,9 +617,7 @@ export class CloudflareDetector {
    * embedded turnstile. Bridge push can arrive after OOPIF death.
    */
   private awaitResolutionRace(
-    active: ActiveDetection,
-    targetId: TargetId,
-    timeout: typeof EMBEDDED_RESOLUTION_TIMEOUT | typeof INTERSTITIAL_RESOLUTION_TIMEOUT,
+    ctx: DetectionContext,
     opts: {
       addToSolvedPages?: boolean;
       timeoutReason?: string;
@@ -629,11 +626,11 @@ export class CloudflareDetector {
   ): Effect.Effect<void, never, never> {
     const self = this;
     return Effect.fn('cf.resolutionRace')({ self }, function*() {
+      const active = ctx.mutableActive;
+      const targetId = active.pageTargetId;
       self.log.warn(`CF lifecycle: resolution_race target=${targetId.slice(0,8)} session=${self.sid} resolution_done=${active.resolution.isDone} aborted=${active.aborted}`);
 
-      const maybeResolved = yield* active.resolution.await.pipe(
-        Effect.timeoutOption(timeout),
-      );
+      const maybeResolved = yield* active.resolution.awaitBounded;
 
       if (maybeResolved._tag === 'Some') {
         const resolved = maybeResolved.value;
@@ -665,12 +662,9 @@ export class CloudflareDetector {
         const label = self.state.buildCompoundLabel(targetId);
         self.events.emitFailed(active, timeoutReason, duration, undefined, label);
       }
-      // Only resolve if registry still holds THIS detection — rechallenge may have
-      // re-registered a NEW detection for the same targetId. Without this identity
-      // check, the old handler kills the new detection (pre-existing bug on main).
-      if (self.state.registry.getActive(targetId) === active) {
-        yield* self.state.registry.resolve(targetId);
-      }
+      // Identity-safe by construction — ctx.resolve() operates on THIS detection only.
+      // Cannot accidentally resolve a rechallenge's NEW detection for the same targetId.
+      yield* ctx.resolve();
     })();
   }
 
@@ -716,7 +710,7 @@ export class CloudflareDetector {
         tracker: new CloudflareTracker(info),
         rechallengeCount,
         abortLatch: Latch.makeUnsafe(false),
-        resolution: Resolution.makeUnsafe((outcome) => {
+        resolution: Resolution.makeUnsafe(INTERSTITIAL_RESOLUTION_TIMEOUT, (outcome) => {
           // Guard: if aborted, scope finalizer or emitSolveFailure handles emission
           if (active.aborted) return;
           if (outcome._tag === 'solved') {
@@ -764,7 +758,7 @@ export class CloudflareDetector {
             break;
           case 'NoCheckbox':
             // Interstitial: no checkbox ever rendered. Don't fast-fail —
-            // wait for bridge cf_error_page or auto-nav via resolution.await below.
+            // wait for bridge cf_error_page or auto-nav via resolution.awaitBounded below.
             self.log.warn(`CF lifecycle: no_checkbox target=${targetId.slice(0,8)} — waiting for bridge/auto-nav`);
             break;
           case 'Aborted':
@@ -774,17 +768,17 @@ export class CloudflareDetector {
               yield* self.emitSolveFailure(active, targetId, reason);
             }
             break;
-          // ClickDispatched, AutoHandled — no action, fall through to resolution.await
+          // ClickDispatched, AutoHandled — no action, fall through to resolution.awaitBounded
         }
       }
 
       // NOTE: No gap fix here for interstitials. When outcome='aborted' && active.aborted,
       // it means onPageNavigated called ctx.abort() and is sleeping RECHALLENGE_DELAY_MS
-      // before completing Resolution. Let Resolution.await below wait for it (~500ms).
+      // before completing Resolution. Let resolution.awaitBounded below wait for it (~500ms).
       // The turnstile handler HAS a gap fix because OOPIF destruction IS the terminal signal.
 
-      // Await Resolution via race: resolution vs abort vs timeout.
-      yield* self.awaitResolutionRace(active, targetId, INTERSTITIAL_RESOLUTION_TIMEOUT, {
+      // Await Resolution via race: resolution vs timeout (baked into Resolution deadline).
+      yield* self.awaitResolutionRace(ctx, {
         timeoutReason: 'solver_exit',  // backward compat with existing Loki queries
         counterLabel: 'interstitial',
       });
@@ -927,7 +921,7 @@ export class CloudflareDetector {
         rechallengeCount,
         abortLatch: Latch.makeUnsafe(false),
         oopifMeta: meta,
-        resolution: Resolution.makeUnsafe((outcome) => {
+        resolution: Resolution.makeUnsafe(EMBEDDED_RESOLUTION_TIMEOUT, (outcome) => {
           // Guard: if aborted, scope finalizer or emitSolveFailure handles emission
           if (active.aborted) return;
           if (outcome._tag === 'solved') {
@@ -1009,8 +1003,8 @@ export class CloudflareDetector {
       // Resolution comes from push signals (beacon/bridge/navigation) or session close.
       self.log.warn(`CF lifecycle: solver_exit target=${targetId.slice(0,8)} session=${self.sid} result=${outcomeTag} resolution_done=${active.resolution.isDone}`);
 
-      // Await Resolution via race: resolution vs abort vs timeout.
-      yield* self.awaitResolutionRace(active, targetId, EMBEDDED_RESOLUTION_TIMEOUT, {
+      // Await Resolution via race: resolution vs timeout (baked into Resolution deadline).
+      yield* self.awaitResolutionRace(ctx, {
         addToSolvedPages: true,
         counterLabel: 'embedded',
       });

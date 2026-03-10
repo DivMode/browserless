@@ -81,6 +81,31 @@ describe('DetectionContext', () => {
       expect(ctx.aborted).toBe(true);
     }));
 
+  it.effect('resolve() sets resolved=true and closes scope', () =>
+    Effect.gen(function*() {
+      const scope = yield* Scope.make();
+      const active = makeActive('T1');
+      const ctx = new DetectionContext(active, scope);
+
+      expect(ctx.resolved).toBe(false);
+
+      yield* ctx.resolve();
+
+      expect(ctx.resolved).toBe(true);
+    }));
+
+  it.effect('resolve() is idempotent — second call is no-op', () =>
+    Effect.gen(function*() {
+      const scope = yield* Scope.make();
+      const active = makeActive('T1');
+      const ctx = new DetectionContext(active, scope);
+
+      yield* ctx.resolve();
+      yield* ctx.resolve(); // should not throw
+
+      expect(ctx.resolved).toBe(true);
+    }));
+
   it.effect('bindOOPIF registers OOPIF and sets active fields', () =>
     Effect.gen(function*() {
       const scope = yield* Scope.make();
@@ -338,7 +363,7 @@ describe('DetectionRegistry with DetectionContext', () => {
       expect(registry.get(targetId)).toBe(active);
       expect(registry.getContext(targetId)).toBe(ctx);
 
-      yield* registry.resolve(targetId);
+      yield* ctx.resolve();
     }));
 
   it.effect('findByIframeTarget finds context with bound OOPIF', () =>
@@ -357,19 +382,19 @@ describe('DetectionRegistry with DetectionContext', () => {
       const notFound = registry.findByIframeTarget(TargetId.makeUnsafe('unknown'));
       expect(notFound).toBeUndefined();
 
-      yield* registry.resolve(targetId);
+      yield* ctx.resolve();
     }));
 
   it.effect('findByIframeTarget returns undefined when no OOPIF bound', () =>
     Effect.gen(function*() {
       const registry = new DetectionRegistry(() => {});
       const targetId = TargetId.makeUnsafe('T1');
-      yield* registry.register(targetId, makeActive('T1'));
+      const ctx = yield* registry.register(targetId, makeActive('T1'));
 
       const found = registry.findByIframeTarget(TargetId.makeUnsafe('iframe-1'));
       expect(found).toBeUndefined();
 
-      yield* registry.resolve(targetId);
+      yield* ctx.resolve();
     }));
 
   it.effect('OOPIF destroyed pre-click → detection NOT aborted, no emission', () =>
@@ -394,7 +419,7 @@ describe('DetectionRegistry with DetectionContext', () => {
       expect(emissions).toHaveLength(0);
 
       // Cleanup
-      yield* registry.resolve(targetId);
+      yield* ctx.resolve();
     }));
 
   it.effect('OOPIF destroyed post-click → detection aborted, resolution NOT settled (waits for bridge push)', () =>
@@ -438,7 +463,7 @@ describe('DetectionRegistry with DetectionContext', () => {
       yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe('iframe-session-1'));
 
       // Resolve first
-      yield* registry.resolve(targetId);
+      yield* ctx.resolve();
 
       // Then OOPIF destroyed — no fallback emission
       yield* Scope.close(ctx.oopif!.scope, { _tag: 'Success', value: void 0 });
@@ -472,11 +497,11 @@ describe('DetectionRegistry with DetectionContext', () => {
   // Resolution + Finalizer Regression Tests
   // ═══════════════════════════════════════════════════════════════════════
 
-  it.effect('resolution.await unblocks on resolution settlement', () =>
+  it.effect('resolution._unsafeAwait unblocks on resolution settlement', () =>
     Effect.gen(function*() {
       const active = makeActive('T1');
 
-      const fiber = yield* active.resolution.await.pipe(Effect.forkChild);
+      const fiber = yield* active.resolution._unsafeAwait.pipe(Effect.forkChild);
 
       // Settle resolution — simulates bridge push
       yield* active.resolution.solve({
@@ -575,8 +600,8 @@ describe('DetectionRegistry with DetectionContext', () => {
       expect(active.aborted).toBe(true);
       expect(active.resolution.isDone).toBe(false);
 
-      // The zombie fix: awaitResolutionRace wraps resolution.await with
-      // Effect.timeoutOption(60s). If no bridge push arrives, the timeout
+      // The zombie fix: awaitResolutionRace uses resolution.awaitBounded which
+      // has a built-in deadline. If no bridge push arrives, the timeout
       // fires and emits resolution_timeout. This bounds zombie lifetime
       // from ∞ to 60s. We verify the architecture here — resolution stays
       // unsettled after abort so the handler can wait for bridge push.

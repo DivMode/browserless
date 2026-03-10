@@ -6,10 +6,12 @@
  * complete the Resolution — Deferred.succeed is idempotent, so exactly one wins.
  *
  * The single consumer (handleEmbeddedDetection / triggerSolveFromUrl) awaits
- * `resolution.result` and performs the actual emission. No fiber can be
+ * `resolution.awaitBounded` and performs the actual emission. No fiber can be
  * interrupted mid-emission because the emission isn't inside a raceFirst.
+ *
+ * Deadline is baked in at construction — no unbounded await possible.
  */
-import { Deferred, Effect } from 'effect';
+import { Deferred, Duration, Effect, Option } from 'effect';
 import type { CloudflareResult } from '../../shared/cloudflare-detection.js';
 
 export type ResolvedOutcome =
@@ -22,17 +24,18 @@ export class Resolution {
 
   private constructor(
     private readonly deferred: Deferred.Deferred<ResolvedOutcome>,
+    private readonly deadline: Duration.Input,
     private readonly onSettle?: (outcome: ResolvedOutcome) => void,
   ) {}
 
   /** Create a new Resolution gate. One per detection lifecycle. */
-  static make(): Effect.Effect<Resolution> {
-    return Effect.map(Deferred.make<ResolvedOutcome>(), (d) => new Resolution(d));
+  static make(deadline: Duration.Input = '60 seconds'): Effect.Effect<Resolution> {
+    return Effect.map(Deferred.make<ResolvedOutcome>(), (d) => new Resolution(d, deadline));
   }
 
   /** Sync factory for imperative contexts (e.g. ActiveDetection creation). */
-  static makeUnsafe(onSettle?: (outcome: ResolvedOutcome) => void): Resolution {
-    return new Resolution(Deferred.makeUnsafe<ResolvedOutcome>(), onSettle);
+  static makeUnsafe(deadline: Duration.Input = '60 seconds', onSettle?: (outcome: ResolvedOutcome) => void): Resolution {
+    return new Resolution(Deferred.makeUnsafe<ResolvedOutcome>(), deadline, onSettle);
   }
 
   /**
@@ -73,8 +76,13 @@ export class Resolution {
     );
   }
 
-  /** Await resolution — blocks until solve() or fail() is called. */
-  get await(): Effect.Effect<ResolvedOutcome> {
+  /** Await with built-in deadline. Returns None on timeout — no unbounded wait possible. */
+  get awaitBounded(): Effect.Effect<Option.Option<ResolvedOutcome>> {
+    return Deferred.await(this.deferred).pipe(Effect.timeoutOption(this.deadline));
+  }
+
+  /** @internal Test-only unbounded await. Production code MUST use awaitBounded. */
+  get _unsafeAwait(): Effect.Effect<ResolvedOutcome> {
     return Deferred.await(this.deferred);
   }
 
@@ -87,6 +95,6 @@ export class Resolution {
 /** Read-only view of Resolution — can observe but cannot settle. */
 export interface ReadonlyResolution {
   readonly isDone: boolean;
-  readonly await: Effect.Effect<ResolvedOutcome>;
+  readonly awaitBounded: Effect.Effect<Option.Option<ResolvedOutcome>>;
   readonly markerEmitted: boolean;
 }

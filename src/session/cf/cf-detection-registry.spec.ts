@@ -24,7 +24,7 @@ const makeActive = (targetId: string): ActiveDetection => {
 };
 
 describe('DetectionRegistry', () => {
-  it('register + resolve → no fallback emission', async () => {
+  it('register + ctx.resolve() → no fallback emission', async () => {
     const emissions: string[] = [];
     const registry = new DetectionRegistry((active) => {
       emissions.push(active.pageTargetId);
@@ -34,11 +34,11 @@ describe('DetectionRegistry', () => {
     const active = makeActive('T1');
 
     await Effect.runPromise(Effect.gen(function*() {
-      yield* registry.register(targetId, active);
+      const ctx = yield* registry.register(targetId, active);
       expect(registry.has(targetId)).to.be.true;
       expect(registry.get(targetId)).to.equal(active);
 
-      yield* registry.resolve(targetId);
+      yield* ctx.resolve();
       expect(registry.has(targetId)).to.be.false;
     }));
 
@@ -78,11 +78,11 @@ describe('DetectionRegistry', () => {
 
     await Effect.runPromise(Effect.gen(function*() {
       yield* registry.register(t1, makeActive('T1'));
-      yield* registry.register(t2, makeActive('T2'));
+      const ctx2 = yield* registry.register(t2, makeActive('T2'));
       yield* registry.register(t3, makeActive('T3'));
 
       // Resolve T2 — should NOT emit
-      yield* registry.resolve(t2);
+      yield* ctx2.resolve();
 
       yield* registry.destroyAll();
     }));
@@ -94,7 +94,7 @@ describe('DetectionRegistry', () => {
     expect(registry.size).to.equal(0);
   });
 
-  it('double resolve → no error, no double emit', async () => {
+  it('double ctx.resolve() → no error, no double emit', async () => {
     const emissions: string[] = [];
     const registry = new DetectionRegistry((active) => {
       emissions.push(active.pageTargetId);
@@ -103,21 +103,12 @@ describe('DetectionRegistry', () => {
     const targetId = TargetId.makeUnsafe('T1');
 
     await Effect.runPromise(Effect.gen(function*() {
-      yield* registry.register(targetId, makeActive('T1'));
-      yield* registry.resolve(targetId);
-      yield* registry.resolve(targetId); // second resolve — no-op
+      const ctx = yield* registry.register(targetId, makeActive('T1'));
+      yield* ctx.resolve();
+      yield* ctx.resolve(); // second resolve — no-op
     }));
 
     expect(emissions).to.be.empty;
-  });
-
-  it('resolve unknown targetId → no error', async () => {
-    const registry = new DetectionRegistry(() => {});
-
-    await Effect.runPromise(
-      registry.resolve(TargetId.makeUnsafe('unknown')),
-    );
-    // No throw
   });
 
   it('unregister unknown targetId → no error', async () => {
@@ -153,10 +144,10 @@ describe('DetectionRegistry', () => {
 
     await Effect.runPromise(Effect.gen(function*() {
       yield* registry.register(targetId, active1);
-      yield* registry.register(targetId, active2); // replaces first
+      const ctx2 = yield* registry.register(targetId, active2); // replaces first
       expect(registry.get(targetId)).to.equal(active2);
 
-      yield* registry.resolve(targetId);
+      yield* ctx2.resolve();
     }));
 
     // First detection was orphaned by re-register
@@ -189,13 +180,13 @@ describe('DetectionRegistry', () => {
     const active = makeActive('T1');
     active.iframeCdpSessionId = CdpSessionId.makeUnsafe('iframe-session-1');
 
-    await Effect.runPromise(registry.register(targetId, active));
+    const ctx = await Effect.runPromise(registry.register(targetId, active));
 
     expect(registry.findByIframeSession('iframe-session-1')).to.equal(targetId);
     expect(registry.findByIframeSession('unknown')).to.be.undefined;
 
     // Cleanup
-    await Effect.runPromise(registry.resolve(targetId));
+    await Effect.runPromise(ctx.resolve());
   });
 
   it('iterator yields all entries', async () => {
