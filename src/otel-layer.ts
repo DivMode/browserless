@@ -38,6 +38,9 @@ export const OtelLayer: Layer.Layer<never> = endpoint
       resource,
       ...(grafanaAuth ? { headers: { authorization: `Basic ${grafanaAuth}` } } : {}),
     }).pipe(
+      // MUST be protobuf — Grafana Cloud Mimir silently drops JSON-encoded OTLP
+      // metrics (returns 200 OK but never ingests). Traces/logs work with JSON,
+      // but metrics do not. Do NOT switch back to layerJson.
       Layer.provide(OtlpSerialization.layerProtobuf),
       Layer.provide(FetchHttpClient.layer),
       Layer.merge(logLevelLayer),
