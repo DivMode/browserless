@@ -865,11 +865,31 @@ export class CdpSession {
             return;
           }
 
-          // CF bridge event — route to solver
+          // CF bridge event — resolve targetId at boundary (TargetRegistry is authoritative)
           if (this.runtime && this._fiberMap) {
+            const targetId = this.targets.findTargetIdByCdpSession(cdpSessionId);
+            if (!targetId) {
+              console.error(JSON.stringify({
+                message: 'bridge event: no target for CDP session',
+                session_id: this.sessionId,
+                cdp_session_id: cdpSessionId,
+                event_type: (parsed as { type?: string }).type,
+                known_targets: this.targets.size,
+              }));
+              return;
+            }
             this.runtime.runFork(
-              FiberMap.run(this._fiberMap, `cf:bridge:${cdpSessionId}`,
-                this.cloudflareHooks.onBridgeEvent(cdpSessionId, parsed).pipe(Effect.ignore)),
+              FiberMap.run(this._fiberMap, `cf:bridge:${targetId}`,
+                this.cloudflareHooks.onBridgeEvent(targetId, parsed).pipe(
+                  Effect.catchCause((cause) => Effect.sync(() => {
+                    console.error(JSON.stringify({
+                      message: 'bridge event: solver defect',
+                      session_id: this.sessionId,
+                      target_id: targetId,
+                      cause: Cause.pretty(cause),
+                    }));
+                  })),
+                )),
             );
           }
           return;
@@ -1217,9 +1237,10 @@ export class CdpSession {
         const parentCdpSid = (msg.sessionId ? CdpSessionId.makeUnsafe(msg.sessionId) : undefined) || session.getLastPageCdpSession();
         if (parentCdpSid) {
           session.targets.addIframe(cdpSessionId, parentCdpSid);
-          if (session._fiberMap) {
+          const parentTargetId = session.targets.findTargetIdByCdpSession(parentCdpSid);
+          if (parentTargetId && session._fiberMap) {
             yield* FiberMap.run(session._fiberMap, `cf:iframe:${targetId}`,
-              session.cloudflareHooks.onIframeAttached(targetId, cdpSessionId, targetInfo.url, parentCdpSid).pipe(Effect.ignore));
+              session.cloudflareHooks.onIframeAttached(targetId, cdpSessionId, targetInfo.url, parentTargetId).pipe(Effect.ignore));
           }
         }
       }

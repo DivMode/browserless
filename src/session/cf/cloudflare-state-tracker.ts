@@ -68,8 +68,6 @@ export class CloudflareStateTracker {
   readonly registry: DetectionRegistry;
   readonly iframeToPage = new Map<TargetId, TargetId>();
   readonly knownPages = new Map<TargetId, CdpSessionId>();
-  /** Reverse index: CdpSessionId → TargetId for O(1) findPageBySession lookups. */
-  private readonly sessionToTarget = new Map<CdpSessionId, TargetId>();
   readonly bindingSolvedTargets = new Set<TargetId>();
   /** CF OOPIF targetIds from completed solves — filtered out of future detection polls to prevent phantom re-detection of stale OOPIFs. */
   readonly solvedCFTargetIds = new Set<string>();
@@ -201,13 +199,13 @@ export class CloudflareStateTracker {
    * Called when the CF bridge pushes an event from the browser.
    * Routes bridge events to existing resolution infrastructure.
    */
-  onBridgeEvent(cdpSessionId: CdpSessionId, event: unknown): Effect.Effect<void> {
+  onBridgeEvent(targetId: TargetId, event: unknown): Effect.Effect<void> {
     const tracker = this;
     return Effect.fn('cf.state.onBridgeEvent')(function*() {
       const parsed = event as { type: string; [key: string]: unknown };
-      yield* Effect.annotateCurrentSpan({ 'cf.bridge_event': parsed.type, 'cf.session_id': cdpSessionId });
-      const pageTargetId = tracker.findPageBySession(cdpSessionId);
-      if (!pageTargetId) return;
+      yield* Effect.annotateCurrentSpan({ 'cf.bridge_event': parsed.type, 'cf.target_id': targetId });
+      // targetId pre-resolved by CdpSession via TargetRegistry — no stale-map lookup.
+      const pageTargetId = targetId;
 
       switch (parsed.type) {
         case 'solved': {
@@ -227,7 +225,7 @@ export class CloudflareStateTracker {
           // No active detection — standalone Turnstile (fast-path auto-solve)
           if (!tracker.bindingSolvedTargets.has(pageTargetId)) {
             yield* Effect.annotateCurrentSpan({ 'cf.token_length': tokenLength });
-            tracker.events.emitStandaloneAutoSolved(pageTargetId, 'bridge_solved', tokenLength, cdpSessionId);
+            tracker.events.emitStandaloneAutoSolved(pageTargetId, 'bridge_solved', tokenLength, tracker.knownPages.get(pageTargetId));
             tracker.bindingSolvedTargets.add(pageTargetId);
           }
           break;
@@ -468,10 +466,9 @@ export class CloudflareStateTracker {
     );
   }
 
-  /** Register a page target ↔ CDP session mapping (maintains reverse index). */
+  /** Register a page target → CDP session mapping. */
   registerPage(targetId: TargetId, cdpSessionId: CdpSessionId): void {
     this.knownPages.set(targetId, cdpSessionId);
-    this.sessionToTarget.set(cdpSessionId, targetId);
   }
 
   /**
@@ -486,10 +483,6 @@ export class CloudflareStateTracker {
       // Scope finalizer handles orphaned detection emission — no manual emit needed.
       yield* tracker.registry.unregister(targetId);
 
-      const cdpSessionId = tracker.knownPages.get(targetId);
-      if (cdpSessionId) {
-        tracker.sessionToTarget.delete(cdpSessionId);
-      }
       tracker.knownPages.delete(targetId);
       tracker.iframeToPage.delete(targetId);
       // Clean up iframeToPage entries pointing TO this page (iframes owned by this page)
@@ -502,10 +495,6 @@ export class CloudflareStateTracker {
       tracker.pendingRechallengeCount.delete(targetId);
       tracker.summaryPhases.delete(targetId);
     })();
-  }
-
-  findPageBySession(cdpSessionId: CdpSessionId): TargetId | undefined {
-    return this.sessionToTarget.get(cdpSessionId);
   }
 
   findPageByIframeSession(iframeCdpSessionId: CdpSessionId): TargetId | undefined {
@@ -543,7 +532,6 @@ export class CloudflareStateTracker {
       yield* this.registry.destroyAll();
       this.iframeToPage.clear();
       this.knownPages.clear();
-      this.sessionToTarget.clear();
       this.bindingSolvedTargets.clear();
       this.solvedCFTargetIds.clear();
       this.solvedPages.clear();

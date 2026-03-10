@@ -493,15 +493,15 @@ export class CloudflareDetector {
   /** Called when a cross-origin iframe is attached. Returns Effect<void>. */
   onIframeAttachedEffect(
     iframeTargetId: TargetId, iframeCdpSessionId: CdpSessionId,
-    url: string, parentCdpSessionId: CdpSessionId,
+    url: string, parentTargetId: TargetId,
   ): Effect.Effect<void> {
     const self = this;
     return Effect.fn('cf.detector.onIframeAttached')(function*() {
       if (!self.enabled) return;
       if (!url?.includes('challenges.cloudflare.com')) return;
 
-      const pageTargetId = self.state.findPageBySession(parentCdpSessionId);
-      if (!pageTargetId) return;
+      // parentTargetId pre-resolved by CdpSession via TargetRegistry — no stale-map lookup.
+      const pageTargetId = parentTargetId;
 
       // Maintain iframeToPage for backwards compat (filterOwnedTargets, onIframeNavigated)
       self.state.iframeToPage.set(iframeTargetId, pageTargetId);
@@ -654,6 +654,15 @@ export class CloudflareDetector {
       } else {
         // Timeout — zombie detection caught. Settle and emit.
         self.log.warn(`CF lifecycle: resolution_timeout target=${targetId.slice(0,8)} session=${self.sid} elapsed_ms=${Date.now() - active.startTime}`);
+        console.error(JSON.stringify({
+          message: 'CF lifecycle: resolution_timeout diagnostic',
+          session_id: self.sid,
+          target_id: targetId,
+          cf_type: active.info.type,
+          had_click: !!active.clickDelivered,
+          iframe_bound: !!active.iframeCdpSessionId,
+          detection_age_ms: Date.now() - active.startTime,
+        }));
         const timeoutReason = opts.timeoutReason ?? 'resolution_timeout';
         cfResolutionTimeouts.labels(opts.counterLabel).inc();
         const duration = Date.now() - active.startTime;
