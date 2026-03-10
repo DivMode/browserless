@@ -103,6 +103,22 @@ export class DetectionContext {
   get canBindOOPIF(): boolean { return this._oopifState._tag !== 'Bound'; }
 
   /**
+   * Mark this detection as resolved and close its scope.
+   * Identity-safe by construction — operates on THIS context only.
+   * Idempotent — second+ calls are no-ops (Scope.close on closed scope is no-op).
+   *
+   * Wrapped in Effect.suspend so the resolved check runs at execution time,
+   * not at effect construction time.
+   */
+  resolve(): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      if (this.resolved) return Effect.void;
+      this.resolved = true;
+      return Scope.close(this.scope, Exit.void);
+    });
+  }
+
+  /**
    * THE single abort entry point — replaces 14 scattered call sites.
    *
    * Sets aborted=true, opens latch (so poll loops exit via raceFirst),

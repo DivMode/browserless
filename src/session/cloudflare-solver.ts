@@ -421,9 +421,6 @@ export class CloudflareSolver {
             const duration = Date.now() - crashCtx.active.startTime;
             yield* crashCtx.abort();
             this.events.emitFailed(crashCtx.active, 'fiber_crash', duration);
-            if (this.stateTracker.registry.has(targetId)) {
-              yield* this.stateTracker.registry.resolve(targetId);
-            }
           }
         })(),
       ),
