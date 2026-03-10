@@ -7,6 +7,12 @@
  *
  * All hook methods return Effect<void> so they can be dispatched as tracked
  * fibers in CdpSession's FiberMap — no more fire-and-forget .catch(() => {}).
+ *
+ * RUNTIME CONTRACT: These methods are called from CdpSession's runtime context.
+ * Implementors MUST ensure returned Effects are safe to execute in any runtime.
+ * If the implementation needs the solver's ManagedRuntime (e.g. for fiber
+ * interruption via FiberMap.remove or Scope.close on detection scopes), it
+ * must encapsulate the boundary crossing internally (see `runInSolver`).
  */
 import type { Effect } from 'effect';
 import type { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';

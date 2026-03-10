@@ -77,6 +77,22 @@ export class CloudflareSolver {
 
   private runtime: ManagedRuntime.ManagedRuntime<SolverR, never>;
 
+  /**
+   * Cross-runtime boundary: execute an effect in the solver's ManagedRuntime.
+   *
+   * Detection fibers are runFork-ed in the ManagedRuntime. Any effect that
+   * interrupts or joins those fibers (FiberMap.remove, Scope.close on
+   * detection scopes, etc.) MUST execute in the same runtime context.
+   *
+   * All public methods that return Effect<void> to CdpSession's hooks
+   * MUST use this helper — callers run effects in CdpSession's runtime,
+   * not the solver's.
+   */
+  private runInSolver(effect: Effect.Effect<void, never, SolverR>): Effect.Effect<void> {
+    const runtime = this.runtime;
+    return Effect.promise(() => runtime.runPromise(effect));
+  }
+
   constructor(sendCommand: SendCommand, injectMarker: InjectMarker, chromePort?: string, sessionId?: string) {
     this.sendCommand = sendCommand;
     // Mutable closure: emitClientEvent is set after construction by session-coordinator.ts
@@ -360,7 +376,9 @@ export class CloudflareSolver {
         // replacement OOPIF can bind via onIframeAttached/onIframeNavigated
         parentCtx.clearOOPIF();
       }
-      return this.stateTracker.unregisterPage(targetId);
+      // unregisterPage calls Scope.close on the detection scope (created
+      // in solver's runtime) — must cross the runtime boundary.
+      return this.runInSolver(this.stateTracker.unregisterPage(targetId));
     }
 
     // PAGE target being destroyed (tab close) — kill the fiber, then
@@ -369,23 +387,14 @@ export class CloudflareSolver {
     // set aborted=true for defects) runs first. For interrupts, the
     // catchCause bails early → aborted stays false → scope finalizer
     // emits session_close fallback marker.
-    //
-    // CRITICAL: Must cross into solver's ManagedRuntime via runtime.runPromise.
-    // Detection fibers are runFork-ed in the ManagedRuntime — FiberMap.remove
-    // calls Fiber.interrupt which must complete in the SAME runtime context.
-    // Without boundary crossing, the interrupt doesn't await the fiber's
-    // catchCause handler, leaving detections unresolved (Emb?).
-    const runtime = this.runtime;
     const fibers = this.detectionFibers;
     const tracker = this.stateTracker;
-    return Effect.gen(function*() {
-      yield* Effect.promise(() => runtime.runPromise(
-        FiberMap.remove(fibers, targetId).pipe(Effect.ignore),
-      ));
-      yield* Effect.promise(() => runtime.runPromise(
-        tracker.unregisterPage(targetId),
-      ));
-    });
+    return this.runInSolver(
+      Effect.gen(function*() {
+        yield* FiberMap.remove(fibers, targetId).pipe(Effect.ignore);
+        yield* tracker.unregisterPage(targetId);
+      }),
+    );
   }
 
   private startDetectionFiber(targetId: TargetId, cdpSessionId: CdpSessionId): void {
@@ -445,38 +454,30 @@ export class CloudflareSolver {
   }
 
   onPageAttached(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void> {
-    return Effect.promise(() => this.runtime.runPromise(
-      this.detector.onPageAttachedEffect(targetId, cdpSessionId, url),
-    ));
+    return this.runInSolver(this.detector.onPageAttachedEffect(targetId, cdpSessionId, url));
   }
 
   onPageNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string, title: string): Effect.Effect<void> {
-    return Effect.promise(() => this.runtime.runPromise(
-      this.detector.onPageNavigatedEffect(targetId, cdpSessionId, url, title),
-    ));
+    return this.runInSolver(this.detector.onPageNavigatedEffect(targetId, cdpSessionId, url, title));
   }
 
   onIframeAttached(
     iframeTargetId: TargetId, iframeCdpSessionId: CdpSessionId,
     url: string, parentCdpSessionId: CdpSessionId,
   ): Effect.Effect<void> {
-    return Effect.promise(() => this.runtime.runPromise(
+    return this.runInSolver(
       this.detector.onIframeAttachedEffect(iframeTargetId, iframeCdpSessionId, url, parentCdpSessionId),
-    ));
+    );
   }
 
   onIframeNavigated(
     iframeTargetId: TargetId, iframeCdpSessionId: CdpSessionId, url: string,
   ): Effect.Effect<void> {
-    return Effect.promise(() => this.runtime.runPromise(
-      this.detector.onIframeNavigatedEffect(iframeTargetId, iframeCdpSessionId, url),
-    ));
+    return this.runInSolver(this.detector.onIframeNavigatedEffect(iframeTargetId, iframeCdpSessionId, url));
   }
 
   onBridgeEvent(cdpSessionId: CdpSessionId, event: unknown): Effect.Effect<void> {
-    return Effect.promise(() => this.runtime.runPromise(
-      this.stateTracker.onBridgeEvent(cdpSessionId, event),
-    ));
+    return this.runInSolver(this.stateTracker.onBridgeEvent(cdpSessionId, event));
   }
 
   async onBeaconSolved(targetId: TargetId, tokenLength: number): Promise<void> {
