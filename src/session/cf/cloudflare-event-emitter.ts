@@ -266,7 +266,7 @@ export function createCFEvents(
       const timingStr = snap.checkbox_to_click_ms != null
         ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
         : '';
-      log.warn(`CF solved: session=${sessionId.slice(0,8)} type=${result.type} method=${result.method} duration=${result.duration_ms}ms${timingStr}`);
+      log.info(`CF solved: session=${sessionId.slice(0,8)} type=${result.type} method=${result.method} duration=${result.duration_ms}ms${timingStr}`);
       emitClientEvent('Browserless.cloudflareSolved', {
         ...result,
         token_length: result.token_length ?? result.token?.length ?? 0,
