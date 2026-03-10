@@ -369,11 +369,22 @@ export class CloudflareSolver {
     // set aborted=true for defects) runs first. For interrupts, the
     // catchCause bails early → aborted stays false → scope finalizer
     // emits session_close fallback marker.
+    //
+    // CRITICAL: Must cross into solver's ManagedRuntime via runtime.runPromise.
+    // Detection fibers are runFork-ed in the ManagedRuntime — FiberMap.remove
+    // calls Fiber.interrupt which must complete in the SAME runtime context.
+    // Without boundary crossing, the interrupt doesn't await the fiber's
+    // catchCause handler, leaving detections unresolved (Emb?).
+    const runtime = this.runtime;
     const fibers = this.detectionFibers;
     const tracker = this.stateTracker;
     return Effect.gen(function*() {
-      yield* FiberMap.remove(fibers, targetId).pipe(Effect.ignore);
-      yield* tracker.unregisterPage(targetId);
+      yield* Effect.promise(() => runtime.runPromise(
+        FiberMap.remove(fibers, targetId).pipe(Effect.ignore),
+      ));
+      yield* Effect.promise(() => runtime.runPromise(
+        tracker.unregisterPage(targetId),
+      ));
     });
   }
 
