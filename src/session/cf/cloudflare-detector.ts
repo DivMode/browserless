@@ -2,7 +2,8 @@ import { Cause, Data, Effect, Latch } from 'effect';
 import { Logger } from '@browserless.io/browserless';
 import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, CloudflareType, EmbeddedInfo, InterstitialCFType } from '../../shared/cloudflare-detection.js';
 import { isInterstitialType, isCFInterstitialTitle } from '../../shared/cloudflare-detection.js';
-import { DETECTION_POLL_DELAY, INTERSTITIAL_RESOLUTION_TIMEOUT, MAX_RECHALLENGES, RECHALLENGE_DELAY_MS } from './cf-schedules.js';
+import { DETECTION_POLL_DELAY, EMBEDDED_RESOLUTION_TIMEOUT, INTERSTITIAL_RESOLUTION_TIMEOUT, MAX_RECHALLENGES, RECHALLENGE_DELAY_MS } from './cf-schedules.js';
+import { cfResolutionTimeouts } from '../../prom-metrics.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
 import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection, CFEvents } from './cloudflare-event-emitter.js';
 import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
@@ -601,6 +602,79 @@ export class CloudflareDetector {
   }
 
   /**
+   * Await resolution with a bounded timeout, then emit the result.
+   * Single implementation for both embedded and interstitial paths.
+   *
+   * Timeout prevents zombie detections (80-1200s blocked fibers) by capping
+   * the wait at 60s (embedded) or 30s (interstitial).
+   *
+   * Session close double-emission is prevented structurally: the registry
+   * finalizer (emitFallback) runs during Scope.close(solverScope), then
+   * FiberMap cleanup interrupts handler fibers before they can process
+   * the woken Deferred. Cooperative scheduling guarantees the handler
+   * never reaches this emission code during session close.
+   *
+   * NOT raced against abortLatch — OOPIF destruction is not terminal for
+   * embedded turnstile. Bridge push can arrive after OOPIF death.
+   */
+  private awaitResolutionRace(
+    active: ActiveDetection,
+    targetId: TargetId,
+    timeout: typeof EMBEDDED_RESOLUTION_TIMEOUT | typeof INTERSTITIAL_RESOLUTION_TIMEOUT,
+    opts: {
+      addToSolvedPages?: boolean;
+      timeoutReason?: string;
+      counterLabel: string;
+    },
+  ): Effect.Effect<void, never, never> {
+    const self = this;
+    return Effect.fn('cf.resolutionRace')({ self }, function*() {
+      self.log.warn(`CF lifecycle: resolution_race target=${targetId.slice(0,8)} session=${self.sid} resolution_done=${active.resolution.isDone} aborted=${active.aborted}`);
+
+      const maybeResolved = yield* active.resolution.await.pipe(
+        Effect.timeoutOption(timeout),
+      );
+
+      if (maybeResolved._tag === 'Some') {
+        const resolved = maybeResolved.value;
+        if (resolved._tag === 'solved') {
+          self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=solved method=${resolved.result.method} elapsed_ms=${Date.now() - active.startTime}`);
+          if (opts.addToSolvedPages) self.state.solvedPages.add(targetId);
+          if (!active.resolution.markerEmitted) {
+            self.state.pushPhase(targetId, resolved.result.type, resolved.result.phase_label || '→');
+          }
+          const label = self.state.buildCompoundLabel(targetId);
+          self.events.emitSolved(active, resolved.result, label, { skipMarker: active.resolution.markerEmitted });
+        } else {
+          self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=failed reason=${resolved.reason} elapsed_ms=${resolved.duration_ms}`);
+          if (!active.resolution.markerEmitted) {
+            const phase_label = resolved.phase_label ?? `✗ ${resolved.reason}`;
+            self.state.pushPhase(targetId, active.info.type, phase_label);
+          }
+          const label = self.state.buildCompoundLabel(targetId);
+          self.events.emitFailed(active, resolved.reason, resolved.duration_ms, resolved.phase_label, label, { skipMarker: active.resolution.markerEmitted });
+        }
+      } else {
+        // Timeout — zombie detection caught. Settle and emit.
+        self.log.warn(`CF lifecycle: resolution_timeout target=${targetId.slice(0,8)} session=${self.sid} elapsed_ms=${Date.now() - active.startTime}`);
+        const timeoutReason = opts.timeoutReason ?? 'resolution_timeout';
+        cfResolutionTimeouts.labels(opts.counterLabel).inc();
+        const duration = Date.now() - active.startTime;
+        yield* active.resolution.fail(timeoutReason, duration);
+        self.state.pushPhase(targetId, active.info.type, `✗ ${timeoutReason}`);
+        const label = self.state.buildCompoundLabel(targetId);
+        self.events.emitFailed(active, timeoutReason, duration, undefined, label);
+      }
+      // Only resolve if registry still holds THIS detection — rechallenge may have
+      // re-registered a NEW detection for the same targetId. Without this identity
+      // check, the old handler kills the new detection (pre-existing bug on main).
+      if (self.state.registry.getActive(targetId) === active) {
+        yield* self.state.registry.resolve(targetId);
+      }
+    })();
+  }
+
+  /**
    * Trigger solve from URL-based detection. Returns Effect<void>.
    * Replaces fire-and-forget .then().catch() with a proper Effect fiber fork.
    */
@@ -709,44 +783,11 @@ export class CloudflareDetector {
       // before completing Resolution. Let Resolution.await below wait for it (~500ms).
       // The turnstile handler HAS a gap fix because OOPIF destruction IS the terminal signal.
 
-      // Await Resolution — the single emission consumer.
-      // For click_dispatched: onPageNavigated completes it ~1.5-2s after click.
-      // For no_click/click_no_token/aborted: emitSolveFailure already completed it above.
-      // 30s timeout: CF can take 10-15s to verify interstitial clicks before redirecting.
-      // (10s was too short — bsctjs.com CF took 12.4s, causing premature solver_exit.)
-      const maybeResolved = yield* active.resolution.await.pipe(
-        Effect.timeoutOption(INTERSTITIAL_RESOLUTION_TIMEOUT),
-      );
-      if (maybeResolved._tag === 'Some') {
-        const resolved = maybeResolved.value;
-        if (resolved._tag === 'solved') {
-          // NOTE: Do NOT add to solvedPages here. triggerSolveFromUrlEffect only
-          // handles interstitials (URL-pattern detection). Interstitial solves don't
-          // produce phantom OOPIFs. Adding to solvedPages would block the embedded
-          // Turnstile detection in multi-phase (Int→Emb) flows.
-          if (!active.resolution.markerEmitted) {
-            self.state.pushPhase(targetId, resolved.result.type, resolved.result.phase_label || '→');
-          }
-          const label = self.state.buildCompoundLabel(targetId);
-          self.events.emitSolved(active, resolved.result, label, { skipMarker: active.resolution.markerEmitted });
-        } else {
-          if (!active.resolution.markerEmitted) {
-            const phase_label = resolved.phase_label ?? `✗ ${resolved.reason}`;
-            self.state.pushPhase(targetId, active.info.type, phase_label);
-          }
-          const label = self.state.buildCompoundLabel(targetId);
-          self.events.emitFailed(active, resolved.reason, resolved.duration_ms, resolved.phase_label, label, { skipMarker: active.resolution.markerEmitted });
-        }
-      } else {
-        // Timeout — no path completed the Resolution within 10s
-        const duration = Date.now() - active.startTime;
-        self.state.pushPhase(targetId, active.info.type, '✗ solver_exit');
-        const label = self.state.buildCompoundLabel(targetId);
-        self.events.emitFailed(active, 'solver_exit', duration, undefined, label);
-      }
-      if (self.state.registry.has(targetId)) {
-        yield* self.state.registry.resolve(targetId);
-      }
+      // Await Resolution via race: resolution vs abort vs timeout.
+      yield* self.awaitResolutionRace(active, targetId, INTERSTITIAL_RESOLUTION_TIMEOUT, {
+        timeoutReason: 'solver_exit',  // backward compat with existing Loki queries
+        counterLabel: 'interstitial',
+      });
 
       // Snapshot ALL current CF OOPIFs so post-navigation detection won't re-detect stale targets
       const postSolveSnapshot = yield* self.strategies.detectTurnstileViaCDP(cdpSessionId).pipe(
@@ -968,34 +1009,11 @@ export class CloudflareDetector {
       // Resolution comes from push signals (beacon/bridge/navigation) or session close.
       self.log.warn(`CF lifecycle: solver_exit target=${targetId.slice(0,8)} session=${self.sid} result=${outcomeTag} resolution_done=${active.resolution.isDone}`);
 
-      // Await Resolution — single emission consumer.
-      // Solver exit no longer settles Resolution. It's settled by:
-      // - Push signals: bridge/beacon/navigation → resolution.solve()
-      // - Session close: scope finalizer → resolution.fail('session_close')
-      // This blocks until one of those paths fires.
-      self.log.warn(`CF lifecycle: resolution_await target=${targetId.slice(0,8)} session=${self.sid} resolution_done=${active.resolution.isDone} aborted=${active.aborted}`);
-      const resolved = yield* active.resolution.await;
-      if (resolved._tag === 'solved') {
-        self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=solved method=${resolved.result.method} elapsed_ms=${Date.now() - active.startTime}`);
-        // PHANTOM GUARD: Mark page as solved to block post-solve OOPIF re-detection.
-        self.state.solvedPages.add(targetId);
-        if (!active.resolution.markerEmitted) {
-          self.state.pushPhase(targetId, resolved.result.type, resolved.result.phase_label || '→');
-        }
-        const label = self.state.buildCompoundLabel(targetId);
-        self.events.emitSolved(active, resolved.result, label, { skipMarker: active.resolution.markerEmitted });
-      } else {
-        self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=failed reason=${resolved.reason} elapsed_ms=${resolved.duration_ms}`);
-        if (!active.resolution.markerEmitted) {
-          const phase_label = resolved.phase_label ?? `✗ ${resolved.reason}`;
-          self.state.pushPhase(targetId, active.info.type, phase_label);
-        }
-        const label = self.state.buildCompoundLabel(targetId);
-        self.events.emitFailed(active, resolved.reason, resolved.duration_ms, resolved.phase_label, label, { skipMarker: active.resolution.markerEmitted });
-      }
-      if (self.state.registry.has(targetId)) {
-        yield* self.state.registry.resolve(targetId);
-      }
+      // Await Resolution via race: resolution vs abort vs timeout.
+      yield* self.awaitResolutionRace(active, targetId, EMBEDDED_RESOLUTION_TIMEOUT, {
+        addToSolvedPages: true,
+        counterLabel: 'embedded',
+      });
     })();
   }
 }

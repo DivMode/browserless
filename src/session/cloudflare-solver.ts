@@ -498,8 +498,8 @@ export class CloudflareSolver {
       // Close the solver scope — this atomically:
       // 1. Drains ALL detection fibers (FiberMap is scope-bound)
       // 2. Runs stateTracker.destroy() (registered as scope finalizer)
+      // 3. Registry scope finalizers settle resolution + emit fallback
       // No manual FiberMap.clear() needed — scope close handles it.
-      // This prevents Bug #2 (disposeEffect race) structurally.
       const fiberCount = yield* FiberMap.size(this.detectionFibers);
       yield* Scope.close(this.solverScope, Exit.void).pipe(
         Effect.timeout('10 seconds'),
