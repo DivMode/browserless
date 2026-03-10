@@ -176,89 +176,102 @@ export class CDPProxy {
       }
     })));
 
-    // Step 1: Connect to Chrome's CDP endpoint FIRST
-    await new Promise<void>((resolve, reject) => {
-      this.browserWs = new WebSocket(this.browserWsEndpoint);
-      wsLifecycle.labels('proxy_browser', 'create').inc();
+    // Step 1: Connect to Chrome's CDP endpoint FIRST (Effect.callback — one-shot resume)
+    this.browserWs = new WebSocket(this.browserWsEndpoint);
+    wsLifecycle.labels('proxy_browser', 'create').inc();
 
-      this.browserWs.on('open', () => {
-        this.log.trace(`Connected to browser: ${this.browserWsEndpoint}`);
-        resolve();
+    await Effect.runPromise(
+      Effect.callback<void, Error>((resume) => {
+        const ws = this.browserWs!;
+        const onOpen = () => {
+          ws.removeListener('error', onError);
+          this.log.trace(`Connected to browser: ${this.browserWsEndpoint}`);
+          resume(Effect.void);
+        };
+        const onError = (err: Error) => {
+          ws.removeListener('open', onOpen);
+          resume(Effect.fail(err));
+        };
+        ws.once('open', onOpen);
+        ws.once('error', onError);
+        return Effect.sync(() => {
+          ws.removeListener('open', onOpen);
+          ws.removeListener('error', onError);
+        });
+      }),
+    );
+
+    // Step 2: Upgrade client socket via Effect.callback (one-shot resume)
+    const clientWs = await Effect.runPromise(
+      Effect.callback<WebSocket, Error>((resume) => {
+        const wss = new WebSocketServer({ noServer: true });
+        const onSocketError = (err: Error) => resume(Effect.fail(err));
+
+        wss.handleUpgrade(
+          this.clientRequest,
+          this.clientSocket,
+          this.clientHead,
+          (ws) => {
+            this.clientSocket.removeListener('error', onSocketError);
+            resume(Effect.succeed(ws));
+          },
+        );
+
+        this.clientSocket.once('error', onSocketError);
+
+        return Effect.sync(() => {
+          this.clientSocket.removeListener('error', onSocketError);
+        });
+      }),
+    );
+
+    // Setup AFTER successful upgrade (un-nested from handleUpgrade callback)
+    this.clientWs = clientWs;
+    wsLifecycle.labels('proxy_client', 'create').inc();
+    this.log.trace('Client WebSocket upgraded');
+
+    // Scope-bound outbound queue: all client WS sends go through here.
+    // Queue.offerUnsafe is atomic — returns false when ended. No readyState race.
+    this.clientOutbound = Effect.runSync(Queue.unbounded<ClientOutboundMessage>());
+
+    // Register queue-end finalizer AFTER WS cleanup finalizer (line 145).
+    // Scope finalizers fire in reverse order → queue ends FIRST, WS terminates AFTER.
+    Effect.runSync(Scope.addFinalizer(this.proxyScope,
+      this.clientOutbound ? Queue.shutdown(this.clientOutbound) : Effect.void,
+    ));
+
+    // Consumer fiber: the ONLY code that calls clientWs.send()
+    this.forkManaged(
+      Effect.fn('cdp.clientOutbound')({ self: this }, function*() {
+        yield* Stream.fromQueue(this.clientOutbound!).pipe(
+          Stream.runForEach((msg) => Effect.sync(() => {
+            try {
+              this.clientWs?.send(msg.data, { binary: msg.binary ?? false }, (err) => {
+                if (err) msg.onError?.(err);
+                else msg.onSent?.();
+              });
+            } catch (e) {
+              msg.onError?.(e instanceof Error ? e : new Error(String(e)));
+            }
+          })),
+        );
+      })(),
+    );
+
+    // Set up bidirectional proxying
+    this.setupProxy();
+
+    // Emit session info to client so they can construct deterministic replay URLs
+    const sessionId = this.browserWsEndpoint.split('/').pop() || '';
+    if (sessionId) {
+      this.emitClientEvent('Browserless.sessionInfo', { sessionId }).catch((e) => {
+        this.log.debug(`Failed to emit sessionInfo: ${e instanceof Error ? e.message : String(e)}`);
       });
+    }
 
-      this.browserWs.on('error', (err) => {
-        this.log.error(`Browser WebSocket error: ${err.message}`);
-        reject(err);
-      });
-    });
-
-    // Step 2: Now upgrade the client socket (Chrome is ready to receive)
-    return new Promise((resolve, reject) => {
-      const wss = new WebSocketServer({ noServer: true });
-
-      wss.handleUpgrade(
-        this.clientRequest,
-        this.clientSocket,
-        this.clientHead,
-        (clientWs: WebSocket) => {
-          this.clientWs = clientWs;
-          wsLifecycle.labels('proxy_client', 'create').inc();
-          this.log.trace('Client WebSocket upgraded');
-
-          // Scope-bound outbound queue: all client WS sends go through here.
-          // Queue.offerUnsafe is atomic — returns false when ended. No readyState race.
-          this.clientOutbound = Effect.runSync(Queue.unbounded<ClientOutboundMessage>());
-
-          // Register queue-end finalizer AFTER WS cleanup finalizer (line 145).
-          // Scope finalizers fire in reverse order → queue ends FIRST, WS terminates AFTER.
-          Effect.runSync(Scope.addFinalizer(this.proxyScope,
-            this.clientOutbound ? Queue.shutdown(this.clientOutbound) : Effect.void,
-          ));
-
-          // Consumer fiber: the ONLY code that calls clientWs.send()
-          this.forkManaged(
-            Effect.fn('cdp.clientOutbound')({ self: this }, function*() {
-              yield* Stream.fromQueue(this.clientOutbound!).pipe(
-                Stream.runForEach((msg) => Effect.sync(() => {
-                  try {
-                    this.clientWs?.send(msg.data, { binary: msg.binary ?? false }, (err) => {
-                      if (err) msg.onError?.(err);
-                      else msg.onSent?.();
-                    });
-                  } catch (e) {
-                    msg.onError?.(e instanceof Error ? e : new Error(String(e)));
-                  }
-                })),
-              );
-            })(),
-          );
-
-          // Set up bidirectional proxying
-          this.setupProxy();
-
-          // Emit session info to client so they can construct deterministic replay URLs
-          const sessionId = this.browserWsEndpoint.split('/').pop() || '';
-          if (sessionId) {
-            this.emitClientEvent('Browserless.sessionInfo', { sessionId }).catch((e) => {
-              this.log.debug(`Failed to emit sessionInfo: ${e instanceof Error ? e.message : String(e)}`);
-            });
-          }
-
-          clientWs.on('error', (err: Error) => {
-            this.log.warn(`Client WebSocket error: ${err.message}`);
-            this.handleClose();
-          });
-
-          resolve();
-        },
-      );
-
-      // Handle upgrade failure
-      this.clientSocket.on('error', (err) => {
-        this.log.error(`Client socket error during upgrade: ${err.message}`);
-        this.handleClose();
-        reject(err);
-      });
+    clientWs.on('error', (err: Error) => {
+      this.log.warn(`Client WebSocket error: ${err.message}`);
+      this.handleClose();
     });
   }
 
