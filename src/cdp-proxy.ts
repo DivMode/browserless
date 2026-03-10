@@ -276,9 +276,7 @@ export class CDPProxy {
           const cmdExit = decodeCDPCommand(JSON.parse(raw));
           if (cmdExit._tag === 'Failure') {
             // Not a valid CDP command — forward raw to browser
-            if (this.browserWs?.readyState === WebSocket.OPEN) {
-              this.browserWs.send(data, { binary: isBinary });
-            }
+            this.sendToBrowser(data, isBinary);
             return;
           }
           const msg = cmdExit.value;
@@ -338,9 +336,7 @@ export class CDPProxy {
             this.forkManaged(
               Effect.sleep('250 millis').pipe(
                 Effect.andThen(Effect.sync(() => {
-                  if (this.browserWs?.readyState === WebSocket.OPEN) {
-                    this.browserWs.send(data, { binary: isBinary });
-                  }
+                  this.sendToBrowser(data, isBinary);
                 })),
               ),
             );
@@ -395,9 +391,7 @@ export class CDPProxy {
         } catch { /* ignore */ }
       }
 
-      if (this.browserWs?.readyState === WebSocket.OPEN) {
-        this.browserWs.send(data, { binary: isBinary });
-      }
+      this.sendToBrowser(data, isBinary);
     });
 
     // Forward browser messages to client (intercept proxy-injected command responses)
@@ -465,9 +459,7 @@ export class CDPProxy {
       await this.sendClientResponse(clientMsgId);
     }
 
-    if (this.browserWs?.readyState === WebSocket.OPEN) {
-      this.browserWs.send(data, { binary: isBinary });
-    }
+    this.sendToBrowser(data, isBinary);
   }
 
   private async sendClientResponse(id: number, result: object = {}): Promise<void> {
@@ -524,9 +516,7 @@ export class CDPProxy {
       this.log.debug(`Tab count check failed, allowing Target.createTarget: ${e instanceof Error ? e.message : String(e)}`);
     }
     // Under limit or check failed — forward to browser
-    if (this.browserWs?.readyState === WebSocket.OPEN) {
-      this.browserWs.send(data, { binary: isBinary });
-    }
+    this.sendToBrowser(data, isBinary);
   }
 
   /**
@@ -735,6 +725,19 @@ export class CDPProxy {
         Effect.repeat(Schedule.fixed(BROWSER_WS_PING_INTERVAL)),
       ),
     );
+  }
+
+  /** Send data to Chrome. No-op after handleClose(). */
+  private sendToBrowser(data: WebSocket.RawData, binary: boolean): void {
+    if (this.isClosing || this.browserWs?.readyState !== WebSocket.OPEN) {
+      proxyDroppedMessages.labels('browser').inc();
+      return;
+    }
+    try {
+      this.browserWs.send(data, { binary });
+    } catch {
+      proxyDroppedMessages.labels('browser').inc();
+    }
   }
 
   /** Fork a fire-and-forget effect — auto-interrupted on handleClose, auto-removed on completion. */
