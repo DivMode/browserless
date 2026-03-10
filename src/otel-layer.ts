@@ -38,7 +38,7 @@ export const OtelLayer: Layer.Layer<never> = endpoint
       resource,
       ...(grafanaAuth ? { headers: { authorization: `Basic ${grafanaAuth}` } } : {}),
     }).pipe(
-      Layer.provide(OtlpSerialization.layerJson),
+      Layer.provide(OtlpSerialization.layerProtobuf),
       Layer.provide(FetchHttpClient.layer),
       Layer.merge(logLevelLayer),
     )
