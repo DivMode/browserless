@@ -167,7 +167,9 @@ const solveByClicking = (
     for (let attempt = 0; attempt < MAX_CLICK_ATTEMPTS; attempt++) {
       if (active.aborted) return false;
 
-      if (attempt > 0) yield* Effect.sleep(CLICK_RETRY_DELAY);
+      if (attempt > 0) yield* Effect.sleep(CLICK_RETRY_DELAY).pipe(
+        Effect.withSpan('cf.clickRetry.sleep', { attributes: { 'cf.attempt': attempt } }),
+      );
 
       const result = yield* deps.findAndClickViaCDP(active, attempt).pipe(
         Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
@@ -301,7 +303,9 @@ const solveTurnstile = (
       }
 
       for (let attempt = 1; attempt <= remainingAttempts; attempt++) {
-        yield* Effect.sleep(CLICK_RETRY_DELAY);
+        yield* Effect.sleep(CLICK_RETRY_DELAY).pipe(
+          Effect.withSpan('cf.turnstile.clickRetry.sleep', { attributes: { 'cf.attempt': attempt } }),
+        );
         const result = yield* deps.findAndClickViaCDP(active, attempt).pipe(
           Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
         );

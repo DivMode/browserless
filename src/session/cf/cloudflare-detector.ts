@@ -339,7 +339,9 @@ export class CloudflareDetector {
    */
   onPageNavigatedEffect(targetId: TargetId, cdpSessionId: CdpSessionId, url: string, title: string): Effect.Effect<void, never, DetectorR> {
     const self = this;
-    return Effect.fn('cf.detector.onPageNavigated')(function*() {
+    // Link to detection's root span for unified tracing
+    const rootSpan = self.state.registry.getContext(targetId)?.rootSpan;
+    return Effect.fn('cf.detector.onPageNavigated', { parent: rootSpan })(function*() {
       yield* Effect.annotateCurrentSpan({
         'cf.target_id': targetId,
         'cf.url': url?.substring(0, 200) ?? '',

@@ -131,9 +131,11 @@ export class CloudflareStateTracker {
    */
   onTurnstileStateChange(state: string, iframeCdpSessionId: CdpSessionId): Effect.Effect<void> {
     const tracker = this;
-    return Effect.fn('cf.state.onTurnstileStateChange')(function*() {
+    // Link to detection's root span for unified tracing
+    const pageTargetId = tracker.registry.findByIframeSession(iframeCdpSessionId);
+    const rootSpan = pageTargetId ? tracker.registry.getContext(pageTargetId)?.rootSpan : undefined;
+    return Effect.fn('cf.state.onTurnstileStateChange', { parent: rootSpan })(function*() {
       yield* Effect.annotateCurrentSpan({ 'cf.target_id': iframeCdpSessionId, 'cf.state': state });
-      const pageTargetId = tracker.registry.findByIframeSession(iframeCdpSessionId);
       if (!pageTargetId) return;
 
       const active = tracker.registry.getActive(pageTargetId);
@@ -201,7 +203,8 @@ export class CloudflareStateTracker {
    */
   onBridgeEvent(targetId: TargetId, event: unknown): Effect.Effect<void> {
     const tracker = this;
-    return Effect.fn('cf.state.onBridgeEvent')(function*() {
+    const rootSpan = tracker.registry.getContext(targetId)?.rootSpan;
+    return Effect.fn('cf.state.onBridgeEvent', { parent: rootSpan })(function*() {
       const parsed = event as { type: string; [key: string]: unknown };
       yield* Effect.annotateCurrentSpan({ 'cf.bridge_event': parsed.type, 'cf.target_id': targetId });
       // targetId pre-resolved by CdpSession via TargetRegistry — no stale-map lookup.
@@ -238,6 +241,23 @@ export class CloudflareStateTracker {
             });
             tracker.events.emitProgress(active, 'widget_error', {
               error_type: parsed.errorType, has_token: parsed.hasToken,
+            });
+          }
+          break;
+        }
+        case 'timing': {
+          // Browser-side timing events — record as replay markers + span events
+          const timingEvent = parsed.event as string;
+          const browserTs = parsed.ts as number;
+          tracker.events.marker(pageTargetId, `cf.browser.${timingEvent}`, {
+            browser_ts: browserTs,
+            server_ts: Date.now(),
+            delta_ms: Date.now() - browserTs,
+          });
+          // Annotate the detection's root span if available
+          if (rootSpan && rootSpan._tag === 'Span') {
+            rootSpan.event(`cf.browser.${timingEvent}`, BigInt(browserTs) * 1_000_000n, {
+              'cf.browser_ts': browserTs,
             });
           }
           break;
@@ -279,7 +299,8 @@ export class CloudflareStateTracker {
    */
   onBeaconSolved(targetId: TargetId, tokenLength: number): Effect.Effect<void> {
     const tracker = this;
-    return Effect.fn('cf.state.onBeaconSolved')(function*() {
+    const rootSpan = tracker.registry.getContext(targetId)?.rootSpan;
+    return Effect.fn('cf.state.onBeaconSolved', { parent: rootSpan })(function*() {
       yield* Effect.annotateCurrentSpan({
         'cf.target_id': targetId,
         'cf.token_length': tokenLength,
