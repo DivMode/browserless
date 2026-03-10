@@ -360,29 +360,32 @@ export class CloudflareSolver {
         // replacement OOPIF can bind via onIframeAttached/onIframeNavigated
         parentCtx.clearOOPIF();
       }
-    } else {
-      // This is a PAGE target being destroyed (tab close) — kill the fiber,
-      // then unregister the page. Sequential order matters: fiber interrupt
-      // must complete before scope close so the catchCause handler (which
-      // would set aborted=true for defects) runs first. For interrupts,
-      // the catchCause bails early → aborted stays false → scope finalizer
-      // emits session_close fallback marker.
-      const runtime = this.runtime;
-      const fibers = this.detectionFibers;
-      const tracker = this.stateTracker;
-      return Effect.gen(function*() {
-        yield* Effect.promise(() => runtime.runPromise(
-          FiberMap.remove(fibers, targetId).pipe(Effect.ignore),
-        ));
-        yield* Effect.promise(() => runtime.runPromise(
-          tracker.unregisterPage(targetId),
-        ));
-      });
+      return this.stateTracker.unregisterPage(targetId);
     }
 
-    return Effect.promise(() => this.runtime.runPromise(
-      this.stateTracker.unregisterPage(targetId),
-    ));
+    // PAGE target being destroyed (tab close) — kill the fiber, then
+    // unregister the page. Sequential order matters: fiber interrupt must
+    // complete before scope close so the catchCause handler (which would
+    // set aborted=true for defects) runs first. For interrupts, the
+    // catchCause bails early → aborted stays false → scope finalizer
+    // emits session_close fallback marker.
+    //
+    // CRITICAL: Must cross into solver's ManagedRuntime via runtime.runPromise.
+    // Detection fibers are runFork-ed in the ManagedRuntime — FiberMap.remove
+    // calls Fiber.interrupt which must complete in the SAME runtime context.
+    // Without boundary crossing, the interrupt doesn't await the fiber's
+    // catchCause handler, leaving detections unresolved (Emb?).
+    const runtime = this.runtime;
+    const fibers = this.detectionFibers;
+    const tracker = this.stateTracker;
+    return Effect.gen(function*() {
+      yield* Effect.promise(() => runtime.runPromise(
+        FiberMap.remove(fibers, targetId).pipe(Effect.ignore),
+      ));
+      yield* Effect.promise(() => runtime.runPromise(
+        tracker.unregisterPage(targetId),
+      ));
+    });
   }
 
   private startDetectionFiber(targetId: TargetId, cdpSessionId: CdpSessionId): void {
