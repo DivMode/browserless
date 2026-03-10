@@ -628,14 +628,14 @@ export class CloudflareDetector {
     return Effect.fn('cf.resolutionRace')({ self }, function*() {
       const active = ctx.mutableActive;
       const targetId = active.pageTargetId;
-      self.log.warn(`CF lifecycle: resolution_race target=${targetId.slice(0,8)} session=${self.sid} resolution_done=${active.resolution.isDone} aborted=${active.aborted}`);
+      self.log.info(`CF lifecycle: resolution_race target=${targetId.slice(0,8)} session=${self.sid} resolution_done=${active.resolution.isDone} aborted=${active.aborted}`);
 
       const maybeResolved = yield* active.resolution.awaitBounded;
 
       if (maybeResolved._tag === 'Some') {
         const resolved = maybeResolved.value;
         if (resolved._tag === 'solved') {
-          self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=solved method=${resolved.result.method} elapsed_ms=${Date.now() - active.startTime}`);
+          self.log.info(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=solved method=${resolved.result.method} elapsed_ms=${Date.now() - active.startTime}`);
           if (opts.addToSolvedPages) self.state.solvedPages.add(targetId);
           if (!active.resolution.markerEmitted) {
             self.state.pushPhase(targetId, resolved.result.type, resolved.result.phase_label || '→');
@@ -768,7 +768,7 @@ export class CloudflareDetector {
           case 'NoCheckbox':
             // Interstitial: no checkbox ever rendered. Don't fast-fail —
             // wait for bridge cf_error_page or auto-nav via resolution.awaitBounded below.
-            self.log.warn(`CF lifecycle: no_checkbox target=${targetId.slice(0,8)} — waiting for bridge/auto-nav`);
+            self.log.info(`CF lifecycle: no_checkbox target=${targetId.slice(0,8)} — waiting for bridge/auto-nav`);
             break;
           case 'Aborted':
             if (!active.aborted) {
@@ -965,7 +965,7 @@ export class CloudflareDetector {
         yield* ctx.bindOOPIF(pending.iframeTargetId, pending.iframeCdpSessionId);
         self.state.pendingIframes.delete(targetId);
       }
-      self.log.warn(`CF lifecycle: registered target=${targetId.slice(0,8)} session=${self.sid} pending_oopif=${!!pending}`);
+      self.log.info(`CF lifecycle: registered target=${targetId.slice(0,8)} session=${self.sid} pending_oopif=${!!pending}`);
       self.events.emitDetected(active);
       self.events.marker(targetId, 'cf.detected', {
         type: 'turnstile', method: 'cdp_dom_walk',
@@ -976,7 +976,7 @@ export class CloudflareDetector {
         sitekey: meta?.sitekey ?? null,
         oopif_mode: meta?.mode ?? null,
       });
-      self.log.warn(`CF lifecycle: detected target=${targetId.slice(0,8)} session=${self.sid} sitekey=${meta?.sitekey ?? 'none'}`);
+      self.log.info(`CF lifecycle: detected target=${targetId.slice(0,8)} session=${self.sid} sitekey=${meta?.sitekey ?? 'none'}`);
 
       // Skip Turnstile rechallenges — detected by the navigation tracker
       // (pendingRechallengeCount), NOT by URL parsing (/rch/ is in ALL OOPIF URLs).
@@ -996,7 +996,7 @@ export class CloudflareDetector {
       // No per-detection Runtime.evaluate needed — hooks are already loaded.
 
       // Dispatch solve via Effect service — no more Promise bridge
-      self.log.warn(`CF lifecycle: dispatch_start target=${targetId.slice(0,8)} session=${self.sid}`);
+      self.log.info(`CF lifecycle: dispatch_start target=${targetId.slice(0,8)} session=${self.sid}`);
       const dispatchStartMs = Date.now();
       const dispatcher = yield* SolveDispatcher;
       const outcome: SolveDetectionResult = yield* dispatcher.dispatch(active).pipe(
@@ -1007,10 +1007,10 @@ export class CloudflareDetector {
         }),
       );
       const outcomeTag = outcome._tag;
-      self.log.warn(`CF lifecycle: dispatch_end target=${targetId.slice(0,8)} session=${self.sid} outcome=${outcomeTag} aborted=${active.aborted} elapsed_ms=${Date.now() - dispatchStartMs}`);
+      self.log.info(`CF lifecycle: dispatch_end target=${targetId.slice(0,8)} session=${self.sid} outcome=${outcomeTag} aborted=${active.aborted} elapsed_ms=${Date.now() - dispatchStartMs}`);
       // Solver is advisory — its exit does NOT kill the detection.
       // Resolution comes from push signals (beacon/bridge/navigation) or session close.
-      self.log.warn(`CF lifecycle: solver_exit target=${targetId.slice(0,8)} session=${self.sid} result=${outcomeTag} resolution_done=${active.resolution.isDone}`);
+      self.log.info(`CF lifecycle: solver_exit target=${targetId.slice(0,8)} session=${self.sid} result=${outcomeTag} resolution_done=${active.resolution.isDone}`);
 
       // Await Resolution via race: resolution vs timeout (baked into Resolution deadline).
       yield* self.awaitResolutionRace(ctx, {
