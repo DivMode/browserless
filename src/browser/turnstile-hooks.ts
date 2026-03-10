@@ -15,12 +15,14 @@
 import type { Emit } from './types';
 
 let tokenReported = false;
+let apiLoadedReported = false;
 
 function reportSolved(emit: Emit, token: string): void {
   if (tokenReported) return;
   tokenReported = true;
   window.__turnstileSolved = true;
   window.__turnstileTokenLength = token.length;
+  emit({ type: 'timing', event: 'token_received', ts: Date.now() });
   emit({ type: 'solved', token, tokenLength: token.length });
 }
 
@@ -41,6 +43,7 @@ function wrapRender(ts: NonNullable<Window['turnstile']>, emit: Emit): void {
   ts.render = function (_container: any, params: any): string {
     params = params || {};
     window.__turnstileRenderTime = Date.now();
+    emit({ type: 'timing', event: 'render_called', ts: Date.now() });
     window.__turnstileRenderParams = {
       sitekey: (params.sitekey || '').substring(0, 20),
       action: params.action || null,
@@ -101,6 +104,10 @@ export function setupTurnstileHooks(emit: Emit): void {
   function captureLoadHandler(): void {
     if (isCFChallengePage()) return;
     if (window.turnstile) {
+      if (!apiLoadedReported) {
+        apiLoadedReported = true;
+        emit({ type: 'timing', event: 'api_loaded', ts: Date.now() });
+      }
       hookAndCheck(window.turnstile, emit);
       if (window.turnstile.__cbHooked && window.turnstile.__grHooked) {
         document.removeEventListener('load', captureLoadHandler, true);
@@ -115,6 +122,10 @@ export function setupTurnstileHooks(emit: Emit): void {
   const pollId = setInterval(() => {
     if (isCFChallengePage()) { clearInterval(pollId); return; }
     if (window.turnstile) {
+      if (!apiLoadedReported) {
+        apiLoadedReported = true;
+        emit({ type: 'timing', event: 'api_loaded', ts: Date.now() });
+      }
       hookAndCheck(window.turnstile, emit);
       if (window.turnstile.__cbHooked && window.turnstile.__grHooked) clearInterval(pollId);
     }

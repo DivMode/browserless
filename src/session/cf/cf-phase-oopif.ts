@@ -124,7 +124,9 @@ export function phase2OOPIFResolution(
       const maxOopifPolls = iframeFrameId ? MAX_OOPIF_POLLS : 1; // 6 × 500ms = 3s max wait
       for (let oopifPoll = 0; oopifPoll < maxOopifPolls; oopifPoll++) {
         if (oopifPoll > 0) {
-          yield* Effect.sleep('500 millis');
+          yield* Effect.sleep('500 millis').pipe(
+            Effect.withSpan('cf.phase2.pollSleep', { attributes: { 'cf.poll': oopifPoll } }),
+          );
           // Re-fetch targets — the correct OOPIF may have appeared
           const refreshed = yield* send('Target.getTargets').pipe(
             Effect.orElseSucceed(() => ({ targetInfos: [] as any[] })),

@@ -324,7 +324,9 @@ export function phase3CheckboxFind(
       if (checkbox) { method = 'runtime_query'; break; }
 
       // Checkbox not found yet — wait and retry (matching pydoll's polling)
-      yield* Effect.sleep(`${pollInterval} millis`);
+      yield* Effect.sleep(`${pollInterval} millis`).pipe(
+        Effect.withSpan('cf.phase3.pollSleep', { attributes: { 'cf.poll': poll } }),
+      );
     }
 
     if (!checkbox) {

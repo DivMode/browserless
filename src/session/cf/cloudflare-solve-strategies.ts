@@ -1,5 +1,6 @@
 import { Data, Effect } from 'effect';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
+import { isInterstitialType } from '../../shared/cloudflare-detection.js';
 import type { ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
 import type { CdpConnection } from '../../shared/cdp-rpc.js';
 
@@ -300,6 +301,13 @@ export class CloudflareSolveStrategies {
           )
         : null;
 
+      // ── CF Network timing: capture api.js TTFB via Performance API ──
+      // Instead of subscribing to Network.* CDP events (requires event handler
+      // plumbing), query the page's Performance API after solving. This gives us
+      // CF script load timing without modifying CdpConnection.
+      // Done at the end of solve via pageSend — safe for embedded types (page
+      // is the embedding site, not CF's challenge page).
+
       // ── Phase 1: Page-side DOM traversal (shared clean_page WS) ───────
       let iframeBackendNodeId: number | null = null;
       let iframeFrameId: string | null = null;
@@ -359,10 +367,47 @@ export class CloudflareSolveStrategies {
       // No delay — pydoll clicks immediately after finding the checkbox.
       // Bare press + random hold + release, no mouseMoved (matches pydoll).
       // All Input events on isolated WS (same as DOM/Runtime).
-      return yield* strategies.phase4Click(
+      const clickResult = yield* strategies.phase4Click(
         send, send, send, oopifSessionId, active,
         checkbox, cbMethod, iframeBackendNodeId, cleanConn, via, attempt, solveStart, checkboxFoundAt,
       );
+
+      // ── CF Network timing: query Performance API for CF resource load times ──
+      // Safe for embedded types only (page is the embedding site).
+      // Interstitial pages ARE the CF challenge — Runtime.evaluate is FORBIDDEN.
+      if (cleanConn && !isInterstitialType(active.info.type)) {
+        yield* Effect.fn('cf.networkTiming')(function*() {
+          const perfResult = yield* cleanConn.send('Runtime.evaluate', {
+            expression: `JSON.stringify(
+              performance.getEntriesByType('resource')
+                .filter(e => e.name.includes('challenges.cloudflare.com'))
+                .map(e => ({ name: e.name.split('/').pop(), ttfb: Math.round(e.responseStart - e.startTime), duration: Math.round(e.duration), size: e.transferSize }))
+            )`,
+            returnByValue: true,
+          }).pipe(Effect.orElseSucceed(() => null));
+          if (perfResult?.result?.value) {
+            try {
+              const entries = JSON.parse(perfResult.result.value) as Array<{ name: string; ttfb: number; duration: number; size: number }>;
+              const apiJs = entries.find(e => e.name?.startsWith('api'));
+              if (apiJs) {
+                yield* Effect.annotateCurrentSpan({
+                  'cf.network.api_js_ttfb': apiJs.ttfb,
+                  'cf.network.api_js_duration': apiJs.duration,
+                  'cf.network.api_js_size': apiJs.size,
+                });
+              }
+              if (entries.length > 0) {
+                yield* Effect.annotateCurrentSpan({
+                  'cf.network.total_cf_resources': entries.length,
+                  'cf.network.total_cf_duration': Math.max(...entries.map(e => e.duration)),
+                });
+              }
+            } catch { /* parse error — skip */ }
+          }
+        })();
+      }
+
+      return clickResult;
     })().pipe(
       Effect.scoped,
       Effect.catch((err: unknown) =>

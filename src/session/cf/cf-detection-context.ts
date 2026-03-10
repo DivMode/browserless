@@ -11,6 +11,7 @@
  * iframes). Post-click OOPIF death means CF rejected the click → abort.
  */
 import { Data, Effect, Exit, Scope } from 'effect';
+import type { Tracer } from 'effect';
 import type { CdpSessionId, TargetId } from '../../shared/cloudflare-detection.js';
 import type { ActiveDetection, ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
 
@@ -37,10 +38,13 @@ export class DetectionContext {
   /** Set to true when detection is properly resolved. Scope finalizer checks this. */
   resolved = false;
   private _oopifState: OOPIFState = OOPIFState.Unbound();
+  /** Root span captured at detection registration — used as parent for async handlers. */
+  readonly rootSpan: Tracer.AnySpan | undefined;
 
-  constructor(active: ActiveDetection, scope: Scope.Closeable) {
+  constructor(active: ActiveDetection, scope: Scope.Closeable, rootSpan?: Tracer.AnySpan) {
     this._active = active;
     this.scope = scope;
+    this.rootSpan = rootSpan;
   }
 
   /** Public read-only view of the active detection. Mutations go through controlled methods. */
