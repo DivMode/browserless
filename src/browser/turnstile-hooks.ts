@@ -7,8 +7,10 @@
  *
  * IMPORTANT: Do NOT use Object.defineProperty to trap window.turnstile —
  * CF's api.js detects getter/setter on the property and refuses to render.
- * Use polling to catch turnstile creation + getResponse() check for tokens
- * from widgets solved before hooks were installed.
+ *
+ * Hook strategy: capture-phase load listener fires BEFORE script onload,
+ * ensuring render() is wrapped before the first call. 20ms poll is the
+ * fallback for edge cases (turnstile created without a script load event).
  */
 import type { Emit } from './types';
 
@@ -92,6 +94,21 @@ export function setupTurnstileHooks(emit: Emit): void {
     hookAndCheck(window.turnstile, emit);
   }
 
+  // Capture-phase load listener: hooks turnstile BEFORE script's onload fires.
+  // HTML spec guarantees: script execution (creates window.turnstile) completes,
+  // then load event dispatches capture→target. We hook in capture phase,
+  // onload calls render() in target phase — render() is already wrapped.
+  function captureLoadHandler(): void {
+    if (isCFChallengePage()) return;
+    if (window.turnstile) {
+      hookAndCheck(window.turnstile, emit);
+      if (window.turnstile.__cbHooked && window.turnstile.__grHooked) {
+        document.removeEventListener('load', captureLoadHandler, true);
+      }
+    }
+  }
+  document.addEventListener('load', captureLoadHandler, true);
+
   // Poll for turnstile creation — CF's api.js loads async and creates
   // window.turnstile. Fast poll (20ms) to hook render() before first call.
   // Abort immediately if _cf_chl_opt detected (CF challenge page).
@@ -102,18 +119,8 @@ export function setupTurnstileHooks(emit: Emit): void {
       if (window.turnstile.__cbHooked && window.turnstile.__grHooked) clearInterval(pollId);
     }
   }, 20);
-  setTimeout(() => clearInterval(pollId), 30000);
-
-  // Token recovery poll — catches tokens from widgets solved via the
-  // original callback (before our hooks were installed).
-  const tokenPollId = setInterval(() => {
-    if (tokenReported) { clearInterval(tokenPollId); return; }
-    if (isCFChallengePage()) { clearInterval(tokenPollId); return; }
-    if (!window.turnstile?.getResponse) return;
-    try {
-      const token = window.turnstile.getResponse();
-      if (token) reportSolved(emit, token);
-    } catch (_) {}
-  }, 200);
-  setTimeout(() => clearInterval(tokenPollId), 30000);
+  setTimeout(() => {
+    clearInterval(pollId);
+    document.removeEventListener('load', captureLoadHandler, true);
+  }, 30000);
 }
