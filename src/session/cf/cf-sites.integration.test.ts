@@ -195,7 +195,7 @@ interface CfTestSite {
  * | `peet-managed`  | `peet.ws/turnstile-test/managed.html`              | turnstile     | `Emb✓` or `Emb→`     | Real sitekey. Managed (interactive) Turnstile    |
  * | `peet-nonint`   | `peet.ws/turnstile-test/non-interactive.html`      | turnstile     | `Emb→`               | Non-interactive — auto-solves                    |
  * | `peet-invisible`| `peet.ws/turnstile-test/invisible.html`            | turnstile     | `Emb→`               | Invisible widget — auto-solves                   |
- * | `cfschl-peet`   | `cfschl.peet.ws/`                                  | interstitial/managed | `Int→` or `Int✓` or `Emb→` or `Emb✓` | May not always serve a challenge |
+ * | `cfschl-peet`   | `cfschl.peet.ws/`                                  | interstitial/managed/turnstile | `Int→` or `Int✓` or `Emb→` or `Emb✓` | May not always serve a challenge |
  *
  * Excluded sites:
  * - `nopecha-cf`: covered by the detailed cloudflare-solver.integration.test.ts
@@ -242,7 +242,7 @@ const CF_TEST_SITES: CfTestSite[] = [
   {
     name: 'cfschl-peet',
     url: 'https://cfschl.peet.ws/',
-    expectedTypes: ['interstitial', 'managed'],
+    expectedTypes: ['interstitial', 'managed', 'turnstile'],
     waitStrategy: 'interstitial',
     expectedSummaries: ['Int→', 'Int✓', 'Emb→', 'Emb✓', 'Int→ Emb→', 'Int→ Emb✓', 'Int✓ Emb→', 'Int✓ Emb✓'],
     maySkip: true, // CF may not always serve a challenge on this site
