@@ -123,9 +123,9 @@ export class SessionCoordinator {
     const cloudflareHooks: CloudflareHooks = {
       onPageAttached: (tid, sid, url) => cloudflareSolver.onPageAttached(tid, sid, url),
       onPageNavigated: (tid, sid, url, title) => cloudflareSolver.onPageNavigated(tid, sid, url, title),
-      onIframeAttached: (tid, sid, url, parent) => cloudflareSolver.onIframeAttached(tid, sid, url, parent),
+      onIframeAttached: (tid, sid, url, parentTid) => cloudflareSolver.onIframeAttached(tid, sid, url, parentTid),
       onIframeNavigated: (tid, sid, url) => cloudflareSolver.onIframeNavigated(tid, sid, url),
-      onBridgeEvent: (sid, event) => cloudflareSolver.onBridgeEvent(sid, event),
+      onBridgeEvent: (tid, event) => cloudflareSolver.onBridgeEvent(tid, event),
       onTargetDestroyed: (tid) => cloudflareSolver.stopTargetDetection(tid),
       destroy: () => cloudflareSolver.destroyEffect,
     };

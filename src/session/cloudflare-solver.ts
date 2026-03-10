@@ -460,10 +460,10 @@ export class CloudflareSolver {
 
   onIframeAttached(
     iframeTargetId: TargetId, iframeCdpSessionId: CdpSessionId,
-    url: string, parentCdpSessionId: CdpSessionId,
+    url: string, parentTargetId: TargetId,
   ): Effect.Effect<void> {
     return this.runInSolver(
-      this.detector.onIframeAttachedEffect(iframeTargetId, iframeCdpSessionId, url, parentCdpSessionId),
+      this.detector.onIframeAttachedEffect(iframeTargetId, iframeCdpSessionId, url, parentTargetId),
     );
   }
 
@@ -473,8 +473,8 @@ export class CloudflareSolver {
     return this.runInSolver(this.detector.onIframeNavigatedEffect(iframeTargetId, iframeCdpSessionId, url));
   }
 
-  onBridgeEvent(cdpSessionId: CdpSessionId, event: unknown): Effect.Effect<void> {
-    return this.runInSolver(this.stateTracker.onBridgeEvent(cdpSessionId, event));
+  onBridgeEvent(targetId: TargetId, event: unknown): Effect.Effect<void> {
+    return this.runInSolver(this.stateTracker.onBridgeEvent(targetId, event));
   }
 
   async onBeaconSolved(targetId: TargetId, tokenLength: number): Promise<void> {
