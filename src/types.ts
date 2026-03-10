@@ -749,7 +749,6 @@ export const BrowserlessManagementRoutes = {
   ReplaysGetRoute: 'ReplaysGetRoute',
   CfSolvedPostRoute: 'CfSolvedPostRoute',
   SessionsGetRoute: 'SessionsGetRoute',
-  PromMetricsGetRoute: 'PromMetricsGetRoute',
   StaticGetRoute: 'StaticGetRoute',
 };
 

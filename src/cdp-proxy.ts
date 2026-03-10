@@ -6,7 +6,7 @@ import { IncomingMessage } from 'http';
 import { Config, Logger } from '@browserless.io/browserless';
 import { Duration, Effect, Exit, FiberSet, Queue, Schedule, Schema, Scope, Stream } from 'effect';
 
-import { proxyDroppedMessages, wsLifecycle } from './prom-metrics.js';
+import { incCounter, proxyDroppedMessages, wsLifecycle } from './effect-metrics.js';
 import { CloudflareConfig } from './shared/cloudflare-detection.js';
 import { CdpSessionId, TargetId } from './shared/cloudflare-detection.js';
 import { BROWSER_WS_PING_INTERVAL, BROWSER_WS_PONG_TIMEOUT_MS } from './session/cf/cf-schedules.js';
@@ -164,7 +164,7 @@ export class CDPProxy {
         this.clientWs.removeAllListeners();
         this.clientWs.terminate();
         this.clientWs = null;
-        wsLifecycle.labels('proxy_client', 'destroy').inc();
+        Effect.runSync(incCounter(wsLifecycle, { type: 'proxy_client', action: 'destroy' }));
       }
       (this as any).clientSocket = null;
       // 3. Close browser WS last
@@ -172,7 +172,7 @@ export class CDPProxy {
         this.browserWs.removeAllListeners();
         this.browserWs.terminate();
         this.browserWs = null;
-        wsLifecycle.labels('proxy_browser', 'destroy').inc();
+        Effect.runSync(incCounter(wsLifecycle, { type: 'proxy_browser', action: 'destroy' }));
       }
     })));
 
@@ -184,7 +184,7 @@ export class CDPProxy {
       Effect.fn('cdp.connect')({ self: this }, function*() {
         // Step 1: Connect to Chrome's CDP endpoint FIRST
         this.browserWs = new WebSocket(this.browserWsEndpoint);
-        wsLifecycle.labels('proxy_browser', 'create').inc();
+        Effect.runSync(incCounter(wsLifecycle, { type: 'proxy_browser', action: 'create' }));
 
         yield* Effect.callback<void, Error>((resume) => {
           const ws = this.browserWs!;
@@ -221,7 +221,7 @@ export class CDPProxy {
 
         // Setup AFTER successful upgrade
         this.clientWs = clientWs;
-        wsLifecycle.labels('proxy_client', 'create').inc();
+        Effect.runSync(incCounter(wsLifecycle, { type: 'proxy_client', action: 'create' }));
         this.log.trace('Client WebSocket upgraded');
 
         // Scope-bound outbound queue: all client WS sends go through here.
@@ -475,7 +475,7 @@ export class CDPProxy {
         onSent: resolve,
         onError: (err) => { this.log.warn(`Failed to send CDP response id=${id}: ${err.message}`); reject(err); },
       })) {
-        proxyDroppedMessages.labels('client').inc();
+        Effect.runSync(incCounter(proxyDroppedMessages, { direction: 'client' }));
         resolve();
       }
     });
@@ -490,7 +490,7 @@ export class CDPProxy {
         onSent: resolve,
         onError: (err) => { this.log.warn(`Failed to send CDP error id=${id}: ${err.message}`); reject(err); },
       })) {
-        proxyDroppedMessages.labels('client').inc();
+        Effect.runSync(incCounter(proxyDroppedMessages, { direction: 'client' }));
         resolve();
       }
     });
@@ -543,7 +543,7 @@ export class CDPProxy {
         onError: (err) => { this.log.warn(`Failed to inject CDP event ${method}: ${err.message}`); reject(err); },
       });
       if (!offered) {
-        proxyDroppedMessages.labels('client').inc();
+        Effect.runSync(incCounter(proxyDroppedMessages, { direction: 'client' }));
         resolve(); // Silent no-op during shutdown
       }
     });
@@ -598,7 +598,7 @@ export class CDPProxy {
   } {
     const endpoint = this.browserWsEndpoint;
     const ws = new WebSocket(endpoint);
-    wsLifecycle.labels('proxy_isolated', 'create').inc();
+    Effect.runSync(incCounter(wsLifecycle, { type: 'proxy_isolated', action: 'create' }));
     const conn = new CdpConnection(ws, { startId: 300_000, defaultTimeout: 30_000 });
     let connected = false;
     const openPromise = new Promise<void>((resolve, reject) => {
@@ -623,7 +623,7 @@ export class CDPProxy {
       conn.dispose();
       ws.removeAllListeners();
       ws.terminate();
-      wsLifecycle.labels('proxy_isolated', 'destroy').inc();
+      Effect.runSync(incCounter(wsLifecycle, { type: 'proxy_isolated', action: 'destroy' }));
     };
 
     return { conn, ws, waitForOpen, cleanup };
@@ -734,13 +734,13 @@ export class CDPProxy {
   /** Send data to Chrome. No-op after handleClose(). */
   private sendToBrowser(data: WebSocket.RawData, binary: boolean): void {
     if (this.isClosing || this.browserWs?.readyState !== WebSocket.OPEN) {
-      proxyDroppedMessages.labels('browser').inc();
+      Effect.runSync(incCounter(proxyDroppedMessages, { direction: 'browser' }));
       return;
     }
     try {
       this.browserWs.send(data, { binary });
     } catch {
-      proxyDroppedMessages.labels('browser').inc();
+      Effect.runSync(incCounter(proxyDroppedMessages, { direction: 'browser' }));
     }
   }
 

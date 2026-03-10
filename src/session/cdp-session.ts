@@ -14,12 +14,12 @@ import {
   type TabReplayCompleteParams,
 } from '@browserless.io/browserless';
 
-import { Cause, Effect, Exit, Fiber, FiberMap, Layer, ManagedRuntime, Queue, Schedule, Scope } from 'effect';
+import { Cause, Effect, Exit, Fiber, FiberMap, Layer, ManagedRuntime, Metric, Queue, Schedule, Scope } from 'effect';
 import { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 import { decodeCDPMessage, decodeRrwebEventBatch } from '../shared/cdp-schemas.js';
 import { CdpConnection } from '../shared/cdp-rpc.js';
 import { CdpSessionGone as CdpSessionGoneError, CdpTimeout as CdpTimeoutError } from './cf/cf-errors.js';
-import { registerSessionState, tabDuration, replayEventsTotal, wsLifecycle } from '../prom-metrics.js';
+import { registerSessionState, tabDuration, replayEventsTotal, wsLifecycle, incCounter, observeHistogram } from '../effect-metrics.js';
 import { TargetRegistry } from './target-state.js';
 import { SessionId } from '../shared/replay-schemas.js';
 import { ReplayStoreError } from '../shared/replay-schemas.js';
@@ -173,12 +173,9 @@ export class CdpSession {
               },
             });
             const sizeMB = (body.length / 1024 / 1024).toFixed(1);
-            console.error(JSON.stringify({
-              message: 'replay.write_start',
-              replay_id: tabReplayId,
-              event_count: events.length,
-              body_size_mb: sizeMB,
-            }));
+            Effect.runSync(Effect.logDebug('replay.write_start').pipe(
+              Effect.annotateLogs({ replay_id: tabReplayId, event_count: events.length, body_size_mb: sizeMB }),
+            ));
             const resp = await fetch(url, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -186,24 +183,17 @@ export class CdpSession {
             });
             if (!resp.ok) throw new Error(`Replay server ${resp.status}: ${await resp.text()}`);
             const result = await resp.json() as { url: string };
-            console.error(JSON.stringify({
-              message: 'replay.write_done',
-              replay_id: tabReplayId,
-              event_count: events.length,
-              body_size_mb: sizeMB,
-            }));
+            Effect.runSync(Effect.logDebug('replay.write_done').pipe(
+              Effect.annotateLogs({ replay_id: tabReplayId, event_count: events.length, body_size_mb: sizeMB }),
+            ));
             return result.url;
           },
           catch: (e) => {
             const msg = e instanceof Error ? e.message : String(e);
             const cause = e instanceof Error && e.cause ? String(e.cause) : undefined;
-            console.error(JSON.stringify({
-              message: 'replay.write_error',
-              replay_id: tabReplayId,
-              error: msg,
-              cause,
-              error_name: e instanceof Error ? e.name : typeof e,
-            }));
+            Effect.runSync(Effect.logError('replay.write_error').pipe(
+              Effect.annotateLogs({ replay_id: tabReplayId, error: msg, cause, error_name: e instanceof Error ? e.name : typeof e }),
+            ));
             return new ReplayStoreError({ message: msg });
           },
         }),
@@ -213,46 +203,34 @@ export class CdpSession {
             const url = `${replayServerUrl}/replays/${tabReplayId}/events`;
             const body = JSON.stringify({ events });
             const sizeMB = (body.length / 1024 / 1024).toFixed(1);
-            console.error(JSON.stringify({
-              message: 'replay.append_start',
-              replay_id: tabReplayId,
-              event_count: events.length,
-              body_size_mb: sizeMB,
-            }));
+            Effect.runSync(Effect.logDebug('replay.append_start').pipe(
+              Effect.annotateLogs({ replay_id: tabReplayId, event_count: events.length, body_size_mb: sizeMB }),
+            ));
             const resp = await fetch(url, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body,
             });
             if (!resp.ok) throw new Error(`Replay server ${resp.status}: ${await resp.text()}`);
-            console.error(JSON.stringify({
-              message: 'replay.append_done',
-              replay_id: tabReplayId,
-              event_count: events.length,
-              body_size_mb: sizeMB,
-            }));
+            Effect.runSync(Effect.logDebug('replay.append_done').pipe(
+              Effect.annotateLogs({ replay_id: tabReplayId, event_count: events.length, body_size_mb: sizeMB }),
+            ));
           },
           catch: (e) => {
             const msg = e instanceof Error ? e.message : String(e);
-            console.error(JSON.stringify({
-              message: 'replay.append_error',
-              replay_id: tabReplayId,
-              error: msg,
-            }));
+            Effect.runSync(Effect.logError('replay.append_error').pipe(
+              Effect.annotateLogs({ replay_id: tabReplayId, error: msg }),
+            ));
             return new ReplayStoreError({ message: msg });
           },
         }),
       writeMetadata: (_metadata) => Effect.void, // Replay server stores metadata with events
     }));
 
-    // ReplayMetricsLayer — Prometheus counters
+    // ReplayMetricsLayer — Effect Metric counters
     const metricsLayer = Layer.succeed(ReplayMetrics, ReplayMetrics.of({
-      incEvents: (count) => Effect.sync(() => {
-        for (let i = 0; i < count; i++) replayEventsTotal.inc();
-      }),
-      observeTabDuration: (seconds) => Effect.sync(() => {
-        tabDuration.observe(seconds);
-      }),
+      incEvents: (count) => Metric.update(replayEventsTotal, count),
+      observeTabDuration: (seconds) => observeHistogram(tabDuration, seconds),
       registerSession: (state) => Effect.sync(() => registerSessionState(state)),
     }));
 
@@ -305,7 +283,7 @@ export class CdpSession {
 
     const ws = new this.WebSocket(this.wsEndpoint);
     this.ws = ws;
-    wsLifecycle.labels('session_browser', 'create').inc();
+    Effect.runSync(incCounter(wsLifecycle, { type: 'session_browser', action: 'create' }));
 
     // CRITICAL: Attach error handler synchronously before any async work
     ws.on('error', (err: Error) => {
@@ -333,7 +311,7 @@ export class CdpSession {
       this.ws?.removeAllListeners();
       this.ws?.terminate();
       this.ws = null;
-      wsLifecycle.labels('session_browser', 'destroy').inc();
+      Effect.runSync(incCounter(wsLifecycle, { type: 'session_browser', action: 'destroy' }));
     })));
 
     // Wire up WS message handler
@@ -595,7 +573,7 @@ export class CdpSession {
       const pageWs = yield* Effect.acquireRelease(
         Effect.gen(function*() {
           const pageWs = new WebSocket(pageWsUrl);
-          wsLifecycle.labels('page', 'create').inc();
+          Effect.runSync(incCounter(wsLifecycle, { type: 'page', action: 'create' }));
 
           pageWs.on('message', (data: Buffer) => {
             try {
@@ -642,7 +620,7 @@ export class CdpSession {
           conn?.dispose();
           pageWs.removeAllListeners();
           pageWs.terminate();
-          wsLifecycle.labels('page', 'destroy').inc();
+          Effect.runSync(incCounter(wsLifecycle, { type: 'page', action: 'destroy' }));
         }),
       );
 
@@ -869,26 +847,19 @@ export class CdpSession {
           if (this.runtime && this._fiberMap) {
             const targetId = this.targets.findTargetIdByCdpSession(cdpSessionId);
             if (!targetId) {
-              console.error(JSON.stringify({
-                message: 'bridge event: no target for CDP session',
-                session_id: this.sessionId,
-                cdp_session_id: cdpSessionId,
-                event_type: (parsed as { type?: string }).type,
-                known_targets: this.targets.size,
-              }));
+              Effect.runSync(Effect.logWarning('bridge event: no target for CDP session').pipe(
+                Effect.annotateLogs({ session_id: this.sessionId, cdp_session_id: cdpSessionId, event_type: (parsed as { type?: string }).type, known_targets: this.targets.size }),
+              ));
               return;
             }
             this.runtime.runFork(
               FiberMap.run(this._fiberMap, `cf:bridge:${targetId}`,
                 this.cloudflareHooks.onBridgeEvent(targetId, parsed).pipe(
-                  Effect.catchCause((cause) => Effect.sync(() => {
-                    console.error(JSON.stringify({
-                      message: 'bridge event: solver defect',
-                      session_id: this.sessionId,
-                      target_id: targetId,
-                      cause: Cause.pretty(cause),
-                    }));
-                  })),
+                  Effect.catchCause((cause) =>
+                    Effect.logError('bridge event: solver defect').pipe(
+                      Effect.annotateLogs({ session_id: this.sessionId, target_id: targetId, cause: Cause.pretty(cause) }),
+                    ),
+                  ),
                 )),
             );
           }
@@ -1275,7 +1246,7 @@ export class CdpSession {
       const target = session.targets.getByTarget(targetId);
 
       if (target) {
-        tabDuration.observe((Date.now() - target.startTime) / 1000);
+        yield* observeHistogram(tabDuration, (Date.now() - target.startTime) / 1000);
         // Flush rrweb buffer into queue BEFORE scope close (queue still open)
         yield* session.finalizeTabEffect(targetId).pipe(Effect.ignore);
       }

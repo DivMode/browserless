@@ -12,7 +12,7 @@
  */
 import { Effect, Scope } from 'effect';
 import { CdpConnection } from '../../shared/cdp-rpc.js';
-import { wsLifecycle } from '../../prom-metrics.js';
+import { incCounter, wsLifecycle } from '../../effect-metrics.js';
 
 export interface ScopedWsOptions {
   /** Starting command ID for CdpConnection (avoids collisions between WS types). */
@@ -63,8 +63,7 @@ export function openScopedWs(
       // Counter AFTER open succeeds — structural guarantee.
       // If handshake fails or fiber interrupts during open, acquire never
       // completes → release never fires → no counter gap.
-      wsLifecycle.labels(label, 'create').inc();
-      console.error(JSON.stringify({ message: `ws.debug.${label}.acquire`, url: url.slice(-20) }));
+      yield* incCounter(wsLifecycle, { type: label, action: 'create' });
 
       const conn = new CdpConnection(ws, {
         startId: opts.startId,
@@ -87,8 +86,7 @@ export function openScopedWs(
       if (ws) {
         try { ws.removeAllListeners(); ws.terminate(); } catch { /* already closed */ }
       }
-      wsLifecycle.labels(label, 'destroy').inc();
-      console.error(JSON.stringify({ message: `ws.debug.${label}.release` }));
+      yield* incCounter(wsLifecycle, { type: label, action: 'destroy' });
     })(),
   );
 }
