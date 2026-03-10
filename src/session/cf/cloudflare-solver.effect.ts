@@ -133,18 +133,17 @@ export const solveDetection = (
       if (Cause.hasInterruptsOnly(cause)) return Effect.succeed(SO.Aborted());
 
       const err = Cause.squash(cause);
-      console.error(JSON.stringify({ message: 'cf.solveDetection defect', error: String(err), type: active.info.type }));
-      return Effect.fn('cf.solveDetection.errorFallback')(function*() {
-        if (!active.aborted) {
-          const events = yield* SolverEvents;
-          yield* events.emitFailed(active, 'solve_exception', Date.now() - active.startTime);
-          // Signal abort via centralized setAborted — solveDetection runs inside the
-          // solve dispatch and doesn't have access to the DetectionContext. The
-          // context.abort() at the registry level will handle scope cleanup.
-          DetectionContext.setAborted(active);
-        }
-        return SO.Aborted();
-      })();
+      return Effect.logError('cf.solveDetection defect').pipe(
+        Effect.annotateLogs({ error: String(err), type: active.info.type }),
+        Effect.andThen(Effect.fn('cf.solveDetection.errorFallback')(function*() {
+          if (!active.aborted) {
+            const events = yield* SolverEvents;
+            yield* events.emitFailed(active, 'solve_exception', Date.now() - active.startTime);
+            DetectionContext.setAborted(active);
+          }
+          return SO.Aborted();
+        })()),
+      );
     }),
   );
 

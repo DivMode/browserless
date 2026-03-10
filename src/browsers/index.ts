@@ -26,7 +26,7 @@ import { SessionRegistry } from '../session/session-registry.js';
 import { SessionLifecycleManager } from '../session/session-lifecycle-manager.js';
 import { SessionCoordinator } from '../session/session-coordinator.js';
 import { BrowserLauncher } from './browser-launcher.js';
-import { setRegistrySize } from '../prom-metrics.js';
+import { setRegistrySize } from '../effect-metrics.js';
 import type { VideoManager } from '../video/video-manager.js';
 
 /**

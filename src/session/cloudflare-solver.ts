@@ -17,7 +17,7 @@ import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
 import { OtelLayer } from '../otel-layer.js';
 import { WS_SCOPE_BUDGET } from './cf/cf-ws-resource.js';
 
-import { wsLifecycle, wsScopeBudgetExceeded } from '../prom-metrics.js';
+import { incCounter, wsLifecycle, wsScopeBudgetExceeded } from '../effect-metrics.js';
 import type { CdpConnection } from '../shared/cdp-rpc.js';
 
 let _solveIdCounter = 0;
@@ -114,7 +114,6 @@ export class CloudflareSolver {
     // Same pattern as CDPProxy: register finalizer even before any work begins.
     Effect.runSync(Scope.addFinalizer(this.solverScope,
       Effect.fn('cf.solver.scope.finalizer')({ self: this }, function*() {
-        console.error(JSON.stringify({ message: 'cf.solver.scope.finalizer' }));
         yield* this.stateTracker.destroy();
       })(),
     ));
@@ -245,8 +244,10 @@ export class CloudflareSolver {
               Effect.scoped,
               // Catch WS open errors — connection refused, handshake timeout, etc.
               Effect.catch((err: unknown) => {
-                console.error(JSON.stringify({ message: 'ws.debug.solver_isolated.error', solveId, tid, error: String(err) }));
-                return Effect.succeed(SolveOutcome.Aborted());
+                return Effect.logError('ws.debug.solver_isolated.error').pipe(
+                  Effect.annotateLogs({ solveId, tid, error: String(err) }),
+                  Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
+                );
               }),
               // Structural kill switch: even if future code introduces blocking
               // inside the scoped region, the budget timeout kills the scope.
@@ -254,36 +255,26 @@ export class CloudflareSolver {
               Effect.timeout(`${WS_SCOPE_BUDGET} millis`),
               // Catch timeout error — budget exceeded returns 'aborted' + logs for Grafana
               Effect.catch(() => {
-                wsScopeBudgetExceeded.labels('solver_isolated').inc();
-                console.error(JSON.stringify({
-                  message: 'ws.scope_budget_exceeded',
-                  label: 'solver_isolated',
-                  budget_ms: WS_SCOPE_BUDGET,
-                  solveId,
-                  tid,
-                }));
-                return Effect.succeed(SolveOutcome.Aborted());
+                return incCounter(wsScopeBudgetExceeded, { type: 'solver_isolated' }).pipe(
+                  Effect.andThen(Effect.logWarning('ws.scope_budget_exceeded').pipe(
+                    Effect.annotateLogs({ label: 'solver_isolated', budget_ms: WS_SCOPE_BUDGET, solveId, tid }),
+                  )),
+                  Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
+                );
               }),
-              Effect.onInterrupt(() => Effect.sync(() => {
-                console.error(JSON.stringify({ message: 'ws.debug.solver_isolated.interrupted', solveId, tid }));
-              })),
             );
           }
 
           if (self.createIsolatedConn) {
             // Legacy path — kept for backward compatibility during migration.
-            const solveId = ++_solveIdCounter;
-            const tid = active.pageTargetId.slice(0, 8);
             return Effect.acquireRelease(
-              Effect.sync(() => {
-                wsLifecycle.labels('solver_isolated', 'create').inc();
-                console.error(JSON.stringify({ message: 'ws.debug.solver_isolated.acquire', solveId, tid }));
+              Effect.gen(function*() {
+                yield* incCounter(wsLifecycle, { type: 'solver_isolated', action: 'create' });
                 return self.createIsolatedConn!();
               }),
               (c) => Effect.fn('ws.release.solver_isolated')(function*() {
                 c.cleanup();
-                wsLifecycle.labels('solver_isolated', 'destroy').inc();
-                console.error(JSON.stringify({ message: 'ws.debug.solver_isolated.release', solveId, tid }));
+                yield* incCounter(wsLifecycle, { type: 'solver_isolated', action: 'destroy' });
               })(),
             ).pipe(
               Effect.tap((isolated) => isolated.waitForOpen.pipe(
@@ -296,9 +287,6 @@ export class CloudflareSolver {
                 sendViaBrowser: originalSender.sendViaProxy,
               }))),
               Effect.scoped,
-              Effect.onInterrupt(() => Effect.sync(() => {
-                console.error(JSON.stringify({ message: 'ws.debug.solver_isolated.interrupted', solveId, tid }));
-              })),
             );
           }
 
@@ -410,11 +398,9 @@ export class CloudflareSolver {
           if (Cause.hasInterruptsOnly(cause)) return;
 
           const pretty = Cause.pretty(cause);
-          console.error(JSON.stringify({
-            message: 'Detection fiber crashed — emitting fallback failure',
-            targetId,
-            error: pretty,
-          }));
+          yield* Effect.logError('Detection fiber crashed — emitting fallback failure').pipe(
+            Effect.annotateLogs({ targetId, error: pretty }),
+          );
           // Emit cf.failed so pydoll doesn't hang waiting for event #2
           const crashCtx = this.stateTracker.registry.getContext(targetId);
           if (crashCtx && !crashCtx.aborted) {
@@ -479,18 +465,22 @@ export class CloudflareSolver {
 
   async onBeaconSolved(targetId: TargetId, tokenLength: number): Promise<void> {
     await this.runtime.runPromise(this.stateTracker.onBeaconSolved(targetId, tokenLength))
-      .catch((e) => console.error(JSON.stringify({ message: 'CF runtime defect', method: 'onBeaconSolved', error: String(e) })));
+      .catch((e) => Effect.runSync(
+        Effect.logError('CF runtime defect').pipe(Effect.annotateLogs({ method: 'onBeaconSolved', error: String(e) })),
+      ));
   }
 
   async emitUnresolvedDetections(): Promise<void> {
     await this.runtime.runPromise(this.stateTracker.emitUnresolvedDetections())
-      .catch((e) => console.error(JSON.stringify({ message: 'CF runtime defect', method: 'emitUnresolvedDetections', error: String(e) })));
+      .catch((e) => Effect.runSync(
+        Effect.logError('CF runtime defect').pipe(Effect.annotateLogs({ method: 'emitUnresolvedDetections', error: String(e) })),
+      ));
   }
 
   /** Pure Effect disposal — callers yield* this directly. No boundary crossing. */
   get destroyEffect(): Effect.Effect<void> {
     return Effect.fn('cf.solver.destroy')({ self: this }, function*() {
-      console.error(JSON.stringify({ message: 'cf.solver.destroy.start' }));
+      yield* Effect.logDebug('cf.solver.destroy.start');
 
       // Close the solver scope — this atomically:
       // 1. Drains ALL detection fibers (FiberMap is scope-bound)
@@ -502,10 +492,12 @@ export class CloudflareSolver {
         Effect.timeout('10 seconds'),
         Effect.ignore,
       );
-      console.error(JSON.stringify({ message: 'cf.solver.destroy.drained', fibers: fiberCount }));
+      yield* Effect.logDebug('cf.solver.destroy.drained').pipe(
+        Effect.annotateLogs({ fibers: fiberCount }),
+      );
 
       yield* this.runtime.disposeEffect;
-      console.error(JSON.stringify({ message: 'cf.solver.destroy.end' }));
+      yield* Effect.logDebug('cf.solver.destroy.end');
     })();
   }
 }

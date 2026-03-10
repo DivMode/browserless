@@ -183,7 +183,6 @@ export class SessionCoordinator {
     const coordinator = this;
 
     return Effect.fn('coordinator.stopReplay')(function*() {
-      console.error(JSON.stringify({ message: 'coordinator.stopReplay.start', session_id: sessionId }));
       yield* Effect.annotateCurrentSpan({ 'session.id': sessionId });
       // Phase 1: Stop screencast capture
       yield* Effect.tryPromise(
@@ -211,12 +210,10 @@ export class SessionCoordinator {
       // Guaranteed Map cleanup — runs even if Effect times out or fails.
       // solver.destroy() is awaited to ensure ManagedRuntime disposal completes.
       Effect.ensuring(Effect.fn('coordinator.stopReplay.cleanup')(function*() {
-        console.error(JSON.stringify({ message: 'coordinator.stopReplay.cleanup.start', session_id: sessionId }));
         coordinator.cdpSessions.delete(sessionId);
         const solver = coordinator.cloudflareSolvers.get(sessionId);
         if (solver) yield* solver.destroyEffect;
         coordinator.cloudflareSolvers.delete(sessionId);
-        console.error(JSON.stringify({ message: 'coordinator.stopReplay.cleanup.end', session_id: sessionId }));
       })()),
     );
   }

@@ -3,7 +3,7 @@ import { Logger } from '@browserless.io/browserless';
 import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, CloudflareType, EmbeddedInfo, InterstitialCFType } from '../../shared/cloudflare-detection.js';
 import { isInterstitialType, isCFInterstitialTitle } from '../../shared/cloudflare-detection.js';
 import { DETECTION_POLL_DELAY, EMBEDDED_RESOLUTION_TIMEOUT, INTERSTITIAL_RESOLUTION_TIMEOUT, MAX_RECHALLENGES, RECHALLENGE_DELAY_MS } from './cf-schedules.js';
-import { cfResolutionTimeouts } from '../../prom-metrics.js';
+import { incCounter, cfResolutionTimeouts } from '../../effect-metrics.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
 import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection, CFEvents } from './cloudflare-event-emitter.js';
 import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
@@ -656,17 +656,18 @@ export class CloudflareDetector {
       } else {
         // Timeout — zombie detection caught. Settle and emit.
         self.log.warn(`CF lifecycle: resolution_timeout target=${targetId.slice(0,8)} session=${self.sid} elapsed_ms=${Date.now() - active.startTime}`);
-        console.error(JSON.stringify({
-          message: 'CF lifecycle: resolution_timeout diagnostic',
-          session_id: self.sid,
-          target_id: targetId,
-          cf_type: active.info.type,
-          had_click: !!active.clickDelivered,
-          iframe_bound: !!active.iframeCdpSessionId,
-          detection_age_ms: Date.now() - active.startTime,
-        }));
+        yield* Effect.logWarning('CF lifecycle: resolution_timeout diagnostic').pipe(
+          Effect.annotateLogs({
+            session_id: self.sid,
+            target_id: targetId,
+            cf_type: active.info.type,
+            had_click: !!active.clickDelivered,
+            iframe_bound: !!active.iframeCdpSessionId,
+            detection_age_ms: Date.now() - active.startTime,
+          }),
+        );
         const timeoutReason = opts.timeoutReason ?? 'resolution_timeout';
-        cfResolutionTimeouts.labels(opts.counterLabel).inc();
+        yield* incCounter(cfResolutionTimeouts, { type: opts.counterLabel });
         const duration = Date.now() - active.startTime;
         yield* active.resolution.fail(timeoutReason, duration);
         self.state.pushPhase(targetId, active.info.type, `✗ ${timeoutReason}`);
@@ -755,8 +756,10 @@ export class CloudflareDetector {
       const rawOutcome = yield* dispatcher.dispatch(active).pipe(
         Effect.catchCause((cause) => {
           const err = Cause.squash(cause);
-          console.error(JSON.stringify({ message: 'cf.triggerSolve dispatch defect', error: String(err) }));
-          return Effect.succeed(SolveOutcome.Aborted());
+          return Effect.logError('cf.triggerSolve dispatch defect').pipe(
+            Effect.annotateLogs({ error: String(err) }),
+            Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
+          );
         }),
       );
       // Complete Resolution for immediate failures — these are known outcomes
@@ -1004,8 +1007,10 @@ export class CloudflareDetector {
       const outcome: SolveDetectionResult = yield* dispatcher.dispatch(active).pipe(
         Effect.catchCause((cause) => {
           const err = Cause.squash(cause);
-          console.error(JSON.stringify({ message: 'cf.handleTurnstile dispatch defect', error: String(err) }));
-          return Effect.succeed(SolveOutcome.Aborted());
+          return Effect.logError('cf.handleTurnstile dispatch defect').pipe(
+            Effect.annotateLogs({ error: String(err) }),
+            Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
+          );
         }),
       );
       const outcomeTag = outcome._tag;

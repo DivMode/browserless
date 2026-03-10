@@ -38,9 +38,7 @@ export function getIframePageCoords(
       return { x: q[0] as number, y: q[1] as number };
     }
     return { x: null, y: null };
-  })().pipe(Effect.scoped, Effect.onInterrupt(() => Effect.sync(() => {
-    console.error(JSON.stringify({ message: 'ws.debug.getIframePageCoords.interrupted', targetId: pageTargetId }));
-  })));
+  })().pipe(Effect.scoped);
 }
 
 /**

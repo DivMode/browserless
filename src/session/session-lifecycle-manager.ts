@@ -8,7 +8,7 @@ import {
 import { rm } from 'fs/promises';
 
 import { Effect, Fiber, Schedule, Scope } from 'effect';
-import { sessionDuration } from '../prom-metrics.js';
+import { observeHistogram, sessionDuration } from '../effect-metrics.js';
 import { SessionCoordinator } from './session-coordinator.js';
 import { SessionRegistry } from './session-registry.js';
 
@@ -71,15 +71,17 @@ export class SessionLifecycleManager {
     })();
 
     return Effect.fn('session.destroy')(function*() {
-      console.error(JSON.stringify({ message: 'session.destroy.start', session_id: session.id }));
+      yield* Effect.logDebug('session.destroy.start').pipe(
+        Effect.annotateLogs({ session_id: session.id }),
+      );
       yield* Effect.annotateCurrentSpan({ 'session.id': session.id });
 
       // Step 1: Registry removal (immediate — prevents stale /sessions)
       lifecycle.registry.remove(browser);
 
-      // Step 2: Prometheus session duration
+      // Step 2: Session duration metric
       const durationSec = (Date.now() - session.startedOn) / 1000;
-      sessionDuration.observe(durationSec);
+      yield* observeHistogram(sessionDuration, durationSec);
 
       // Step 3: Replay + CF cleanup (with timeout)
       yield* replayCleanup.pipe(
@@ -96,9 +98,8 @@ export class SessionLifecycleManager {
       // Step 5: Data dir cleanup — GUARANTEED by Effect.ensuring
       // Runs even if steps 1-4 throw, timeout, or get interrupted
       Effect.ensuring(
-        Effect.sync(() => {
-          console.error(JSON.stringify({ message: 'session.destroy.end', session_id: session.id }));
-        }).pipe(
+        Effect.logDebug('session.destroy.end').pipe(
+          Effect.annotateLogs({ session_id: session.id }),
           Effect.andThen(
             session.isTempDataDir
               ? Effect.tryPromise(() => lifecycle.removeUserDataDir(session.userDataDir)).pipe(Effect.ignore)
@@ -125,10 +126,7 @@ export class SessionLifecycleManager {
         this.registry.register(browser, session);
         return browser;
       }),
-      () => {
-        console.error(JSON.stringify({ message: 'session.acquireRelease.release', session_id: session.id }));
-        return this.destroySession(browser, session).pipe(Effect.ignore);
-      },
+      () => this.destroySession(browser, session).pipe(Effect.ignore),
     );
   }
 
@@ -171,14 +169,9 @@ export class SessionLifecycleManager {
       Effect.runFork(Fiber.interrupt(priorFiber));
     }
 
-    console.error(JSON.stringify({
-      message: 'session.close.decision',
-      session_id: session.id,
-      keep_open: keepOpen,
-      connected,
-      has_keep_until: hasKeepUntil,
-      force,
-    }));
+    Effect.runSync(Effect.logDebug('session.close.decision').pipe(
+      Effect.annotateLogs({ session_id: session.id, keep_open: keepOpen, connected, has_keep_until: hasKeepUntil, force }),
+    ));
 
     this.log.debug(
       `close() check: session=${session.id} numbConnected=${session.numbConnected} keepUntil=${keepUntil} keepOpen=${keepOpen} force=${force}`,

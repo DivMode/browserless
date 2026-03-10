@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from '@effect/vitest';
 import { vi, beforeEach } from 'vitest';
-import { Effect, Exit, Scope } from 'effect';
+import { Effect, Exit, Metric, Scope } from 'effect';
 import EventEmitter from 'node:events';
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -50,54 +50,54 @@ vi.mock('ws', () => ({
   },
 }));
 
-// Counter tracking
-let counters: Map<string, number>;
-
-vi.mock('../../prom-metrics.js', () => ({
-  wsLifecycle: {
-    labels: (type: string, action: string) => ({
-      inc: () => {
-        const key = `${type}:${action}`;
-        counters.set(key, (counters.get(key) || 0) + 1);
-      },
-    }),
-  },
-}));
-
 // ═══════════════════════════════════════════════════════════════════════
 // Import AFTER mocks
 // ═══════════════════════════════════════════════════════════════════════
 
 const { openScopedWs, WS_SCOPE_BUDGET } = await import('./cf-ws-resource.js');
+const { wsLifecycle } = await import('../../effect-metrics.js');
+
+/** Read counter value for a labeled metric inside the Effect context. */
+function readCounter(type: string, action: string) {
+  return Metric.value(wsLifecycle.pipe(Metric.withAttributes({ type, action }))).pipe(
+    Effect.map((state) => (state as any)?.count ?? 0),
+  );
+}
 
 describe('openScopedWs', () => {
   beforeEach(() => {
     mockInstances = [];
-    counters = new Map();
     mockBehavior = 'open';
   });
 
   it.effect('counters balanced on success — create after open, destroy on scope close', () =>
     Effect.gen(function*() {
+      // Capture baseline (counters are cumulative across tests)
+      const createBefore = yield* readCounter('test_ws', 'create');
+      const destroyBefore = yield* readCounter('test_ws', 'destroy');
+
       const scope = yield* Scope.make();
       yield* openScopedWs('test_ws', 'ws://localhost:1234', { startId: 1 }).pipe(
         Effect.provideService(Scope.Scope, scope),
       );
 
-      expect(counters.get('test_ws:create')).toBe(1);
-      expect(counters.get('test_ws:destroy')).toBeUndefined();
+      expect((yield* readCounter('test_ws', 'create')) - createBefore).toBe(1);
+      expect((yield* readCounter('test_ws', 'destroy')) - destroyBefore).toBe(0);
 
       // Close scope — triggers release
       yield* Scope.close(scope, Exit.void);
 
-      expect(counters.get('test_ws:create')).toBe(1);
-      expect(counters.get('test_ws:destroy')).toBe(1);
+      expect((yield* readCounter('test_ws', 'create')) - createBefore).toBe(1);
+      expect((yield* readCounter('test_ws', 'destroy')) - destroyBefore).toBe(1);
     }),
   );
 
   it.effect('counters balanced on open failure — neither fires', () =>
     Effect.gen(function*() {
       mockBehavior = 'error';
+      const createBefore = yield* readCounter('test_ws', 'create');
+      const destroyBefore = yield* readCounter('test_ws', 'destroy');
+
       const scope = yield* Scope.make();
       const exit = yield* openScopedWs('test_ws', 'ws://localhost:1234').pipe(
         Effect.provideService(Scope.Scope, scope),
@@ -105,8 +105,8 @@ describe('openScopedWs', () => {
       );
 
       // Acquire failed → neither counter should fire
-      expect(counters.get('test_ws:create')).toBeUndefined();
-      expect(counters.get('test_ws:destroy')).toBeUndefined();
+      expect((yield* readCounter('test_ws', 'create')) - createBefore).toBe(0);
+      expect((yield* readCounter('test_ws', 'destroy')) - destroyBefore).toBe(0);
       expect(Exit.isFailure(exit)).toBe(true);
 
       yield* Scope.close(scope, Exit.void);
@@ -115,6 +115,11 @@ describe('openScopedWs', () => {
 
   it.effect('multiple concurrent scoped WS connections clean up independently', () =>
     Effect.gen(function*() {
+      const createA = yield* readCounter('type_a', 'create');
+      const destroyA = yield* readCounter('type_a', 'destroy');
+      const createB = yield* readCounter('type_b', 'create');
+      const destroyB = yield* readCounter('type_b', 'destroy');
+
       const scope1 = yield* Scope.make();
       const scope2 = yield* Scope.make();
 
@@ -125,17 +130,17 @@ describe('openScopedWs', () => {
         Effect.provideService(Scope.Scope, scope2),
       );
 
-      expect(counters.get('type_a:create')).toBe(1);
-      expect(counters.get('type_b:create')).toBe(1);
+      expect((yield* readCounter('type_a', 'create')) - createA).toBe(1);
+      expect((yield* readCounter('type_b', 'create')) - createB).toBe(1);
 
       // Close only scope1
       yield* Scope.close(scope1, Exit.void);
-      expect(counters.get('type_a:destroy')).toBe(1);
-      expect(counters.get('type_b:destroy')).toBeUndefined();
+      expect((yield* readCounter('type_a', 'destroy')) - destroyA).toBe(1);
+      expect((yield* readCounter('type_b', 'destroy')) - destroyB).toBe(0);
 
       // Close scope2
       yield* Scope.close(scope2, Exit.void);
-      expect(counters.get('type_b:destroy')).toBe(1);
+      expect((yield* readCounter('type_b', 'destroy')) - destroyB).toBe(1);
     }),
   );
 
