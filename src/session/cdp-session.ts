@@ -474,13 +474,18 @@ export class CdpSession {
   private offerEvents(targetId: TargetId, events: readonly { type: number; timestamp: number; data: unknown }[]): void {
     const queue = this.tabQueues.get(targetId);
     if (!queue) {
-      console.error(JSON.stringify({
-        message: 'offerEvents: tab queue missing — events dropped',
-        session_id: this.sessionId,
-        target_id: targetId,
-        event_count: events.length,
-        event_types: events.map(e => e.type),
-      }));
+      // During teardown, CF solver scope finalizers emit markers asynchronously
+      // (via runInSolver) after the tab queue has been deleted by FINALIZER 2.
+      // These are diagnostic markers — dropping during shutdown is expected.
+      if (this.state === 'ACTIVE') {
+        console.error(JSON.stringify({
+          message: 'offerEvents: tab queue missing — events dropped',
+          session_id: this.sessionId,
+          target_id: targetId,
+          event_count: events.length,
+          event_types: events.map(e => e.type),
+        }));
+      }
       return;
     }
     const sid = SessionId.makeUnsafe(this.sessionId);
