@@ -10,6 +10,11 @@
  * fiber updates gauge values on an interval (see gaugeCollector).
  */
 import { Effect, Metric, Schedule } from 'effect';
+import { monitorEventLoopDelay } from 'perf_hooks';
+
+// Event loop histogram — created once at module scope, reset each collection tick
+const eventLoopHistogram = monitorEventLoopDelay({ resolution: 20 });
+eventLoopHistogram.enable();
 
 // ──────────────────────────────────────────────
 // Session state interface (unchanged from prom-metrics.ts)
@@ -91,38 +96,81 @@ export const sessionDuration = Metric.histogram('browserless_session_duration_se
 
 export const sessionsRegistered = Metric.gauge('browserless_sessions_registered', {
   description: 'Number of browser sessions in the session registry',
+  attributes: { unit: '{count}' },
 });
 
 export const replaySessionsActive = Metric.gauge('browserless_replay_sessions_active', {
   description: 'Number of active replay sessions',
+  attributes: { unit: '{count}' },
 });
 
 export const wsConnections = Metric.gauge('browserless_replay_ws_connections', {
   description: 'Number of open per-page WebSocket connections',
+  attributes: { unit: '{count}' },
 });
 
 export const pendingCommandsGauge = Metric.gauge('browserless_replay_pending_commands', {
   description: 'Number of pending CDP commands awaiting response',
+  attributes: { unit: '{count}' },
 });
 
 export const tabsOpen = Metric.gauge('browserless_tabs_open', {
   description: 'Number of Chrome tabs currently open',
+  attributes: { unit: '{count}' },
 });
 
-export const replayEstimatedBytes = Metric.gauge('browserless_replay_estimated_bytes', {
+export const replayEstimatedBytes = Metric.gauge('browserless_replay_estimated', {
   description: 'Estimated bytes of in-memory replay data across all active sessions',
+  attributes: { unit: 'By' },
 });
 
 export const socketState = Metric.gauge('browserless_socket_state', {
   description: 'Socket handle states (alive/destroyed/half-open)',
+  attributes: { unit: '{count}' },
 });
 
 export const activeHandlesByType = Metric.gauge('browserless_active_handles_by_type', {
   description: 'Active handles broken down by constructor type',
+  attributes: { unit: '{count}' },
 });
 
 export const socketHandles = Metric.gauge('browserless_socket_handles', {
   description: 'Active socket handles by remote address',
+  attributes: { unit: '{count}' },
+});
+
+// Node.js runtime gauges (replaces prom-client default collectors)
+export const processHeapUsed = Metric.gauge('process_heap_used', {
+  description: 'V8 heap used in bytes',
+  attributes: { unit: 'By' },
+});
+export const processHeapTotal = Metric.gauge('process_heap_total', {
+  description: 'V8 heap total in bytes',
+  attributes: { unit: 'By' },
+});
+export const processRss = Metric.gauge('process_rss', {
+  description: 'Resident set size in bytes',
+  attributes: { unit: 'By' },
+});
+export const processExternal = Metric.gauge('process_external', {
+  description: 'V8 external memory in bytes',
+  attributes: { unit: 'By' },
+});
+export const eventLoopLagP50 = Metric.gauge('nodejs_eventloop_lag_p50', {
+  description: 'Event loop delay p50 in seconds',
+  attributes: { unit: 's' },
+});
+export const eventLoopLagP99 = Metric.gauge('nodejs_eventloop_lag_p99', {
+  description: 'Event loop delay p99 in seconds',
+  attributes: { unit: 's' },
+});
+export const processCpuUser = Metric.gauge('process_cpu_user', {
+  description: 'Cumulative user CPU time in seconds',
+  attributes: { unit: 's' },
+});
+export const processCpuSystem = Metric.gauge('process_cpu_system', {
+  description: 'Cumulative system CPU time in seconds',
+  attributes: { unit: 's' },
 });
 
 // ──────────────────────────────────────────────
@@ -228,6 +276,21 @@ export const gaugeCollector = Effect.fn('metrics.gaugeCollector')(function*() {
       for (const [remote, count] of socketCounts) {
         yield* Metric.update(socketHandles.pipe(Metric.withAttributes({ remote })), count);
       }
+
+      // Node.js runtime metrics
+      const mem = process.memoryUsage();
+      yield* Metric.update(processHeapUsed, mem.heapUsed);
+      yield* Metric.update(processHeapTotal, mem.heapTotal);
+      yield* Metric.update(processRss, mem.rss);
+      yield* Metric.update(processExternal, mem.external);
+
+      const cpu = process.cpuUsage();
+      yield* Metric.update(processCpuUser, cpu.user / 1e6); // microseconds → seconds
+      yield* Metric.update(processCpuSystem, cpu.system / 1e6);
+
+      yield* Metric.update(eventLoopLagP50, eventLoopHistogram.percentile(50) / 1e9); // ns → seconds
+      yield* Metric.update(eventLoopLagP99, eventLoopHistogram.percentile(99) / 1e9);
+      eventLoopHistogram.reset();
     })(),
     Schedule.fixed('30 seconds'),
   );
