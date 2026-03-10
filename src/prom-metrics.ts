@@ -185,6 +185,12 @@ export const wsScopeBudgetExceeded = getOrCreateLabeledCounter(
   ['type'],
 );
 
+export const cfResolutionTimeouts = getOrCreateLabeledCounter(
+  'browserless_cf_resolution_timeout_total',
+  'CF detection resolution timeouts (zombie detections caught by timeout)',
+  ['type'],
+);
+
 // Gauge: alive vs destroyed socket handles still in process._getActiveHandles()
 export const socketStateDetails = getOrCreateLabeledCollectGauge(
   'browserless_socket_state',

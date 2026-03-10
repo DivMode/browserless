@@ -39,6 +39,11 @@ export const AUTO_SOLVE_POLL_DELAY = '500 millis' as const;
  * Proven: bsctjs.com ahrefs scrape — CF took 12.4s to verify, 10s timeout missed by 1.4s. */
 export const INTERSTITIAL_RESOLUTION_TIMEOUT = '30 seconds' as const;
 
+/** Embedded turnstile resolution timeout — max time to wait for push signal.
+ * Most solves complete in 5-15s via bridge push. 60s gives generous margin
+ * while eliminating the 200-1200s zombie tail from lost push signals. */
+export const EMBEDDED_RESOLUTION_TIMEOUT = '60 seconds' as const;
+
 /** Navigation wait — how long to wait for page navigation after click (ms). */
 export const NAV_WAIT_MS = 3_000;
 

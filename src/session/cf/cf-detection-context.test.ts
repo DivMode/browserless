@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Latch, Scope } from 'effect';
+import { Effect, Fiber, Latch, Scope } from 'effect';
 import { CdpSessionId, TargetId } from '../../shared/cloudflare-detection.js';
 import type { CloudflareInfo } from '../../shared/cloudflare-detection.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
@@ -397,7 +397,7 @@ describe('DetectionRegistry with DetectionContext', () => {
       yield* registry.resolve(targetId);
     }));
 
-  it.effect('OOPIF destroyed post-click → detection aborted via scope', () =>
+  it.effect('OOPIF destroyed post-click → detection aborted, resolution NOT settled (waits for bridge push)', () =>
     Effect.gen(function*() {
       const emissions: Array<{ targetId: string; signal: SolveSignal }> = [];
       const registry = new DetectionRegistry((active, signal) => {
@@ -419,7 +419,10 @@ describe('DetectionRegistry with DetectionContext', () => {
       // Detection SHOULD be aborted — CF rejected our click
       expect(ctx.aborted).toBe(true);
       expect(registry.has(targetId)).toBe(false);
+      // Finalizer does NOT settle for aborted detections — handler fiber
+      // waits for bridge push (typical ~200ms) or 60s timeout (zombie fix).
       expect(emissions).toHaveLength(0);
+      expect(active.resolution.isDone).toBe(false);
     }));
 
   it.effect('OOPIF destroyed after resolve → no fallback emission', () =>
@@ -463,5 +466,119 @@ describe('DetectionRegistry with DetectionContext', () => {
       yield* waiter;
 
       expect(latchOpened).toBe(true);
+    }));
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Resolution + Finalizer Regression Tests
+  // ═══════════════════════════════════════════════════════════════════════
+
+  it.effect('resolution.await unblocks on resolution settlement', () =>
+    Effect.gen(function*() {
+      const active = makeActive('T1');
+
+      const fiber = yield* active.resolution.await.pipe(Effect.forkChild);
+
+      // Settle resolution — simulates bridge push
+      yield* active.resolution.solve({
+        type: 'turnstile',
+        method: 'auto_solve',
+        signal: 'bridge_solved',
+        duration_ms: 5000,
+        phase_label: '→',
+      });
+
+      const result = yield* Fiber.join(fiber).pipe(
+        Effect.timeout('2 seconds'),
+        Effect.catchTag('TimeoutError', () =>
+          Effect.succeed(null),
+        ),
+      );
+
+      expect(result).not.toBeNull();
+      expect(result!._tag).toBe('solved');
+    }));
+
+  it.effect('late push after abort does not re-settle', () =>
+    Effect.gen(function*() {
+      const active = makeActive('T1');
+
+      // Abort first
+      DetectionContext.setAborted(active);
+      const abortDuration = Date.now() - active.startTime;
+      yield* active.resolution.fail('aborted', abortDuration);
+
+      expect(active.resolution.isDone).toBe(true);
+
+      // Late push — should be a no-op (returns false)
+      const lateSolve = yield* active.resolution.solve({
+        type: 'turnstile',
+        method: 'auto_solve',
+        signal: 'bridge_solved',
+        duration_ms: 5000,
+        phase_label: '→',
+      });
+
+      expect(lateSolve).toBe(false);
+    }));
+
+  it.effect('scope finalizer settles resolution when aborted', () =>
+    Effect.gen(function*() {
+      const registry = new DetectionRegistry(() => {});
+      const targetId = TargetId.makeUnsafe('T1');
+      const active = makeActive('T1');
+      yield* registry.register(targetId, active);
+
+      // Abort the detection (opens latch + closes scope → finalizer runs)
+      DetectionContext.setAborted(active);
+
+      // Unregister closes scope → finalizer settles resolution
+      yield* registry.unregister(targetId);
+
+      expect(active.resolution.isDone).toBe(true);
+    }));
+
+  it.effect('aborted detection: bridge push still settles resolution after OOPIF destruction', () =>
+    Effect.gen(function*() {
+      const registry = new DetectionRegistry(() => {});
+      const targetId = TargetId.makeUnsafe('T1');
+      const active = makeActive('T1');
+      const ctx = yield* registry.register(targetId, active);
+
+      // Simulate OOPIF post-click destruction — sets aborted + opens latch
+      ctx.setClickDelivered();
+      DetectionContext.setAborted(active);
+      yield* Scope.close(ctx.scope, { _tag: 'Success', value: void 0 });
+
+      // Resolution NOT settled by finalizer — handler waits for bridge push
+      expect(active.resolution.isDone).toBe(false);
+
+      // Bridge push arrives after OOPIF destruction (typical ~200ms later) —
+      // this is the happy path, resolution.solve() succeeds
+      const solved = yield* active.resolution.solve({
+        type: 'turnstile',
+        method: 'auto_solve',
+        signal: 'bridge_solved',
+        duration_ms: 5000,
+        phase_label: '→',
+      });
+
+      expect(solved).toBe(true);
+      expect(active.resolution.isDone).toBe(true);
+    }));
+
+  it.effect('aborted detection: resolution stays unsettled after abort (zombie fix = timeout in handler)', () =>
+    Effect.gen(function*() {
+      const active = makeActive('T1');
+
+      // Simulate abort (OOPIF destroyed) — resolution NOT settled
+      DetectionContext.setAborted(active);
+      expect(active.aborted).toBe(true);
+      expect(active.resolution.isDone).toBe(false);
+
+      // The zombie fix: awaitResolutionRace wraps resolution.await with
+      // Effect.timeoutOption(60s). If no bridge push arrives, the timeout
+      // fires and emits resolution_timeout. This bounds zombie lifetime
+      // from ∞ to 60s. We verify the architecture here — resolution stays
+      // unsettled after abort so the handler can wait for bridge push.
     }));
 });

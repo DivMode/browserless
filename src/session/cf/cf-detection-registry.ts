@@ -56,7 +56,9 @@ export class DetectionRegistry {
       self.entries.set(targetId, context);
 
       // Register the finalizer — runs when scope closes.
-      // Now settles Resolution so the solver's latch await unblocks.
+      // Handles session close: non-aborted orphaned detections get session_close
+      // fallback. Aborted detections (OOPIF destroyed) are left unsettled — the
+      // handler fiber waits for bridge push or 60s timeout (the zombie fix).
       yield* Scope.addFinalizer(scope, Effect.gen(function*() {
         // Remove from map (idempotent — may already be gone if destroyAll iterates)
         self.entries.delete(targetId);
