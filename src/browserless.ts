@@ -41,6 +41,8 @@ import { userInfo } from 'os';
 
 import { ServiceContainer } from './container/container.js';
 import { createContainer, Services } from './container/bootstrap.js';
+import { gaugeCollector } from './effect-metrics.js';
+import { OtelLayer } from './otel-layer.js';
 import { VideoManager } from './video/video-manager.js';
 
 const routeSchemas = ['body', 'query'];
@@ -81,6 +83,7 @@ export class Browserless extends EventEmitter {
   server?: HTTPServer;
   metricsSaveInterval: number = 5 * 60 * 1000;
   private metricsFiber: Fiber.Fiber<unknown> | null = null;
+  private gaugeCollectorFiber: Fiber.Fiber<unknown> | null = null;
 
   constructor({
     browserManager,
@@ -258,6 +261,10 @@ export class Browserless extends EventEmitter {
   }
 
   public async stop() {
+    if (this.gaugeCollectorFiber) {
+      await Effect.runPromise(Fiber.interrupt(this.gaugeCollectorFiber));
+      this.gaugeCollectorFiber = null;
+    }
     if (this.metricsFiber) {
       await Effect.runPromise(Fiber.interrupt(this.metricsFiber));
       this.metricsFiber = null;
@@ -461,6 +468,14 @@ export class Browserless extends EventEmitter {
         Effect.ignore,
         Effect.repeat(Schedule.fixed(Duration.millis(this.metricsSaveInterval))),
       ),
+    );
+
+    // OTLP metrics export + gauge collection at server level.
+    // This creates a single long-lived OtlpMetrics exporter that snapshots
+    // the shared global MetricRegistry (all counters/histograms from all
+    // per-session runtimes) and pushes via OTLP every 10s.
+    this.gaugeCollectorFiber = Effect.runFork(
+      gaugeCollector.pipe(Effect.provide(OtelLayer)),
     );
   }
 
