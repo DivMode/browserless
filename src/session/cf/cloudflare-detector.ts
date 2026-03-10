@@ -872,7 +872,7 @@ export class CloudflareDetector {
           switch (classified._tag) {
             case 'EmbeddedTurnstile':
               yield* self.handleEmbeddedDetection(
-                targetId, cdpSessionId, classified.detection, classified.meta, startTime,
+                targetId, cdpSessionId, classified.detection, classified.meta, startTime, pageInfo?.url,
               );
               break;
             case 'InlineInterstitial':
@@ -910,6 +910,7 @@ export class CloudflareDetector {
     detection: CFDetected,
     meta: TurnstileOOPIFMeta | undefined,
     startTime: number,
+    pageUrl?: string,
   ): Effect.Effect<void, never, DetectorR> {
     const self = this;
     return Effect.fn('cf.handleEmbeddedDetection')(function*() {
@@ -925,7 +926,7 @@ export class CloudflareDetector {
       // No runtime title check needed — classifyOOPIFDetection handles it.
       const firstTarget = detection.targets[0];
       const info: EmbeddedInfo = {
-        type: 'turnstile', url: firstTarget?.url ?? '', detectionMethod: 'cdp_dom_walk',
+        type: 'turnstile', url: pageUrl ?? firstTarget?.url ?? '', detectionMethod: 'cdp_dom_walk',
         iframeUrl: firstTarget?.url,
       };
       const active: EmbeddedDetection = {

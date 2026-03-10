@@ -381,7 +381,7 @@ export class CloudflareSolveStrategies {
             expression: `JSON.stringify(
               performance.getEntriesByType('resource')
                 .filter(e => e.name.includes('challenges.cloudflare.com'))
-                .map(e => ({ name: e.name.split('/').pop(), ttfb: Math.round(e.responseStart - e.startTime), duration: Math.round(e.duration), size: e.transferSize }))
+                .map(e => ({ name: e.name.split('/').pop(), ttfb: Math.max(0, Math.round(e.responseStart - e.startTime)), duration: Math.round(e.duration), size: e.transferSize }))
             )`,
             returnByValue: true,
           }).pipe(Effect.orElseSucceed(() => null));
