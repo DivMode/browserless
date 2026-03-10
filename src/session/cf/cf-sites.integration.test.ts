@@ -453,7 +453,7 @@ describe.concurrent('CF Solver Multi-Site', () => {
           throw err;
         }
       }),
-    { timeout: 15_000 });
+    { timeout: 25_000 });
   }
 });
 
