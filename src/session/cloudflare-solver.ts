@@ -208,6 +208,8 @@ export class CloudflareSolver {
 
       const provideServices = (active: ActiveDetection, sender: Parameters<typeof CdpSender.of>[0]) => {
         // Per-dispatch SolveDeps override — wire mutation methods to this active's DetectionContext
+        const ctx = self.stateTracker.registry.getContext(active.pageTargetId);
+        const rootSpan = ctx?.rootSpan;
         const perDispatchDeps = SolveDeps.of({
           ...solveDeps,
           setClickDelivered: (clickDeliveredAt) => Effect.sync(() => {
@@ -219,7 +221,7 @@ export class CloudflareSolver {
             if (ctx) ctx.markActivityLoopStarted();
           }),
         });
-        return solveDetectionEffect(active).pipe(
+        return solveDetectionEffect(active, rootSpan).pipe(
           Effect.provideService(SolverEvents, solverEvents),
           Effect.provideService(SolveDeps, perDispatchDeps),
           Effect.provideService(CdpSender, sender),

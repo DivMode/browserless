@@ -9,6 +9,7 @@
  * via ManagedRuntime and calls these via runtime.runPromise().
  */
 import { Cause, Data, Effect } from 'effect';
+import type { Tracer } from 'effect';
 import { SolveOutcome } from './cloudflare-solve-strategies.js';
 import { DetectionContext } from './cf-detection-context.js';
 import { ClickResult } from './cloudflare-solve-strategies.js';
@@ -57,8 +58,9 @@ export type SolveDetectionResult = SolveOutcome | TurnstileResult;
 
 export const solveDetection = (
   active: SolverActiveDetection,
+  parentSpan?: Tracer.AnySpan,
 ) =>
-  Effect.fn('cf.solveDetection')(function*() {
+  Effect.fn('cf.solveDetection', parentSpan ? { parent: parentSpan } : undefined)(function*() {
     yield* annotateActive(active);
     if (active.aborted) return SO.Aborted();
 

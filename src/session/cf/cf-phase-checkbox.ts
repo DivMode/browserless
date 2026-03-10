@@ -249,24 +249,8 @@ export function phase3CheckboxFind(
       via, oopif_session: oopifSessionId.substring(0, 20),
     });
 
-    // Create isolated world
-    let isolatedContextId: number | null = null;
-    let oopifFrameId: string | null = null;
-    const frameTreeResult = yield* send('Page.getFrameTree', {}, oopifSessionId);
-    oopifFrameId = frameTreeResult?.frameTree?.frame?.id ?? null;
-
-    if (oopifFrameId) {
-      const isolatedWorld = yield* send('Page.createIsolatedWorld', {
-        frameId: oopifFrameId,
-        worldName: `browserless::cf::${oopifFrameId}`,
-      }, oopifSessionId);
-      isolatedContextId = isolatedWorld?.executionContextId ?? null;
-    }
-
     yield* events.marker(pageTargetId, 'cf.cdp_dom_session', {
       using_iframe: true, type: active.info.type, via,
-      isolated_world: !!isolatedContextId,
-      oopif_frame_id: oopifFrameId ?? 'none',
     });
 
     // Find checkbox with polling
@@ -303,26 +287,6 @@ export function phase3CheckboxFind(
         found: false, doc_root: !!doc?.root,
       });
 
-      // Strategy 1 fallback — isolated world (only if tree walk found nothing)
-      if (isolatedContextId) {
-        const s1Start = Date.now();
-        checkbox = yield* findCheckboxViaIsolatedWorld(send, oopifSessionId, isolatedContextId);
-        yield* events.marker(pageTargetId, 'cf.phase3_strategy', {
-          strategy: 'isolated_world', poll, elapsed_ms: Date.now() - s1Start,
-          found: !!checkbox,
-        });
-        if (checkbox) { method = 'isolated_world'; break; }
-      }
-
-      // Strategy 2 fallback — runtime query
-      const s2Start = Date.now();
-      checkbox = yield* findCheckboxViaRuntime(send, oopifSessionId);
-      yield* events.marker(pageTargetId, 'cf.phase3_strategy', {
-        strategy: 'runtime_query', poll, elapsed_ms: Date.now() - s2Start,
-        found: !!checkbox,
-      });
-      if (checkbox) { method = 'runtime_query'; break; }
-
       // Checkbox not found yet — wait and retry (matching pydoll's polling)
       yield* Effect.sleep(`${pollInterval} millis`).pipe(
         Effect.withSpan('cf.phase3.pollSleep', { attributes: { 'cf.poll': poll } }),
@@ -332,7 +296,7 @@ export function phase3CheckboxFind(
     if (!checkbox) {
       yield* Effect.annotateCurrentSpan({ 'cf.checkbox_found': false, 'cf.poll_count': pollCount });
       // Snapshot shadow DOM state for diagnostics
-      const diag = yield* diagnoseShadowDOM(send, oopifSessionId, isolatedContextId);
+      const diag = yield* diagnoseShadowDOM(send, oopifSessionId);
       yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox', { via, polls: pollCount, diag });
       yield* events.emitProgress(active, 'widget_error', {
         error_type: 'no_checkbox',
@@ -370,7 +334,6 @@ export function phase3CheckboxFind(
 function diagnoseShadowDOM(
   send: EffectSend,
   oopifSessionId: CdpSessionId,
-  _isolatedContextId: number | null,
 ): Effect.Effect<Record<string, unknown>> {
   return Effect.fn('cf.diagnoseShadowDOM')(function*() {
     yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId });
