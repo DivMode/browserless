@@ -749,8 +749,16 @@ export class CdpSession {
   }
 
   private async _doDestroy(source: 'cleanup' | 'ws_close' | 'error'): Promise<void> {
-    // Run the Effect pipeline
-    await Effect.runPromise(this.destroyEffect(source)).catch((e) => {
+    // Run destroy in the session runtime with sessionContext as parent span.
+    // This ensures destroy-time spans (cf.state.unregisterPage, etc.) join the
+    // session trace instead of creating orphaned traces via the default runtime.
+    const destroy = this.sessionContext
+      ? this.destroyEffect(source).pipe(Effect.withParentSpan(this.sessionContext))
+      : this.destroyEffect(source);
+    const run = this.runtime
+      ? this.runtime.runPromise(destroy)
+      : Effect.runPromise(destroy);
+    await run.catch((e) => {
       this.log.warn(`destroyEffect error: session_id=${this.sessionId} source=${source} error=${e instanceof Error ? e.message : String(e)}`);
     });
 

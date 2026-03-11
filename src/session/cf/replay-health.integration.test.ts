@@ -109,7 +109,11 @@ describe('Replay Recording Health', () => {
     // ── 4. Turnstile summary — MUST exist and MUST be valid ────────
     // This test navigates to peet-nonint which always serves a Turnstile.
     // A missing or invalid summary means the solver or marker pipeline broke.
-    const summary = buildSummaryFromMarkers(allMarkers);
+    // Use ONLY the main tab's markers — OOPIF tabs have duplicate CF bridge events
+    // that cause buildSummaryFromMarkers to see double detections (Emb?Emb→).
+    const mainTabAnalysis = analyses.find(a => a.replayId.includes(targetId!));
+    const mainTabMarkers = mainTabAnalysis?.markers ?? allMarkers;
+    const summary = buildSummaryFromMarkers(mainTabMarkers);
     expect(summary, 'No summary from markers — cf.detected missing or unpaired').not.toBeNull();
     console.log(
       `  [Turnstile] ${summary!.label} | type=${summary!.type} method=${summary!.method} signal=${summary!.signal} dur=${summary!.durationMs}ms`,
@@ -123,9 +127,9 @@ describe('Replay Recording Health', () => {
     ).toContain(summary!.label);
 
     // Summary consistency: method/signal must match the label
-    const inconsistency = assertSummaryConsistency(summary!, allMarkers);
+    const inconsistency = assertSummaryConsistency(summary!, mainTabMarkers);
     if (inconsistency) {
-      failWithEvidence('replay-health', `summary/replay mismatch — ${inconsistency}`, allMarkers, null);
+      failWithEvidence('replay-health', `summary/replay mismatch — ${inconsistency}`, mainTabMarkers, null);
     }
 
     // ── 4b. Cross-validate via /signals on each tab replay ──────────
