@@ -26,16 +26,26 @@ import {
   PROXY,
   REPLAY_HTTP,
   buildWsUrl,
-  dumpDebugContext,
+  dumpConsoleErrors,
+  dumpMarkerTimeline,
   dumpRechallengeDiag,
+  dumpReplayHint,
   failWithEvidence,
   fetchDebugData,
   fetchMarkers,
   findAllReplays,
   type ReplayMarker,
   type ReplayMeta,
-  type SessionResult,
 } from './integration-helpers';
+
+/** Session result for the nopecha solve test — local to this file. */
+interface SessionResult {
+  markers: ReplayMarker[];
+  replay: ReplayMeta;
+  replayId: string;
+  consoleErrors: string[];
+  allEvents: unknown[];
+}
 
 // ── Config ──────────────────────────────────────────────────────────
 
@@ -256,7 +266,9 @@ describe('CF Solver Integration (real nopecha.com)', () => {
       const detected = markers.find((m) => m.tag === 'cf.detected');
       if (!detected) {
         console.error('=== NO cf.detected MARKER ===');
-        dumpDebugContext(session);
+        dumpMarkerTimeline(session.markers);
+        dumpConsoleErrors(session.consoleErrors);
+        dumpReplayHint(session.replayId);
       }
       expect(detected, 'cf.detected marker missing — solver did not detect CF').toBeDefined();
 
@@ -278,7 +290,9 @@ describe('CF Solver Integration (real nopecha.com)', () => {
       if (!solved || failed) {
         console.error('=== SOLVE FAILURE ===');
         if (failed) console.error(`  cf.failed: ${JSON.stringify(failed.payload)}`);
-        dumpDebugContext(session);
+        dumpMarkerTimeline(session.markers);
+        dumpConsoleErrors(session.consoleErrors);
+        dumpReplayHint(session.replayId);
       }
 
       expect(failed, 'cf.failed marker present — solver failed').toBeUndefined();
@@ -315,7 +329,9 @@ describe('CF Solver Integration (real nopecha.com)', () => {
       const click = markers.find((m) => m.tag === 'cf.oopif_click');
       if (!click) {
         console.error('=== CLICK MARKER MISSING ===');
-        dumpDebugContext(session);
+        dumpMarkerTimeline(session.markers);
+        dumpConsoleErrors(session.consoleErrors);
+        dumpReplayHint(session.replayId);
       }
       expect(click, 'cf.oopif_click marker missing for click solve').toBeDefined();
 
