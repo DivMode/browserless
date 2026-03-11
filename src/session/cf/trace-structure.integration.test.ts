@@ -95,10 +95,15 @@ describe('Trace structure', () => {
         spans = await fetchSpans(PORT);
         expect(spans.length).toBeGreaterThan(0);
 
-        // Find the session root span to get the traceId
+        // Find OUR session root span — in parallel runs, other integration tests
+        // also create sessions on the same server. Pick the ENDED session span
+        // (endTimeNano !== '0') since our browser.close() + 5s wait ensures
+        // our session is fully destroyed, while other tests may still be running.
         const sessionSpans = findSpans(spans, 'session');
         expect(sessionSpans.length).toBeGreaterThanOrEqual(1);
-        sessionTraceId = sessionSpans[0].traceId;
+        const endedSessions = sessionSpans.filter((s) => s.endTimeNano !== '0');
+        const ourSession = endedSessions.length > 0 ? endedSessions[0] : sessionSpans[0];
+        sessionTraceId = ourSession.traceId;
 
         // Filter to just this session's trace
         spans = spans.filter((s) => s.traceId === sessionTraceId);
