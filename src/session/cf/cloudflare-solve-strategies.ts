@@ -754,15 +754,19 @@ export class CloudflareSolveStrategies {
       );
       if (cfTargets.length === 0) return { _tag: 'not_detected' as const };
 
-      // Traced slow path — only when CF targets exist
+      // Filter stale targets BEFORE creating span — eliminates ~99% of trace noise
+      // from detection polls that find only already-solved OOPIFs.
+      const matched = cfTargets.filter(
+        (t: { targetId?: string }) => !(t.targetId && solvedCFTargetIds?.has(t.targetId)),
+      );
+      if (matched.length === 0) return { _tag: 'not_detected' as const };
+
+      // Traced path — only when fresh (non-stale) CF targets found
       return yield* Effect.fn('cf.detectTurnstileViaCDP')(function*() {
         yield* Effect.annotateCurrentSpan({ 'cf.target_id': _pageCdpSessionId });
 
         const filteredOut = cfTargets.filter(
           (t: { targetId?: string }) => t.targetId && solvedCFTargetIds?.has(t.targetId),
-        );
-        const matched = cfTargets.filter(
-          (t: { targetId?: string }) => !(t.targetId && solvedCFTargetIds?.has(t.targetId)),
         );
 
         yield* Effect.annotateCurrentSpan({
@@ -774,8 +778,6 @@ export class CloudflareSolveStrategies {
           'cf.detect.matched_urls': matched.map((t: { url?: string; targetId?: string }) => `${t.targetId?.slice(0, 8)}=${t.url}`).join(' | '),
           'cf.detect.filtered_ids': filteredOut.map((t: { targetId?: string }) => t.targetId?.slice(0, 8)).join(','),
         });
-
-        if (matched.length === 0) return { _tag: 'not_detected' as const };
 
         return {
           _tag: 'detected' as const,

@@ -478,7 +478,12 @@ export class CloudflareSolver {
   }
 
   async onBeaconSolved(targetId: TargetId, tokenLength: number): Promise<void> {
-    await this.runtime.runPromise(this.stateTracker.onBeaconSolved(targetId, tokenLength))
+    const effect = this.stateTracker.onBeaconSolved(targetId, tokenLength);
+    // Inject the detection's parent span so the beacon span joins the same trace
+    // instead of creating an orphan root span (beacon arrives via HTTP, not CDP).
+    const ctx = this.stateTracker.registry.getContext(targetId);
+    const parented = ctx?.parentSpan ? effect.pipe(Effect.withParentSpan(ctx.parentSpan)) : effect;
+    await this.runtime.runPromise(parented)
       .catch((e) => Effect.runSync(
         Effect.logError('CF runtime defect').pipe(Effect.annotateLogs({ method: 'onBeaconSolved', error: String(e) })),
       ));
