@@ -15,7 +15,7 @@
  * Resolution is identity-safe via DetectionContext.resolve() — no targetId-based resolve.
  */
 
-import { Effect, Exit, Scope } from 'effect';
+import { Effect, Exit, Option, Scope } from 'effect';
 import type { TargetId } from '../../shared/cloudflare-detection.js';
 import type { ActiveDetection, ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
 import type { SolveSignal } from './cloudflare-state-tracker.js';
@@ -40,7 +40,12 @@ export class DetectionRegistry {
    */
   register(targetId: TargetId, active: ActiveDetection): Effect.Effect<DetectionContext> {
     const self = this;
-    return Effect.fn('cf.registry.register')(function*() {
+    // Capture the caller's span BEFORE Effect.fn creates cf.registry.register —
+    // this gives us the parent span (e.g. cf.handleEmbeddedDetection) so that
+    // onBeaconSolved can join the same trace as a sibling of cf.solveDetection.
+    return Effect.flatMap(
+      Effect.currentSpan.pipe(Effect.option),
+      (callerSpan) => Effect.fn('cf.registry.register')(function*() {
       // Extract domain from page URL for Tempo filtering
       let domain = 'unknown';
       try {
@@ -66,7 +71,10 @@ export class DetectionRegistry {
       }
 
       const scope = yield* Scope.make();
-      const context = new DetectionContext(active, scope);
+      const context = new DetectionContext(
+        active, scope,
+        Option.isSome(callerSpan) ? callerSpan.value : undefined,
+      );
       self.entries.set(targetId, context);
 
       // Register the finalizer — runs when scope closes.
@@ -87,7 +95,7 @@ export class DetectionRegistry {
       }));
 
       return context;
-    })();
+    })());
   }
 
   /**
