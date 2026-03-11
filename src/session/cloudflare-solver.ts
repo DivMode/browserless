@@ -1,4 +1,4 @@
-import { Cause, Effect, Exit, FiberMap, Layer, ManagedRuntime, Option, Scope, type Tracer } from 'effect';
+import { Cause, Effect, Exit, FiberMap, Layer, ManagedRuntime, Scope, type Tracer } from 'effect';
 import { CdpSessionId } from '../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareConfig } from '../shared/cloudflare-detection.js';
 import { CloudflareDetector } from './cf/cloudflare-detector.js';
@@ -95,17 +95,19 @@ export class CloudflareSolver {
    */
   private runInSolver(effect: Effect.Effect<void, never, SolverR>): Effect.Effect<void> {
     const runtime = this.runtime;
-    return Effect.flatMap(
-      Effect.currentSpan.pipe(Effect.option),
-      (parentSpan) =>
-        Effect.promise(() =>
-          runtime.runPromise(
-            Option.isSome(parentSpan)
-              ? effect.pipe(Effect.withParentSpan(parentSpan.value))
-              : effect
-          )
+    // Use withFiber to access fiber.currentSpan directly — includes ExternalSpans.
+    // Effect.currentSpan uses currentSpanLocal which filters ExternalSpans (_tag !== "Span"),
+    // causing solver effects to become orphaned when the parent is the session ExternalSpan.
+    return Effect.withFiber((fiber) => {
+      const parentSpan = fiber.currentSpan;
+      return Effect.promise(() =>
+        runtime.runPromise(
+          parentSpan
+            ? effect.pipe(Effect.withParentSpan(parentSpan))
+            : effect
         )
-    );
+      );
+    });
   }
 
   constructor(sendCommand: SendCommand, injectMarker: InjectMarker, chromePort?: string, sessionId?: string) {
