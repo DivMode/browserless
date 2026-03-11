@@ -371,6 +371,10 @@ export class CloudflareStateTracker {
         if (autoCtx) yield* autoCtx.abort();
         tracker.events.marker(active.pageTargetId, 'cf.auto_solved', { signal, method: attr.method });
       }
+      // Mark target as solved regardless of race outcome — prevents
+      // emitStandaloneAutoSolved from firing a phantom event when a
+      // second signal (e.g. beacon after bridge) arrives post-resolution.
+      tracker.bindingSolvedTargets.add(active.pageTargetId);
     })();
   }
 
@@ -405,18 +409,15 @@ export class CloudflareStateTracker {
   activityLoopEmbedded(active: ReadonlyEmbeddedDetection): Effect.Effect<void, never, typeof OOPIFChecker.Identifier> {
     const tracker = this;
 
+    // No wrapper span — the inner cf.state.checkOOPIF traces meaningful work.
+    // Wrapping each poll iteration created 27-30+ noise spans per long trace.
     const activityIteration = (loopIter: number) =>
-      Effect.fn('cf.state.activityIterationEmbedded')(function*() {
-        yield* Effect.annotateCurrentSpan({ 'cf.target_id': active.pageTargetId });
-
+      Effect.gen(function*() {
         tracker.events.emitProgress(active, 'activity_poll', { iteration: loopIter });
-
-        // Check OOPIF state via CDP DOM walk — safe, uses iframe session
         const oopifResult = yield* tracker.checkOOPIFStateIteration(active);
         if (oopifResult === 'aborted') return 'aborted' as const;
-
         return 'continue' as const;
-      })();
+      });
 
     return Effect.suspend(() => {
       if (active.aborted || tracker.destroyed) return Effect.fail('done' as const);
@@ -444,22 +445,15 @@ export class CloudflareStateTracker {
   activityLoopInterstitial(active: ReadonlyInterstitialDetection): Effect.Effect<void, never, typeof OOPIFChecker.Identifier> {
     const tracker = this;
 
+    // No wrapper span — the inner cf.state.checkOOPIF traces meaningful work.
+    // Wrapping each poll iteration created 27-30+ noise spans per long trace.
     const activityIteration = (loopIter: number) =>
-      Effect.fn('cf.state.activityIterationInterstitial')(function*() {
-        yield* Effect.annotateCurrentSpan({ 'cf.target_id': active.pageTargetId });
-        // NO isSolvedEffect — that uses Runtime.evaluate on the page session.
-        // For interstitials, solving is detected via page navigation (onPageNavigated).
-
+      Effect.gen(function*() {
         tracker.events.emitProgress(active, 'activity_poll', { iteration: loopIter });
-
-        // Check OOPIF state via CDP DOM walk — safe, uses iframe session
         const oopifResult = yield* tracker.checkOOPIFStateIteration(active);
         if (oopifResult === 'aborted') return 'aborted' as const;
-
-        // NO isWidgetErrorEffect — that uses Runtime.evaluate on the page session.
-
         return 'continue' as const;
-      })();
+      });
 
     return Effect.suspend(() => {
       if (active.aborted || tracker.destroyed) return Effect.fail('done' as const);

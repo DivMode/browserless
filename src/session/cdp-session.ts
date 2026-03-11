@@ -14,8 +14,7 @@ import {
   type TabReplayCompleteParams,
 } from '@browserless.io/browserless';
 
-import { Cause, Effect, Exit, Fiber, FiberMap, Layer, ManagedRuntime, Metric, Queue, Schedule, Scope } from 'effect';
-import type { Tracer } from 'effect';
+import { Cause, Effect, Exit, Fiber, FiberMap, Layer, ManagedRuntime, Metric, Queue, Schedule, Scope, Tracer } from 'effect';
 import { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 import { decodeCDPMessage, decodeRrwebEventBatch } from '../shared/cdp-schemas.js';
 import { CdpConnection } from '../shared/cdp-rpc.js';
@@ -34,7 +33,7 @@ import type { CloudflareHooks } from './cloudflare-hooks.js';
 import type { VideoHooks } from './video-services.js';
 
 import { CF_BRIDGE_JS } from '../generated/cf-bridge.js';
-import { OtelLayer } from '../otel-layer.js';
+import { SharedTracerLayer } from '../otel-runtime.js';
 import { AntibotHandler, type AntibotBrowserReport } from './antibot/antibot-handler.js';
 
 // Capture at module load — defense-in-depth against stale `node --watch` zombies.
@@ -90,6 +89,9 @@ export class CdpSession {
   private runtime: ManagedRuntime.ManagedRuntime<SessionR, never> | null = null;
   /** Session-level root span — parent for ALL CDP event handlers. One trace per session. */
   private sessionSpan: Tracer.Span | null = null;
+  /** Immutable span reference — same IDs as sessionSpan but never null after init.
+   * Used for all withParentSpan calls to eliminate orphans during destroy window. */
+  private sessionContext: Tracer.ExternalSpan | null = null;
 
   // Replay state — per-tab event queues and counters
   private readonly tabQueues = new Map<string, Queue.Queue<TabEvent, Cause.Done>>();
@@ -265,7 +267,7 @@ export class CdpSession {
       writerLayer,
       metricsLayer,
       Layer.merge(lifecycleLayer, Layer.provide(sessionLifecycleLayer, lifecycleLayer)),
-      OtelLayer,
+      SharedTracerLayer,
     );
   }
 
@@ -291,6 +293,15 @@ export class CdpSession {
       Effect.makeSpan('session', { root: true }),
     );
     this.sessionSpan.attribute('session.id', this.sessionId);
+
+    // Immutable ExternalSpan with same IDs — used for all withParentSpan calls.
+    // Never null, no lifecycle. Eliminates orphans during destroy window.
+    this.sessionContext = Tracer.externalSpan({
+      spanId: this.sessionSpan.spanId,
+      traceId: this.sessionSpan.traceId,
+      sampled: true,
+    });
+    this.cloudflareHooks.setSessionSpan(this.sessionContext);
 
     const ws = new this.WebSocket(this.wsEndpoint);
     this.ws = ws;
@@ -421,8 +432,11 @@ export class CdpSession {
           target.pageWebSocket = null;
           if (!target.failedReconnect && this.runtime && this._fiberMap) {
             target.failedReconnect = true;
+            const wsEffect = this.sessionContext
+              ? this.openPageWs(target.targetId).pipe(Effect.withParentSpan(this.sessionContext))
+              : this.openPageWs(target.targetId);
             this.runtime.runFork(
-              FiberMap.run(this._fiberMap, `pageWs:${target.targetId}`, this.openPageWs(target.targetId)),
+              FiberMap.run(this._fiberMap, `pageWs:${target.targetId}`, wsEffect),
             );
           }
           // Fall through to browser-level WS
@@ -721,11 +735,13 @@ export class CdpSession {
     })().pipe(
       // Guaranteed cleanup — runs even if Effect times out or fails
       Effect.ensuring(Effect.sync(() => {
-        // End session-level root span — finalizes the trace
+        // End session-level root span — pushes to server exporter (not per-session).
+        // Server exporter is alive → root span exported on next 5s cycle.
         if (session.sessionSpan) {
           session.sessionSpan.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
           session.sessionSpan = null;
         }
+        // sessionContext stays set — immutable, no cleanup needed
         session.eventCounts.clear();
         session.state = 'DESTROYED';
       })),
@@ -815,8 +831,8 @@ export class CdpSession {
         if (handler) {
           const targetId = msg.params?.targetInfo?.targetId ?? msg.params?.targetId ?? '';
           const baseEffect = handler(msg);
-          const traced = this.sessionSpan
-            ? baseEffect.pipe(Effect.withParentSpan(this.sessionSpan))
+          const traced = this.sessionContext
+            ? baseEffect.pipe(Effect.withParentSpan(this.sessionContext))
             : baseEffect;
           this.runtime.runFork(
             FiberMap.run(this._fiberMap, `msg:${msg.method}:${targetId}`,
@@ -874,8 +890,8 @@ export class CdpSession {
               return;
             }
             const bridgeEffect = this.cloudflareHooks.onBridgeEvent(targetId, parsed);
-            const tracedBridge = this.sessionSpan
-              ? bridgeEffect.pipe(Effect.withParentSpan(this.sessionSpan))
+            const tracedBridge = this.sessionContext
+              ? bridgeEffect.pipe(Effect.withParentSpan(this.sessionContext))
               : bridgeEffect;
             this.runtime.runFork(
               FiberMap.run(this._fiberMap, `cf:bridge:${targetId}`,
@@ -1133,8 +1149,8 @@ export class CdpSession {
             // Fork via runtime.runFork — tabConsumer requires ReplayWriter/ReplayMetrics in R
             // Parent under session span so replay.tab appears in the session trace tree
             const tabEffect = tabConsumer(queue, sessionIdBranded, targetId);
-            const tracedTab = session.sessionSpan
-              ? tabEffect.pipe(Effect.withParentSpan(session.sessionSpan))
+            const tracedTab = session.sessionContext
+              ? tabEffect.pipe(Effect.withParentSpan(session.sessionContext))
               : tabEffect;
             session.runtime.runFork(
               FiberMap.run(session._fiberMap, `tab:${targetId}`, tracedTab),
@@ -1163,8 +1179,8 @@ export class CdpSession {
               if (result) session.log.info(`[rrweb-diag] target=${targetId} ${result?.result?.value}`);
             }).pipe(Effect.ignore);
             // Parent under session span so probe appears in the session trace tree
-            const tracedProbe = session.sessionSpan
-              ? probeEffect.pipe(Effect.withParentSpan(session.sessionSpan))
+            const tracedProbe = session.sessionContext
+              ? probeEffect.pipe(Effect.withParentSpan(session.sessionContext))
               : probeEffect;
             session.runtime.runFork(
               FiberMap.run(session._fiberMap, `probe:${targetId}`, tracedProbe),

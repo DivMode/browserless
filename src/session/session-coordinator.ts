@@ -127,6 +127,7 @@ export class SessionCoordinator {
       onIframeNavigated: (tid, sid, url) => cloudflareSolver.onIframeNavigated(tid, sid, url),
       onBridgeEvent: (tid, event) => cloudflareSolver.onBridgeEvent(tid, event),
       onTargetDestroyed: (tid) => cloudflareSolver.stopTargetDetection(tid),
+      setSessionSpan: (span) => cloudflareSolver.setSessionSpan(span),
       destroy: () => cloudflareSolver.destroyEffect,
     };
 

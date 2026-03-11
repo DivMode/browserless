@@ -42,7 +42,7 @@ import { userInfo } from 'os';
 import { ServiceContainer } from './container/container.js';
 import { createContainer, Services } from './container/bootstrap.js';
 import { gaugeCollector } from './effect-metrics.js';
-import { OtelLayer } from './otel-layer.js';
+import { initOtelRuntime, runForkInServer, disposeOtelRuntime } from './otel-runtime.js';
 import { VideoManager } from './video/video-manager.js';
 
 const routeSchemas = ['body', 'query'];
@@ -269,7 +269,7 @@ export class Browserless extends EventEmitter {
       await Effect.runPromise(Fiber.interrupt(this.metricsFiber));
       this.metricsFiber = null;
     }
-    return Promise.all([
+    await Promise.all([
       this.server?.shutdown(),
       this.browserManager.shutdown(),
       this.config.shutdown(),
@@ -282,6 +282,9 @@ export class Browserless extends EventEmitter {
       this.webhooks.shutdown(),
       this.hooks.shutdown(),
     ]);
+    // Dispose server OTLP runtime LAST — flushes the exporter's final span batch.
+    // Must happen after all sessions end so their final spans are in the buffer.
+    await Effect.runPromise(disposeOtelRuntime).catch(() => {});
   }
 
   public async start() {
@@ -460,6 +463,11 @@ export class Browserless extends EventEmitter {
       this.Logger,
     );
 
+    // Initialize server-scoped OTLP runtime — must happen before any sessions.
+    // Creates ONE OtlpExporter for the entire process. Session runtimes share the
+    // Tracer service via SharedTracerLayer (no per-session exporter, no dispose race).
+    await initOtelRuntime();
+
     await this.loadPwVersions();
     await this.server.start();
     this.logger.debug(`Starting metrics collection.`);
@@ -471,12 +479,8 @@ export class Browserless extends EventEmitter {
     );
 
     // OTLP metrics export + gauge collection at server level.
-    // This creates a single long-lived OtlpMetrics exporter that snapshots
-    // the shared global MetricRegistry (all counters/histograms from all
-    // per-session runtimes) and pushes via OTLP every 10s.
-    this.gaugeCollectorFiber = Effect.runFork(
-      gaugeCollector.pipe(Effect.provide(OtelLayer)),
-    );
+    // Runs in the server runtime — shares the same exporter as all session runtimes.
+    this.gaugeCollectorFiber = runForkInServer(gaugeCollector);
   }
 
   /**

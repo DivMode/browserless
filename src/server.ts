@@ -28,6 +28,7 @@ import {
 import { EventEmitter } from 'events';
 
 import EnjoiResolver from './shared/utils/enjoi-resolver.js';
+import { getCollectedSpans, clearCollectedSpans } from './testing/span-collector.js';
 
 export interface HTTPServerOptions {
   concurrent: number;
@@ -148,6 +149,23 @@ export class HTTPServer extends EventEmitter {
     shimLegacyRequests(req.parsed);
 
     if (!proceed) return;
+
+    // Debug endpoint for trace integration tests (gated by TEST_TRACE_COLLECT)
+    if (process.env.TEST_TRACE_COLLECT && req.parsed?.pathname === '/debug/spans') {
+      if (req.method === 'GET') {
+        const traceId = req.parsed.searchParams.get('traceId');
+        const spans = traceId
+          ? getCollectedSpans().filter((s) => s.traceId === traceId)
+          : getCollectedSpans();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(spans));
+      }
+      if (req.method === 'DELETE') {
+        clearCollectedSpans();
+        res.writeHead(204);
+        return res.end();
+      }
+    }
 
     if (this.config.getAllowCORS()) {
       const corsHeaders = this.config.getCORSHeaders();

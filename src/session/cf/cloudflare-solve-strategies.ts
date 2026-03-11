@@ -239,22 +239,26 @@ export class CloudflareSolveStrategies {
       const send: EffectSend = (method, params, sessionId, timeoutMs) => {
         const seq = cmdSeq++;
         const t0 = Date.now() - solveStart;
-        if (debugEnabled) {
-          const sid = sessionId ? `[sid=${sessionId.substring(0, 16)}]` : '[no-sid]';
-          const p = params ? JSON.stringify(params).substring(0, 150) : '{}';
-          console.log(`  [SOLVE #${seq}] +${t0}ms ${method} ${sid} ${p}`);
-        }
-        return cdp.sendViaProxy(method, params, sessionId, timeoutMs).pipe(
+        return (debugEnabled
+          ? Effect.logDebug(`SOLVE #${seq} send`).pipe(
+              Effect.annotateLogs({
+                elapsed_ms: t0, method,
+                session_id: sessionId ? sessionId.substring(0, 16) : 'no-sid',
+                params: params ? JSON.stringify(params).substring(0, 150) : '{}',
+              }),
+            )
+          : Effect.void
+        ).pipe(
+          Effect.andThen(() => cdp.sendViaProxy(method, params, sessionId, timeoutMs)),
           Effect.orElseSucceed(() => null),
-          Effect.tap((result) =>
-            Effect.sync(() => {
-              if (debugEnabled) {
-                const t1 = Date.now() - solveStart;
-                const summary = result ? JSON.stringify(result).substring(0, 120) : 'null';
-                console.log(`  [SOLVE #${seq}] +${t1}ms → ${summary}`);
-              }
-            }),
-          ),
+          Effect.tap((result) => {
+            if (!debugEnabled) return Effect.void;
+            const t1 = Date.now() - solveStart;
+            const summary = result ? JSON.stringify(result).substring(0, 120) : 'null';
+            return Effect.logDebug(`SOLVE #${seq} recv`).pipe(
+              Effect.annotateLogs({ elapsed_ms: t1, summary }),
+            );
+          }),
         );
       };
       const via = 'proxy_ws';
@@ -263,21 +267,25 @@ export class CloudflareSolveStrategies {
       const pageSend: EffectSend = (method, params, sessionId, timeoutMs) => {
         const seq = cmdSeq++;
         const t0 = Date.now() - solveStart;
-        if (debugEnabled) {
-          const p = params ? JSON.stringify(params).substring(0, 150) : '{}';
-          console.log(`  [PAGE  #${seq}] +${t0}ms ${method} [page-session] ${p}`);
-        }
-        return cdp.send(method, params, sessionId, timeoutMs).pipe(
+        return (debugEnabled
+          ? Effect.logDebug(`PAGE #${seq} send`).pipe(
+              Effect.annotateLogs({
+                elapsed_ms: t0, method,
+                params: params ? JSON.stringify(params).substring(0, 150) : '{}',
+              }),
+            )
+          : Effect.void
+        ).pipe(
+          Effect.andThen(() => cdp.send(method, params, sessionId, timeoutMs)),
           Effect.orElseSucceed(() => null),
-          Effect.tap((result) =>
-            Effect.sync(() => {
-              if (debugEnabled) {
-                const t1 = Date.now() - solveStart;
-                const summary = result ? JSON.stringify(result).substring(0, 120) : 'null';
-                console.log(`  [PAGE  #${seq}] +${t1}ms → ${summary}`);
-              }
-            }),
-          ),
+          Effect.tap((result) => {
+            if (!debugEnabled) return Effect.void;
+            const t1 = Date.now() - solveStart;
+            const summary = result ? JSON.stringify(result).substring(0, 120) : 'null';
+            return Effect.logDebug(`PAGE #${seq} recv`).pipe(
+              Effect.annotateLogs({ elapsed_ms: t1, summary }),
+            );
+          }),
         );
       };
 
@@ -353,6 +361,17 @@ export class CloudflareSolveStrategies {
           elapsed_ms: Date.now() - solveStart,
         });
         return ClickResult.NoCheckbox();
+      }
+
+      // ── Click Proof: Install persistent mousedown listener in OOPIF ──
+      // Captures isTrusted + stack trace for ANY click on the OOPIF,
+      // including clicks that happen AFTER the solver exits.
+      // Idempotent — checks if already installed.
+      if (attempt === 0) {
+        yield* send('Runtime.evaluate', {
+          expression: `if(!window.__clickProofInstalled){window.__clickProofInstalled=true;window.__clickProofData=null;document.addEventListener('mousedown',function(e){window.__clickProofData=JSON.stringify({isTrusted:e.isTrusted,x:e.clientX,y:e.clientY,ts:Date.now(),stack:(new Error()).stack})},{capture:true})}`,
+          returnByValue: true,
+        }, oopifSessionId).pipe(Effect.orElseSucceed(() => null));
       }
 
       // ── Phase 3: Isolated world + checkbox find (OOPIF session) ──────
@@ -819,6 +838,24 @@ export class CloudflareSolveStrategies {
       );
 
       if (!doc?.root) return null;
+
+      // ── Click Proof: read __clickProofData if set by the OOPIF listener ──
+      const proofResult = yield* cdp.sendViaProxy('Runtime.evaluate', {
+        expression: `window.__clickProofData`,
+        returnByValue: true,
+      }, iframeCdpSessionId).pipe(Effect.orElseSucceed(() => null));
+      const proofValue = (proofResult as any)?.result?.value;
+      if (proofValue && typeof proofValue === 'string') {
+        // Log it prominently — this is the definitive proof of what clicked
+        yield* Effect.logWarning('CLICK-PROOF: OOPIF click detected').pipe(
+          Effect.annotateLogs({ click_proof: proofValue }),
+        );
+        // Clear it so we don't log it again
+        yield* cdp.sendViaProxy('Runtime.evaluate', {
+          expression: `window.__clickProofData=null`,
+          returnByValue: true,
+        }, iframeCdpSessionId).pipe(Effect.orElseSucceed(() => null));
+      }
 
       return strategies.findStateInOOPIFTree(doc.root);
     })();
