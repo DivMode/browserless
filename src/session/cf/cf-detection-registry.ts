@@ -15,7 +15,7 @@
  * Resolution is identity-safe via DetectionContext.resolve() — no targetId-based resolve.
  */
 
-import { Effect, Exit, Option, Scope } from 'effect';
+import { Effect, Exit, Scope } from 'effect';
 import type { TargetId } from '../../shared/cloudflare-detection.js';
 import type { ActiveDetection, ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
 import type { SolveSignal } from './cloudflare-state-tracker.js';
@@ -41,18 +41,15 @@ export class DetectionRegistry {
   register(targetId: TargetId, active: ActiveDetection): Effect.Effect<DetectionContext> {
     const self = this;
     return Effect.fn('cf.registry.register')(function*() {
-      // Capture root span for unified tracing — async handlers (bridge, beacon,
-      // navigation) use this as parent so all events appear in one trace.
-      const rootSpanOption = yield* Effect.currentSpan.pipe(Effect.option);
-      const rootSpan = Option.getOrUndefined(rootSpanOption);
-
       // Extract domain from page URL for Tempo filtering
       let domain = 'unknown';
       try {
         if (active.info.url) domain = new URL(active.info.url).hostname;
       } catch { /* malformed URL */ }
 
+      // Assign detectionId — groups all solve spans for this challenge
       const detectionId = crypto.randomUUID();
+      active.detectionId = detectionId;
 
       yield* Effect.annotateCurrentSpan({
         'cf.target_id': targetId,
@@ -60,6 +57,7 @@ export class DetectionRegistry {
         'cf.detection_method': active.info.detectionMethod ?? 'unknown',
         'cf.domain': domain,
         'cf.detection_id': detectionId,
+        ...(active.sessionId ? { 'session.id': active.sessionId } : {}),
       });
       // If a detection already exists for this target, close its scope first
       const existing = self.entries.get(targetId);
@@ -68,7 +66,7 @@ export class DetectionRegistry {
       }
 
       const scope = yield* Scope.make();
-      const context = new DetectionContext(active, scope, rootSpan);
+      const context = new DetectionContext(active, scope);
       self.entries.set(targetId, context);
 
       // Register the finalizer — runs when scope closes.

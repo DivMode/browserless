@@ -15,6 +15,7 @@ import {
 } from '@browserless.io/browserless';
 
 import { Cause, Effect, Exit, Fiber, FiberMap, Layer, ManagedRuntime, Metric, Queue, Schedule, Scope } from 'effect';
+import type { Tracer } from 'effect';
 import { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 import { decodeCDPMessage, decodeRrwebEventBatch } from '../shared/cdp-schemas.js';
 import { CdpConnection } from '../shared/cdp-rpc.js';
@@ -87,6 +88,8 @@ export class CdpSession {
   // Single runtime + FiberMap for all fibers (replay consumers + per-page WS + probes)
   private _fiberMap: FiberMap.FiberMap<string> | null = null;
   private runtime: ManagedRuntime.ManagedRuntime<SessionR, never> | null = null;
+  /** Session-level root span — parent for ALL CDP event handlers. One trace per session. */
+  private sessionSpan: Tracer.Span | null = null;
 
   // Replay state — per-tab event queues and counters
   private readonly tabQueues = new Map<string, Queue.Queue<TabEvent, Cause.Done>>();
@@ -280,6 +283,14 @@ export class CdpSession {
 
     // Force Layer evaluation — creates FiberMap before CDP messages arrive
     await this.runtime.runPromise(Effect.void);
+
+    // Create session-level root span — parent for all CDP handlers.
+    // Effect.makeSpan creates a standalone span that outlives individual fibers.
+    // All CDP event handlers inherit this as parent → one traceId per session.
+    this.sessionSpan = await this.runtime.runPromise(
+      Effect.makeSpan('session', { root: true }),
+    );
+    this.sessionSpan.attribute('session.id', this.sessionId);
 
     const ws = new this.WebSocket(this.wsEndpoint);
     this.ws = ws;
@@ -710,6 +721,11 @@ export class CdpSession {
     })().pipe(
       // Guaranteed cleanup — runs even if Effect times out or fails
       Effect.ensuring(Effect.sync(() => {
+        // End session-level root span — finalizes the trace
+        if (session.sessionSpan) {
+          session.sessionSpan.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
+          session.sessionSpan = null;
+        }
         session.eventCounts.clear();
         session.state = 'DESTROYED';
       })),
@@ -793,13 +809,18 @@ export class CdpSession {
       }
 
       // Routed CDP events — dispatched as tracked fibers
+      // Session span injected as parent → all CDP handlers share one traceId
       if (msg.method && this.runtime && this._fiberMap) {
         const handler = this.effectHandlers.get(msg.method);
         if (handler) {
           const targetId = msg.params?.targetInfo?.targetId ?? msg.params?.targetId ?? '';
+          const baseEffect = handler(msg);
+          const traced = this.sessionSpan
+            ? baseEffect.pipe(Effect.withParentSpan(this.sessionSpan))
+            : baseEffect;
           this.runtime.runFork(
             FiberMap.run(this._fiberMap, `msg:${msg.method}:${targetId}`,
-              handler(msg).pipe(
+              traced.pipe(
                 Effect.tapError((e) => Effect.logWarning(`CDP handler error: method=${msg.method} target=${targetId} error=${e}`)),
                 Effect.ignore)),
           );
@@ -852,9 +873,13 @@ export class CdpSession {
               ));
               return;
             }
+            const bridgeEffect = this.cloudflareHooks.onBridgeEvent(targetId, parsed);
+            const tracedBridge = this.sessionSpan
+              ? bridgeEffect.pipe(Effect.withParentSpan(this.sessionSpan))
+              : bridgeEffect;
             this.runtime.runFork(
               FiberMap.run(this._fiberMap, `cf:bridge:${targetId}`,
-                this.cloudflareHooks.onBridgeEvent(targetId, parsed).pipe(
+                tracedBridge.pipe(
                   Effect.catchCause((cause) =>
                     Effect.logError('bridge event: solver defect').pipe(
                       Effect.annotateLogs({ session_id: this.sessionId, target_id: targetId, cause: Cause.pretty(cause) }),
@@ -1106,34 +1131,43 @@ export class CdpSession {
           const sessionIdBranded = SessionId.makeUnsafe(session.sessionId);
           if (session._fiberMap) {
             // Fork via runtime.runFork — tabConsumer requires ReplayWriter/ReplayMetrics in R
+            // Parent under session span so replay.tab appears in the session trace tree
+            const tabEffect = tabConsumer(queue, sessionIdBranded, targetId);
+            const tracedTab = session.sessionSpan
+              ? tabEffect.pipe(Effect.withParentSpan(session.sessionSpan))
+              : tabEffect;
             session.runtime.runFork(
-              FiberMap.run(session._fiberMap, `tab:${targetId}`,
-                tabConsumer(queue, sessionIdBranded, targetId)),
+              FiberMap.run(session._fiberMap, `tab:${targetId}`, tracedTab),
             );
           }
 
           // Diagnostic probe: check rrweb state 2s after target resumes
           if (session._fiberMap) {
+            const probeEffect = Effect.gen(function*() {
+              yield* Effect.sleep('2 seconds');
+              const result = yield* session.send('Runtime.evaluate', {
+                expression: `JSON.stringify({
+                  recording: typeof window.__browserlessRecording,
+                  recValue: window.__browserlessRecording === true ? 'true(iframe)' : (window.__browserlessRecording ? 'object' : 'falsy'),
+                  stopFn: typeof window.__browserlessStopRecording,
+                  rrweb: typeof window.rrweb,
+                  rrwebRecord: typeof (window.rrweb && window.rrweb.record),
+                  error: (window.__browserlessRecording && window.__browserlessRecording._rrwebError) || null,
+                  eventCount: window.__browserlessRecording?.events?.length ?? -1,
+                  bufCount: window.__browserlessRecording?._buf?.length ?? -1,
+                  body: !!document.body,
+                  readyState: document.readyState,
+                })`,
+                returnByValue: true,
+              }, cdpSessionId).pipe(Effect.orElseSucceed(() => null));
+              if (result) session.log.info(`[rrweb-diag] target=${targetId} ${result?.result?.value}`);
+            }).pipe(Effect.ignore);
+            // Parent under session span so probe appears in the session trace tree
+            const tracedProbe = session.sessionSpan
+              ? probeEffect.pipe(Effect.withParentSpan(session.sessionSpan))
+              : probeEffect;
             session.runtime.runFork(
-              FiberMap.run(session._fiberMap, `probe:${targetId}`, Effect.gen(function*() {
-                yield* Effect.sleep('2 seconds');
-                const result = yield* session.send('Runtime.evaluate', {
-                  expression: `JSON.stringify({
-                    recording: typeof window.__browserlessRecording,
-                    recValue: window.__browserlessRecording === true ? 'true(iframe)' : (window.__browserlessRecording ? 'object' : 'falsy'),
-                    stopFn: typeof window.__browserlessStopRecording,
-                    rrweb: typeof window.rrweb,
-                    rrwebRecord: typeof (window.rrweb && window.rrweb.record),
-                    error: (window.__browserlessRecording && window.__browserlessRecording._rrwebError) || null,
-                    eventCount: window.__browserlessRecording?.events?.length ?? -1,
-                    bufCount: window.__browserlessRecording?._buf?.length ?? -1,
-                    body: !!document.body,
-                    readyState: document.readyState,
-                  })`,
-                  returnByValue: true,
-                }, cdpSessionId).pipe(Effect.orElseSucceed(() => null));
-                if (result) session.log.info(`[rrweb-diag] target=${targetId} ${result?.result?.value}`);
-              }).pipe(Effect.ignore)),
+              FiberMap.run(session._fiberMap, `probe:${targetId}`, tracedProbe),
             );
           }
         }

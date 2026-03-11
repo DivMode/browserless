@@ -9,7 +9,6 @@
  * via ManagedRuntime and calls these via runtime.runPromise().
  */
 import { Cause, Data, Effect } from 'effect';
-import type { Tracer } from 'effect';
 import { SolveOutcome } from './cloudflare-solve-strategies.js';
 import { DetectionContext } from './cf-detection-context.js';
 import { ClickResult } from './cloudflare-solve-strategies.js';
@@ -27,13 +26,21 @@ function narrowEmbedded(a: SolverActiveDetection): SolverEmbeddedDetection {
 }
 
 /** Annotate the current span with ActiveDetection context for Tempo filtering. */
-const annotateActive = (active: ReadonlyActiveDetection) =>
-  Effect.annotateCurrentSpan({
-    'cf.type': active.info.type,
+const annotateActive = (active: ReadonlyActiveDetection) => {
+  let domain = 'unknown';
+  try {
+    if (active.info.url) domain = new URL(active.info.url).hostname;
+  } catch { /* malformed URL */ }
+  return Effect.annotateCurrentSpan({
+    ...(active.sessionId ? { 'session.id': active.sessionId } : {}),
     'cf.target_id': active.pageTargetId,
+    'cf.domain': domain,
+    ...(active.detectionId ? { 'cf.detection_id': active.detectionId } : {}),
+    'cf.type': active.info.type,
     'cf.detection_method': active.info.detectionMethod ?? 'unknown',
     ...(active.info.url ? { 'cf.url': active.info.url.substring(0, 200) } : {}),
   });
+};
 
 /** Yielded type of the SolveDeps service. */
 type SolveDepsI = typeof SolveDeps.Service;
@@ -58,9 +65,8 @@ export type SolveDetectionResult = SolveOutcome | TurnstileResult;
 
 export const solveDetection = (
   active: SolverActiveDetection,
-  parentSpan?: Tracer.AnySpan,
 ) =>
-  Effect.fn('cf.solveDetection', parentSpan ? { parent: parentSpan } : undefined)(function*() {
+  Effect.fn('cf.solveDetection')(function*() {
     yield* annotateActive(active);
     if (active.aborted) return SO.Aborted();
 

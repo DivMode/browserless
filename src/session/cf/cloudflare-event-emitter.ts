@@ -138,6 +138,10 @@ export interface ActiveDetection {
   info: CloudflareInfo;
   pageCdpSessionId: CdpSessionId;
   pageTargetId: TargetId;
+  /** Session ID — propagated to all CF spans for Tempo filtering. */
+  sessionId?: string;
+  /** Detection UUID — groups all solve spans for a single challenge. Set by DetectionRegistry.register(). */
+  detectionId?: string;
   iframeCdpSessionId?: CdpSessionId;
   iframeTargetId?: TargetId;
   startTime: number;

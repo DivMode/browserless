@@ -1,4 +1,4 @@
-import { Cause, Effect, Exit, FiberMap, Layer, ManagedRuntime, Scope } from 'effect';
+import { Cause, Effect, Exit, FiberMap, Layer, ManagedRuntime, Option, Scope } from 'effect';
 import { CdpSessionId } from '../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareConfig } from '../shared/cloudflare-detection.js';
 import { CloudflareDetector } from './cf/cloudflare-detector.js';
@@ -87,10 +87,24 @@ export class CloudflareSolver {
    * All public methods that return Effect<void> to CdpSession's hooks
    * MUST use this helper — callers run effects in CdpSession's runtime,
    * not the solver's.
+   *
+   * Span propagation: captures the caller's current span and injects it as
+   * parent in the solver's runtime. This bridges the runtime boundary so all
+   * solver spans share the same traceId as the session-level root span.
    */
   private runInSolver(effect: Effect.Effect<void, never, SolverR>): Effect.Effect<void> {
     const runtime = this.runtime;
-    return Effect.promise(() => runtime.runPromise(effect));
+    return Effect.flatMap(
+      Effect.currentSpan.pipe(Effect.option),
+      (parentSpan) =>
+        Effect.promise(() =>
+          runtime.runPromise(
+            Option.isSome(parentSpan)
+              ? effect.pipe(Effect.withParentSpan(parentSpan.value))
+              : effect
+          )
+        )
+    );
   }
 
   constructor(sendCommand: SendCommand, injectMarker: InjectMarker, chromePort?: string, sessionId?: string) {
@@ -208,8 +222,6 @@ export class CloudflareSolver {
 
       const provideServices = (active: ActiveDetection, sender: Parameters<typeof CdpSender.of>[0]) => {
         // Per-dispatch SolveDeps override — wire mutation methods to this active's DetectionContext
-        const ctx = self.stateTracker.registry.getContext(active.pageTargetId);
-        const rootSpan = ctx?.rootSpan;
         const perDispatchDeps = SolveDeps.of({
           ...solveDeps,
           setClickDelivered: (clickDeliveredAt) => Effect.sync(() => {
@@ -221,7 +233,7 @@ export class CloudflareSolver {
             if (ctx) ctx.markActivityLoopStarted();
           }),
         });
-        return solveDetectionEffect(active, rootSpan).pipe(
+        return solveDetectionEffect(active).pipe(
           Effect.provideService(SolverEvents, solverEvents),
           Effect.provideService(SolveDeps, perDispatchDeps),
           Effect.provideService(CdpSender, sender),

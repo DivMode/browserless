@@ -339,9 +339,7 @@ export class CloudflareDetector {
    */
   onPageNavigatedEffect(targetId: TargetId, cdpSessionId: CdpSessionId, url: string, title: string): Effect.Effect<void, never, DetectorR> {
     const self = this;
-    // Link to detection's root span for unified tracing
-    const rootSpan = self.state.registry.getContext(targetId)?.rootSpan;
-    return Effect.fn('cf.detector.onPageNavigated', { parent: rootSpan })(function*() {
+    return Effect.fn('cf.detector.onPageNavigated')(function*() {
       yield* Effect.annotateCurrentSpan({
         'cf.target_id': targetId,
         'cf.url': url?.substring(0, 200) ?? '',
@@ -716,6 +714,7 @@ export class CloudflareDetector {
         info,
         pageCdpSessionId: cdpSessionId,
         pageTargetId: targetId,
+        sessionId: self.sessionId,
         startTime: Date.now(),
         attempt: 1,
         aborted: false,
@@ -821,7 +820,10 @@ export class CloudflareDetector {
   detectTurnstileWidgetEffect(targetId: TargetId, cdpSessionId: CdpSessionId): Effect.Effect<void, never, DetectorR> {
     const self = this;
     return Effect.fn('cf.detectTurnstileWidget')(function*() {
-      yield* Effect.annotateCurrentSpan({ 'cf.target_id': targetId });
+      yield* Effect.annotateCurrentSpan({
+        'cf.target_id': targetId,
+        ...(self.sessionId ? { 'session.id': self.sessionId } : {}),
+      });
       if (self.state.destroyed || !self.enabled) return;
       if (self.state.registry.has(targetId)) return;
       // PHANTOM GUARD: Skip detection on pages that already solved CF — new OOPIFs
@@ -931,6 +933,7 @@ export class CloudflareDetector {
       };
       const active: EmbeddedDetection = {
         info, pageCdpSessionId: cdpSessionId, pageTargetId: targetId,
+        sessionId: self.sessionId,
         startTime, attempt: 1, aborted: false,
         tracker: new CloudflareTracker(info),
         rechallengeCount,
