@@ -726,9 +726,9 @@ export class CloudflareSolveStrategies {
    */
   detectTurnstileViaCDP(_pageCdpSessionId: CdpSessionId, solvedCFTargetIds?: ReadonlySet<string>): Effect.Effect<CFDetectionResult, never, typeof CdpSender.Identifier> {
     const strategies = this;
-    return Effect.fn('cf.detectTurnstileViaCDP')(function*() {
-      yield* Effect.annotateCurrentSpan({ 'cf.target_id': _pageCdpSessionId });
-
+    // Untraced fast path (Effect.gen) for the 99% no-op polling iterations.
+    // Only creates a traced span when CF challenge iframes are actually found.
+    return Effect.gen(function*() {
       // Cache Target.getTargets — 15 tabs polling at 5/sec = 75 CDP calls/sec without this.
       // Single-threaded Node.js means no race conditions on the cache.
       const now = Date.now();
@@ -752,14 +752,19 @@ export class CloudflareSolveStrategies {
           && t.url?.includes('challenges.cloudflare.com')
           && !isCFTestWidget(t.url!),
       );
-      const filteredOut = cfTargets.filter(
-        (t: { targetId?: string }) => t.targetId && solvedCFTargetIds?.has(t.targetId),
-      );
-      const matched = cfTargets.filter(
-        (t: { targetId?: string }) => !(t.targetId && solvedCFTargetIds?.has(t.targetId)),
-      );
+      if (cfTargets.length === 0) return { _tag: 'not_detected' as const };
 
-      if (matched.length > 0 || filteredOut.length > 0) {
+      // Traced slow path — only when CF targets exist
+      return yield* Effect.fn('cf.detectTurnstileViaCDP')(function*() {
+        yield* Effect.annotateCurrentSpan({ 'cf.target_id': _pageCdpSessionId });
+
+        const filteredOut = cfTargets.filter(
+          (t: { targetId?: string }) => t.targetId && solvedCFTargetIds?.has(t.targetId),
+        );
+        const matched = cfTargets.filter(
+          (t: { targetId?: string }) => !(t.targetId && solvedCFTargetIds?.has(t.targetId)),
+        );
+
         yield* Effect.annotateCurrentSpan({
           'cf.detect.total_targets': targetInfos.length,
           'cf.detect.cf_targets': cfTargets.length,
@@ -769,20 +774,20 @@ export class CloudflareSolveStrategies {
           'cf.detect.matched_urls': matched.map((t: { url?: string; targetId?: string }) => `${t.targetId?.slice(0, 8)}=${t.url}`).join(' | '),
           'cf.detect.filtered_ids': filteredOut.map((t: { targetId?: string }) => t.targetId?.slice(0, 8)).join(','),
         });
-      }
 
-      if (matched.length === 0) return { _tag: 'not_detected' as const };
+        if (matched.length === 0) return { _tag: 'not_detected' as const };
 
-      return {
-        _tag: 'detected' as const,
-        targets: matched.map((t: { type: string; url?: string; targetId?: string }) => ({
-          targetId: t.targetId!,
-          url: t.url ?? '',
-          type: t.type as 'iframe' | 'page',
-          meta: parseTurnstileOOPIFUrl(t.url ?? ''),
-        })),
-      };
-    })();
+        return {
+          _tag: 'detected' as const,
+          targets: matched.map((t: { type: string; url?: string; targetId?: string }) => ({
+            targetId: t.targetId!,
+            url: t.url ?? '',
+            type: t.type as 'iframe' | 'page',
+            meta: parseTurnstileOOPIFUrl(t.url ?? ''),
+          })),
+        };
+      })();
+    });
   }
 
   /**

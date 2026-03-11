@@ -207,9 +207,12 @@ export const observeHistogram = (
 // Fork this as a child fiber in BrowserManager's runtime.
 // ──────────────────────────────────────────────
 
-export const gaugeCollector = Effect.fn('metrics.gaugeCollector')(function*() {
+// Intentionally untraced (Effect.gen, not Effect.fn) — gauge collection is
+// infrastructure metrics, not request tracing. Effect.fn creates spans that
+// appear as noisy `?` root traces in Tempo every 30s with zero diagnostic value.
+export const gaugeCollector = Effect.gen(function*() {
   yield* Effect.repeat(
-    Effect.fn('metrics.gaugeCollector.tick')(function*() {
+    Effect.gen(function*() {
       // Session registry size
       yield* Metric.update(sessionsRegistered, getRegistrySize());
 
@@ -291,7 +294,7 @@ export const gaugeCollector = Effect.fn('metrics.gaugeCollector')(function*() {
       yield* Metric.update(eventLoopLagP50, eventLoopHistogram.percentile(50) / 1e9); // ns → seconds
       yield* Metric.update(eventLoopLagP99, eventLoopHistogram.percentile(99) / 1e9);
       eventLoopHistogram.reset();
-    })(),
+    }),
     Schedule.fixed('30 seconds'),
   );
-})();
+});
