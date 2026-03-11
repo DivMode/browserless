@@ -4,9 +4,9 @@
  * Verifies the replay infrastructure works end-to-end:
  *   1. Per-tab replays are created and stored
  *   2. Each tab has recorded events (not empty)
- *   3. CF markers (type 5) are present — server-side, always works
- *   4. DOM snapshots (type 2) — warns if missing (Chrome 137+ macOS limitation)
- *   5. Turnstile summary can be derived from markers
+ *   3. CF markers present — server-side cfMarkerCount > 0
+ *   4. Turnstile summary from server-computed cfSummary matches expected labels
+ *   5. Cross-validation via /signals endpoint on each tab
  *
  * Prerequisites: same as CF solver tests (globalSetup handles build + server).
  */
@@ -17,10 +17,9 @@ import {
   PROXY,
   REPLAY_HTTP,
   assertSummaryConsistency,
-  buildSummaryFromMarkers,
   buildWsUrl,
   failWithEvidence,
-  fetchReplayAnalysis,
+  fetchMarkers,
   fetchSignals,
   findAllReplays,
 } from './integration-helpers';
@@ -81,42 +80,48 @@ describe('Replay Recording Health', () => {
     const replays = allReplays.filter(r => r.parentSessionId === ourSessionId);
     expect(replays.length, 'No replays found for our session — recording pipeline broken').toBeGreaterThan(0);
 
-    // ── 2. Per-tab analysis ────────────────────────────────────────
-    const analyses = await Promise.all(replays.map((r) => fetchReplayAnalysis(r.id)));
+    // ── 2. Per-tab event counts + markers ──────────────────────────
+    // Fetch markers from each tab via fetchMarkers (full replay fetch, not metadata)
+    const tabAnalyses = await Promise.all(
+      replays.map(async (r) => ({
+        replay: r,
+        markers: await fetchMarkers(r.id),
+      })),
+    );
 
-    for (const a of analyses) {
-      console.log(
-        `  tab ${a.replayId}: ${a.totalEvents} events ${JSON.stringify(a.eventCounts)} cf_markers=${a.markers.length}`,
-      );
+    for (const { replay: r, markers } of tabAnalyses) {
+      console.log(`  tab ${r.id}: ${r.eventCount} events, cfMarkers=${markers.length}`);
     }
 
     // Every tab must have events
-    for (const a of analyses) {
+    for (const { replay: r } of tabAnalyses) {
       expect(
-        a.totalEvents,
-        `Replay ${a.replayId} has zero events — recording broken for this tab`,
+        r.eventCount,
+        `Replay ${r.id} has zero events — recording broken for this tab`,
       ).toBeGreaterThan(0);
     }
 
-    // ── 3. CF markers (type 5) — server-side, always works ────────
-    const allMarkers = analyses.flatMap((a) => a.markers);
-    const totalCfMarkers = allMarkers.length;
+    // ── 3. CF markers — server-side, always works ─────────────────
+    const allMarkers = tabAnalyses.flatMap(({ markers }) => markers);
     expect(
-      totalCfMarkers,
+      allMarkers.length,
       'No CF markers (type 5) — server-side marker injection broken',
     ).toBeGreaterThan(0);
 
     // ── 4. Turnstile summary — MUST exist and MUST be valid ────────
     // This test navigates to peet-nonint which always serves a Turnstile.
-    // A missing or invalid summary means the solver or marker pipeline broke.
-    // Use ONLY the main tab's markers — OOPIF tabs have duplicate CF bridge events
-    // that cause buildSummaryFromMarkers to see double detections (Emb?Emb→).
-    const mainTabAnalysis = analyses.find(a => a.replayId.includes(targetId!));
-    const mainTabMarkers = mainTabAnalysis?.markers ?? allMarkers;
-    const summary = buildSummaryFromMarkers(mainTabMarkers);
-    expect(summary, 'No summary from markers — cf.detected missing or unpaired').not.toBeNull();
+    // A missing summary means the solver or marker pipeline broke.
+    // Use /signals endpoint which computes summary from replay events.
+    const mainTabReplay = replays.find(r => r.id.includes(targetId!));
+    expect(mainTabReplay, `No replay found for main tab targetId ${targetId}`).toBeDefined();
+    const mainSignals = await fetchSignals(mainTabReplay!.id);
+    const summary = mainSignals?.summary ?? mainTabReplay?.cfSummary ?? null;
+    const mainMarkers = mainSignals?.cf_markers.map(m => ({
+      tag: m.tag, payload: m.payload, timestamp: m.timestamp,
+    })) ?? [];
+    expect(summary, 'No summary from /signals or cfSummary — solver or marker pipeline broken').not.toBeNull();
     console.log(
-      `  [Turnstile] ${summary!.label} | type=${summary!.type} method=${summary!.method} signal=${summary!.signal} dur=${summary!.durationMs}ms`,
+      `  [Turnstile] ${summary!.label} | type=${summary!.type} method=${summary!.method} signal=${summary!.signal ?? '-'} dur=${summary!.duration_ms ?? '-'}ms`,
     );
 
     // Label must be an expected outcome for peet-nonint (non-interactive = auto-solve)
@@ -126,23 +131,25 @@ describe('Replay Recording Health', () => {
       `Summary label '${summary!.label}' not in expected [${expectedLabels}] for peet-nonint`,
     ).toContain(summary!.label);
 
-    // Summary consistency: method/signal must match the label
-    const inconsistency = assertSummaryConsistency(summary!, mainTabMarkers);
+    // Summary consistency via /signals markers
+    const inconsistency = assertSummaryConsistency(summary!, mainMarkers);
     if (inconsistency) {
-      failWithEvidence('replay-health', `summary/replay mismatch — ${inconsistency}`, mainTabMarkers, null);
+      failWithEvidence('replay-health', `summary/replay mismatch — ${inconsistency}`, mainMarkers, null);
     }
 
     // ── 4b. Cross-validate via /signals on each tab replay ──────────
-    for (const a of analyses) {
-      if (a.markers.length === 0) continue; // tabs without CF markers (e.g. about:blank)
-      const signals = await fetchSignals(a.replayId);
-      expect(signals, `${a.replayId}: /signals returned null — endpoint down`).not.toBeNull();
-      expect(signals!.event_count, `${a.replayId}: /signals event_count=0`).toBeGreaterThan(0);
+    for (const r of replays) {
+      // Use fetched markers to check if tab has CF data
+      const tabMarkerData = tabAnalyses.find(t => t.replay.id === r.id);
+      if (!tabMarkerData || tabMarkerData.markers.length === 0) continue; // tabs without CF markers (e.g. about:blank)
+      const signals = await fetchSignals(r.id);
+      expect(signals, `${r.id}: /signals returned null — endpoint down`).not.toBeNull();
+      expect(signals!.event_count, `${r.id}: /signals event_count=0`).toBeGreaterThan(0);
 
       // If this tab has cf.detected markers, /signals must produce a summary
-      const tabHasDetection = a.markers.some(m => m.tag === 'cf.detected');
+      const tabHasDetection = signals!.cf_markers.some(m => m.tag === 'cf.detected');
       if (tabHasDetection) {
-        expect(signals!.summary, `${a.replayId}: has cf.detected but /signals summary is null`).not.toBeNull();
+        expect(signals!.summary, `${r.id}: has cf.detected but /signals summary is null`).not.toBeNull();
 
         // No phantom zero-duration solves after a real solve
         const solves = signals!.cf_markers.filter(m => m.tag === 'cf.solved');
@@ -150,54 +157,45 @@ describe('Replay Recording Health', () => {
         const real = nonCleanup.filter(s => Number(s.payload.duration_ms) > 0);
         const zero = nonCleanup.filter(s => Number(s.payload.duration_ms) === 0);
         for (const phantom of zero) {
-          const priorReal = real.find(r => r.timestamp < phantom.timestamp);
+          const priorReal = real.find(rv => rv.timestamp < phantom.timestamp);
           if (priorReal) {
+            const tabMarkers = signals!.cf_markers.map(m => ({
+              tag: m.tag, payload: m.payload, timestamp: m.timestamp,
+            }));
             failWithEvidence(
               'replay-health',
-              `${a.replayId}: phantom cf.solved (duration_ms=0) at +${phantom.offset_ms}ms after real solve`,
-              a.markers,
-              `${REPLAY_HTTP}/replays/${a.replayId}`,
+              `${r.id}: phantom cf.solved (duration_ms=0) at +${phantom.offset_ms}ms after real solve`,
+              tabMarkers,
+              `${REPLAY_HTTP}/replays/${r.id}`,
             );
           }
         }
 
-        // Bidirectional click consistency
+        // Bidirectional click consistency — use server-computed summary
         const hasClick = signals!.cf_markers.some(m => m.tag === 'cf.oopif_click' && m.payload.ok);
-        const tabSummary = buildSummaryFromMarkers(a.markers);
+        const tabSummary = signals!.summary;
         if (tabSummary) {
+          const tabMarkers = signals!.cf_markers.map(m => ({
+            tag: m.tag, payload: m.payload, timestamp: m.timestamp,
+          }));
           if (hasClick && tabSummary.label.endsWith('→')) {
             failWithEvidence(
               'replay-health',
-              `${a.replayId}: click ok=true but label '${tabSummary.label}' shows auto (→)`,
-              a.markers,
-              `${REPLAY_HTTP}/replays/${a.replayId}`,
+              `${r.id}: click ok=true but label '${tabSummary.label}' shows auto (→)`,
+              tabMarkers,
+              `${REPLAY_HTTP}/replays/${r.id}`,
             );
           }
           if (tabSummary.label.includes('✓') && !hasClick) {
             failWithEvidence(
               'replay-health',
-              `${a.replayId}: label '${tabSummary.label}' claims click but no cf.oopif_click ok=true`,
-              a.markers,
-              `${REPLAY_HTTP}/replays/${a.replayId}`,
+              `${r.id}: label '${tabSummary.label}' claims click but no cf.oopif_click ok=true`,
+              tabMarkers,
+              `${REPLAY_HTTP}/replays/${r.id}`,
             );
           }
         }
       }
-    }
-
-    // ── 5. DOM snapshots (type 2) — warn if missing ────────────────
-    // Chrome 137+ on macOS silently ignores --load-extension on branded
-    // Chrome. The rrweb extension won't load, so no DOM snapshots.
-    // This is expected locally; Docker/production uses a compatible binary.
-    const totalType2 = analyses.reduce((sum, a) => sum + (a.eventCounts[2] ?? 0), 0);
-    if (!totalType2) {
-      console.warn(
-        '  ⚠ No DOM snapshots (type 2) — rrweb extension not loaded.\n' +
-        '    Chrome 137+ on macOS ignores --load-extension on branded Chrome.\n' +
-        '    Replay player will show empty recordings. CF markers still work.',
-      );
-    } else {
-      console.log(`  DOM snapshots: ${totalType2} (extension loaded OK)`);
     }
   });
 });

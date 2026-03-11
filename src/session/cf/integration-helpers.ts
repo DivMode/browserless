@@ -31,7 +31,7 @@ export const RESULTS_FILE = join(tmpdir(), 'cf-integration-results.jsonl');
 /** Append a site result as a JSON line to the shared results file. */
 export function writeSiteResult(result: {
   name: string;
-  summary: TurnstileSummary | null;
+  summary: TurnstileSummary | ServerCfSummary | null;
   replayId: string | null;
   durationMs: number;
   status: 'PASS' | 'FAIL' | 'SKIP';
@@ -74,6 +74,15 @@ export { CF_MARKERS, buildSummaryFromMarkers, assertSummaryConsistency } from '.
 import type { ReplayMarker, TurnstileSummary } from './cf-summary.js';
 
 // Runtime schema for replay list response — catches server-side field renames immediately
+const CfSummaryFromServer = Schema.Struct({
+  label: Schema.String,
+  type: Schema.String,
+  method: Schema.String,
+  signal: Schema.optional(Schema.String),
+  duration_ms: Schema.optional(Schema.Number),
+  rechallenge: Schema.Boolean,
+});
+
 const ReplayMetaFromServer = Schema.Struct({
   id: Schema.String,
   eventCount: Schema.Number,
@@ -85,8 +94,21 @@ const ReplayMetaFromServer = Schema.Struct({
   targetId: Schema.NullOr(Schema.String),
   source: Schema.NullOr(Schema.String),
   createdAt: Schema.String,
+  cfSummary: Schema.optionalKey(Schema.NullOr(CfSummaryFromServer)),
+  cfMarkerCount: Schema.optionalKey(Schema.Number),
+  clickCount: Schema.optionalKey(Schema.Number),
 });
 const ReplayListResponse = Schema.Array(ReplayMetaFromServer);
+
+/** Server-computed CF summary shape (snake_case duration_ms, unlike client TurnstileSummary). */
+export interface ServerCfSummary {
+  label: string;
+  type: string;
+  method: string;
+  signal?: string;
+  duration_ms?: number;
+  rechallenge: boolean;
+}
 
 export interface ReplayMeta {
   id: string;
@@ -99,14 +121,9 @@ export interface ReplayMeta {
   browserType: string | null;
   source: string | null;
   createdAt: string;
-}
-
-export interface SessionResult {
-  markers: ReplayMarker[];
-  replay: ReplayMeta;
-  replayId: string;
-  consoleErrors: string[];
-  allEvents: unknown[];
+  cfSummary?: ServerCfSummary | null;
+  cfMarkerCount?: number;
+  clickCount?: number;
 }
 
 // ── Replay API (plain async) ────────────────────────────────────────
@@ -119,7 +136,13 @@ export async function findAllReplays(afterTs: number): Promise<ReplayMeta[]> {
   const replays = Schema.decodeUnknownSync(ReplayListResponse)(raw);
   return replays
     .filter((r) => (r.startedAt ?? 0) >= afterTs)
-    .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+    .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))
+    .map((r) => ({
+      ...r,
+      cfSummary: r.cfSummary ?? null,
+      cfMarkerCount: r.cfMarkerCount ?? 0,
+      clickCount: r.clickCount ?? 0,
+    }));
 }
 
 /** Extract CF markers (type 5, tag starts with 'cf.') from a replay. */
@@ -164,59 +187,6 @@ export async function fetchDebugData(replayId: string): Promise<{
     });
 
   return { consoleErrors, allEvents: replay.events };
-}
-
-/** Count events by rrweb type from a replay. */
-export async function fetchEventTypeCounts(replayId: string): Promise<Record<number, number>> {
-  const res = await fetch(`${REPLAY_HTTP}/replays/${replayId}`);
-  if (!res.ok) return {};
-  const replay = (await res.json()) as {
-    events?: Array<{ type: number }>;
-  };
-  if (!replay.events) return {};
-  const counts: Record<number, number> = {};
-  for (const e of replay.events) {
-    counts[e.type] = (counts[e.type] || 0) + 1;
-  }
-  return counts;
-}
-
-// ── Replay analysis (single-fetch) ──────────────────────────────────
-
-export interface ReplayAnalysis {
-  replayId: string;
-  eventCounts: Record<number, number>;
-  totalEvents: number;
-  markers: ReplayMarker[];
-}
-
-/** Fetch a replay once and return event counts + CF markers. */
-export async function fetchReplayAnalysis(replayId: string): Promise<ReplayAnalysis> {
-  const res = await fetch(`${REPLAY_HTTP}/replays/${replayId}`);
-  if (!res.ok) return { replayId, eventCounts: {}, totalEvents: 0, markers: [] };
-  const replay = (await res.json()) as {
-    events?: Array<{
-      type: number;
-      timestamp: number;
-      data?: { tag?: string; payload?: Record<string, unknown> };
-    }>;
-  };
-  if (!replay.events) return { replayId, eventCounts: {}, totalEvents: 0, markers: [] };
-
-  const eventCounts: Record<number, number> = {};
-  const markers: ReplayMarker[] = [];
-  for (const e of replay.events) {
-    eventCounts[e.type] = (eventCounts[e.type] || 0) + 1;
-    if (e.type === 5 && e.data?.tag?.startsWith('cf.')) {
-      markers.push({
-        tag: e.data.tag,
-        payload: e.data.payload ?? {},
-        timestamp: e.timestamp,
-      });
-    }
-  }
-
-  return { replayId, eventCounts, totalEvents: replay.events.length, markers };
 }
 
 // ── Signal extraction (via /signals endpoint) ───────────────────────
@@ -307,12 +277,6 @@ export function dumpReplayHint(replayId: string) {
   console.error(`=== REPLAY ===`);
   console.error(`  ID: ${replayId}`);
   console.error(`  curl -s ${REPLAY_HTTP}/replays/${replayId} | python3 -c "import sys,json; [print(f'{e[\"type\"]}:{e.get(\"data\",{}).get(\"tag\",\"\")}') for e in json.load(sys.stdin).get('events',[])]"`);
-}
-
-export function dumpDebugContext(session: SessionResult) {
-  dumpMarkerTimeline(session.markers);
-  dumpConsoleErrors(session.consoleErrors);
-  dumpReplayHint(session.replayId);
 }
 
 export function dumpRechallengeDiag(markers: ReplayMarker[], replayId: string | null): void {

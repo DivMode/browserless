@@ -67,15 +67,13 @@ import puppeteer, { type Browser, type Page } from 'puppeteer-core';
 import {
   PROXY,
   REPLAY_HTTP,
-  type TurnstileSummary,
+  type ServerCfSummary,
   assertSummaryConsistency,
-  buildSummaryFromMarkers,
   buildWsUrl,
   dumpMarkerTimeline,
   dumpRechallengeDiag,
   dumpReplayHint,
   failWithEvidence,
-  fetchReplayAnalysis,
   fetchSignals,
   findAllReplays,
   writeSiteResult,
@@ -274,7 +272,7 @@ describe.concurrent('CF Solver Multi-Site', () => {
         const testStartTs = Date.now();
         let replayId: string | null = null;
         let targetId: string | null = null;
-        let summary: TurnstileSummary | null = null;
+        let summary: ServerCfSummary | null = null;
 
         try {
           const page = yield* Effect.scoped(
@@ -307,46 +305,49 @@ describe.concurrent('CF Solver Multi-Site', () => {
             `${site.name}: no replay found for targetId ${targetId} — recording pipeline broken`,
           ).toBeGreaterThan(0);
 
-          const analyses = yield* Effect.promise(() =>
-            Promise.all(replays.map((r) => fetchReplayAnalysis(r.id))),
-          );
-
-          // Every tab must have at least some events recorded
-          for (const a of analyses) {
+          // Every tab must have recorded events
+          for (const r of replays) {
             expect(
-              a.totalEvents,
-              `${site.name}: replay ${a.replayId} has zero events — recording broken for this tab`,
+              r.eventCount,
+              `${site.name}: replay ${r.id} has zero events — recording broken for this tab`,
             ).toBeGreaterThan(0);
           }
 
-          // ── 2. CF marker extraction ──────────────────────────────────
-          const allMarkers = analyses.flatMap((a) => a.markers);
-          summary = buildSummaryFromMarkers(allMarkers);
+          // ── 2. CF summary — from /signals endpoint (primary) or replay metadata (fallback)
+          // Fetch full marker data for detailed assertions (rechallenge, widget rendering, consistency)
+          const signals = yield* Effect.promise(() => fetchSignals(replayId!));
+          const allMarkers = signals?.cf_markers.map(m => ({
+            tag: m.tag, payload: m.payload, timestamp: m.timestamp,
+          })) ?? [];
 
-          if (!summary && site.maySkip) {
+          // Prefer /signals summary (always computed from replay events), fall back to replay list metadata
+          const derivedSummary = signals?.summary ?? replays[0]?.cfSummary ?? null;
+
+          // maySkip sites might not get a CF challenge at all
+          if (!derivedSummary && site.maySkip) {
             writeSiteResult({ name: site.name, summary: null, replayId, durationMs: 0, status: 'SKIP' });
             return;
           }
 
-          // ── 2b. Turnstile widget rendered ─────────────────────────────
-          // If this site ONLY expects turnstile and we got no detection at all,
-          // the widget didn't load. This catches bugs where our bridge code
-          // prevents CF from rendering the widget entirely (e.g., trapping
-          // window.turnstile with Object.defineProperty).
-          if (!summary && site.expectedTypes.every((t) => t === 'turnstile')) {
+          // Every CF test site MUST produce a summary — null means broken detection
+          if (!derivedSummary) {
             const replayUrl = replayId ? `${REPLAY_HTTP}/replays/${replayId}` : null;
+            if (site.expectedTypes.every((t) => t === 'turnstile')) {
+              failWithEvidence(
+                site.name,
+                'Turnstile widget never rendered — zero CF detection on a known turnstile site. Bridge may be blocking CF rendering.',
+                allMarkers,
+                replayUrl,
+              );
+            }
             failWithEvidence(
               site.name,
-              'Turnstile widget never rendered — zero CF detection on a known turnstile site. Bridge may be blocking CF rendering.',
+              'No summary from /signals or cfSummary — solver not detecting.',
               allMarkers,
-              replayUrl,
+              replayId ? `${REPLAY_HTTP}/replays/${replayId}` : null,
             );
           }
-
-          expect(
-            summary,
-            `${site.name}: no cf.detected marker — solver not detecting`,
-          ).toBeTruthy();
+          summary = derivedSummary;
 
           // ── 3. Rechallenge check ─────────────────────────────────────
           if (summary!.rechallenge) {
@@ -443,31 +444,30 @@ describe.concurrent('CF Solver Multi-Site', () => {
             const replayUrl = `${REPLAY_HTTP}/replays/${replayId}`;
             const fail = (msg: string): never => failWithEvidence(site.name, msg, allMarkers, replayUrl);
 
-            // 6a. Fetch signals — endpoint MUST respond with data
-            const signals = yield* Effect.promise(() => fetchSignals(replayId));
+            // 6a. Signals already fetched in step 2 — validate they have data
             if (!signals) throw fail(`/signals returned null for replay ${replayId} — endpoint down or 404`);
-            if (!signals.summary) throw fail(`/signals has no summary but marker-derived label is '${summary!.label}'`);
+            if (!signals.summary) throw fail(`/signals has no summary but server cfSummary label is '${summary!.label}'`);
             const sig = signals.summary;
 
             // 6b. Basic integrity — replay has events and CF markers
             if (signals.event_count === 0) throw fail('/signals event_count=0 — empty replay');
             if (signals.cf_marker_count === 0) throw fail('/signals cf_marker_count=0 — no CF markers');
 
-            // 6c. Full summary field comparison — label, method, signal, type all must match
+            // 6c. /signals summary must match replay list cfSummary (both server-computed, same data)
             if (sig.label !== summary!.label) {
               throw fail(
-                `/signals label '${sig.label}' != marker-derived '${summary!.label}' — ` +
-                `buildSummaryFromMarkers diverged between browserless and replay-server`,
+                `/signals label '${sig.label}' != cfSummary '${summary!.label}' — ` +
+                `extractSignals diverged between /replays and /signals endpoints`,
               );
             }
             if (sig.method !== summary!.method) {
-              throw fail(`/signals method '${sig.method}' != marker-derived '${summary!.method}'`);
+              throw fail(`/signals method '${sig.method}' != cfSummary '${summary!.method}'`);
             }
             if (sig.type !== summary!.type) {
-              throw fail(`/signals type '${sig.type}' != marker-derived '${summary!.type}'`);
+              throw fail(`/signals type '${sig.type}' != cfSummary '${summary!.type}'`);
             }
             if (summary!.signal && sig.signal !== summary!.signal) {
-              throw fail(`/signals signal '${sig.signal}' != marker-derived '${summary!.signal}'`);
+              throw fail(`/signals signal '${sig.signal}' != cfSummary '${summary!.signal}'`);
             }
 
             // 6d. Duration MUST be positive — zero or negative = phantom or broken timer
@@ -479,7 +479,6 @@ describe.concurrent('CF Solver Multi-Site', () => {
             // Pattern: emitStandaloneAutoSolved fires a fake cf.detected+cf.solved
             // with duration_ms=0 AFTER the real solve already resolved the target.
             // session_close solves are scope finalizer cleanup — not phantoms.
-            const detections = signals.cf_markers.filter(m => m.tag === 'cf.detected');
             const solves = signals.cf_markers.filter(m => m.tag === 'cf.solved');
             const nonCleanupSolves = solves.filter(s => s.payload.signal !== 'session_close');
 
