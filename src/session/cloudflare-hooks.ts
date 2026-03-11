@@ -14,7 +14,7 @@
  * interruption via FiberMap.remove or Scope.close on detection scopes), it
  * must encapsulate the boundary crossing internally (see `runInSolver`).
  */
-import type { Effect } from 'effect';
+import type { Effect, Tracer } from 'effect';
 import type { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 
 export interface CloudflareHooks {
@@ -25,6 +25,8 @@ export interface CloudflareHooks {
   onBridgeEvent(targetId: TargetId, event: unknown): Effect.Effect<void>;
   /** Awaited — ensures detection fiber is interrupted before target cleanup. */
   onTargetDestroyed(targetId: TargetId): Effect.Effect<void>;
+  /** Set the session-level root span — detection fibers will be parented under it. */
+  setSessionSpan(span: Tracer.AnySpan): void;
   /** Awaited — ensures ManagedRuntime disposal completes before session teardown. */
   destroy(): Effect.Effect<void>;
 }

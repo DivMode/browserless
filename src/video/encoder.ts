@@ -8,7 +8,7 @@ import {
   exists,
 } from '@browserless.io/browserless';
 
-import { OtelLayer } from '../otel-layer.js';
+import { SharedTracerLayer } from '../otel-runtime.js';
 
 export interface EncodingProgress {
   framesProcessed: number;
@@ -42,7 +42,7 @@ export class VideoEncoder {
   private static readonly SEGMENT_DURATION = 10;
   private log = new Logger('video-encoder');
   private progress = new Map<string, EncodingProgress>();
-  private runtime = ManagedRuntime.make(OtelLayer);
+  private runtime = ManagedRuntime.make(SharedTracerLayer);
   private effectQueue: Queue.Queue<EncodeJob> | null = null;
 
   constructor() {

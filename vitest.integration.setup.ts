@@ -164,7 +164,7 @@ export async function setup() {
     ['build/index.js'],
     {
       cwd: BROWSERLESS_DIR,
-      env: { ...process.env, PORT: String(PORT), HOST: '0.0.0.0' },
+      env: { ...process.env, PORT: String(PORT), HOST: '0.0.0.0', TEST_TRACE_COLLECT: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   );

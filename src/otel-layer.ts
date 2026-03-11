@@ -1,23 +1,28 @@
 /**
- * Shared OTEL layer for all ManagedRuntimes — traces + logs + metrics in one layer.
+ * OTLP layer — traces + logs + metrics in one layer.
+ *
+ * Now consumed ONLY by the server-scoped runtime in otel-runtime.ts.
+ * Session runtimes use SharedTracerLayer (from otel-runtime.ts) instead.
  *
  * Uses Effect's built-in OTLP exporters — zero external dependencies.
- * When no OTLP endpoint is set, provides Layer.empty (zero overhead).
  *
  * Priority:
  *   1. GRAFANA_CLOUD_OTLP_ENDPOINT + auth header → direct to Grafana Cloud
  *   2. OTEL_EXPORTER_OTLP_ENDPOINT → local Alloy (no auth)
- *   3. Neither → Layer.empty (no-op)
+ *   3. TEST_TRACE_COLLECT → in-memory collecting tracer (integration tests)
+ *   4. Neither → Layer.empty (no-op)
  *
  * Layer type: Layer.Layer<never> — fully satisfied, merges into any composition.
  */
 import { Layer, References } from 'effect';
 import { Otlp, OtlpSerialization } from 'effect/unstable/observability';
 import { FetchHttpClient } from 'effect/unstable/http';
+import { collectingTracerLayer } from './testing/span-collector.js';
 
 const grafanaEndpoint = process.env.GRAFANA_CLOUD_OTLP_ENDPOINT;
 const grafanaAuth = process.env.GRAFANA_CLOUD_OTLP_AUTH_HEADER;
 const alloyEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+const testCollect = !!process.env.TEST_TRACE_COLLECT;
 
 const endpoint = grafanaEndpoint || alloyEndpoint;
 
@@ -45,4 +50,6 @@ export const OtelLayer: Layer.Layer<never> = endpoint
       Layer.provide(FetchHttpClient.layer),
       Layer.merge(logLevelLayer),
     )
-  : Layer.empty;
+  : testCollect
+    ? collectingTracerLayer().pipe(Layer.merge(logLevelLayer))
+    : Layer.empty;

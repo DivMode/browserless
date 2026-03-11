@@ -1,4 +1,4 @@
-import { Cause, Effect, Exit, FiberMap, Layer, ManagedRuntime, Option, Scope } from 'effect';
+import { Cause, Effect, Exit, FiberMap, Layer, ManagedRuntime, Option, Scope, type Tracer } from 'effect';
 import { CdpSessionId } from '../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareConfig } from '../shared/cloudflare-detection.js';
 import { CloudflareDetector } from './cf/cloudflare-detector.js';
@@ -14,7 +14,7 @@ import {
 import { CdpSessionGone } from './cf/cf-errors.js';
 import { solveDetection as solveDetectionEffect } from './cf/cloudflare-solver.effect.js';
 import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
-import { OtelLayer } from '../otel-layer.js';
+import { SharedTracerLayer } from '../otel-runtime.js';
 import { WS_SCOPE_BUDGET } from './cf/cf-ws-resource.js';
 
 import { incCounter, wsLifecycle, wsScopeBudgetExceeded } from '../effect-metrics.js';
@@ -64,6 +64,7 @@ export class CloudflareSolver {
   private createIsolatedConn: (() => IsolatedConnection) | null = null;
   private createIsolatedConnScoped: (() => IsolatedConnectionScoped) | null = null;
   private _setRealEmit: (fn: EmitClientEvent) => void;
+  private sessionSpan: Tracer.AnySpan | null = null;
 
   // ── Eager scope + scope-bound FiberMap (CDPProxy pattern) ──────────
   // Never null, never late-initialized. Scope.close() drains all fibers
@@ -342,7 +343,7 @@ export class CloudflareSolver {
     const baseLayers = Layer.mergeAll(
       cdpSenderLayer, solverEventsLayer,
       detectionStarterLayer, solverConfigLayer,
-      OtelLayer,
+      SharedTracerLayer,
     );
 
     // oopifCheckerLayer needs CdpSender
@@ -355,6 +356,10 @@ export class CloudflareSolver {
 
   setEmitClientEvent(fn: EmitClientEvent): void {
     this._setRealEmit(fn);
+  }
+
+  setSessionSpan(span: Tracer.AnySpan): void {
+    this.sessionSpan = span;
   }
 
   /** Interrupt and stop the detection fiber for a target (e.g. on tab close). */
@@ -425,8 +430,13 @@ export class CloudflareSolver {
         })(),
       ),
     );
+    // Parent under session span so detection traces join the session trace tree
+    // instead of creating orphan root spans (cf.detectTurnstileWidget as root).
+    const traced = this.sessionSpan
+      ? guarded.pipe(Effect.withParentSpan(this.sessionSpan))
+      : guarded;
     this.runtime.runFork(
-      FiberMap.run(this.detectionFibers, targetId, guarded),
+      FiberMap.run(this.detectionFibers, targetId, traced),
     );
   }
 
@@ -482,7 +492,8 @@ export class CloudflareSolver {
     // Inject the detection's parent span so the beacon span joins the same trace
     // instead of creating an orphan root span (beacon arrives via HTTP, not CDP).
     const ctx = this.stateTracker.registry.getContext(targetId);
-    const parented = ctx?.parentSpan ? effect.pipe(Effect.withParentSpan(ctx.parentSpan)) : effect;
+    const parentSpan = ctx?.parentSpan ?? this.sessionSpan;
+    const parented = parentSpan ? effect.pipe(Effect.withParentSpan(parentSpan)) : effect;
     await this.runtime.runPromise(parented)
       .catch((e) => Effect.runSync(
         Effect.logError('CF runtime defect').pipe(Effect.annotateLogs({ method: 'onBeaconSolved', error: String(e) })),

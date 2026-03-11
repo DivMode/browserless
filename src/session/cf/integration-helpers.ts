@@ -219,6 +219,43 @@ export async function fetchReplayAnalysis(replayId: string): Promise<ReplayAnaly
   return { replayId, eventCounts, totalEvents: replay.events.length, markers };
 }
 
+// ── Signal extraction (via /signals endpoint) ───────────────────────
+
+export interface SignalExtraction {
+  cf_markers: Array<{
+    tag: string;
+    timestamp: number;
+    offset_ms: number;
+    payload: Record<string, unknown>;
+  }>;
+  clicks: Array<{
+    timestamp: number;
+    offset_ms: number;
+    x: number;
+    y: number;
+    node_id: number;
+    type: string;
+  }>;
+  summary: {
+    label: string;
+    type: string;
+    method: string;
+    signal?: string;
+    duration_ms?: number;
+    rechallenge: boolean;
+  } | null;
+  event_count: number;
+  cf_marker_count: number;
+  click_count: number;
+}
+
+/** Fetch extracted signals from the /signals endpoint — lightweight alternative to full replay fetch. */
+export async function fetchSignals(replayId: string): Promise<SignalExtraction | null> {
+  const res = await fetch(`${REPLAY_HTTP}/replays/${replayId}/signals`);
+  if (!res.ok) return null;
+  return (await res.json()) as SignalExtraction;
+}
+
 // ── Structured failure ──────────────────────────────────────────────
 
 /** Fail a CF test with full marker evidence embedded in the error message.

@@ -377,6 +377,23 @@ export class CDPProxy {
               }
             }
           }
+
+          // Instrument: log ALL Input.dispatchMouseEvent from client (pydoll)
+          // Browserless solver clicks bypass the proxy (direct WS to Chrome),
+          // so any mouse event here is from pydoll's CDP connection.
+          if (msg.method === 'Input.dispatchMouseEvent') {
+            const p = msg.params as Record<string, unknown> | undefined;
+            const type = p?.type ?? '';
+            const x = p?.x ?? 0;
+            const y = p?.y ?? 0;
+            const button = p?.button ?? '';
+            const clickCount = p?.clickCount ?? 0;
+            // Full CDP sessionId — maps to a specific target (tab/OOPIF)
+            const cdpSessionId = msg.sessionId ?? 'page';
+            this.log.warn(
+              `[PYDOLL-MOUSE] ${type} x=${x} y=${y} button=${button} clicks=${clickCount} cdpSession=${cdpSessionId}`,
+            );
+          }
         } catch {
           // ignore parse errors
         }

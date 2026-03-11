@@ -76,6 +76,7 @@ import {
   dumpReplayHint,
   failWithEvidence,
   fetchReplayAnalysis,
+  fetchSignals,
   findAllReplays,
   writeSiteResult,
 } from './integration-helpers';
@@ -432,6 +433,109 @@ describe.concurrent('CF Solver Multi-Site', () => {
               allMarkers,
               replayUrl,
             );
+          }
+
+          // ── 6. Cross-validation via /signals endpoint ──────────────
+          // This is the primary regression gate for phantom CF events.
+          // Every assertion here catches a specific, proven production bug.
+          // NOTHING is optional — every value MUST exist. Missing = hard failure.
+          {
+            const replayUrl = `${REPLAY_HTTP}/replays/${replayId}`;
+            const fail = (msg: string): never => failWithEvidence(site.name, msg, allMarkers, replayUrl);
+
+            // 6a. Fetch signals — endpoint MUST respond with data
+            const signals = yield* Effect.promise(() => fetchSignals(replayId));
+            if (!signals) throw fail(`/signals returned null for replay ${replayId} — endpoint down or 404`);
+            if (!signals.summary) throw fail(`/signals has no summary but marker-derived label is '${summary!.label}'`);
+            const sig = signals.summary;
+
+            // 6b. Basic integrity — replay has events and CF markers
+            if (signals.event_count === 0) throw fail('/signals event_count=0 — empty replay');
+            if (signals.cf_marker_count === 0) throw fail('/signals cf_marker_count=0 — no CF markers');
+
+            // 6c. Full summary field comparison — label, method, signal, type all must match
+            if (sig.label !== summary!.label) {
+              throw fail(
+                `/signals label '${sig.label}' != marker-derived '${summary!.label}' — ` +
+                `buildSummaryFromMarkers diverged between browserless and replay-server`,
+              );
+            }
+            if (sig.method !== summary!.method) {
+              throw fail(`/signals method '${sig.method}' != marker-derived '${summary!.method}'`);
+            }
+            if (sig.type !== summary!.type) {
+              throw fail(`/signals type '${sig.type}' != marker-derived '${summary!.type}'`);
+            }
+            if (summary!.signal && sig.signal !== summary!.signal) {
+              throw fail(`/signals signal '${sig.signal}' != marker-derived '${summary!.signal}'`);
+            }
+
+            // 6d. Duration MUST be positive — zero or negative = phantom or broken timer
+            if (sig.duration_ms !== undefined && sig.duration_ms <= 0) {
+              throw fail(`/signals duration_ms=${sig.duration_ms} — non-positive duration`);
+            }
+
+            // 6e. Phantom solve detection — the specific bug this PR fixes.
+            // Pattern: emitStandaloneAutoSolved fires a fake cf.detected+cf.solved
+            // with duration_ms=0 AFTER the real solve already resolved the target.
+            // session_close solves are scope finalizer cleanup — not phantoms.
+            const detections = signals.cf_markers.filter(m => m.tag === 'cf.detected');
+            const solves = signals.cf_markers.filter(m => m.tag === 'cf.solved');
+            const nonCleanupSolves = solves.filter(s => s.payload.signal !== 'session_close');
+
+            // Zero-duration solves after a real solve = phantom
+            const positiveSolves = nonCleanupSolves.filter(s => Number(s.payload.duration_ms) > 0);
+            const zeroSolves = nonCleanupSolves.filter(s => Number(s.payload.duration_ms) === 0);
+            for (const phantom of zeroSolves) {
+              const priorReal = positiveSolves.find(r => r.timestamp < phantom.timestamp);
+              if (priorReal) {
+                throw fail(
+                  `Phantom cf.solved (duration_ms=0) at +${phantom.offset_ms}ms ` +
+                  `after real solve at +${priorReal.offset_ms}ms (duration=${Number(priorReal.payload.duration_ms)}ms) — ` +
+                  `emitStandaloneAutoSolved fired for already-resolved target`,
+                );
+              }
+            }
+
+            // 6f. Orphaned detections: cf.detected with no cf.solved/cf.failed before
+            // the NEXT cf.detected. Classic phantom pattern: standalone emits a second
+            // detection for an already-resolved target.
+            const lifecycle = signals.cf_markers
+              .filter(m => m.tag === 'cf.detected' || m.tag === 'cf.solved' || m.tag === 'cf.failed')
+              .sort((a, b) => a.timestamp - b.timestamp);
+            let pendingDetect: typeof lifecycle[0] | null = null;
+            const orphaned: typeof lifecycle = [];
+            for (const m of lifecycle) {
+              if (m.tag === 'cf.detected') {
+                if (pendingDetect) orphaned.push(pendingDetect);
+                pendingDetect = m;
+              } else {
+                pendingDetect = null;
+              }
+            }
+            if (orphaned.length > 0) {
+              const info = orphaned.map(d => `+${d.offset_ms}ms type=${d.payload.type}`).join(', ');
+              throw fail(`${orphaned.length} orphaned cf.detected (no solve/fail before next detection): ${info}`);
+            }
+
+            // 6g. Bidirectional click consistency — both directions are mandatory
+            const hasClickMarker = signals.cf_markers.some(m => m.tag === 'cf.oopif_click' && m.payload.ok);
+            const labelHasClick = summary!.label.includes('✓');
+            const labelEndsAuto = summary!.label.endsWith('→');
+
+            // Click delivered → label MUST be ✓ (the original phantom bug: click_solve overwritten to →)
+            if (hasClickMarker && labelEndsAuto) {
+              throw fail(
+                `cf.oopif_click ok=true but label '${summary!.label}' shows auto (→) — ` +
+                `phantom auto_solve overwrote click_solve`,
+              );
+            }
+            // Label is ✓ → click marker MUST exist
+            if (labelHasClick && !hasClickMarker) {
+              throw fail(
+                `Label '${summary!.label}' claims click (✓) but no cf.oopif_click ok=true marker`,
+              );
+            }
           }
 
           writeSiteResult({
