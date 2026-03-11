@@ -25,7 +25,8 @@ export interface CloudflareHooks {
   onBridgeEvent(targetId: TargetId, event: unknown): Effect.Effect<void>;
   /** Awaited — ensures detection fiber is interrupted before target cleanup. */
   onTargetDestroyed(targetId: TargetId): Effect.Effect<void>;
-  /** Set the session-level root span — detection fibers will be parented under it. */
+  /** Set the session-level span for parenting solver traces.
+   * Accepts AnySpan (both Span and ExternalSpan) — cdp-session passes an ExternalSpan. */
   setSessionSpan(span: Tracer.AnySpan): void;
   /** Awaited — ensures ManagedRuntime disposal completes before session teardown. */
   destroy(): Effect.Effect<void>;

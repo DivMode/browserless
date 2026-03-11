@@ -16,6 +16,7 @@ import { solveDetection as solveDetectionEffect } from './cf/cloudflare-solver.e
 import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
 import { SharedTracerLayer } from '../otel-runtime.js';
 import { WS_SCOPE_BUDGET } from './cf/cf-ws-resource.js';
+import { withSessionSpan, forkTracedFiber, bridgeRuntime } from './trace-helpers.js';
 
 import { incCounter, wsLifecycle, wsScopeBudgetExceeded } from '../effect-metrics.js';
 import type { CdpConnection } from '../shared/cdp-rpc.js';
@@ -64,7 +65,9 @@ export class CloudflareSolver {
   private createIsolatedConn: (() => IsolatedConnection) | null = null;
   private createIsolatedConnScoped: (() => IsolatedConnectionScoped) | null = null;
   private _setRealEmit: (fn: EmitClientEvent) => void;
-  private sessionSpan: Tracer.AnySpan | null = null;
+  /** Session-level span reference for parenting detection fibers under the session trace.
+   * Set via setSessionSpan() — receives an ExternalSpan from cdp-session (never null after init). */
+  private sessionContext: Tracer.AnySpan | null = null;
 
   // ── Eager scope + scope-bound FiberMap (CDPProxy pattern) ──────────
   // Never null, never late-initialized. Scope.close() drains all fibers
@@ -78,36 +81,10 @@ export class CloudflareSolver {
 
   private runtime: ManagedRuntime.ManagedRuntime<SolverR, never>;
 
-  /**
-   * Cross-runtime boundary: execute an effect in the solver's ManagedRuntime.
-   *
-   * Detection fibers are runFork-ed in the ManagedRuntime. Any effect that
-   * interrupts or joins those fibers (FiberMap.remove, Scope.close on
-   * detection scopes, etc.) MUST execute in the same runtime context.
-   *
-   * All public methods that return Effect<void> to CdpSession's hooks
-   * MUST use this helper — callers run effects in CdpSession's runtime,
-   * not the solver's.
-   *
-   * Span propagation: captures the caller's current span and injects it as
-   * parent in the solver's runtime. This bridges the runtime boundary so all
-   * solver spans share the same traceId as the session-level root span.
-   */
-  private runInSolver(effect: Effect.Effect<void, never, SolverR>): Effect.Effect<void> {
-    const runtime = this.runtime;
-    // Use withFiber to access fiber.currentSpan directly — includes ExternalSpans.
-    // Effect.currentSpan uses currentSpanLocal which filters ExternalSpans (_tag !== "Span"),
-    // causing solver effects to become orphaned when the parent is the session ExternalSpan.
-    return Effect.withFiber((fiber) => {
-      const parentSpan = fiber.currentSpan;
-      return Effect.promise(() =>
-        runtime.runPromise(
-          parentSpan
-            ? effect.pipe(Effect.withParentSpan(parentSpan))
-            : effect
-        )
-      );
-    });
+  /** Cross-runtime bridge — executes effects in the solver's ManagedRuntime,
+   * propagating the caller's span context for unified tracing. */
+  private runInSolver<A, E>(effect: Effect.Effect<A, E, SolverR>): Effect.Effect<A, E> {
+    return bridgeRuntime(this.runtime)(effect);
   }
 
   constructor(sendCommand: SendCommand, injectMarker: InjectMarker, chromePort?: string, sessionId?: string) {
@@ -361,7 +338,7 @@ export class CloudflareSolver {
   }
 
   setSessionSpan(span: Tracer.AnySpan): void {
-    this.sessionSpan = span;
+    this.sessionContext = span;
   }
 
   /** Interrupt and stop the detection fiber for a target (e.g. on tab close). */
@@ -434,12 +411,7 @@ export class CloudflareSolver {
     );
     // Parent under session span so detection traces join the session trace tree
     // instead of creating orphan root spans (cf.detectTurnstileWidget as root).
-    const traced = this.sessionSpan
-      ? guarded.pipe(Effect.withParentSpan(this.sessionSpan))
-      : guarded;
-    this.runtime.runFork(
-      FiberMap.run(this.detectionFibers, targetId, traced),
-    );
+    forkTracedFiber(this.runtime, this.detectionFibers, targetId, guarded, this.sessionContext);
   }
 
   setSendViaProxy(fn: SendCommand): void {
@@ -494,8 +466,8 @@ export class CloudflareSolver {
     // Inject the detection's parent span so the beacon span joins the same trace
     // instead of creating an orphan root span (beacon arrives via HTTP, not CDP).
     const ctx = this.stateTracker.registry.getContext(targetId);
-    const parentSpan = ctx?.parentSpan ?? this.sessionSpan;
-    const parented = parentSpan ? effect.pipe(Effect.withParentSpan(parentSpan)) : effect;
+    const parentSpan = ctx?.parentSpan ?? this.sessionContext;
+    const parented = withSessionSpan(effect, parentSpan);
     await this.runtime.runPromise(parented)
       .catch((e) => Effect.runSync(
         Effect.logError('CF runtime defect').pipe(Effect.annotateLogs({ method: 'onBeaconSolved', error: String(e) })),
