@@ -210,7 +210,7 @@ describe('CF Solver Integration (real nopecha.com)', () => {
       expect(session.markers.length).toBeGreaterThan(0);
       console.log(`  session ready: ${session.markers.length} markers, replay ${session.replayId}`);
     }),
-  { timeout: 20_000 });
+  { timeout: 60_000 });
 
   // 2. No rechallenge — P0 gate
   //
