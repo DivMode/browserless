@@ -7,7 +7,7 @@ import {
 } from '@browserless.io/browserless';
 import { rm } from 'fs/promises';
 
-import { Effect, Fiber, Schedule, Scope } from 'effect';
+import { Effect, Exit, Fiber, FiberMap, Schedule, Scope } from 'effect';
 import { observeHistogram, sessionDuration } from '../effect-metrics.js';
 import { SessionCoordinator } from './session-coordinator.js';
 import { SessionRegistry } from './session-registry.js';
@@ -23,7 +23,16 @@ import { SessionRegistry } from './session-registry.js';
  * This class is extracted from BrowserManager to reduce its complexity.
  */
 export class SessionLifecycleManager {
-  private timerFibers: Map<string, Fiber.Fiber<void>> = new Map();
+  // Eager scope + scope-bound FiberMap (same pattern as CloudflareSolver).
+  // FiberMap.run auto-interrupts prior fiber for same key — no manual interrupt needed.
+  // Scope.close() drains all timer fibers atomically on shutdown.
+  private readonly timerScope = Scope.makeUnsafe();
+  private readonly timerFibers: FiberMap.FiberMap<string> = Effect.runSync(
+    FiberMap.make<string>().pipe(
+      Effect.provideService(Scope.Scope, this.timerScope),
+    ),
+  );
+
   private watchdogFiber: Fiber.Fiber<unknown> | null = null;
   private log = new Logger('session-lifecycle');
 
@@ -145,143 +154,197 @@ export class SessionLifecycleManager {
   }
 
   /**
-   * Close a browser session.
+   * Close effect — the Effect-native implementation of close().
    *
    * Handles:
-   * - Keep-alive timers
+   * - Keep-alive timers via FiberMap (auto-interrupts prior timer for same session)
    * - Connection counting
    * - Delegates to destroySession for actual cleanup
+   */
+  private closeEffect(
+    browser: BrowserInstance,
+    session: BrowserlessSession,
+    force: boolean,
+  ): Effect.Effect<ReplayCompleteParams | null> {
+    const lifecycle = this;
+
+    return Effect.fn('lifecycle.close')(function*() {
+      const now = Date.now();
+      const keepUntil = browser.keepUntil();
+      const connected = session.numbConnected;
+      const hasKeepUntil = keepUntil > now;
+      const keepOpen = (connected > 0 || hasKeepUntil) && !force;
+
+      // FiberMap.run auto-interrupts prior fiber for same key, but we log it
+      if (FiberMap.hasUnsafe(lifecycle.timerFibers, session.id)) {
+        lifecycle.log.debug(`Deleting prior keep-until timer for "${session.id}"`);
+      }
+
+      yield* Effect.logDebug('session.close.decision').pipe(
+        Effect.annotateLogs({ session_id: session.id, keep_open: keepOpen, connected, has_keep_until: hasKeepUntil, force }),
+      );
+
+      lifecycle.log.debug(
+        `close() check: session=${session.id} numbConnected=${session.numbConnected} keepUntil=${keepUntil} keepOpen=${keepOpen} force=${force}`,
+      );
+
+      if (!force && hasKeepUntil) {
+        const timeout = keepUntil - now;
+        lifecycle.log.trace(
+          `Setting timer ${timeout.toLocaleString()} for "${session.id}"`,
+        );
+        // FiberMap.run auto-interrupts any existing fiber for this session.id
+        yield* FiberMap.run(lifecycle.timerFibers, session.id,
+          Effect.sleep(timeout).pipe(
+            Effect.andThen(Effect.sync(() => {
+              const currentSession = lifecycle.registry.get(browser);
+              if (currentSession) {
+                lifecycle.log.trace(`Timer hit for "${currentSession.id}"`);
+                lifecycle.close(browser, currentSession);
+              }
+            })),
+          ),
+        );
+      }
+
+      if (!keepOpen) {
+        lifecycle.log.warn(`KILLING browser session ${session.id}: numbConnected=${connected} keepUntil=${keepUntil} force=${force}`);
+        yield* lifecycle.destroySession(browser, session);
+      }
+
+      return null;
+    })();
+  }
+
+  /**
+   * Close a browser session.
+   * Public Promise bridge — delegates to closeEffect.
    */
   async close(
     browser: BrowserInstance,
     session: BrowserlessSession,
     force = false,
   ): Promise<ReplayCompleteParams | null> {
-    const now = Date.now();
-    const keepUntil = browser.keepUntil();
-    const connected = session.numbConnected;
-    const hasKeepUntil = keepUntil > now;
-    const keepOpen = (connected > 0 || hasKeepUntil) && !force;
-    const priorFiber = this.timerFibers.get(session.id);
+    return Effect.runPromise(this.closeEffect(browser, session, force));
+  }
 
-    if (priorFiber) {
-      this.log.debug(`Deleting prior keep-until timer for "${session.id}"`);
-      Effect.runFork(Fiber.interrupt(priorFiber));
-    }
+  /**
+   * Complete effect — Effect-native implementation of complete().
+   */
+  private completeEffect(browser: BrowserInstance): Effect.Effect<void> {
+    const lifecycle = this;
 
-    Effect.runSync(Effect.logDebug('session.close.decision').pipe(
-      Effect.annotateLogs({ session_id: session.id, keep_open: keepOpen, connected, has_keep_until: hasKeepUntil, force }),
-    ));
+    return Effect.fn('lifecycle.complete')(function*() {
+      const session = lifecycle.registry.get(browser);
+      if (!session) {
+        lifecycle.log.info(
+          `complete() called but no session found (already closed?)`,
+        );
+        yield* Effect.promise(() => browser.close());
+        return;
+      }
 
-    this.log.debug(
-      `close() check: session=${session.id} numbConnected=${session.numbConnected} keepUntil=${keepUntil} keepOpen=${keepOpen} force=${force}`,
-    );
+      const { id, resolver } = session;
 
-    if (!force && hasKeepUntil) {
-      const timeout = keepUntil - now;
-      this.log.trace(
-        `Setting timer ${timeout.toLocaleString()} for "${session.id}"`,
+      if (id && resolver) {
+        resolver(null);
+      }
+
+      --session.numbConnected;
+
+      lifecycle.log.debug(
+        `complete(): session ${id} numbConnected=${session.numbConnected}`,
       );
-      const fiber = Effect.runFork(
-        Effect.sleep(timeout).pipe(
-          Effect.andThen(Effect.sync(() => {
-            this.timerFibers.delete(session.id);
-            const currentSession = this.registry.get(browser);
-            if (currentSession) {
-              this.log.trace(`Timer hit for "${currentSession.id}"`);
-              this.close(browser, currentSession);
-            }
-          })),
-        ),
-      );
-      this.timerFibers.set(session.id, fiber);
-    }
 
-    if (!keepOpen) {
-      this.log.warn(`KILLING browser session ${session.id}: numbConnected=${connected} keepUntil=${keepUntil} force=${force}`);
-      await Effect.runPromise(this.destroySession(browser, session));
-    }
-
-    return null;
+      // CRITICAL: Must await close to ensure session is removed from registry
+      // before returning. This method is called when a WebSocket client disconnects.
+      yield* lifecycle.closeEffect(browser, session, false);
+    })();
   }
 
   /**
    * Complete a browser session (WebSocket disconnect).
+   * Public Promise bridge — delegates to completeEffect.
    */
   async complete(browser: BrowserInstance): Promise<void> {
-    const session = this.registry.get(browser);
-    if (!session) {
-      this.log.info(
-        `complete() called but no session found (already closed?)`,
-      );
-      return browser.close();
-    }
+    return Effect.runPromise(this.completeEffect(browser));
+  }
 
-    const { id, resolver } = session;
+  /**
+   * Kill sessions effect — Effect-native implementation of killSessions().
+   */
+  private killSessionsEffect(target: string): Effect.Effect<ReplayCompleteParams[]> {
+    const lifecycle = this;
 
-    if (id && resolver) {
-      resolver(null);
-    }
+    return Effect.fn('lifecycle.killSessions')(function*() {
+      lifecycle.log.debug(`killSessions invoked target: "${target}"`);
+      const sessions = lifecycle.registry.toArray();
+      const results: ReplayCompleteParams[] = [];
+      let closed = 0;
 
-    --session.numbConnected;
+      for (const [browser, session] of sessions) {
+        if (
+          session.trackingId === target ||
+          session.id === target ||
+          target === 'all'
+        ) {
+          lifecycle.log.debug(
+            `Closing browser via killSessions BrowserId: "${session.id}", trackingId: "${session.trackingId}"`,
+          );
+          // CRITICAL: Must await close to ensure session is fully cleaned up
+          const metadata = yield* lifecycle.closeEffect(browser, session, true);
+          if (metadata) results.push(metadata);
+          closed++;
+        }
+      }
 
-    this.log.debug(
-      `complete(): session ${id} numbConnected=${session.numbConnected}`,
-    );
+      if (closed === 0 && target !== 'all') {
+        // Throw directly — Effect catches as defect, runPromise rejects with it.
+        // Matches original behavior where callers catch Error instances.
+        throw new Error(`Couldn't locate session for id: "${target}"`);
+      }
 
-    // CRITICAL: Must await close() to ensure session is removed from registry
-    // before returning. This method is called when a WebSocket client disconnects.
-    await this.close(browser, session);
+      return results;
+    })();
   }
 
   /**
    * Kill sessions by ID, trackingId, or 'all'.
+   * Public Promise bridge — delegates to killSessionsEffect.
    */
   async killSessions(target: string): Promise<ReplayCompleteParams[]> {
-    this.log.debug(`killSessions invoked target: "${target}"`);
-    const sessions = this.registry.toArray();
-    const results: ReplayCompleteParams[] = [];
-    let closed = 0;
-
-    for (const [browser, session] of sessions) {
-      if (
-        session.trackingId === target ||
-        session.id === target ||
-        target === 'all'
-      ) {
-        this.log.debug(
-          `Closing browser via killSessions BrowserId: "${session.id}", trackingId: "${session.trackingId}"`,
-        );
-        // CRITICAL: Must await close() to ensure session is fully cleaned up
-        const metadata = await this.close(browser, session, true);
-        if (metadata) results.push(metadata);
-        closed++;
-      }
-    }
-
-    if (closed === 0 && target !== 'all') {
-      throw new Error(`Couldn't locate session for id: "${target}"`);
-    }
-
-    return results;
+    return Effect.runPromise(this.killSessionsEffect(target));
   }
 
   /**
-   * Get the timer fibers map.
+   * Get the timer FiberMap.
    * Useful for testing.
    */
-  getTimers(): Map<string, Fiber.Fiber<void>> {
+  getTimers(): FiberMap.FiberMap<string> {
     return this.timerFibers;
   }
 
   /**
-   * Clear all timers by interrupting their fibers.
+   * Check if a timer fiber exists for a session.
+   * Synchronous — uses FiberMap.hasUnsafe.
+   */
+  hasTimer(sessionId: string): boolean {
+    return FiberMap.hasUnsafe(this.timerFibers, sessionId);
+  }
+
+  /**
+   * Get the number of active timer fibers.
+   * Synchronous — runs FiberMap.size in sync context.
+   */
+  getTimerCount(): number {
+    return Effect.runSync(FiberMap.size(this.timerFibers));
+  }
+
+  /**
+   * Clear all timers by interrupting their fibers via FiberMap.clear.
    */
   clearTimers(): void {
-    for (const fiber of this.timerFibers.values()) {
-      Effect.runFork(Fiber.interrupt(fiber));
-    }
-    this.timerFibers.clear();
+    Effect.runSync(FiberMap.clear(this.timerFibers));
   }
 
   /**
@@ -357,7 +420,9 @@ export class SessionLifecycleManager {
     const encoder = this.sessionCoordinator?.getVideoEncoder();
     if (encoder) await Effect.runPromise(encoder.disposeEffect);
 
+    // FiberMap.clear interrupts all timer fibers, then close the scope
     this.clearTimers();
+    await Effect.runPromise(Scope.close(this.timerScope, Exit.void));
     this.log.info('Session lifecycle shutdown complete');
   }
 }

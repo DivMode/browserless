@@ -11,6 +11,7 @@ import {
   jsonResponse,
 } from '@browserless.io/browserless';
 import { ServerResponse } from 'http';
+import { Effect } from 'effect';
 
 export interface QuerySchema extends SystemQueryParameters {
   token?: string;
@@ -34,27 +35,37 @@ export default class VideoDeleteRoute extends HTTPRoute {
   tags = [APITags.management];
 
   async handler(req: Request, res: ServerResponse): Promise<void> {
-    const video = this.videoManager();
-    if (!video) {
-      return jsonResponse(res, 503, { error: 'Video manager is not enabled' });
-    }
+    const route = this;
+    return Effect.runPromise(
+      Effect.fn('route.video.delete')(function* () {
+        const video = route.videoManager();
+        if (!video) {
+          return jsonResponse(res, 503, {
+            error: 'Video manager is not enabled',
+          });
+        }
 
-    // Extract replay ID from path: /video/:id
-    const pathParts = req.parsed.pathname.split('/');
-    const videoIndex = pathParts.indexOf('video');
-    const id = videoIndex >= 0 && videoIndex + 1 < pathParts.length
-      ? pathParts[videoIndex + 1]
-      : null;
+        // Extract replay ID from path: /video/:id
+        const pathParts = req.parsed.pathname.split('/');
+        const videoIndex = pathParts.indexOf('video');
+        const id =
+          videoIndex >= 0 && videoIndex + 1 < pathParts.length
+            ? pathParts[videoIndex + 1]
+            : null;
 
-    if (!id) {
-      throw new NotFound('Replay ID is required');
-    }
+        if (!id) {
+          throw new NotFound('Replay ID is required');
+        }
 
-    const deleted = await video.deleteVideoFrames(id);
-    if (!deleted) {
-      throw new NotFound(`Video frames for replay "${id}" not found`);
-    }
+        const deleted = yield* Effect.promise(() =>
+          video.deleteVideoFrames(id),
+        );
+        if (!deleted) {
+          throw new NotFound(`Video frames for replay "${id}" not found`);
+        }
 
-    return jsonResponse(res, 200, { deleted: true, id });
+        return jsonResponse(res, 200, { deleted: true, id });
+      })(),
+    );
   }
 }

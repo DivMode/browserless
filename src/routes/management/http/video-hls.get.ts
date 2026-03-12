@@ -15,6 +15,7 @@ import { createReadStream, watch } from 'fs';
 import { stat } from 'fs/promises';
 import { ServerResponse } from 'http';
 import path from 'path';
+import { Effect } from 'effect';
 
 export interface QuerySchema extends SystemQueryParameters {
   token?: string;
@@ -40,75 +41,83 @@ export default class VideoHlsGetRoute extends HTTPRoute {
   tags = [APITags.management];
 
   async handler(req: Request, res: ServerResponse): Promise<void> {
-    const video = this.videoManager();
-    if (!video) {
-      return writeResponse(res, 503, 'Video manager is not enabled');
-    }
+    const route = this;
+    return Effect.runPromise(
+      Effect.fn('route.video-hls.get')(function* () {
+        const video = route.videoManager();
+        if (!video) {
+          return writeResponse(res, 503, 'Video manager is not enabled');
+        }
 
-    // Parse path: /video/{id}/hls/{filename}
-    const pathParts = req.parsed.pathname.split('/');
-    const videoIndex = pathParts.indexOf('video');
-    const hlsIndex = pathParts.indexOf('hls');
-    if (hlsIndex < 0 || hlsIndex + 1 >= pathParts.length) {
-      throw new NotFound('HLS filename is required');
-    }
+        // Parse path: /video/{id}/hls/{filename}
+        const pathParts = req.parsed.pathname.split('/');
+        const videoIndex = pathParts.indexOf('video');
+        const hlsIndex = pathParts.indexOf('hls');
+        if (hlsIndex < 0 || hlsIndex + 1 >= pathParts.length) {
+          throw new NotFound('HLS filename is required');
+        }
 
-    const id = videoIndex >= 0 && videoIndex + 1 < pathParts.length
-      ? pathParts[videoIndex + 1]
-      : null;
-    const filename = pathParts[hlsIndex + 1];
+        const id =
+          videoIndex >= 0 && videoIndex + 1 < pathParts.length
+            ? pathParts[videoIndex + 1]
+            : null;
+        const filename = pathParts[hlsIndex + 1];
 
-    if (!id || !filename) {
-      throw new NotFound('Replay ID and filename are required');
-    }
+        if (!id || !filename) {
+          throw new NotFound('Replay ID and filename are required');
+        }
 
-    // Validate filename (allow .m3u8, .m4s, .mp4 (init segment), and legacy .ts)
-    if (!/^[\w-]+\.(m3u8|m4s|mp4|ts)$/.test(filename)) {
-      throw new NotFound('Invalid HLS filename');
-    }
+        // Validate filename (allow .m3u8, .m4s, .mp4 (init segment), and legacy .ts)
+        if (!/^[\w-]+\.(m3u8|m4s|mp4|ts)$/.test(filename)) {
+          throw new NotFound('Invalid HLS filename');
+        }
 
-    const videosDir = video.getVideosDir();
-    const filePath = path.join(videosDir, id, filename);
+        const videosDir = video.getVideosDir();
+        const filePath = path.join(videosDir, id, filename);
 
-    // If file doesn't exist yet, wait briefly in case encoding is in progress
-    if (!(await exists(filePath))) {
-      const appeared = await this.waitForFile(filePath, 30_000);
-      if (!appeared) {
-        throw new NotFound(`HLS file not found: ${filename}`);
-      }
-    }
+        // If file doesn't exist yet, wait briefly in case encoding is in progress
+        if (!(yield* Effect.promise(() => exists(filePath)))) {
+          const appeared = yield* Effect.promise(() =>
+            route.waitForFile(filePath, 30_000),
+          );
+          if (!appeared) {
+            throw new NotFound(`HLS file not found: ${filename}`);
+          }
+        }
 
-    const fileStat = await stat(filePath);
-    const isPlaylist = filename.endsWith('.m3u8');
+        const fileStat = yield* Effect.promise(() => stat(filePath));
+        const isPlaylist = filename.endsWith('.m3u8');
 
-    const contentType = isPlaylist
-      ? 'application/vnd.apple.mpegurl'
-      : filename.endsWith('.m4s') || filename.endsWith('.mp4')
-        ? 'video/mp4'
-        : 'video/mp2t';
+        const contentType = isPlaylist
+          ? 'application/vnd.apple.mpegurl'
+          : filename.endsWith('.m4s') || filename.endsWith('.mp4')
+            ? 'video/mp4'
+            : 'video/mp2t';
 
-    // Playlist: no-cache (player should always get latest version)
-    // Segments + init: immutable once written, cache for 1 hour
-    const cacheControl = isPlaylist
-      ? 'no-cache, no-store'
-      : 'public, max-age=3600, immutable';
+        // Playlist: no-cache (player should always get latest version)
+        // Segments + init: immutable once written, cache for 1 hour
+        const cacheControl = isPlaylist
+          ? 'no-cache, no-store'
+          : 'public, max-age=3600, immutable';
 
-    res.writeHead(200, {
-      'Content-Type': contentType,
-      'Content-Length': fileStat.size,
-      'Cache-Control': cacheControl,
-      'Access-Control-Allow-Origin': '*',
-    });
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Content-Length': fileStat.size,
+          'Cache-Control': cacheControl,
+          'Access-Control-Allow-Origin': '*',
+        });
 
-    const stream = createReadStream(filePath);
-    stream.pipe(res);
+        const stream = createReadStream(filePath);
+        stream.pipe(res);
 
-    stream.on('error', () => {
-      if (!res.headersSent) {
-        res.writeHead(500);
-      }
-      res.end();
-    });
+        stream.on('error', () => {
+          if (!res.headersSent) {
+            res.writeHead(500);
+          }
+          res.end();
+        });
+      })(),
+    );
   }
 
   /**

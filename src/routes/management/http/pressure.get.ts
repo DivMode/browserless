@@ -11,6 +11,7 @@ import {
   writeResponse,
 } from '@browserless.io/browserless';
 import { ServerResponse } from 'http';
+import { Effect } from 'effect';
 
 export type ResponseSchema = {
   pressure: {
@@ -89,63 +90,68 @@ export default class PressureGetRoute extends HTTPRoute {
   path = HTTPManagementRoutes.pressure;
   tags = [APITags.management];
   async handler(req: Request, res: ServerResponse): Promise<void> {
-    const monitoring = this.monitoring();
-    const config = this.config();
-    const limiter = this.limiter();
-    const metrics = this.metrics();
+    const route = this;
+    return Effect.runPromise(
+      Effect.fn('route.pressure.get')(function* () {
+        const monitoring = route.monitoring();
+        const config = route.config();
+        const limiter = route.limiter();
+        const metrics = route.metrics();
 
-    const {
-      cpuInt: cpu,
-      memoryInt: memory,
-      cpuOverloaded,
-      memoryOverloaded,
-    } = await monitoring.overloaded();
-    const date = Date.now();
-    const hasCapacity = limiter.hasCapacity;
-    const queued = limiter.waiting;
-    const isAvailable = hasCapacity && !cpuOverloaded && !memoryOverloaded;
-    const running = limiter.executing;
-    const recentlyRejected = metrics.get().rejected;
-    const maxConcurrent = config.getConcurrent();
-    const maxQueued = config.getQueued();
+        const {
+          cpuInt: cpu,
+          memoryInt: memory,
+          cpuOverloaded,
+          memoryOverloaded,
+        } = yield* Effect.promise(() => monitoring.overloaded());
+        const date = Date.now();
+        const hasCapacity = limiter.hasCapacity;
+        const queued = limiter.waiting;
+        const isAvailable = hasCapacity && !cpuOverloaded && !memoryOverloaded;
+        const running = limiter.executing;
+        const recentlyRejected = metrics.get().rejected;
+        const maxConcurrent = config.getConcurrent();
+        const maxQueued = config.getQueued();
 
-    const reason = !hasCapacity
-      ? 'full'
-      : cpuOverloaded
-        ? 'cpu'
-        : memoryOverloaded
-          ? 'memory'
-          : '';
+        const reason = !hasCapacity
+          ? 'full'
+          : cpuOverloaded
+            ? 'cpu'
+            : memoryOverloaded
+              ? 'memory'
+              : '';
 
-    const message = !hasCapacity
-      ? 'Concurrency and queue are full'
-      : cpuOverloaded
-        ? 'CPU is over the configured maximum for cpu percent'
-        : memoryOverloaded
-          ? 'Memory is over the configured maximum for memory percent'
-          : '';
+        const message = !hasCapacity
+          ? 'Concurrency and queue are full'
+          : cpuOverloaded
+            ? 'CPU is over the configured maximum for cpu percent'
+            : memoryOverloaded
+              ? 'Memory is over the configured maximum for memory percent'
+              : '';
 
-    const response: ResponseSchema = {
-      pressure: {
-        cpu,
-        date,
-        isAvailable,
-        maxConcurrent,
-        maxQueued,
-        memory,
-        message,
-        queued,
-        reason,
-        recentlyRejected,
-        running,
-      },
-    };
+        const response: ResponseSchema = {
+          pressure: {
+            cpu,
+            date,
+            isAvailable,
+            maxConcurrent,
+            maxQueued,
+            memory,
+            message,
+            queued,
+            reason,
+            recentlyRejected,
+            running,
+          },
+        };
 
-    if (req.headers.accept === contentTypes.text) {
-      const code = response.pressure.isAvailable ? 200 : 503;
-      return writeResponse(res, code, message);
-    }
+        if (req.headers.accept === contentTypes.text) {
+          const code = response.pressure.isAvailable ? 200 : 503;
+          return writeResponse(res, code, message);
+        }
 
-    return jsonResponse(res, 200, response);
+        return jsonResponse(res, 200, response);
+      })(),
+    );
   }
 }

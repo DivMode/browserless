@@ -19,6 +19,7 @@ import {
   sleep,
 } from '@browserless.io/browserless';
 import { mkdir, readdir } from 'fs/promises';
+import { Effect } from 'effect';
 import { ServerResponse } from 'http';
 import { createReadStream } from 'fs';
 import { deleteAsync } from 'del';
@@ -66,85 +67,92 @@ export default class ChromiumDownloadPostRoute extends BrowserHTTPRoute {
     browser: BrowserInstance,
   ): Promise<void> {
     const config = this.config();
-    const downloadPath = path.join(
-      await config.getDownloadsDir(),
-      `.browserless.download.${id()}`,
-    );
-
-    logger.info(`Generating a download directory at "${downloadPath}"`);
-    await mkdir(downloadPath);
-    const handler = functionHandler(config, logger, { downloadPath });
-    const response = await handler(req, browser);
-
-    const { page } = response;
-    logger.debug(`Download function has returned, finding downloads...`);
-    async function checkIfDownloadComplete(): Promise<string | null> {
-      if (res.headersSent) {
-        logger.trace(
-          `Request headers have been sent, terminating download watch.`,
+    return Effect.runPromise(
+      Effect.fn('route.download.post')(function* () {
+        const downloadPath = path.join(
+          yield* Effect.promise(() => config.getDownloadsDir()),
+          `.browserless.download.${id()}`,
         );
-        return null;
-      }
-      const [fileName] = await readdir(downloadPath);
-      if (!fileName || fileName.endsWith('.crdownload')) {
-        await sleep(500);
-        return checkIfDownloadComplete();
-      }
 
-      logger.debug(`All files have finished downloading`);
+        logger.info(`Generating a download directory at "${downloadPath}"`);
+        yield* Effect.promise(() => mkdir(downloadPath));
+        const handler = functionHandler(config, logger, { downloadPath });
+        const response = yield* Effect.promise(() => handler(req, browser));
 
-      return path.join(downloadPath, fileName);
-    }
-
-    const filePath = await checkIfDownloadComplete();
-    logger.debug(`Closing pages.`);
-    page.close();
-    page.removeAllListeners();
-
-    const rmDownload = once(
-      () =>
-        filePath &&
-        deleteAsync(filePath, { force: true })
-          .then(() => {
-            logger.debug(
-              `Successfully deleted downloads from disk at "${filePath}"`,
+        const { page } = response;
+        logger.debug(`Download function has returned, finding downloads...`);
+        async function checkIfDownloadComplete(): Promise<string | null> {
+          if (res.headersSent) {
+            logger.trace(
+              `Request headers have been sent, terminating download watch.`,
             );
-          })
-          .catch((err) => {
-            logger.error(
-              `Error cleaning up downloaded files: "${err}" at "${filePath}"`,
-            );
-          }),
-    );
-
-    if (res.headersSent || !filePath) {
-      rmDownload();
-      return;
-    }
-    const contentType = mimeTypes.get(path.extname(filePath));
-    if (contentType) {
-      res.setHeader('Content-Type', contentType);
-    }
-
-    // Stream the file — bridge to Promise for the createReadStream callback API
-    return new Promise<void>((resolve, reject) => {
-      createReadStream(filePath)
-        .on('error', (error) => {
-          if (error) {
-            rmDownload();
-            return reject(
-              new NotFound(
-                `Couldn't locate or send downloads in "${downloadPath}"`,
-              ),
-            );
+            return null;
           }
-        })
-        .on('end', () => {
-          logger.info(`Downloads successfully sent`);
+          const [fileName] = await readdir(downloadPath);
+          if (!fileName || fileName.endsWith('.crdownload')) {
+            await sleep(500);
+            return checkIfDownloadComplete();
+          }
+
+          logger.debug(`All files have finished downloading`);
+
+          return path.join(downloadPath, fileName);
+        }
+
+        const filePath = yield* Effect.promise(() => checkIfDownloadComplete());
+        logger.debug(`Closing pages.`);
+        page.close();
+        page.removeAllListeners();
+
+        const rmDownload = once(
+          () =>
+            filePath &&
+            deleteAsync(filePath, { force: true })
+              .then(() => {
+                logger.debug(
+                  `Successfully deleted downloads from disk at "${filePath}"`,
+                );
+              })
+              .catch((err) => {
+                logger.error(
+                  `Error cleaning up downloaded files: "${err}" at "${filePath}"`,
+                );
+              }),
+        );
+
+        if (res.headersSent || !filePath) {
           rmDownload();
-          return resolve();
-        })
-        .pipe(res);
-    });
+          return;
+        }
+        const contentType = mimeTypes.get(path.extname(filePath));
+        if (contentType) {
+          res.setHeader('Content-Type', contentType);
+        }
+
+        // Stream the file — bridge to Promise for the createReadStream callback API
+        yield* Effect.promise(
+          () =>
+            new Promise<void>((resolve, reject) => {
+              createReadStream(filePath)
+                .on('error', (error) => {
+                  if (error) {
+                    rmDownload();
+                    return reject(
+                      new NotFound(
+                        `Couldn't locate or send downloads in "${downloadPath}"`,
+                      ),
+                    );
+                  }
+                })
+                .on('end', () => {
+                  logger.info(`Downloads successfully sent`);
+                  rmDownload();
+                  return resolve();
+                })
+                .pipe(res);
+            }),
+        );
+      })(),
+    );
   }
 }

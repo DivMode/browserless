@@ -10,6 +10,7 @@ import {
   writeResponse,
 } from '@browserless.io/browserless';
 import { ServerResponse } from 'http';
+import { Effect } from 'effect';
 
 export type ResponseSchema = Array<IBrowserlessStats>;
 
@@ -25,12 +26,19 @@ export default class MetricsGetRoute extends HTTPRoute {
   path = HTTPManagementRoutes.metrics;
   tags = [APITags.management];
   async handler(_req: Request, res: ServerResponse): Promise<void> {
-    const fileSystem = this.fileSystem();
-    const config = this.config();
+    const route = this;
+    return Effect.runPromise(
+      Effect.fn('route.metrics.get')(function* () {
+        const fileSystem = route.fileSystem();
+        const config = route.config();
 
-    const stats = await fileSystem.read(config.getMetricsJSONPath(), false);
-    const response = `[${stats.join(',')}]`;
+        const stats = yield* Effect.promise(() =>
+          fileSystem.read(config.getMetricsJSONPath(), false),
+        );
+        const response = `[${stats.join(',')}]`;
 
-    return writeResponse(res, 200, response, contentTypes.json);
+        return writeResponse(res, 200, response, contentTypes.json);
+      })(),
+    );
   }
 }

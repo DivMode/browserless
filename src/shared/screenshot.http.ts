@@ -30,6 +30,7 @@ import {
   waitForFunction as waitForFn,
 } from '@browserless.io/browserless';
 import { ElementHandle, Page } from 'puppeteer-core';
+import { Effect } from 'effect';
 import { ServerResponse } from 'http';
 import Stream from 'stream';
 
@@ -90,190 +91,202 @@ export default class ScreenshotPost extends BrowserHTTPRoute {
     logger: Logger,
     browser: BrowserInstance,
   ): Promise<void> {
-    logger.info('Screenshot API invoked with body:', req.body);
-    const contentType =
-      !req.headers.accept || req.headers.accept?.includes('*')
-        ? 'image/png'
-        : req.headers.accept;
+    return Effect.runPromise(
+      Effect.fn('route.screenshot.post')(function* () {
+        logger.info('Screenshot API invoked with body:', req.body);
+        const contentType =
+          !req.headers.accept || req.headers.accept?.includes('*')
+            ? 'image/png'
+            : req.headers.accept;
 
-    if (!req.body) {
-      throw new BadRequest(`Couldn't parse JSON body`);
-    }
-
-    res.setHeader('Content-Type', contentType);
-
-    const {
-      url,
-      gotoOptions,
-      authenticate,
-      html,
-      addScriptTag = [],
-      addStyleTag = [],
-      cookies = [],
-      emulateMediaType,
-      rejectRequestPattern = [],
-      requestInterceptors = [],
-      rejectResourceTypes = [],
-      options,
-      scrollPage,
-      setExtraHTTPHeaders,
-      setJavaScriptEnabled,
-      userAgent,
-      viewport,
-      waitForTimeout,
-      waitForFunction,
-      waitForSelector,
-      waitForEvent,
-      selector,
-      bestAttempt = false,
-    } = req.body as BodySchema;
-
-    if (options?.path) {
-      throw new BadRequest(`"path" option is not allowed`);
-    }
-
-    const content = url || html;
-
-    if (!content) {
-      throw new BadRequest(`One of "url" or "html" properties are required.`);
-    }
-
-    const page = (await browser.newPage()) as UnwrapPromise<
-      ReturnType<ChromiumCDP['newPage']>
-    >;
-    const gotoCall = url ? page.goto.bind(page) : page.setContent.bind(page);
-
-    if (emulateMediaType) {
-      await page.emulateMediaType(emulateMediaType);
-    }
-
-    if (cookies.length) {
-      await page.setCookie(...cookies);
-    }
-
-    if (viewport) {
-      await page.setViewport(viewport);
-    }
-
-    if (userAgent) {
-      await page.setUserAgent(userAgent);
-    }
-
-    if (authenticate) {
-      await page.authenticate(authenticate);
-    }
-
-    if (setExtraHTTPHeaders) {
-      await page.setExtraHTTPHeaders(setExtraHTTPHeaders);
-    }
-
-    if (setJavaScriptEnabled) {
-      await page.setJavaScriptEnabled(setJavaScriptEnabled);
-    }
-
-    if (
-      rejectRequestPattern.length ||
-      requestInterceptors.length ||
-      rejectResourceTypes.length
-    ) {
-      await page.setRequestInterception(true);
-
-      page.on('request', (req) => {
-        if (
-          !!rejectRequestPattern.find((pattern) => req.url().match(pattern)) ||
-          rejectResourceTypes.includes(req.resourceType())
-        ) {
-          logger.debug(`Aborting request ${req.method()}: ${req.url()}`);
-          return req.abort();
+        if (!req.body) {
+          throw new BadRequest(`Couldn't parse JSON body`);
         }
-        const interceptor = requestInterceptors.find((r) =>
-          req.url().match(r.pattern),
-        );
-        if (interceptor) {
-          return req.respond({
-            ...interceptor.response,
-            body: interceptor.response.body
-              ? isBase64Encoded(interceptor.response.body as string)
-                ? Buffer.from(interceptor.response.body, 'base64')
-                : interceptor.response.body
-              : undefined,
+
+        res.setHeader('Content-Type', contentType);
+
+        const {
+          url,
+          gotoOptions,
+          authenticate,
+          html,
+          addScriptTag = [],
+          addStyleTag = [],
+          cookies = [],
+          emulateMediaType,
+          rejectRequestPattern = [],
+          requestInterceptors = [],
+          rejectResourceTypes = [],
+          options,
+          scrollPage,
+          setExtraHTTPHeaders,
+          setJavaScriptEnabled,
+          userAgent,
+          viewport,
+          waitForTimeout,
+          waitForFunction,
+          waitForSelector,
+          waitForEvent,
+          selector,
+          bestAttempt = false,
+        } = req.body as BodySchema;
+
+        if (options?.path) {
+          throw new BadRequest(`"path" option is not allowed`);
+        }
+
+        const content = url || html;
+
+        if (!content) {
+          throw new BadRequest(`One of "url" or "html" properties are required.`);
+        }
+
+        const page = (yield* Effect.promise(() =>
+          Promise.resolve(browser.newPage()),
+        )) as UnwrapPromise<ReturnType<ChromiumCDP['newPage']>>;
+        const gotoCall = url ? page.goto.bind(page) : page.setContent.bind(page);
+
+        if (emulateMediaType) {
+          yield* Effect.promise(() => page.emulateMediaType(emulateMediaType));
+        }
+
+        if (cookies.length) {
+          yield* Effect.promise(() => page.setCookie(...cookies));
+        }
+
+        if (viewport) {
+          yield* Effect.promise(() => page.setViewport(viewport));
+        }
+
+        if (userAgent) {
+          yield* Effect.promise(() => page.setUserAgent(userAgent));
+        }
+
+        if (authenticate) {
+          yield* Effect.promise(() => page.authenticate(authenticate));
+        }
+
+        if (setExtraHTTPHeaders) {
+          yield* Effect.promise(() => page.setExtraHTTPHeaders(setExtraHTTPHeaders));
+        }
+
+        if (setJavaScriptEnabled) {
+          yield* Effect.promise(() => page.setJavaScriptEnabled(setJavaScriptEnabled));
+        }
+
+        if (
+          rejectRequestPattern.length ||
+          requestInterceptors.length ||
+          rejectResourceTypes.length
+        ) {
+          yield* Effect.promise(() => page.setRequestInterception(true));
+
+          page.on('request', (req) => {
+            if (
+              !!rejectRequestPattern.find((pattern) => req.url().match(pattern)) ||
+              rejectResourceTypes.includes(req.resourceType())
+            ) {
+              logger.debug(`Aborting request ${req.method()}: ${req.url()}`);
+              return req.abort();
+            }
+            const interceptor = requestInterceptors.find((r) =>
+              req.url().match(r.pattern),
+            );
+            if (interceptor) {
+              return req.respond({
+                ...interceptor.response,
+                body: interceptor.response.body
+                  ? isBase64Encoded(interceptor.response.body as string)
+                    ? Buffer.from(interceptor.response.body, 'base64')
+                    : interceptor.response.body
+                  : undefined,
+              });
+            }
+            return req.continue();
           });
         }
-        return req.continue();
-      });
-    }
 
-    const gotoResponse = await gotoCall(content, gotoOptions).catch(
-      bestAttemptCatch(bestAttempt),
+        const gotoResponse = yield* Effect.promise(() =>
+          gotoCall(content, gotoOptions).catch(bestAttemptCatch(bestAttempt)),
+        );
+
+        if (addStyleTag.length) {
+          for (const tag in addStyleTag) {
+            yield* Effect.promise(() => page.addStyleTag(addStyleTag[tag]));
+          }
+        }
+
+        if (addScriptTag.length) {
+          for (const tag in addScriptTag) {
+            yield* Effect.promise(() => page.addScriptTag(addScriptTag[tag]));
+          }
+        }
+
+        if (waitForTimeout) {
+          yield* Effect.promise(() =>
+            sleep(waitForTimeout).catch(bestAttemptCatch(bestAttempt)),
+          );
+        }
+
+        if (waitForFunction) {
+          yield* Effect.promise(() =>
+            waitForFn(page, waitForFunction).catch(bestAttemptCatch(bestAttempt)),
+          );
+        }
+
+        if (waitForSelector) {
+          const { selector, hidden, timeout, visible } = waitForSelector;
+          yield* Effect.promise(() =>
+            page
+              .waitForSelector(selector, { hidden, timeout, visible })
+              .catch(bestAttemptCatch(bestAttempt)),
+          );
+        }
+
+        if (waitForEvent) {
+          yield* Effect.promise(() =>
+            waitForEvt(page, waitForEvent).catch(bestAttemptCatch(bestAttempt)),
+          );
+        }
+
+        if (scrollPage) {
+          yield* Effect.promise(() => scrollThroughPage(page));
+        }
+
+        const headers = {
+          'X-Response-Code': gotoResponse?.status(),
+          'X-Response-IP': gotoResponse?.remoteAddress().ip,
+          'X-Response-Port': gotoResponse?.remoteAddress().port,
+          'X-Response-Status': gotoResponse?.statusText(),
+          'X-Response-URL': gotoResponse?.url().substring(0, 1000),
+        };
+
+        for (const [key, value] of Object.entries(headers)) {
+          if (value !== undefined) {
+            res.setHeader(key, value);
+          }
+        }
+
+        const target: ElementHandle | Page | null = selector
+          ? yield* Effect.promise(() => page.$(selector))
+          : page;
+
+        if (!target) {
+          throw new BadRequest('Element not found on page!');
+        }
+
+        const buffer = (yield* Effect.promise(() =>
+          (target as Page).screenshot(options),
+        )) as Buffer;
+
+        const readStream = new Stream.PassThrough();
+        readStream.end(buffer);
+
+        yield* Effect.promise(() => new Promise((r) => readStream.pipe(res).once('close', r)));
+
+        page.close().catch(noop);
+        logger.debug('Screenshot API request completed');
+      })(),
     );
-
-    if (addStyleTag.length) {
-      for (const tag in addStyleTag) {
-        await page.addStyleTag(addStyleTag[tag]);
-      }
-    }
-
-    if (addScriptTag.length) {
-      for (const tag in addScriptTag) {
-        await page.addScriptTag(addScriptTag[tag]);
-      }
-    }
-
-    if (waitForTimeout) {
-      await sleep(waitForTimeout).catch(bestAttemptCatch(bestAttempt));
-    }
-
-    if (waitForFunction) {
-      await waitForFn(page, waitForFunction).catch(
-        bestAttemptCatch(bestAttempt),
-      );
-    }
-
-    if (waitForSelector) {
-      const { selector, hidden, timeout, visible } = waitForSelector;
-      await page
-        .waitForSelector(selector, { hidden, timeout, visible })
-        .catch(bestAttemptCatch(bestAttempt));
-    }
-
-    if (waitForEvent) {
-      await waitForEvt(page, waitForEvent).catch(bestAttemptCatch(bestAttempt));
-    }
-
-    if (scrollPage) {
-      await scrollThroughPage(page);
-    }
-
-    const headers = {
-      'X-Response-Code': gotoResponse?.status(),
-      'X-Response-IP': gotoResponse?.remoteAddress().ip,
-      'X-Response-Port': gotoResponse?.remoteAddress().port,
-      'X-Response-Status': gotoResponse?.statusText(),
-      'X-Response-URL': gotoResponse?.url().substring(0, 1000),
-    };
-
-    for (const [key, value] of Object.entries(headers)) {
-      if (value !== undefined) {
-        res.setHeader(key, value);
-      }
-    }
-
-    const target: ElementHandle | Page | null = selector
-      ? await page.$(selector)
-      : page;
-
-    if (!target) {
-      throw new BadRequest('Element not found on page!');
-    }
-
-    const buffer = (await (target as Page).screenshot(options)) as Buffer;
-
-    const readStream = new Stream.PassThrough();
-    readStream.end(buffer);
-
-    await new Promise((r) => readStream.pipe(res).once('close', r));
-
-    page.close().catch(noop);
-    logger.debug('Screenshot API request completed');
   }
 }

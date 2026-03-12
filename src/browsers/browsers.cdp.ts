@@ -16,6 +16,7 @@ import {
 import type { TargetId } from '../shared/cloudflare-detection.js';
 import puppeteer, { Browser, Page, Target } from 'puppeteer-core';
 import { Duplex } from 'stream';
+import { Effect } from 'effect';
 import { EventEmitter } from 'events';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import getPort from 'get-port';
@@ -228,8 +229,10 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
     return page;
   }
 
-  public async close(): Promise<void> {
-    if (this.browser) {
+  private closeEffect(): Effect.Effect<void> {
+    return Effect.fn('chromiumCdp.close')({ self: this }, function*() {
+      if (!this.browser) return;
+
       this.logger.info(
         `Closing ${this.constructor.name} process and all listeners`,
       );
@@ -240,10 +243,10 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
       this.browser = null;
       this.browserWSEndpoint = null;
 
-      const closed = await Promise.race([
-        browser.close().then(() => true),
-        new Promise<false>((resolve) => setTimeout(() => resolve(false), 5_000)),
-      ]).catch(() => false);
+      const closed = yield* Effect.tryPromise(() => browser.close().then(() => true)).pipe(
+        Effect.timeout('5 seconds'),
+        Effect.catch(() => Effect.succeed(false)),
+      );
 
       if (!closed && chromeProcess?.pid) {
         this.logger.warn(
@@ -258,7 +261,11 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
 
       browser.removeAllListeners();
       this.cleanListeners();
-    }
+    })();
+  }
+
+  public async close(): Promise<void> {
+    return Effect.runPromise(this.closeEffect());
   }
 
   public async pages(): Promise<Page[]> {
@@ -269,192 +276,198 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
     return this.browser?.process() || null;
   }
 
-  public async launch({
+  private launchEffect({
     options,
     stealth,
-  }: BrowserLauncherOptions): Promise<Browser> {
-    this.port = await getPort();
-    this.logger.info(`${this.constructor.name} got open port ${this.port}`);
+  }: BrowserLauncherOptions): Effect.Effect<Browser> {
+    return Effect.fn('chromiumCdp.launch')({ self: this }, function*() {
+      this.port = yield* Effect.promise(() => getPort());
+      this.logger.info(`${this.constructor.name} got open port ${this.port}`);
 
-    const extensionLaunchArgs = options.args?.find((a) =>
-      a.startsWith('--load-extension'),
-    );
-
-    // Remove extension flags as we recompile them below with our own
-    options.args = options.args?.filter(
-      (a) =>
-        !a.startsWith('--load-extension') &&
-        !a.startsWith('--disable-extensions-except'),
-    );
-
-    const noExt = process.env.DISABLE_EXTENSIONS === 'true';
-    const noScreenxy = process.env.DISABLE_SCREENXY_EXT === 'true';
-    const noReplayExt = process.env.DISABLE_REPLAY_EXT === 'true';
-    const extensions = noExt ? [] : [
-      this.blockAds ? ublockLitePath : null,
-      noScreenxy ? null : screenxyPatchPath,
-      (this.enableReplay && !noReplayExt) ? replayExtensionPath : null,
-      extensionLaunchArgs ? extensionLaunchArgs.split('=')[1] : null,
-    ].filter((_) => !!_);
-
-    // Bypass the host we bind to so things like /function can work with proxies
-    if (options.args?.some((arg) => arg.includes('--proxy-server'))) {
-      const defaultBypassList = [
-        this.config.getHost(),
-        new URL(this.config.getExternalAddress()).hostname,
-      ];
-      const bypassProxyListIdx = options.args?.findIndex((arg) =>
-        arg.includes('--proxy-bypass-list'),
+      const extensionLaunchArgs = options.args?.find((a) =>
+        a.startsWith('--load-extension'),
       );
-      if (bypassProxyListIdx !== -1) {
-        options.args[bypassProxyListIdx] =
-          `--proxy-bypass-list=` +
-          [options.args[bypassProxyListIdx].split('=')[1], ...defaultBypassList]
-            .filter((_) => !!_)
-            .join(';');
-      } else {
-        options.args.push(`--proxy-bypass-list=${defaultBypassList.join(';')}`);
-      }
-    }
 
-    // Enforce WebRTC leak prevention when proxy is active
-    const hasProxy = options.args?.some((arg) => arg.includes('--proxy-server'));
-    const hasWebRtcPolicy = options.args?.some((arg) => arg.includes('--force-webrtc-ip-handling-policy'));
-    if (hasProxy && !hasWebRtcPolicy) {
-      options.args!.push('--force-webrtc-ip-handling-policy=disable_non_proxied_udp');
-    }
-
-    const finalOptions = {
-      ...options,
-      args: [
-        `--remote-debugging-port=${this.port}`,
-        `--no-sandbox`,
-
-        // ── Anti-detection: suppress automation signals ──────────────
-        // Source: SeleniumBase UC mode — reduce fingerprint surface via
-        // Chrome flags rather than detectable JS overrides.
-        `--disable-blink-features=AutomationControlled`,
-        `--simulate-outdated-no-au=Tue, 31 Dec 2099 23:59:59 GMT`,
-        `--no-first-run`,
-        `--no-default-browser-check`,
-        `--homepage=about:blank`,
-        `--no-pings`,
-        `--password-store=basic`,
-
-        // ── Disable features that leak automation fingerprint ────────
-        `--disable-features=` + [
-          'LocalNetworkAccessChecks',
-          'UserAgentClientHint',
-          'OptimizationHints',
-          'OptimizationHintsFetching',
-          'OptimizationTargetPrediction',
-          'OptimizationGuideModelDownloading',
-          'Translate',
-          'ComponentUpdater',
-          'DownloadBubble',
-          'DownloadBubbleV2',
-          'InsecureDownloadWarnings',
-          'InterestFeedContentSuggestions',
-          'PrivacySandboxSettings4',
-          'SidePanelPinning',
-          'Bluetooth',
-          'WebBluetooth',
-          'UnifiedWebBluetooth',
-          'WebAuthentication',
-          'PasskeyAuth',
-        ].join(','),
-
-        // ── WebGL normalization ──────────────────────────────────────
-        // SwiftShader produces a consistent WebGL fingerprint in Docker/Xvfb
-        // where GPU access is unavailable anyway.
-        `--use-gl=angle`,
-        `--use-angle=swiftshader-webgl`,
-
-        // ── Background throttling prevention ─────────────────────────
-        `--disable-background-timer-throttling`,
-        `--disable-backgrounding-occluded-windows`,
-        `--disable-renderer-backgrounding`,
-
-        // ── UI noise suppression ─────────────────────────────────────
-        `--disable-infobars`,
-        `--disable-notifications`,
-        `--deny-permission-prompts`,
-        `--disable-popup-blocking`,
-        `--disable-search-engine-choice-screen`,
-        `--disable-translate`,
-        `--disable-save-password-bubble`,
-        `--disable-single-click-autofill`,
-        `--disable-client-side-phishing-detection`,
-        `--disable-device-discovery-notifications`,
-        `--ash-no-nudges`,
-
-        // ── Performance / IPC ────────────────────────────────────────
-        `--animation-duration-scale=0`,
-        `--wm-window-animations-disabled`,
-        `--disable-ipc-flooding-protection`,
-        `--dns-prefetch-disable`,
-
-        // ── Privacy Sandbox ──────────────────────────────────────────
-        // Real Chrome has these APIs; enabling makes us look less like automation.
-        `--enable-privacy-sandbox-ads-apis`,
-
-        ...(options.args || []),
-        this.userDataDir ? `--user-data-dir=${this.userDataDir}` : '',
-      ].filter((_) => !!_),
-      executablePath: this.executablePath,
-    };
-
-    if (extensions.length) {
-      finalOptions.args.push(
-        '--load-extension=' + extensions.join(','),
-        '--disable-extensions-except=' + extensions.join(','),
+      // Remove extension flags as we recompile them below with our own
+      options.args = options.args?.filter(
+        (a) =>
+          !a.startsWith('--load-extension') &&
+          !a.startsWith('--disable-extensions-except'),
       );
-    }
 
-    // ── Write Chrome Preferences before launch ──────────────────────
-    // Suppresses credential prompts, notifications, safe browsing noise,
-    // and the "Chrome didn't shut down correctly" crash banner.
-    if (this.userDataDir) {
-      const prefsDir = path.join(this.userDataDir, 'Default');
-      const prefsPath = path.join(prefsDir, 'Preferences');
-      try {
-        fs.mkdirSync(prefsDir, { recursive: true });
-        const prefs = {
-          credentials_enable_service: false,
-          autofill: { credit_card_enabled: false },
-          profile: {
-            password_manager_enabled: false,
-            password_manager_leak_detection: false,
-            exit_type: null,
-            default_content_setting_values: { notifications: 2 },
-          },
-          local_discovery: { notifications_enabled: false },
-          safebrowsing: { enabled: false, disable_download_protection: true },
-        };
-        fs.writeFileSync(prefsPath, JSON.stringify(prefs));
-      } catch (err) {
-        this.logger.warn(`Failed to write Chrome Preferences: ${err}`);
+      const noExt = process.env.DISABLE_EXTENSIONS === 'true';
+      const noScreenxy = process.env.DISABLE_SCREENXY_EXT === 'true';
+      const noReplayExt = process.env.DISABLE_REPLAY_EXT === 'true';
+      const extensions = noExt ? [] : [
+        this.blockAds ? ublockLitePath : null,
+        noScreenxy ? null : screenxyPatchPath,
+        (this.enableReplay && !noReplayExt) ? replayExtensionPath : null,
+        extensionLaunchArgs ? extensionLaunchArgs.split('=')[1] : null,
+      ].filter((_) => !!_);
+
+      // Bypass the host we bind to so things like /function can work with proxies
+      if (options.args?.some((arg) => arg.includes('--proxy-server'))) {
+        const defaultBypassList = [
+          this.config.getHost(),
+          new URL(this.config.getExternalAddress()).hostname,
+        ];
+        const bypassProxyListIdx = options.args?.findIndex((arg) =>
+          arg.includes('--proxy-bypass-list'),
+        );
+        if (bypassProxyListIdx !== -1) {
+          options.args[bypassProxyListIdx] =
+            `--proxy-bypass-list=` +
+            [options.args[bypassProxyListIdx].split('=')[1], ...defaultBypassList]
+              .filter((_) => !!_)
+              .join(';');
+        } else {
+          options.args.push(`--proxy-bypass-list=${defaultBypassList.join(';')}`);
+        }
       }
-    }
 
-    const launch = stealth
-      ? puppeteerStealth.launch.bind(puppeteerStealth)
-      : puppeteer.launch.bind(puppeteer);
+      // Enforce WebRTC leak prevention when proxy is active
+      const hasProxy = options.args?.some((arg) => arg.includes('--proxy-server'));
+      const hasWebRtcPolicy = options.args?.some((arg) => arg.includes('--force-webrtc-ip-handling-policy'));
+      if (hasProxy && !hasWebRtcPolicy) {
+        options.args!.push('--force-webrtc-ip-handling-policy=disable_non_proxied_udp');
+      }
 
-    this.logger.info(
-      finalOptions,
-      `Launching ${this.constructor.name} Handler`,
-    );
-    this.browser = (await launch(finalOptions)) as Browser;
+      const finalOptions = {
+        ...options,
+        args: [
+          `--remote-debugging-port=${this.port}`,
+          `--no-sandbox`,
 
-    this.browser.on('targetcreated', this.onTargetCreated.bind(this));
-    this.running = true;
-    this.browserWSEndpoint = this.browser.wsEndpoint();
-    this.logger.info(
-      `${this.constructor.name} is running on ${this.browserWSEndpoint}`,
-    );
+          // ── Anti-detection: suppress automation signals ──────────────
+          // Source: SeleniumBase UC mode — reduce fingerprint surface via
+          // Chrome flags rather than detectable JS overrides.
+          `--disable-blink-features=AutomationControlled`,
+          `--simulate-outdated-no-au=Tue, 31 Dec 2099 23:59:59 GMT`,
+          `--no-first-run`,
+          `--no-default-browser-check`,
+          `--homepage=about:blank`,
+          `--no-pings`,
+          `--password-store=basic`,
 
-    return this.browser;
+          // ── Disable features that leak automation fingerprint ────────
+          `--disable-features=` + [
+            'LocalNetworkAccessChecks',
+            'UserAgentClientHint',
+            'OptimizationHints',
+            'OptimizationHintsFetching',
+            'OptimizationTargetPrediction',
+            'OptimizationGuideModelDownloading',
+            'Translate',
+            'ComponentUpdater',
+            'DownloadBubble',
+            'DownloadBubbleV2',
+            'InsecureDownloadWarnings',
+            'InterestFeedContentSuggestions',
+            'PrivacySandboxSettings4',
+            'SidePanelPinning',
+            'Bluetooth',
+            'WebBluetooth',
+            'UnifiedWebBluetooth',
+            'WebAuthentication',
+            'PasskeyAuth',
+          ].join(','),
+
+          // ── WebGL normalization ──────────────────────────────────────
+          // SwiftShader produces a consistent WebGL fingerprint in Docker/Xvfb
+          // where GPU access is unavailable anyway.
+          `--use-gl=angle`,
+          `--use-angle=swiftshader-webgl`,
+
+          // ── Background throttling prevention ─────────────────────────
+          `--disable-background-timer-throttling`,
+          `--disable-backgrounding-occluded-windows`,
+          `--disable-renderer-backgrounding`,
+
+          // ── UI noise suppression ─────────────────────────────────────
+          `--disable-infobars`,
+          `--disable-notifications`,
+          `--deny-permission-prompts`,
+          `--disable-popup-blocking`,
+          `--disable-search-engine-choice-screen`,
+          `--disable-translate`,
+          `--disable-save-password-bubble`,
+          `--disable-single-click-autofill`,
+          `--disable-client-side-phishing-detection`,
+          `--disable-device-discovery-notifications`,
+          `--ash-no-nudges`,
+
+          // ── Performance / IPC ────────────────────────────────────────
+          `--animation-duration-scale=0`,
+          `--wm-window-animations-disabled`,
+          `--disable-ipc-flooding-protection`,
+          `--dns-prefetch-disable`,
+
+          // ── Privacy Sandbox ──────────────────────────────────────────
+          // Real Chrome has these APIs; enabling makes us look less like automation.
+          `--enable-privacy-sandbox-ads-apis`,
+
+          ...(options.args || []),
+          this.userDataDir ? `--user-data-dir=${this.userDataDir}` : '',
+        ].filter((_) => !!_),
+        executablePath: this.executablePath,
+      };
+
+      if (extensions.length) {
+        finalOptions.args.push(
+          '--load-extension=' + extensions.join(','),
+          '--disable-extensions-except=' + extensions.join(','),
+        );
+      }
+
+      // ── Write Chrome Preferences before launch ──────────────────────
+      // Suppresses credential prompts, notifications, safe browsing noise,
+      // and the "Chrome didn't shut down correctly" crash banner.
+      if (this.userDataDir) {
+        const prefsDir = path.join(this.userDataDir, 'Default');
+        const prefsPath = path.join(prefsDir, 'Preferences');
+        try {
+          fs.mkdirSync(prefsDir, { recursive: true });
+          const prefs = {
+            credentials_enable_service: false,
+            autofill: { credit_card_enabled: false },
+            profile: {
+              password_manager_enabled: false,
+              password_manager_leak_detection: false,
+              exit_type: null,
+              default_content_setting_values: { notifications: 2 },
+            },
+            local_discovery: { notifications_enabled: false },
+            safebrowsing: { enabled: false, disable_download_protection: true },
+          };
+          fs.writeFileSync(prefsPath, JSON.stringify(prefs));
+        } catch (err) {
+          this.logger.warn(`Failed to write Chrome Preferences: ${err}`);
+        }
+      }
+
+      const launchFn = stealth
+        ? puppeteerStealth.launch.bind(puppeteerStealth)
+        : puppeteer.launch.bind(puppeteer);
+
+      this.logger.info(
+        finalOptions,
+        `Launching ${this.constructor.name} Handler`,
+      );
+      this.browser = (yield* Effect.promise(() => launchFn(finalOptions))) as Browser;
+
+      this.browser.on('targetcreated', this.onTargetCreated.bind(this));
+      this.running = true;
+      this.browserWSEndpoint = this.browser.wsEndpoint();
+      this.logger.info(
+        `${this.constructor.name} is running on ${this.browserWSEndpoint}`,
+      );
+
+      return this.browser;
+    })();
+  }
+
+  public async launch(options: BrowserLauncherOptions): Promise<Browser> {
+    return Effect.runPromise(this.launchEffect(options));
   }
 
   public wsEndpoint(): string | null {

@@ -1,4 +1,5 @@
 import { Config, IResourceLoad, Logger } from '@browserless.io/browserless';
+import { Effect } from 'effect';
 import { EventEmitter } from 'events';
 import si from 'systeminformation';
 
@@ -8,22 +9,52 @@ export class Monitoring extends EventEmitter {
     super();
   }
 
+  public getMachineStatsEffect(): Effect.Effect<IResourceLoad> {
+    return Effect.fn('monitoring.getMachineStats')({ self: this }, function* () {
+      const [cpuLoad, memLoad] = yield* Effect.tryPromise(() =>
+        Promise.all([si.currentLoad(), si.mem()]),
+      ).pipe(Effect.catch(() => Effect.succeed([null, null] as const)));
+
+      const cpu = cpuLoad ? cpuLoad.currentLoadUser / 100 : null;
+      const memory = memLoad ? memLoad.active / memLoad.total : null;
+
+      return {
+        cpu,
+        memory,
+      };
+    })();
+  }
+
+  public overloadedEffect(): Effect.Effect<{
+    cpuInt: number | null;
+    cpuOverloaded: boolean;
+    memoryInt: number | null;
+    memoryOverloaded: boolean;
+  }> {
+    return Effect.fn('monitoring.overloaded')({ self: this }, function* () {
+      const { cpu, memory } = yield* this.getMachineStatsEffect();
+      const cpuInt = cpu && Math.ceil(cpu * 100);
+      const memoryInt = memory && Math.ceil(memory * 100);
+
+      yield* Effect.logDebug(
+        `Checking overload status: CPU ${cpuInt}% Memory ${memoryInt}%`,
+      );
+
+      const cpuOverloaded = !!(cpuInt && cpuInt >= this.config.getCPULimit());
+      const memoryOverloaded = !!(
+        memoryInt && memoryInt >= this.config.getMemoryLimit()
+      );
+      return {
+        cpuInt,
+        cpuOverloaded,
+        memoryInt,
+        memoryOverloaded,
+      };
+    })();
+  }
+
   public async getMachineStats(): Promise<IResourceLoad> {
-    const [cpuLoad, memLoad] = await Promise.all([
-      si.currentLoad(),
-      si.mem(),
-    ]).catch((err) => {
-      this.log.error(`Error checking machine stats`, err);
-      return [null, null];
-    });
-
-    const cpu = cpuLoad ? cpuLoad.currentLoadUser / 100 : null;
-    const memory = memLoad ? memLoad.active / memLoad.total : null;
-
-    return {
-      cpu,
-      memory,
-    };
+    return Effect.runPromise(this.getMachineStatsEffect());
   }
 
   public async overloaded(): Promise<{
@@ -32,24 +63,7 @@ export class Monitoring extends EventEmitter {
     memoryInt: number | null;
     memoryOverloaded: boolean;
   }> {
-    const { cpu, memory } = await this.getMachineStats();
-    const cpuInt = cpu && Math.ceil(cpu * 100);
-    const memoryInt = memory && Math.ceil(memory * 100);
-
-    this.log.debug(
-      `Checking overload status: CPU ${cpuInt}% Memory ${memoryInt}%`,
-    );
-
-    const cpuOverloaded = !!(cpuInt && cpuInt >= this.config.getCPULimit());
-    const memoryOverloaded = !!(
-      memoryInt && memoryInt >= this.config.getMemoryLimit()
-    );
-    return {
-      cpuInt,
-      cpuOverloaded,
-      memoryInt,
-      memoryOverloaded,
-    };
+    return Effect.runPromise(this.overloadedEffect());
   }
 
   /**

@@ -166,50 +166,66 @@ export class Browserless extends EventEmitter {
     return true;
   }
 
-  protected async loadPwVersions(): Promise<void> {
-    const { playwrightVersions } = JSON.parse(
-      (await fs.readFile('package.json')).toString(),
-    );
+  protected loadPwVersionsEffect = Effect.fn('browserless.loadPwVersions')(
+    { self: this },
+    function* () {
+      const { playwrightVersions } = JSON.parse(
+        (
+          yield* Effect.promise(() => fs.readFile('package.json'))
+        ).toString(),
+      );
 
-    this.config.setPwVersions(playwrightVersions);
+      this.config.setPwVersions(playwrightVersions);
+    },
+  );
+
+  protected async loadPwVersions(): Promise<void> {
+    return Effect.runPromise(this.loadPwVersionsEffect());
   }
 
-  protected async saveMetrics(): Promise<void> {
-    const metricsPath = this.config.getMetricsJSONPath();
-    const { cpu, memory } = await this.monitoring.getMachineStats();
-    const metrics = await this.metrics.get();
-    const aggregatedStats: IBrowserlessStats = {
-      ...metrics,
-      cpu,
-      memory,
-    };
+  protected saveMetricsEffect = Effect.fn('browserless.saveMetrics')(
+    { self: this },
+    function* () {
+      const metricsPath = this.config.getMetricsJSONPath();
+      const { cpu, memory } = yield* this.monitoring.getMachineStatsEffect();
+      const metrics = this.metrics.get();
+      const aggregatedStats: IBrowserlessStats = {
+        ...metrics,
+        cpu,
+        memory,
+      };
 
-    this.metrics.reset();
+      this.metrics.reset();
 
-    this.logger.info(
-      `Current period usage: ${JSON.stringify({
-        date: aggregatedStats.date,
-        error: aggregatedStats.error,
-        maxConcurrent: aggregatedStats.maxConcurrent,
-        maxTime: aggregatedStats.maxTime,
-        meanTime: aggregatedStats.meanTime,
-        minTime: aggregatedStats.minTime,
-        rejected: aggregatedStats.rejected,
-        successful: aggregatedStats.successful,
-        timedout: aggregatedStats.timedout,
-        totalTime: aggregatedStats.totalTime,
-        units: aggregatedStats.units,
-      })}`,
-    );
-
-    if (metricsPath) {
-      this.logger.info(`Saving metrics to "${metricsPath}"`);
-      this.fileSystem.append(
-        metricsPath,
-        JSON.stringify(aggregatedStats),
-        false,
+      yield* Effect.logInfo(
+        `Current period usage: ${JSON.stringify({
+          date: aggregatedStats.date,
+          error: aggregatedStats.error,
+          maxConcurrent: aggregatedStats.maxConcurrent,
+          maxTime: aggregatedStats.maxTime,
+          meanTime: aggregatedStats.meanTime,
+          minTime: aggregatedStats.minTime,
+          rejected: aggregatedStats.rejected,
+          successful: aggregatedStats.successful,
+          timedout: aggregatedStats.timedout,
+          totalTime: aggregatedStats.totalTime,
+          units: aggregatedStats.units,
+        })}`,
       );
-    }
+
+      if (metricsPath) {
+        yield* Effect.logInfo(`Saving metrics to "${metricsPath}"`);
+        this.fileSystem.append(
+          metricsPath,
+          JSON.stringify(aggregatedStats),
+          false,
+        );
+      }
+    },
+  );
+
+  protected async saveMetrics(): Promise<void> {
+    return Effect.runPromise(this.saveMetricsEffect());
   }
 
   public setMetricsSaveInterval(interval: number) {
@@ -224,7 +240,7 @@ export class Browserless extends EventEmitter {
     }
     this.metricsSaveInterval = interval;
     this.metricsFiber = Effect.runFork(
-      Effect.tryPromise(() => this.saveMetrics()).pipe(
+      this.saveMetricsEffect().pipe(
         Effect.ignore,
         Effect.repeat(Schedule.fixed(Duration.millis(interval))),
       ),
@@ -260,227 +276,264 @@ export class Browserless extends EventEmitter {
     this.config.setPort(port);
   }
 
+  public stopEffect = Effect.fn('browserless.stop')(
+    { self: this },
+    function* () {
+      if (this.gaugeCollectorFiber) {
+        yield* Fiber.interrupt(this.gaugeCollectorFiber);
+        this.gaugeCollectorFiber = null;
+      }
+      if (this.metricsFiber) {
+        yield* Fiber.interrupt(this.metricsFiber);
+        this.metricsFiber = null;
+      }
+      yield* Effect.promise(() =>
+        Promise.all([
+          this.server?.shutdown(),
+          this.browserManager.shutdown(),
+          this.config.shutdown(),
+          this.fileSystem.shutdown(),
+          this.limiter.shutdown(),
+          this.metrics.shutdown(),
+          this.monitoring.shutdown(),
+          this.router.shutdown(),
+          this.token.shutdown(),
+          this.webhooks.shutdown(),
+          this.hooks.shutdown(),
+        ]),
+      );
+      // Dispose server OTLP runtime LAST — flushes the exporter's final span batch.
+      // Must happen after all sessions end so their final spans are in the buffer.
+      yield* disposeOtelRuntime.pipe(Effect.ignore);
+    },
+  );
+
   public async stop() {
-    if (this.gaugeCollectorFiber) {
-      await Effect.runPromise(Fiber.interrupt(this.gaugeCollectorFiber));
-      this.gaugeCollectorFiber = null;
-    }
-    if (this.metricsFiber) {
-      await Effect.runPromise(Fiber.interrupt(this.metricsFiber));
-      this.metricsFiber = null;
-    }
-    await Promise.all([
-      this.server?.shutdown(),
-      this.browserManager.shutdown(),
-      this.config.shutdown(),
-      this.fileSystem.shutdown(),
-      this.limiter.shutdown(),
-      this.metrics.shutdown(),
-      this.monitoring.shutdown(),
-      this.router.shutdown(),
-      this.token.shutdown(),
-      this.webhooks.shutdown(),
-      this.hooks.shutdown(),
-    ]);
-    // Dispose server OTLP runtime LAST — flushes the exporter's final span batch.
-    // Must happen after all sessions end so their final spans are in the buffer.
-    await Effect.runPromise(disposeOtelRuntime).catch(() => {});
+    return Effect.runPromise(this.stopEffect());
   }
 
-  public async start() {
-    const httpRoutes: Array<HTTPRoute | BrowserHTTPRoute> = [];
-    const wsRoutes: Array<WebSocketRoute | BrowserWebsocketRoute> = [];
-    const internalBrowsers = [
-      ChromiumCDP,
-      ChromeCDP,
-      EdgeCDP,
-      FirefoxPlaywright,
-      EdgePlaywright,
-      ChromiumPlaywright,
-      WebKitPlaywright,
-    ];
+  public startEffect = Effect.fn('browserless.start')(
+    { self: this },
+    function* () {
+      const httpRoutes: Array<HTTPRoute | BrowserHTTPRoute> = [];
+      const wsRoutes: Array<WebSocketRoute | BrowserWebsocketRoute> = [];
+      const internalBrowsers = [
+        ChromiumCDP,
+        ChromeCDP,
+        EdgeCDP,
+        FirefoxPlaywright,
+        EdgePlaywright,
+        ChromiumPlaywright,
+        WebKitPlaywright,
+      ];
 
-    const [[internalHttpRouteFiles, internalWsRouteFiles], installedBrowsers] =
-      await Promise.all([getRouteFiles(this.config), availableBrowsers]);
-
-    const hasDebugger = await this.config.hasDebugger();
-    const debuggerURL =
-      hasDebugger &&
-      makeExternalURL(this.config.getExternalAddress(), `/debugger/?token=xxx`);
-    const docsLink = makeExternalURL(this.config.getExternalAddress(), '/docs');
-
-    this.logger.info(printLogo(docsLink, debuggerURL));
-    this.logger.info(`Running as user "${userInfo().username}"`);
-    this.logger.debug('Starting import of HTTP Routes');
-
-    for (const httpRoute of [
-      ...this.httpRouteFiles,
-      ...internalHttpRouteFiles,
-    ]) {
-      if (httpRoute.endsWith('js')) {
-        const [bodySchema, querySchema] = await Promise.all(
-          routeSchemas.map(async (schemaType) => {
-            const schemaPath = path.parse(httpRoute);
-            schemaPath.base = `${schemaPath.name}.${schemaType}.json`;
-            return await readFile(path.format(schemaPath), 'utf-8').catch(
-              () => '',
-            );
-          }),
+      const [[internalHttpRouteFiles, internalWsRouteFiles], installedBrowsers] =
+        yield* Effect.promise(() =>
+          Promise.all([getRouteFiles(this.config), availableBrowsers]),
         );
 
-        const routeImport = `${
-          this.config.getIsWin() ? 'file:///' : ''
-        }${httpRoute}`;
-        const {
-          default: Route,
-        }: { default: Implements<HTTPRoute> | Implements<BrowserHTTPRoute> } =
-          await import(routeImport + `?cb=${Date.now()}`);
-        const route = new Route(
-          this.browserManager,
-          this.config,
-          this.fileSystem,
-          this.metrics,
-          this.monitoring,
-          this.staticSDKDir,
-          this.limiter,
+      const hasDebugger = yield* Effect.promise(() =>
+        this.config.hasDebugger(),
+      );
+      const debuggerURL =
+        hasDebugger &&
+        makeExternalURL(
+          this.config.getExternalAddress(),
+          `/debugger/?token=xxx`,
         );
+      const docsLink = makeExternalURL(
+        this.config.getExternalAddress(),
+        '/docs',
+      );
 
-        if (!this.routeIsDisabled(route)) {
-          route.bodySchema = safeParse(bodySchema);
-          route.querySchema = safeParse(querySchema);
-          route.config = () => this.config;
-          route.limiter = () => this.limiter;
-          route.metrics = () => this.metrics;
-          route.monitoring = () => this.monitoring;
-          route.fileSystem = () => this.fileSystem;
-          route.staticSDKDir = () => this.staticSDKDir;
-          route.videoManager = () => this.videoManager;
+      yield* Effect.logInfo(printLogo(docsLink, debuggerURL));
+      yield* Effect.logInfo(`Running as user "${userInfo().username}"`);
+      yield* Effect.logDebug('Starting import of HTTP Routes');
 
-          httpRoutes.push(route);
-        }
-      }
-    }
-
-    this.logger.debug('Starting import of WebSocket Routes');
-    for (const wsRoute of [
-      ...this.webSocketRouteFiles,
-      ...internalWsRouteFiles,
-    ]) {
-      if (wsRoute.endsWith('js')) {
-        const [, querySchema] = await Promise.all(
-          routeSchemas.map(async (schemaType) => {
-            const schemaPath = path.parse(wsRoute);
-            schemaPath.base = `${schemaPath.name}.${schemaType}.json`;
-            return await readFile(path.format(schemaPath), 'utf-8').catch(
-              () => '',
-            );
-          }),
-        );
-
-        const wsImport = normalizeFileProtocol(wsRoute);
-        const {
-          default: Route,
-        }: {
-          default:
-            | Implements<WebSocketRoute>
-            | Implements<BrowserWebsocketRoute>;
-        } = await import(wsImport + `?cb=${Date.now()}`);
-        const route = new Route(
-          this.browserManager,
-          this.config,
-          this.fileSystem,
-          this.metrics,
-          this.monitoring,
-          this.staticSDKDir,
-          this.limiter,
-        );
-
-        if (!this.routeIsDisabled(route)) {
-          route.querySchema = safeParse(querySchema);
-          route.config = () => this.config;
-          route.limiter = () => this.limiter;
-          route.metrics = () => this.metrics;
-          route.monitoring = () => this.monitoring;
-          route.fileSystem = () => this.fileSystem;
-          route.staticSDKDir = () => this.staticSDKDir;
-          route.videoManager = () => this.videoManager;
-
-          wsRoutes.push(route);
-        }
-      }
-    }
-
-    const allRoutes: [
-      (HTTPRoute | BrowserHTTPRoute)[],
-      (WebSocketRoute | BrowserWebsocketRoute)[],
-    ] = [
-      [...httpRoutes].filter((r) => this.filterNonMacArm64Browsers(r)),
-      [...wsRoutes].filter((r) => this.filterNonMacArm64Browsers(r)),
-    ];
-
-    // Validate that we have the browsers they are asking for
-    allRoutes
-      .flat()
-      .map((route) => {
-        if (
-          'browser' in route &&
-          route.browser &&
-          internalBrowsers.includes(route.browser) &&
-          !installedBrowsers.some((b) => b.name === route.browser?.name)
-        ) {
-          console.warn(
-            dedent(`Skipping route "${route.path}" — missing browser binary for "${route.browser?.name}".
-            Installed Browsers: ${installedBrowsers.map((b) => b.name).join(', ')}`),
+      for (const httpRoute of [
+        ...this.httpRouteFiles,
+        ...internalHttpRouteFiles,
+      ]) {
+        if (httpRoute.endsWith('js')) {
+          const [bodySchema, querySchema] = yield* Effect.promise(() =>
+            Promise.all(
+              routeSchemas.map(async (schemaType) => {
+                const schemaPath = path.parse(httpRoute);
+                schemaPath.base = `${schemaPath.name}.${schemaType}.json`;
+                return await readFile(path.format(schemaPath), 'utf-8').catch(
+                  () => '',
+                );
+              }),
+            ),
           );
-          return null;
+
+          const routeImport = `${
+            this.config.getIsWin() ? 'file:///' : ''
+          }${httpRoute}`;
+          const {
+            default: Route,
+          }: {
+            default: Implements<HTTPRoute> | Implements<BrowserHTTPRoute>;
+          } = yield* Effect.promise(() =>
+            import(routeImport + `?cb=${Date.now()}`),
+          );
+          const route = new Route(
+            this.browserManager,
+            this.config,
+            this.fileSystem,
+            this.metrics,
+            this.monitoring,
+            this.staticSDKDir,
+            this.limiter,
+          );
+
+          if (!this.routeIsDisabled(route)) {
+            route.bodySchema = safeParse(bodySchema);
+            route.querySchema = safeParse(querySchema);
+            route.config = () => this.config;
+            route.limiter = () => this.limiter;
+            route.metrics = () => this.metrics;
+            route.monitoring = () => this.monitoring;
+            route.fileSystem = () => this.fileSystem;
+            route.staticSDKDir = () => this.staticSDKDir;
+            route.videoManager = () => this.videoManager;
+
+            httpRoutes.push(route);
+          }
         }
-        return route;
-      })
-      .filter((e): e is NonNullable<typeof e> => e !== null)
-      .filter((e, i, a) => a.findIndex((r) => r.name === e.name) !== i)
-      .map((r) => r.name)
-      .forEach((name) => {
-        this.logger.warn(
-          `Found duplicate routing names. Route names must be unique: ${name}`,
-        );
-      });
+      }
 
-    const [filteredHTTPRoutes, filteredWSRoutes] = allRoutes;
+      yield* Effect.logDebug('Starting import of WebSocket Routes');
+      for (const wsRoute of [
+        ...this.webSocketRouteFiles,
+        ...internalWsRouteFiles,
+      ]) {
+        if (wsRoute.endsWith('js')) {
+          const [, querySchema] = yield* Effect.promise(() =>
+            Promise.all(
+              routeSchemas.map(async (schemaType) => {
+                const schemaPath = path.parse(wsRoute);
+                schemaPath.base = `${schemaPath.name}.${schemaType}.json`;
+                return await readFile(path.format(schemaPath), 'utf-8').catch(
+                  () => '',
+                );
+              }),
+            ),
+          );
 
-    filteredHTTPRoutes.forEach((r) => this.router.registerHTTPRoute(r));
-    filteredWSRoutes.forEach((r) => this.router.registerWebSocketRoute(r));
+          const wsImport = normalizeFileProtocol(wsRoute);
+          const {
+            default: Route,
+          }: {
+            default:
+              | Implements<WebSocketRoute>
+              | Implements<BrowserWebsocketRoute>;
+          } = yield* Effect.promise(() =>
+            import(wsImport + `?cb=${Date.now()}`),
+          );
+          const route = new Route(
+            this.browserManager,
+            this.config,
+            this.fileSystem,
+            this.metrics,
+            this.monitoring,
+            this.staticSDKDir,
+            this.limiter,
+          );
 
-    this.logger.debug(
-      `Imported and validated all route files, starting up server.`,
-    );
+          if (!this.routeIsDisabled(route)) {
+            route.querySchema = safeParse(querySchema);
+            route.config = () => this.config;
+            route.limiter = () => this.limiter;
+            route.metrics = () => this.metrics;
+            route.monitoring = () => this.monitoring;
+            route.fileSystem = () => this.fileSystem;
+            route.staticSDKDir = () => this.staticSDKDir;
+            route.videoManager = () => this.videoManager;
 
-    this.server = new HTTPServer(
-      this.config,
-      this.metrics,
-      this.token,
-      this.router,
-      this.hooks,
-      this.Logger,
-    );
+            wsRoutes.push(route);
+          }
+        }
+      }
 
-    // Initialize server-scoped OTLP runtime — must happen before any sessions.
-    // Creates ONE OtlpExporter for the entire process. Session runtimes share the
-    // Tracer service via SharedTracerLayer (no per-session exporter, no dispose race).
-    await initOtelRuntime();
+      const allRoutes: [
+        (HTTPRoute | BrowserHTTPRoute)[],
+        (WebSocketRoute | BrowserWebsocketRoute)[],
+      ] = [
+        [...httpRoutes].filter((r) => this.filterNonMacArm64Browsers(r)),
+        [...wsRoutes].filter((r) => this.filterNonMacArm64Browsers(r)),
+      ];
 
-    await this.loadPwVersions();
-    await this.server.start();
-    this.logger.debug(`Starting metrics collection.`);
-    this.metricsFiber = Effect.runFork(
-      Effect.tryPromise(() => this.saveMetrics()).pipe(
-        Effect.ignore,
-        Effect.repeat(Schedule.fixed(Duration.millis(this.metricsSaveInterval))),
-      ),
-    );
+      // Validate that we have the browsers they are asking for
+      allRoutes
+        .flat()
+        .map((route) => {
+          if (
+            'browser' in route &&
+            route.browser &&
+            internalBrowsers.includes(route.browser) &&
+            !installedBrowsers.some((b) => b.name === route.browser?.name)
+          ) {
+            console.warn(
+              dedent(`Skipping route "${route.path}" — missing browser binary for "${route.browser?.name}".
+              Installed Browsers: ${installedBrowsers.map((b) => b.name).join(', ')}`),
+            );
+            return null;
+          }
+          return route;
+        })
+        .filter((e): e is NonNullable<typeof e> => e !== null)
+        .filter((e, i, a) => a.findIndex((r) => r.name === e.name) !== i)
+        .map((r) => r.name)
+        .forEach((name) => {
+          this.logger.warn(
+            `Found duplicate routing names. Route names must be unique: ${name}`,
+          );
+        });
 
-    // OTLP metrics export + gauge collection at server level.
-    // Runs in the server runtime — shares the same exporter as all session runtimes.
-    this.gaugeCollectorFiber = runForkInServer(gaugeCollector);
+      const [filteredHTTPRoutes, filteredWSRoutes] = allRoutes;
+
+      filteredHTTPRoutes.forEach((r) => this.router.registerHTTPRoute(r));
+      filteredWSRoutes.forEach((r) => this.router.registerWebSocketRoute(r));
+
+      yield* Effect.logDebug(
+        `Imported and validated all route files, starting up server.`,
+      );
+
+      this.server = new HTTPServer(
+        this.config,
+        this.metrics,
+        this.token,
+        this.router,
+        this.hooks,
+        this.Logger,
+      );
+
+      // Initialize server-scoped OTLP runtime — must happen before any sessions.
+      // Creates ONE OtlpExporter for the entire process. Session runtimes share the
+      // Tracer service via SharedTracerLayer (no per-session exporter, no dispose race).
+      yield* Effect.promise(() => initOtelRuntime());
+
+      yield* this.loadPwVersionsEffect();
+      yield* Effect.promise(() => this.server!.start());
+      yield* Effect.logDebug(`Starting metrics collection.`);
+      this.metricsFiber = Effect.runFork(
+        this.saveMetricsEffect().pipe(
+          Effect.ignore,
+          Effect.repeat(
+            Schedule.fixed(Duration.millis(this.metricsSaveInterval)),
+          ),
+        ),
+      );
+
+      // OTLP metrics export + gauge collection at server level.
+      // Runs in the server runtime — shares the same exporter as all session runtimes.
+      this.gaugeCollectorFiber = runForkInServer(gaugeCollector);
+    },
+  );
+
+  public async start() {
+    return Effect.runPromise(this.startEffect());
   }
 
   /**

@@ -28,6 +28,7 @@ import {
   parseStringParam,
   pwVersionRegex,
 } from '@browserless.io/browserless';
+import { Effect } from 'effect';
 import { Page } from 'puppeteer-core';
 import micromatch from 'micromatch';
 import path from 'path';
@@ -77,215 +78,239 @@ export class BrowserLauncher {
   /**
    * Get a browser for a request.
    * Handles reconnection to existing browsers and launching new ones.
+   * Public Promise bridge — delegates to getBrowserForRequestEffect.
    */
   async getBrowserForRequest(
     req: Request,
     router: BrowserHTTPRoute | BrowserWebsocketRoute,
     logger: Logger,
   ): Promise<BrowserInstance> {
-    const { browser: Browser } = router;
-    const blockAds = parseBooleanParam(
-      req.parsed.searchParams,
-      'blockAds',
-      false,
+    return Effect.runPromise(
+      this.getBrowserForRequestEffect(req, router, logger),
     );
-    const replay = parseBooleanParam(
-      req.parsed.searchParams,
-      'replay',
-      false,
-    );
-    const video = parseBooleanParam(
-      req.parsed.searchParams,
-      'video',
-      false,
-    );
-    const cfSolver = parseBooleanParam(
-      req.parsed.searchParams,
-      'cfSolver',
-      false,
-    );
-    const antibot = parseBooleanParam(
-      req.parsed.searchParams,
-      'antibot',
-      false,
-    );
-    const trackingId =
-      parseStringParam(req.parsed.searchParams, 'trackingId', '') || undefined;
+  }
 
-    // Handle trackingId validation
-    if (trackingId) {
-      if (this.registry.hasTrackingId(trackingId)) {
-        throw new BadRequest(
-          `A browser session with trackingId "${trackingId}" already exists`,
-        );
-      }
+  /**
+   * Effect-native implementation of getBrowserForRequest.
+   * Traced span: launcher.getBrowserForRequest
+   */
+  private getBrowserForRequestEffect(
+    req: Request,
+    router: BrowserHTTPRoute | BrowserWebsocketRoute,
+    logger: Logger,
+  ): Effect.Effect<BrowserInstance> {
+    const launcher = this;
 
-      if (trackingId.length > 32) {
-        throw new BadRequest(
-          `TrackingId "${trackingId}" must be less than 32 characters`,
-        );
-      }
-
-      if (!micromatch.isMatch(trackingId, '+([0-9a-zA-Z-_])')) {
-        throw new BadRequest(`trackingId contains invalid characters`);
-      }
-
-      if (trackingId === 'all') {
-        throw new BadRequest(`trackingId cannot be the reserved word "all"`);
-      }
-
-      this.log.debug(`Assigning session trackingId "${trackingId}"`);
-    }
-
-    // Handle browser reconnection
-    if (
-      this.reconnectionPatterns.some((p) => req.parsed.pathname.includes(p))
-    ) {
-      return this.handleReconnection(req);
-    }
-
-    // Handle page connections
-    if (req.parsed.pathname.includes('/devtools/page')) {
-      return this.handlePageConnection(req);
-    }
-
-    // Parse launch options and per-session timeout
-    const launchOptions = this.parseLaunchOptions(req, router);
-    const timeout = req.parsed.searchParams.get('timeout');
-
-    // Determine user data directory
-    const manualUserDataDir = this.getManualUserDataDir(launchOptions);
-    const userDataDir =
-      manualUserDataDir ||
-      (!this.playwrightBrowserNames.includes(Browser.name)
-        ? await generateDataDir(undefined, this.config)
-        : null);
-
-    // Remove user-data-dir from args if set manually
-    if (manualUserDataDir && launchOptions.args) {
-      launchOptions.args = launchOptions.args.filter(
-        (arg) => !arg.includes('--user-data-dir='),
+    return Effect.fn('launcher.getBrowserForRequest')(function*() {
+      const { browser: Browser } = router;
+      const blockAds = parseBooleanParam(
+        req.parsed.searchParams,
+        'blockAds',
+        false,
       );
-    }
+      const replay = parseBooleanParam(
+        req.parsed.searchParams,
+        'replay',
+        false,
+      );
+      const video = parseBooleanParam(
+        req.parsed.searchParams,
+        'video',
+        false,
+      );
+      const cfSolver = parseBooleanParam(
+        req.parsed.searchParams,
+        'cfSolver',
+        false,
+      );
+      const antibot = parseBooleanParam(
+        req.parsed.searchParams,
+        'antibot',
+        false,
+      );
+      const trackingId =
+        parseStringParam(req.parsed.searchParams, 'trackingId', '') || undefined;
 
-    // Handle proxy configuration for Playwright
-    this.configureProxy(launchOptions, req);
+      // Handle trackingId validation — throws propagate as defects
+      if (trackingId) {
+        if (launcher.registry.hasTrackingId(trackingId)) {
+          throw new BadRequest(
+            `A browser session with trackingId "${trackingId}" already exists`,
+          );
+        }
 
-    // Handle deprecated options
-    this.handleDeprecatedOptions(launchOptions);
+        if (trackingId.length > 32) {
+          throw new BadRequest(
+            `TrackingId "${trackingId}" must be less than 32 characters`,
+          );
+        }
 
-    // Create browser instance
-    const enableReplay = replay && !!this.sessionCoordinator?.isEnabled();
-    const browser = new Browser({
-      blockAds,
-      config: this.config,
-      enableReplay,
-      logger,
-      userDataDir,
-    });
+        if (!micromatch.isMatch(trackingId, '+([0-9a-zA-Z-_])')) {
+          throw new BadRequest(`trackingId contains invalid characters`);
+        }
 
-    // Get Playwright version from user agent
-    const match = (req.headers['user-agent'] || '').match(pwVersionRegex);
-    const pwVersion = match ? match[1] : 'default';
+        if (trackingId === 'all') {
+          throw new BadRequest(`trackingId cannot be the reserved word "all"`);
+        }
 
-    // Pre-create session object
-    const session: BrowserlessSession = {
-      id: '', // Will be set after launch
-      initialConnectURL:
-        path.join(req.parsed.pathname, req.parsed.search) || '',
-      isTempDataDir: !manualUserDataDir,
-      launchOptions,
-      numbConnected: 1,
-      replay: replay && this.sessionCoordinator?.isEnabled(),
-      video: video && this.sessionCoordinator?.isEnabled(),
-      resolver: noop,
-      routePath: router.path,
-      startedOn: Date.now(),
-      trackingId,
-      ttl: timeout ? +timeout : 0,
-      userDataDir,
-    };
-
-    // Register newPage handler BEFORE launch
-    browser.on('newPage', async (page: Page) => {
-      await this.onNewPage(req, page, session);
-      (router.onNewPage || noop)(req.parsed || '', page);
-    });
-
-    // Launch browser
-    await browser.launch({
-      options: launchOptions as BrowserServerOptions,
-      pwVersion,
-      req,
-      stealth: 'stealth' in launchOptions ? launchOptions.stealth : undefined,
-    });
-    await this.hooks.browser({ browser, req });
-
-    // Get session ID from wsEndpoint
-    const sessionId = getFinalPathSegment(browser.wsEndpoint()!)!;
-    session.id = sessionId;
-
-    // Update logger context
-    logger.setSessionContext({
-      trackingId,
-      sessionId,
-    });
-
-    // Register session
-    this.registry.register(browser, session);
-
-    // Start replay if enabled — must await so auto-attach is registered
-    // before browser is returned (otherwise new tabs race with setup)
-    if (session.replay && this.sessionCoordinator) {
-      this.sessionCoordinator.startReplay(sessionId, trackingId);
-      try {
-        await this.sessionCoordinator.setupSession(browser, sessionId, {
-          video: !!session.video,
-          antibot,
-          onTabReplayComplete: (metadata) => {
-            if (isReplayCapable(browser)) {
-              browser.sendTabReplayComplete(metadata).catch((e) => {
-                this.log.warn(`Failed to send tab replay event: ${e instanceof Error ? e.message : String(e)}`);
-              });
-            }
-          },
-          onAntibotReport: (report) => {
-            if (browser instanceof ChromiumCDP) {
-              browser.emitAntibotReport(report).catch((e) => {
-                this.log.warn(`Failed to emit antibot report: ${e instanceof Error ? e.message : String(e)}`);
-              });
-            }
-          },
-        });
-      } catch (e) {
-        this.log.warn(`Replay setup failed for session ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
+        yield* Effect.logDebug(`Assigning session trackingId "${trackingId}"`);
       }
 
-      // Wire monitor to browser for CDPProxy integration
-      const cloudflareSolver = this.sessionCoordinator?.getCloudflareSolver(sessionId);
-      if (cloudflareSolver && browser instanceof ChromiumCDP) {
-        browser.setCloudflareSolver(cloudflareSolver);
+      // Handle browser reconnection
+      if (
+        launcher.reconnectionPatterns.some((p) => req.parsed.pathname.includes(p))
+      ) {
+        return launcher.handleReconnection(req);
+      }
 
-        // Auto-enable solver via query param (for integration tests)
-        if (cfSolver) {
-          cloudflareSolver.enable({});
+      // Handle page connections
+      if (req.parsed.pathname.includes('/devtools/page')) {
+        return yield* Effect.promise(() => launcher.handlePageConnection(req));
+      }
+
+      // Parse launch options and per-session timeout
+      const launchOptions = launcher.parseLaunchOptions(req, router);
+      const timeout = req.parsed.searchParams.get('timeout');
+
+      // Determine user data directory
+      const manualUserDataDir = launcher.getManualUserDataDir(launchOptions);
+      const userDataDir =
+        manualUserDataDir ||
+        (!launcher.playwrightBrowserNames.includes(Browser.name)
+          ? yield* Effect.promise(() => generateDataDir(undefined, launcher.config))
+          : null);
+
+      // Remove user-data-dir from args if set manually
+      if (manualUserDataDir && launchOptions.args) {
+        launchOptions.args = launchOptions.args.filter(
+          (arg) => !arg.includes('--user-data-dir='),
+        );
+      }
+
+      // Handle proxy configuration for Playwright
+      launcher.configureProxy(launchOptions, req);
+
+      // Handle deprecated options
+      launcher.handleDeprecatedOptions(launchOptions);
+
+      // Create browser instance
+      const enableReplay = replay && !!launcher.sessionCoordinator?.isEnabled();
+      const browser = new Browser({
+        blockAds,
+        config: launcher.config,
+        enableReplay,
+        logger,
+        userDataDir,
+      });
+
+      // Get Playwright version from user agent
+      const match = (req.headers['user-agent'] || '').match(pwVersionRegex);
+      const pwVersion = match ? match[1] : 'default';
+
+      // Pre-create session object
+      const session: BrowserlessSession = {
+        id: '', // Will be set after launch
+        initialConnectURL:
+          path.join(req.parsed.pathname, req.parsed.search) || '',
+        isTempDataDir: !manualUserDataDir,
+        launchOptions,
+        numbConnected: 1,
+        replay: replay && launcher.sessionCoordinator?.isEnabled(),
+        video: video && launcher.sessionCoordinator?.isEnabled(),
+        resolver: noop,
+        routePath: router.path,
+        startedOn: Date.now(),
+        trackingId,
+        ttl: timeout ? +timeout : 0,
+        userDataDir,
+      };
+
+      // Register newPage handler BEFORE launch
+      browser.on('newPage', async (page: Page) => {
+        await launcher.onNewPage(req, page, session);
+        (router.onNewPage || noop)(req.parsed || '', page);
+      });
+
+      // Launch browser
+      yield* Effect.promise(
+        () =>
+          browser.launch({
+            options: launchOptions as BrowserServerOptions,
+            pwVersion,
+            req,
+            stealth: 'stealth' in launchOptions ? launchOptions.stealth : undefined,
+          }) as Promise<unknown>,
+      );
+      yield* Effect.promise(() => launcher.hooks.browser({ browser, req }));
+
+      // Get session ID from wsEndpoint
+      const sessionId = getFinalPathSegment(browser.wsEndpoint()!)!;
+      session.id = sessionId;
+
+      // Update logger context
+      logger.setSessionContext({
+        trackingId,
+        sessionId,
+      });
+
+      // Register session
+      launcher.registry.register(browser, session);
+
+      // Start replay if enabled — must await so auto-attach is registered
+      // before browser is returned (otherwise new tabs race with setup)
+      if (session.replay && launcher.sessionCoordinator) {
+        launcher.sessionCoordinator.startReplay(sessionId, trackingId);
+        try {
+          yield* Effect.promise(() =>
+            launcher.sessionCoordinator!.setupSession(browser, sessionId, {
+              video: !!session.video,
+              antibot,
+              onTabReplayComplete: (metadata) => {
+                if (isReplayCapable(browser)) {
+                  browser.sendTabReplayComplete(metadata).catch((e) => {
+                    launcher.log.warn(`Failed to send tab replay event: ${e instanceof Error ? e.message : String(e)}`);
+                  });
+                }
+              },
+              onAntibotReport: (report) => {
+                if (browser instanceof ChromiumCDP) {
+                  browser.emitAntibotReport(report).catch((e) => {
+                    launcher.log.warn(`Failed to emit antibot report: ${e instanceof Error ? e.message : String(e)}`);
+                  });
+                }
+              },
+            }),
+          );
+        } catch (e) {
+          yield* Effect.logWarning(`Replay setup failed for session ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+
+        // Wire monitor to browser for CDPProxy integration
+        const cloudflareSolver = launcher.sessionCoordinator?.getCloudflareSolver(sessionId);
+        if (cloudflareSolver && browser instanceof ChromiumCDP) {
+          browser.setCloudflareSolver(cloudflareSolver);
+
+          // Auto-enable solver via query param (for integration tests)
+          if (cfSolver) {
+            cloudflareSolver.enable({});
+          }
+        }
+
+        // Wire replay marker callback for Browserless.addReplayMarker CDP command
+        const markerCallback = launcher.sessionCoordinator?.getReplayMarkerCallback(sessionId);
+        if (markerCallback && browser instanceof ChromiumCDP) {
+          browser.setReplayMarkerCallback(markerCallback);
+        }
+
+        // Wire tab count for CDPProxy tab limit enforcement
+        const tabCountCallback = launcher.sessionCoordinator?.getTabCountCallback(sessionId);
+        if (tabCountCallback && browser instanceof ChromiumCDP) {
+          browser.setGetTabCount(tabCountCallback);
         }
       }
 
-      // Wire replay marker callback for Browserless.addReplayMarker CDP command
-      const markerCallback = this.sessionCoordinator?.getReplayMarkerCallback(sessionId);
-      if (markerCallback && browser instanceof ChromiumCDP) {
-        browser.setReplayMarkerCallback(markerCallback);
-      }
-
-      // Wire tab count for CDPProxy tab limit enforcement
-      const tabCountCallback = this.sessionCoordinator?.getTabCountCallback(sessionId);
-      if (tabCountCallback && browser instanceof ChromiumCDP) {
-        browser.setGetTabCount(tabCountCallback);
-      }
-    }
-
-    return browser;
+      return browser;
+    })();
   }
 
   /**

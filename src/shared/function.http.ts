@@ -15,6 +15,7 @@ import {
   dedent,
   writeResponse,
 } from '@browserless.io/browserless';
+import { Effect } from 'effect';
 import { ServerResponse } from 'http';
 import Stream from 'stream';
 import { fileTypeFromBuffer } from 'file-type';
@@ -62,34 +63,43 @@ export default class ChromiumFunctionPostRoute extends BrowserHTTPRoute {
     browser: BrowserInstance,
   ): Promise<void> {
     const config = this.config();
-    const timeout = req.parsed.searchParams.get('timeout');
-    const handler = functionHandler(config, logger, {
-      protocolTimeout: timeout ? +timeout : undefined,
-    });
-    const { contentType, payload, page } = await handler(req, browser);
+    return Effect.runPromise(
+      Effect.fn('route.function.post')(function* () {
+        const timeout = req.parsed.searchParams.get('timeout');
+        const handler = functionHandler(config, logger, {
+          protocolTimeout: timeout ? +timeout : undefined,
+        });
+        const { contentType, payload, page } = yield* Effect.promise(() =>
+          handler(req, browser),
+        );
 
-    logger.info(`Got function response of "${contentType}"`);
-    page.close();
-    page.removeAllListeners();
+        logger.info(`Got function response of "${contentType}"`);
+        page.close();
+        page.removeAllListeners();
 
-    if (contentType === 'uint8array') {
-      const response = new Uint8Array(payload as Buffer);
-      const type = ((await fileTypeFromBuffer(response)) || { mime: undefined })
-        .mime;
+        if (contentType === 'uint8array') {
+          const response = new Uint8Array(payload as Buffer);
+          const type = (
+            (yield* Effect.promise(() => fileTypeFromBuffer(response))) || {
+              mime: undefined,
+            }
+          ).mime;
 
-      if (!type) {
-        throw new BadRequest(`Couldn't determine function's response type.`);
-      } else {
-        logger.info(`Sending file-type response of "${type}"`);
-        const readStream = new Stream.PassThrough();
-        readStream.end(response);
-        res.setHeader('Content-Type', type);
-        return new Promise((r) => readStream.pipe(res).once('close', r));
-      }
-    } else {
-      writeResponse(res, 200, payload as string, contentType as contentTypes);
-    }
-
-    return;
+          if (!type) {
+            throw new BadRequest(`Couldn't determine function's response type.`);
+          } else {
+            logger.info(`Sending file-type response of "${type}"`);
+            const readStream = new Stream.PassThrough();
+            readStream.end(response);
+            res.setHeader('Content-Type', type);
+            yield* Effect.promise(
+              () => new Promise((r) => readStream.pipe(res).once('close', r)),
+            );
+          }
+        } else {
+          writeResponse(res, 200, payload as string, contentType as contentTypes);
+        }
+      })(),
+    );
   }
 }

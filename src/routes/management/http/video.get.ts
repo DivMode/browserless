@@ -11,6 +11,7 @@ import {
   writeResponse,
 } from '@browserless.io/browserless';
 import { ServerResponse } from 'http';
+import { Effect } from 'effect';
 
 export interface QuerySchema extends SystemQueryParameters {
   token?: string;
@@ -36,36 +37,47 @@ export default class VideoGetRoute extends HTTPRoute {
   tags = [APITags.management];
 
   async handler(req: Request, res: ServerResponse): Promise<void> {
-    const video = this.videoManager();
-    if (!video) {
-      return writeResponse(res, 503, 'Video manager is not enabled');
-    }
+    const route = this;
+    return Effect.runPromise(
+      Effect.fn('route.video.get')(function* () {
+        const video = route.videoManager();
+        if (!video) {
+          return writeResponse(res, 503, 'Video manager is not enabled');
+        }
 
-    // Extract replay ID from path: /video/:id
-    const pathParts = req.parsed.pathname.split('/');
-    const videoIndex = pathParts.indexOf('video');
-    const id = videoIndex >= 0 && videoIndex + 1 < pathParts.length
-      ? pathParts[videoIndex + 1]
-      : null;
+        // Extract replay ID from path: /video/:id
+        const pathParts = req.parsed.pathname.split('/');
+        const videoIndex = pathParts.indexOf('video');
+        const id =
+          videoIndex >= 0 && videoIndex + 1 < pathParts.length
+            ? pathParts[videoIndex + 1]
+            : null;
 
-    if (!id) {
-      throw new NotFound('Replay ID is required');
-    }
+        if (!id) {
+          throw new NotFound('Replay ID is required');
+        }
 
-    // Pass auth token through to sub-resource URLs (video, HLS, status)
-    const token = req.parsed.searchParams.get('token') ?? '';
+        // Pass auth token through to sub-resource URLs (video, HLS, status)
+        const token = req.parsed.searchParams.get('token') ?? '';
 
-    // Check in-memory encoder for encoding status
-    const encoder = video.getVideoEncoder();
-    const progress = encoder?.getProgress(id) ?? null;
-    const encodingStatus = progress?.status ?? 'none';
-    const frameCount = progress?.totalFrames ?? 0;
+        // Check in-memory encoder for encoding status
+        const encoder = video.getVideoEncoder();
+        const progress = encoder?.getProgress(id) ?? null;
+        const encodingStatus = progress?.status ?? 'none';
+        const frameCount = progress?.totalFrames ?? 0;
 
-    const html = this.generatePlayerHTML(id, encodingStatus, frameCount, token);
+        const html = route.generatePlayerHTML(
+          id,
+          encodingStatus,
+          frameCount,
+          token,
+        );
 
-    res.setHeader('Content-Type', 'text/html');
-    res.writeHead(200);
-    res.end(html);
+        res.setHeader('Content-Type', 'text/html');
+        res.writeHead(200);
+        res.end(html);
+      })(),
+    );
   }
 
   private generatePlayerHTML(

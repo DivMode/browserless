@@ -16,10 +16,11 @@ for (const key of REQUIRED_ENV) {
   }
 }
 
-(async () => {
+const program = Effect.fn('browserless.main')(function* () {
   const browserless = new Browserless();
   const logger = new Logger('index.js');
-  browserless.start();
+
+  yield* Effect.promise(() => browserless.start());
 
   const shutdown = (_reason: string, code: number) =>
     Effect.runPromise(
@@ -53,4 +54,10 @@ for (const key of REQUIRED_ENV) {
     .on('unhandledRejection', (reason, promise) => {
       console.error('Unhandled Rejection at:', promise, 'reason:', reason);
     });
+
+  // Keep the process alive — the HTTP server listener keeps the event loop running.
+  // This yield* never completes — shutdown happens via signal handlers.
+  yield* Effect.never;
 })();
+
+Effect.runFork(program);
