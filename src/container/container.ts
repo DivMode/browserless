@@ -1,4 +1,6 @@
-import { Logger } from '@browserless.io/browserless';
+import { Effect } from 'effect';
+
+import { runForkInServer } from '../otel-runtime.js';
 
 /**
  * Service factory function type.
@@ -36,7 +38,6 @@ interface ServiceRegistration<T> {
 export class ServiceContainer {
   private services: Map<string, ServiceRegistration<unknown>> = new Map();
   private resolving: Set<string> = new Set(); // For circular dependency detection
-  private log = new Logger('container');
 
   /**
    * Register a singleton service.
@@ -48,7 +49,7 @@ export class ServiceContainer {
     dependencies: string[] = []
   ): this {
     if (this.services.has(name)) {
-      this.log.warn(`Service "${name}" is being overwritten`);
+      runForkInServer(Effect.logWarning(`Service "${name}" is being overwritten`));
     }
 
     this.services.set(name, {
@@ -70,7 +71,7 @@ export class ServiceContainer {
     dependencies: string[] = []
   ): this {
     if (this.services.has(name)) {
-      this.log.warn(`Service "${name}" is being overwritten`);
+      runForkInServer(Effect.logWarning(`Service "${name}" is being overwritten`));
     }
 
     this.services.set(name, {
@@ -88,7 +89,7 @@ export class ServiceContainer {
    */
   registerInstance<T>(name: string, instance: T): this {
     if (this.services.has(name)) {
-      this.log.warn(`Service "${name}" is being overwritten with instance`);
+      runForkInServer(Effect.logWarning(`Service "${name}" is being overwritten with instance`));
     }
 
     this.services.set(name, {
@@ -160,7 +161,7 @@ export class ServiceContainer {
    * Call this at startup to fail fast.
    */
   validate(): void {
-    this.log.debug('Validating service container...');
+    runForkInServer(Effect.logDebug('Validating service container...'));
 
     // Check for missing dependencies
     for (const [name, registration] of this.services) {
@@ -200,7 +201,7 @@ export class ServiceContainer {
       visit(name);
     }
 
-    this.log.debug(`Validated ${this.services.size} services`);
+    runForkInServer(Effect.logDebug(`Validated ${this.services.size} services`));
   }
 
   /**

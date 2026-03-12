@@ -62,7 +62,6 @@ type routeInstances =
   | BrowserWebsocketRoute;
 
 export class Browserless extends EventEmitter {
-  protected logger: BlessLogger;
   protected browserManager: BrowserManager;
   protected config: Config;
   protected fileSystem: FileSystem;
@@ -114,7 +113,6 @@ export class Browserless extends EventEmitter {
   } = {}) {
     super();
     this.Logger = LoggerOverride ?? BlessLogger;
-    this.logger = new this.Logger('index');
     this.config = config || new Config();
     this.metrics = metrics || new Metrics();
     this.token = token || new Token(this.config);
@@ -158,8 +156,10 @@ export class Browserless extends EventEmitter {
         route.browser.name.toLowerCase().includes(b),
       )
     ) {
-      this.logger.warn(
-        `Ignoring route "${route.path}" because it is not supported on arm64 platforms (route requires browser "${route.browser.name}").`,
+      runForkInServer(
+        Effect.logWarning(
+          `Ignoring route "${route.path}" because it is not supported on arm64 platforms (route requires browser "${route.browser.name}").`,
+        ),
       );
       return false;
     }
@@ -486,8 +486,10 @@ export class Browserless extends EventEmitter {
         .filter((e, i, a) => a.findIndex((r) => r.name === e.name) !== i)
         .map((r) => r.name)
         .forEach((name) => {
-          this.logger.warn(
-            `Found duplicate routing names. Route names must be unique: ${name}`,
+          runForkInServer(
+            Effect.logWarning(
+              `Found duplicate routing names. Route names must be unique: ${name}`,
+            ),
           );
         });
 

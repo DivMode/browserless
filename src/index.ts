@@ -1,4 +1,4 @@
-import { Browserless, Logger } from '@browserless.io/browserless';
+import { Browserless } from '@browserless.io/browserless';
 import { Effect } from 'effect';
 
 // ── Fail-fast env validation ─────────────────────────────────────────
@@ -18,7 +18,6 @@ for (const key of REQUIRED_ENV) {
 
 const program = Effect.fn('browserless.main')(function* () {
   const browserless = new Browserless();
-  const logger = new Logger('index.js');
 
   yield* Effect.promise(() => browserless.start());
 
@@ -35,19 +34,19 @@ const program = Effect.fn('browserless.main')(function* () {
 
   process
     .once('SIGTERM', () => {
-      logger.info('SIGTERM received, saving and closing down');
+      console.error(JSON.stringify({ message: 'SIGTERM received, saving and closing down', level: 'info' }));
       shutdown('SIGTERM', 0);
     })
     .once('SIGINT', () => {
-      logger.info('SIGINT received, saving and closing down');
+      console.error(JSON.stringify({ message: 'SIGINT received, saving and closing down', level: 'info' }));
       shutdown('SIGINT', 0);
     })
     .once('SIGHUP', () => {
-      logger.info('SIGHUP received, saving and closing down');
+      console.error(JSON.stringify({ message: 'SIGHUP received, saving and closing down', level: 'info' }));
       shutdown('SIGHUP', 0);
     })
     .once('SIGUSR2', () => {
-      logger.info('SIGUSR2 received, saving and closing down');
+      console.error(JSON.stringify({ message: 'SIGUSR2 received, saving and closing down', level: 'info' }));
       shutdown('SIGUSR2', 0);
     })
     .once('uncaughtException', (err, origin) => {

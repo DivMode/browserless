@@ -1,5 +1,6 @@
-import { Logger } from '@browserless.io/browserless';
-import { Latch } from 'effect';
+import { Effect, Latch } from 'effect';
+
+import { runForkInServer } from '../../otel-runtime.js';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareInfo, CloudflareResult, CloudflareSnapshot, InterstitialInfo, EmbeddedInfo } from '../../shared/cloudflare-detection.js';
 import type { TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
@@ -232,8 +233,6 @@ export function createCFEvents(
   sessionId = '',
   shouldRecordMarkers: () => boolean = () => true,
 ) {
-  const log = new Logger('cf-events');
-
   const marker = (targetId: TargetId, tag: string, payload?: object): void => {
     if (shouldRecordMarkers()) {
       injectMarker(targetId, tag, payload);
@@ -250,7 +249,7 @@ export function createCFEvents(
         detectionMethod: active.info.detectionMethod,
         pollCount: active.info.pollCount || 1,
         targetId: active.pageTargetId,
-      }).catch((e) => log.debug(`emitDetected failed: ${e instanceof Error ? e.message : String(e)}`));
+      }).catch((e) => runForkInServer(Effect.logDebug(`emitDetected failed: ${e instanceof Error ? e.message : String(e)}`)));
     },
 
     emitProgress(active: ReadonlyActiveDetection, state: string, extra?: Record<string, any>): void {
@@ -261,7 +260,7 @@ export function createCFEvents(
         attempt: active.attempt,
         targetId: active.pageTargetId,
         ...extra,
-      }).catch((e) => log.debug(`emitProgress failed: ${e instanceof Error ? e.message : String(e)}`));
+      }).catch((e) => runForkInServer(Effect.logDebug(`emitProgress failed: ${e instanceof Error ? e.message : String(e)}`)));
       marker(active.pageTargetId, 'cf.state_change', { state, ...extra });
     },
 
@@ -270,14 +269,14 @@ export function createCFEvents(
       const timingStr = snap.checkbox_to_click_ms != null
         ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
         : '';
-      log.info(`CF solved: session=${sessionId.slice(0,8)} type=${result.type} method=${result.method} duration=${result.duration_ms}ms${timingStr}`);
+      runForkInServer(Effect.logInfo(`CF solved: session=${sessionId.slice(0,8)} type=${result.type} method=${result.method} duration=${result.duration_ms}ms${timingStr}`));
       emitClientEvent('Browserless.cloudflareSolved', {
         ...result,
         token_length: result.token_length ?? result.token?.length ?? 0,
         targetId: active.pageTargetId,
         summary: active.tracker.snapshot(),
         cf_summary_label,
-      }).catch((e) => log.debug(`emitSolved failed: ${e instanceof Error ? e.message : String(e)}`));
+      }).catch((e) => runForkInServer(Effect.logDebug(`emitSolved failed: ${e instanceof Error ? e.message : String(e)}`)));
       if (!options?.skipMarker) {
         marker(active.pageTargetId, 'cf.solved', {
           type: result.type, method: result.method, duration_ms: result.duration_ms,
@@ -295,7 +294,7 @@ export function createCFEvents(
       const timingStr = snap.checkbox_to_click_ms != null
         ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
         : '';
-      log.warn(`CF failed: session=${sessionId.slice(0,8)} reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'} rechallenge=${isRechallenge} widget_error_count=${snap.widget_error_count} widget_error_type=${snap.widget_error_type ?? 'none'} click_count=${snap.click_count} false_positives=${snap.false_positive_count}${diagStr}${timingStr}`);
+      runForkInServer(Effect.logWarning(`CF failed: session=${sessionId.slice(0,8)} reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'} rechallenge=${isRechallenge} widget_error_count=${snap.widget_error_count} widget_error_type=${snap.widget_error_type ?? 'none'} click_count=${snap.click_count} false_positives=${snap.false_positive_count}${diagStr}${timingStr}`));
       emitClientEvent('Browserless.cloudflareFailed', {
         reason, type: active.info.type, duration_ms: duration, attempts: active.attempt,
         targetId: active.pageTargetId,
@@ -303,7 +302,7 @@ export function createCFEvents(
         summary: snap,
         phase_label,
         cf_summary_label,
-      }).catch((e) => log.debug(`emitFailed failed: ${e instanceof Error ? e.message : String(e)}`));
+      }).catch((e) => runForkInServer(Effect.logDebug(`emitFailed failed: ${e instanceof Error ? e.message : String(e)}`)));
       if (!options?.skipMarker) {
         marker(active.pageTargetId, 'cf.failed', { reason, duration_ms: duration, phase_label, oopif_url: active.info.url, rechallenge: isRechallenge });
       }

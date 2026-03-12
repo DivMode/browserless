@@ -2,7 +2,6 @@ import {
   AfterResponse,
   Config,
   Hooks,
-  Logger,
   Metrics,
   Monitoring,
   TooManyRequests,
@@ -10,6 +9,8 @@ import {
 } from '@browserless.io/browserless';
 import { Effect } from 'effect';
 import q from 'queue';
+
+import { runForkInServer } from './otel-runtime.js';
 
 export type LimitFn<TArgs extends unknown[], TResult> = (
   ...args: TArgs
@@ -27,7 +28,6 @@ interface Job {
 
 export class Limiter extends q {
   protected queued: number;
-  protected logger = new Logger('limiter');
 
   constructor(
     protected config: Config,
@@ -43,22 +43,22 @@ export class Limiter extends q {
     });
     this.queued = config.getQueued();
 
-    this.logger.debug(
+    runForkInServer(Effect.logDebug(
       `Concurrency: ${this.concurrency} queue: ${this.queued} timeout: ${this.timeout}ms`,
-    );
+    ));
 
     config.on('concurrent', (concurrency: number) => {
-      this.logger.debug(`Concurrency updated to ${concurrency}`);
+      runForkInServer(Effect.logDebug(`Concurrency updated to ${concurrency}`));
       this.concurrency = concurrency;
     });
 
     config.on('queued', (queued: number) => {
-      this.logger.debug(`Queue updated to ${queued}`);
+      runForkInServer(Effect.logDebug(`Queue updated to ${queued}`));
       this.queued = queued;
     });
 
     config.on('timeout', (timeout: number) => {
-      this.logger.debug(`Timeout updated to ${timeout}ms`);
+      runForkInServer(Effect.logDebug(`Timeout updated to ${timeout}ms`));
       this.timeout = timeout <= 0 ? 0 : timeout;
     });
 
@@ -79,7 +79,7 @@ export class Limiter extends q {
   }: {
     detail: { error: unknown };
   }) {
-    this.logger.error(error);
+    runForkInServer(Effect.logError(String(error)));
   }
 
   protected handleEnd() {
@@ -92,9 +92,9 @@ export class Limiter extends q {
 
   protected handleSuccess({ detail: { job } }: { detail: { job: Job } }) {
     const timeUsed = Date.now() - job.start;
-    this.logger.debug(
+    runForkInServer(Effect.logDebug(
       `Job has succeeded after ${timeUsed.toLocaleString()}ms of activity.`,
-    );
+    ));
     this.metrics.addSuccessful(Date.now() - job.start);
     // @TODO Figure out a better argument handling for jobs
     this.jobEnd({
@@ -110,12 +110,12 @@ export class Limiter extends q {
     detail: { job: Job; next: Job };
   }) {
     const timeUsed = Date.now() - job.start;
-    this.logger.warn(
+    runForkInServer(Effect.logWarning(
       `Job has hit timeout after ${timeUsed.toLocaleString()}ms of activity.`,
-    );
+    ));
     this.metrics.addTimedout(Date.now() - job.start);
     this.webhooks.callTimeoutAlertURL();
-    this.logger.debug(`Calling timeout handler`);
+    runForkInServer(Effect.logDebug(`Calling timeout handler`));
     job?.onTimeoutFn(job);
     this.jobEnd({
       req: job.args[0],
@@ -131,9 +131,9 @@ export class Limiter extends q {
   }: {
     detail: { error: unknown; job: Job };
   }) {
-    this.logger.debug(
+    runForkInServer(Effect.logDebug(
       `Recording failed stat, cleaning up: "${error?.toString()}"`,
-    );
+    ));
     this.metrics.addError(Date.now() - job.start);
     this.webhooks.callErrorAlertURL(error?.toString() ?? 'Unknown Error');
     this.jobEnd({
@@ -148,9 +148,9 @@ export class Limiter extends q {
   }
 
   protected logQueue(message: string) {
-    this.logger.debug(
+    runForkInServer(Effect.logDebug(
       `(Running: ${this.executing}, Pending: ${this.waiting}) ${message} `,
-    );
+    ));
   }
 
   get executing(): number {

@@ -42,7 +42,6 @@ import type { VideoManager } from '../video/video-manager.js';
  * This class was reduced from 1270 lines to ~200 lines.
  */
 export class BrowserManager {
-  protected log = new Logger('browser-manager');
   protected chromeBrowsers = [ChromiumCDP, ChromeCDP, EdgeCDP];
 
   // Extracted components

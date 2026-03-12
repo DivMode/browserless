@@ -3,10 +3,11 @@ import WebSocket from 'ws';
 const WebSocketServer = (WebSocket as any).Server as typeof import('ws').WebSocketServer;
 import { Duplex } from 'stream';
 import { IncomingMessage } from 'http';
-import { Config, Logger } from '@browserless.io/browserless';
+import { Config } from '@browserless.io/browserless';
 import { Duration, Effect, Exit, FiberSet, Queue, Schedule, Schema, Scope, Stream } from 'effect';
 
 import { incCounter, proxyDroppedMessages, wsLifecycle } from './effect-metrics.js';
+import { runForkInServer } from './otel-runtime.js';
 import { CloudflareConfig } from './shared/cloudflare-detection.js';
 import { CdpSessionId, TargetId } from './shared/cloudflare-detection.js';
 import { BROWSER_WS_PING_INTERVAL, BROWSER_WS_PONG_TIMEOUT_MS } from './session/cf/cf-schedules.js';
@@ -114,7 +115,6 @@ export class CDPProxy {
   private clientOutbound: Queue.Queue<ClientOutboundMessage> | null = null;
   private isClosing = false;
   private closeRequested = false;
-  private log = new Logger('cdp-proxy');
   private getTabCount?: () => number;
   private readonly proxyScope = Scope.makeUnsafe();
   private readonly fibers = Effect.runSync(
@@ -190,7 +190,7 @@ export class CDPProxy {
           const ws = this.browserWs!;
           const onOpen = () => {
             ws.removeListener('error', onError);
-            this.log.trace(`Connected to browser: ${this.browserWsEndpoint}`);
+            runForkInServer(Effect.logDebug('Connected to browser').pipe(Effect.annotateLogs({ endpoint: this.browserWsEndpoint })));
             resume(Effect.void);
           };
           const onError = (err: Error) => {
@@ -222,7 +222,7 @@ export class CDPProxy {
         // Setup AFTER successful upgrade
         this.clientWs = clientWs;
         Effect.runSync(incCounter(wsLifecycle, { type: 'proxy_client', action: 'create' }));
-        this.log.trace('Client WebSocket upgraded');
+        runForkInServer(Effect.logDebug('Client WebSocket upgraded'));
 
         // Scope-bound outbound queue: all client WS sends go through here.
         this.clientOutbound = Effect.runSync(Queue.unbounded<ClientOutboundMessage>());
@@ -254,12 +254,12 @@ export class CDPProxy {
         const sessionId = this.browserWsEndpoint.split('/').pop() || '';
         if (sessionId) {
           this.emitClientEvent('Browserless.sessionInfo', { sessionId }).catch((e) => {
-            this.log.debug(`Failed to emit sessionInfo: ${e instanceof Error ? e.message : String(e)}`);
+            runForkInServer(Effect.logDebug('Failed to emit sessionInfo').pipe(Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e) })));
           });
         }
 
         clientWs.on('error', (err: Error) => {
-          this.log.warn(`Client WebSocket error: ${err.message}`);
+          runForkInServer(Effect.logWarning('Client WebSocket error').pipe(Effect.annotateLogs({ error: err.message })));
           this.handleClose();
         });
       })(),
@@ -366,7 +366,7 @@ export class CDPProxy {
                 // Sync check — fast path when CdpSession is tracking targets
                 const count = this.getTabCount();
                 if (count >= limit) {
-                  this.log.warn(`Tab limit reached (${count}/${limit}), rejecting Target.createTarget`);
+                  runForkInServer(Effect.logWarning('Tab limit reached, rejecting Target.createTarget').pipe(Effect.annotateLogs({ count: String(count), limit: String(limit) })));
                   void this.sendClientError(msg.id, -32000, `Tab limit exceeded (${count}/${limit})`);
                   return;
                 }
@@ -390,9 +390,10 @@ export class CDPProxy {
             const clickCount = p?.clickCount ?? 0;
             // Full CDP sessionId — maps to a specific target (tab/OOPIF)
             const cdpSessionId = msg.sessionId ?? 'page';
-            this.log.warn(
-              `[PYDOLL-MOUSE] ${type} x=${x} y=${y} button=${button} clicks=${clickCount} cdpSession=${cdpSessionId}`,
-            );
+            runForkInServer(Effect.logWarning('[PYDOLL-MOUSE] dispatch').pipe(Effect.annotateLogs({
+              type: String(type), x: String(x), y: String(y), button: String(button),
+              clickCount: String(clickCount), cdpSession: String(cdpSessionId),
+            })));
           }
         } catch {
           // ignore parse errors
@@ -407,7 +408,7 @@ export class CDPProxy {
           if (msg.method) {
             const sid = msg.sessionId ? ` [sid=${msg.sessionId.substring(0, 16)}]` : '';
             const params = msg.params ? JSON.stringify(msg.params).substring(0, 200) : '{}';
-            this.log.info(`[CDP→Chrome] id=${msg.id} ${msg.method}${sid} ${params}`);
+            runForkInServer(Effect.logInfo('[CDP→Chrome]').pipe(Effect.annotateLogs({ id: String(msg.id), method: msg.method, sid: sid.trim(), params })));
           }
         } catch { /* ignore */ }
       }
@@ -431,7 +432,7 @@ export class CDPProxy {
             if (this.cdpDebug && msg.method) {
               const sid = msg.sessionId ? ` [sid=${msg.sessionId.substring(0, 16)}]` : '';
               const params = msg.params ? JSON.stringify(msg.params).substring(0, 150) : '{}';
-              this.log.info(`[Chrome→CDP] ${msg.method}${sid} ${params}`);
+              runForkInServer(Effect.logInfo('[Chrome→CDP]').pipe(Effect.annotateLogs({ method: msg.method, sid: sid.trim(), params })));
             }
           }
         } catch { /* ignore parse errors */ }
@@ -443,12 +444,12 @@ export class CDPProxy {
 
     // Handle close from either side
     this.clientWs.on('close', () => {
-      this.log.trace('Client WebSocket closed');
+      runForkInServer(Effect.logDebug('Client WebSocket closed'));
       this.handleClose();
     });
 
     this.browserWs.on('close', () => {
-      this.log.trace('Browser WebSocket closed');
+      runForkInServer(Effect.logDebug('Browser WebSocket closed'));
       this.handleClose();
     });
 
@@ -469,7 +470,7 @@ export class CDPProxy {
         Effect.tryPromise(() => this.onBeforeClose!()).pipe(
           Effect.timeout(Duration.millis(ON_BEFORE_CLOSE_TIMEOUT_MS)),
           Effect.catch((e) => Effect.sync(() => {
-            this.log.warn(`onBeforeClose failed: ${e instanceof Error ? e.message : String(e)}`);
+            runForkInServer(Effect.logWarning('onBeforeClose failed').pipe(Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e) })));
           })),
         ),
       );
@@ -490,7 +491,7 @@ export class CDPProxy {
       if (!Queue.offerUnsafe(this.clientOutbound!, {
         data: message,
         onSent: resolve,
-        onError: (err) => { this.log.warn(`Failed to send CDP response id=${id}: ${err.message}`); reject(err); },
+        onError: (err) => { runForkInServer(Effect.logWarning('Failed to send CDP response').pipe(Effect.annotateLogs({ id: String(id), error: err.message }))); reject(err); },
       })) {
         Effect.runSync(incCounter(proxyDroppedMessages, { direction: 'client' }));
         resolve();
@@ -505,7 +506,7 @@ export class CDPProxy {
       if (!Queue.offerUnsafe(this.clientOutbound!, {
         data: payload,
         onSent: resolve,
-        onError: (err) => { this.log.warn(`Failed to send CDP error id=${id}: ${err.message}`); reject(err); },
+        onError: (err) => { runForkInServer(Effect.logWarning('Failed to send CDP error').pipe(Effect.annotateLogs({ id: String(id), error: err.message }))); reject(err); },
       })) {
         Effect.runSync(incCounter(proxyDroppedMessages, { direction: 'client' }));
         resolve();
@@ -528,13 +529,13 @@ export class CDPProxy {
       const targets: Array<{ type: string }> = result?.targetInfos ?? [];
       const count = targets.filter(t => t.type === 'page').length;
       if (count >= limit) {
-        this.log.warn(`Tab limit reached (${count}/${limit}), rejecting Target.createTarget`);
+        runForkInServer(Effect.logWarning('Tab limit reached, rejecting Target.createTarget').pipe(Effect.annotateLogs({ count: String(count), limit: String(limit) })));
         void this.sendClientError(msgId, -32000, `Tab limit exceeded (${count}/${limit})`);
         return;
       }
     } catch (e) {
       // If we can't determine tab count, allow the request through
-      this.log.debug(`Tab count check failed, allowing Target.createTarget: ${e instanceof Error ? e.message : String(e)}`);
+      runForkInServer(Effect.logDebug('Tab count check failed, allowing Target.createTarget').pipe(Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e) })));
     }
     // Under limit or check failed — forward to browser
     this.sendToBrowser(data, isBinary);
@@ -549,15 +550,15 @@ export class CDPProxy {
    */
   async emitClientEvent(method: string, params: object): Promise<void> {
     if (!this.clientOutbound) {
-      this.log.warn(`Cannot inject event ${method}: queue not initialized`);
+      runForkInServer(Effect.logWarning('Cannot inject event: queue not initialized').pipe(Effect.annotateLogs({ method })));
       return;
     }
     const message = JSON.stringify({ method, params });
     return new Promise<void>((resolve, reject) => {
       const offered = Queue.offerUnsafe(this.clientOutbound!, {
         data: message,
-        onSent: () => { this.log.trace(`Injected CDP event: ${method}`); resolve(); },
-        onError: (err) => { this.log.warn(`Failed to inject CDP event ${method}: ${err.message}`); reject(err); },
+        onSent: () => { runForkInServer(Effect.logDebug('Injected CDP event').pipe(Effect.annotateLogs({ method }))); resolve(); },
+        onError: (err) => { runForkInServer(Effect.logWarning('Failed to inject CDP event').pipe(Effect.annotateLogs({ method, error: err.message }))); reject(err); },
       });
       if (!offered) {
         Effect.runSync(incCounter(proxyDroppedMessages, { direction: 'client' }));
@@ -590,7 +591,7 @@ export class CDPProxy {
     if (this.cdpDebug) {
       const sid = sessionId ? ` [sid=${sessionId.substring(0, 16)}]` : '';
       const p = JSON.stringify(params).substring(0, 200);
-      this.log.info(`[SOLVER→Chrome] ${method}${sid} ${p}`);
+      runForkInServer(Effect.logInfo('[SOLVER→Chrome]').pipe(Effect.annotateLogs({ method, sid: sid.trim(), params: p })));
     }
 
     return conn.sendPromise(method, params, sessionId, timeoutMs);
@@ -678,12 +679,12 @@ export class CDPProxy {
    */
   async sendReplayComplete(metadata: ReplayCompleteParams): Promise<void> {
     await this.emitClientEvent('Browserless.replayComplete', metadata);
-    this.log.info(`Sent replay complete event: ${metadata.id}`);
+    runForkInServer(Effect.logInfo('Sent replay complete event').pipe(Effect.annotateLogs({ replay_id: metadata.id })));
   }
 
   async sendTabReplayComplete(metadata: TabReplayCompleteParams): Promise<void> {
     await this.emitClientEvent('Browserless.tabReplayComplete', metadata);
-    this.log.info(`Sent tab replay complete event: targetId=${metadata.targetId}`);
+    runForkInServer(Effect.logInfo('Sent tab replay complete event').pipe(Effect.annotateLogs({ targetId: metadata.targetId })));
   }
 
   /**
@@ -732,7 +733,7 @@ export class CDPProxy {
       });
 
       if (!gotPong) {
-        this.log.warn('Browser WS heartbeat timeout — Chrome not responding, closing session');
+        runForkInServer(Effect.logWarning('Browser WS heartbeat timeout — Chrome not responding, closing session'));
         this.handleClose();
       }
     });
@@ -740,7 +741,7 @@ export class CDPProxy {
     this.forkManaged(
       tick().pipe(
         Effect.catch((e) => Effect.sync(() => {
-          this.log.warn(`Browser WS ping failed, closing session: ${e instanceof Error ? e.message : String(e)}`);
+          runForkInServer(Effect.logWarning('Browser WS ping failed, closing session').pipe(Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e) })));
           this.handleClose();
         })),
         Effect.repeat(Schedule.fixed(BROWSER_WS_PING_INTERVAL)),
@@ -779,10 +780,10 @@ export class CDPProxy {
 
     const clientState = this.clientWs?.readyState;
     const browserState = this.browserWs?.readyState;
-    this.log.info(
-      `CDPProxy closing: clientWs=${clientState === WebSocket.OPEN ? 'OPEN' : clientState} ` +
-      `browserWs=${browserState === WebSocket.OPEN ? 'OPEN' : browserState}`
-    );
+    runForkInServer(Effect.logInfo('CDPProxy closing').pipe(Effect.annotateLogs({
+      clientWs: clientState === WebSocket.OPEN ? 'OPEN' : String(clientState),
+      browserWs: browserState === WebSocket.OPEN ? 'OPEN' : String(browserState),
+    })));
 
     // Await scope close so all acquireRelease finalizers fire before onClose
     this.closePromise = Effect.runPromise(Scope.close(this.proxyScope, Exit.void))

@@ -8,7 +8,6 @@
  */
 import {
   BrowserInstance,
-  Logger,
   TabReplayCompleteParams,
 } from '@browserless.io/browserless';
 
@@ -24,7 +23,6 @@ import type { VideoManager } from '../video/video-manager.js';
 export { type StopTabRecordingResult } from './cdp-session-types.js';
 
 export class SessionCoordinator {
-  private log = new Logger('session-coordinator');
   private screencast = createScreencastCapture();
   private videoEncoder: VideoEncoder;
   private cloudflareSolvers = new Map<string, CloudflareSolver>();
@@ -189,8 +187,8 @@ export class SessionCoordinator {
   /**
    * Start replay capture for a session (no-op: replay is handled by CdpSession → ReplayWriter).
    */
-  startReplay(sessionId: string, _trackingId?: string): void {
-    this.log.debug(`Started replay capture for session ${sessionId}`);
+  startReplay(_sessionId: string, _trackingId?: string): void {
+    // No-op: replay is handled by CdpSession → ReplayWriter
   }
 
   /**
@@ -291,14 +289,14 @@ export class SessionCoordinator {
     return Effect.fn('coordinator.shutdown')(function*() {
       const sessionIds = [...coordinator.cdpSessions.keys()];
       yield* Effect.annotateCurrentSpan({ 'session.target_count': sessionIds.length });
-      coordinator.log.info(`Shutting down ${sessionIds.length} session(s)...`);
+      yield* Effect.logInfo(`Shutting down ${sessionIds.length} session(s)...`);
 
       for (const sessionId of sessionIds) {
         yield* coordinator.stopReplayEffect(sessionId).pipe(Effect.ignore);
       }
 
       yield* coordinator.videoEncoder.disposeEffect;
-      coordinator.log.info('Session coordinator shutdown complete');
+      yield* Effect.logInfo('Session coordinator shutdown complete');
     })();
   }
 

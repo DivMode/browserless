@@ -1,7 +1,6 @@
 import {
   BrowserInstance,
   BrowserlessSession,
-  Logger,
   ReplayCompleteParams,
   exists,
 } from '@browserless.io/browserless';
@@ -9,6 +8,7 @@ import { rm } from 'fs/promises';
 
 import { Effect, Exit, Fiber, FiberMap, Schedule, Scope } from 'effect';
 import { observeHistogram, sessionDuration } from '../effect-metrics.js';
+import { runForkInServer } from '../otel-runtime.js';
 import { SessionCoordinator } from './session-coordinator.js';
 import { SessionRegistry } from './session-registry.js';
 
@@ -34,7 +34,6 @@ export class SessionLifecycleManager {
   );
 
   private watchdogFiber: Fiber.Fiber<unknown> | null = null;
-  private log = new Logger('session-lifecycle');
 
   constructor(
     private registry: SessionRegistry,
@@ -144,10 +143,14 @@ export class SessionLifecycleManager {
    */
   private async removeUserDataDir(userDataDir: string | null): Promise<void> {
     if (userDataDir && (await exists(userDataDir))) {
-      this.log.debug(`Deleting data directory "${userDataDir}"`);
+      runForkInServer(
+        Effect.logDebug(`Deleting data directory "${userDataDir}"`),
+      );
       await rm(userDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 }).catch((err) => {
-        this.log.error(
-          `Error cleaning up user-data-dir "${err}" at ${userDataDir}`,
+        runForkInServer(
+          Effect.logError(`Error cleaning up user-data-dir`).pipe(
+            Effect.annotateLogs({ error: String(err), user_data_dir: userDataDir }),
+          ),
         );
       });
     }
@@ -177,21 +180,23 @@ export class SessionLifecycleManager {
 
       // FiberMap.run auto-interrupts prior fiber for same key, but we log it
       if (FiberMap.hasUnsafe(lifecycle.timerFibers, session.id)) {
-        lifecycle.log.debug(`Deleting prior keep-until timer for "${session.id}"`);
+        yield* Effect.logDebug(`Deleting prior keep-until timer`).pipe(
+          Effect.annotateLogs({ session_id: session.id }),
+        );
       }
 
       yield* Effect.logDebug('session.close.decision').pipe(
         Effect.annotateLogs({ session_id: session.id, keep_open: keepOpen, connected, has_keep_until: hasKeepUntil, force }),
       );
 
-      lifecycle.log.debug(
-        `close() check: session=${session.id} numbConnected=${session.numbConnected} keepUntil=${keepUntil} keepOpen=${keepOpen} force=${force}`,
+      yield* Effect.logDebug('close() check').pipe(
+        Effect.annotateLogs({ session_id: session.id, numb_connected: session.numbConnected, keep_until: keepUntil, keep_open: keepOpen, force }),
       );
 
       if (!force && hasKeepUntil) {
         const timeout = keepUntil - now;
-        lifecycle.log.trace(
-          `Setting timer ${timeout.toLocaleString()} for "${session.id}"`,
+        yield* Effect.logDebug(`Setting keep-until timer`).pipe(
+          Effect.annotateLogs({ session_id: session.id, timeout_ms: timeout }),
         );
         // FiberMap.run auto-interrupts any existing fiber for this session.id
         yield* FiberMap.run(lifecycle.timerFibers, session.id,
@@ -199,7 +204,11 @@ export class SessionLifecycleManager {
             Effect.andThen(Effect.sync(() => {
               const currentSession = lifecycle.registry.get(browser);
               if (currentSession) {
-                lifecycle.log.trace(`Timer hit for "${currentSession.id}"`);
+                runForkInServer(
+                  Effect.logDebug('Timer hit').pipe(
+                    Effect.annotateLogs({ session_id: currentSession.id }),
+                  ),
+                );
                 lifecycle.close(browser, currentSession);
               }
             })),
@@ -208,7 +217,9 @@ export class SessionLifecycleManager {
       }
 
       if (!keepOpen) {
-        lifecycle.log.warn(`KILLING browser session ${session.id}: numbConnected=${connected} keepUntil=${keepUntil} force=${force}`);
+        yield* Effect.logWarning(`KILLING browser session`).pipe(
+          Effect.annotateLogs({ session_id: session.id, numb_connected: connected, keep_until: keepUntil, force }),
+        );
         yield* lifecycle.destroySession(browser, session);
       }
 
@@ -237,9 +248,7 @@ export class SessionLifecycleManager {
     return Effect.fn('lifecycle.complete')(function*() {
       const session = lifecycle.registry.get(browser);
       if (!session) {
-        lifecycle.log.info(
-          `complete() called but no session found (already closed?)`,
-        );
+        yield* Effect.logInfo('complete() called but no session found (already closed?)');
         yield* Effect.promise(() => browser.close());
         return;
       }
@@ -252,8 +261,8 @@ export class SessionLifecycleManager {
 
       --session.numbConnected;
 
-      lifecycle.log.debug(
-        `complete(): session ${id} numbConnected=${session.numbConnected}`,
+      yield* Effect.logDebug('complete()').pipe(
+        Effect.annotateLogs({ session_id: id, numb_connected: session.numbConnected }),
       );
 
       // CRITICAL: Must await close to ensure session is removed from registry
@@ -277,7 +286,9 @@ export class SessionLifecycleManager {
     const lifecycle = this;
 
     return Effect.fn('lifecycle.killSessions')(function*() {
-      lifecycle.log.debug(`killSessions invoked target: "${target}"`);
+      yield* Effect.logDebug('killSessions invoked').pipe(
+        Effect.annotateLogs({ target }),
+      );
       const sessions = lifecycle.registry.toArray();
       const results: ReplayCompleteParams[] = [];
       let closed = 0;
@@ -288,8 +299,8 @@ export class SessionLifecycleManager {
           session.id === target ||
           target === 'all'
         ) {
-          lifecycle.log.debug(
-            `Closing browser via killSessions BrowserId: "${session.id}", trackingId: "${session.trackingId}"`,
+          yield* Effect.logDebug('Closing browser via killSessions').pipe(
+            Effect.annotateLogs({ browser_id: session.id, tracking_id: session.trackingId }),
           );
           // CRITICAL: Must await close to ensure session is fully cleaned up
           const metadata = yield* lifecycle.closeEffect(browser, session, true);
@@ -367,15 +378,17 @@ export class SessionLifecycleManager {
           });
 
         if (stale.length > 0) {
-          lifecycle.log.warn(`Watchdog: ${stale.length} stale session(s)`);
+          yield* Effect.logWarning(`Watchdog: stale sessions found`).pipe(
+            Effect.annotateLogs({ stale_count: stale.length }),
+          );
           yield* Effect.all(
             stale.map(([browser, session]) => {
-              lifecycle.log.warn(
-                `Watchdog: force-closing ${session.id} (age=${Math.round((now - session.startedOn) / 1000)}s, ttl=${session.ttl}ms, numbConnected=${session.numbConnected})`,
-              );
-              return lifecycle.destroySession(browser, session).pipe(
-                Effect.timeout('20 seconds'),
-                Effect.ignore,
+              return Effect.logWarning('Watchdog: force-closing session').pipe(
+                Effect.annotateLogs({ session_id: session.id, age_s: Math.round((now - session.startedOn) / 1000), ttl_ms: session.ttl, numb_connected: session.numbConnected }),
+                Effect.andThen(lifecycle.destroySession(browser, session).pipe(
+                  Effect.timeout('20 seconds'),
+                  Effect.ignore,
+                )),
               );
             }),
             { concurrency: 'unbounded' },
@@ -391,7 +404,7 @@ export class SessionLifecycleManager {
    * Shutdown: destroy all sessions via the single cleanup path, clear timers.
    */
   async shutdown(): Promise<void> {
-    this.log.info('Closing down browser sessions');
+    runForkInServer(Effect.logInfo('Closing down browser sessions'));
 
     // Step 0: Flush all root spans IMMEDIATELY — before any slow cleanup.
     // This pushes session + tab root spans to the OTLP exporter buffer so
@@ -409,7 +422,11 @@ export class SessionLifecycleManager {
     // Destroy all sessions via the single cleanup path
     const sessions = this.registry.toArray();
     if (sessions.length > 0) {
-      this.log.info(`Destroying ${sessions.length} session(s)...`);
+      runForkInServer(
+        Effect.logInfo('Destroying sessions').pipe(
+          Effect.annotateLogs({ session_count: sessions.length }),
+        ),
+      );
       await Effect.runPromise(
         Effect.all(
           sessions.map(([browser, session]) =>
@@ -430,6 +447,6 @@ export class SessionLifecycleManager {
     // FiberMap.clear interrupts all timer fibers, then close the scope
     this.clearTimers();
     await Effect.runPromise(Scope.close(this.timerScope, Exit.void));
-    this.log.info('Session lifecycle shutdown complete');
+    runForkInServer(Effect.logInfo('Session lifecycle shutdown complete'));
   }
 }

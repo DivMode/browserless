@@ -1,7 +1,6 @@
 import {
   BrowserInstance,
   BrowserlessSession,
-  Logger,
 } from '@browserless.io/browserless';
 
 /**
@@ -17,14 +16,12 @@ import {
  */
 export class SessionRegistry {
   private sessionsMap: Map<BrowserInstance, BrowserlessSession> = new Map();
-  private log = new Logger('session-registry');
 
   /**
    * Register a browser session.
    */
   register(browser: BrowserInstance, session: BrowserlessSession): void {
     this.sessionsMap.set(browser, session);
-    this.log.debug(`Registered session ${session.id}`);
   }
 
   /**
@@ -34,7 +31,6 @@ export class SessionRegistry {
     const session = this.sessionsMap.get(browser);
     if (session) {
       this.sessionsMap.delete(browser);
-      this.log.debug(`Removed session ${session.id}`);
     }
   }
 
@@ -146,7 +142,6 @@ export class SessionRegistry {
    */
   clear(): void {
     this.sessionsMap.clear();
-    this.log.debug('Cleared all sessions');
   }
 
   /**
