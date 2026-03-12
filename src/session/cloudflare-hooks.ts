@@ -28,6 +28,8 @@ export interface CloudflareHooks {
   /** Set the session-level span for parenting solver traces.
    * Accepts AnySpan (both Span and ExternalSpan) — cdp-session passes an ExternalSpan. */
   setSessionSpan(span: Tracer.AnySpan): void;
+  /** Set a per-tab span for parenting detection fibers under the tab's trace. */
+  setTabSpan(targetId: TargetId, span: Tracer.AnySpan): void;
   /** Awaited — ensures ManagedRuntime disposal completes before session teardown. */
   destroy(): Effect.Effect<void>;
 }

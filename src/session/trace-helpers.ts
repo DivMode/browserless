@@ -4,7 +4,7 @@
  * These extract the repeated conditional `withParentSpan` pattern used
  * throughout cdp-session.ts and cloudflare-solver.ts into composable helpers.
  */
-import { Effect, FiberMap, ManagedRuntime, type Tracer } from 'effect';
+import { Effect, Fiber, FiberMap, ManagedRuntime, type Tracer } from 'effect';
 
 /**
  * Conditionally parent an effect under a session span.
@@ -42,6 +42,43 @@ export const forkTracedFiber = <K extends string>(
  * filters ExternalSpans — causing solver effects to become orphaned when the
  * parent is the session's ExternalSpan.
  */
+/**
+ * Fork a fiber as an independent root trace, linked back to the session span.
+ * Creates a NEW traceId (root: true) with a span link for correlation.
+ * Use this when a fiber should form its own trace rather than joining the session trace.
+ */
+export const forkLinkedRootFiber = <K extends string>(
+  runtime: ManagedRuntime.ManagedRuntime<any, never>,
+  fiberMap: FiberMap.FiberMap<K>,
+  key: K,
+  spanName: string,
+  effect: Effect.Effect<void, never, any>,
+  sessionSpan: Tracer.AnySpan | null | undefined,
+): void => {
+  const linked = sessionSpan
+    ? effect.pipe(
+        Effect.withSpan(spanName, {
+          root: true,
+          links: [{ span: sessionSpan, attributes: {} }],
+        }),
+      )
+    : effect.pipe(Effect.withSpan(spanName, { root: true }));
+  runtime.runFork(FiberMap.run(fiberMap, key, linked));
+};
+
+/**
+ * Cross-runtime bridge with interrupt propagation.
+ *
+ * Runs the effect in a foreign ManagedRuntime, propagating the caller's
+ * current span for unified tracing. When the calling fiber is interrupted
+ * (e.g., tab scope close → FiberMap finalization), the inner fiber in the
+ * foreign runtime is also interrupted.
+ *
+ * Previous implementation used Effect.promise(() => runtime.runPromise(...))
+ * which couldn't propagate interrupts — Promises have no cancellation.
+ * This caused ghost detection fibers: the session runtime interrupted the
+ * handler, but the solver runtime's copy kept running (500ms sleep → fork ghost).
+ */
 export const bridgeRuntime = <R>(
   runtime: ManagedRuntime.ManagedRuntime<R, never>,
 ) => <A, E>(
@@ -49,7 +86,9 @@ export const bridgeRuntime = <R>(
 ): Effect.Effect<A, E> =>
   Effect.withFiber((fiber) => {
     const parentSpan = fiber.currentSpan;
-    return Effect.promise(() =>
-      runtime.runPromise(withSessionSpan(effect, parentSpan)),
+    const traced = withSessionSpan(effect, parentSpan);
+    const innerFiber = runtime.runFork(traced);
+    return Fiber.join(innerFiber).pipe(
+      Effect.onInterrupt(() => Fiber.interrupt(innerFiber)),
     );
   });

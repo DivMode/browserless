@@ -635,6 +635,11 @@ export class CloudflareDetector {
       if (maybeResolved._tag === 'Some') {
         const resolved = maybeResolved.value;
         if (resolved._tag === 'solved') {
+          yield* Effect.annotateCurrentSpan({
+            'cf.resolution_outcome': 'solved',
+            'cf.solve_method': resolved.result.method,
+            'cf.elapsed_ms': Date.now() - active.startTime,
+          });
           self.log.info(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=solved method=${resolved.result.method} elapsed_ms=${Date.now() - active.startTime}`);
           if (opts.addToSolvedPages) self.state.solvedPages.add(targetId);
           if (!active.resolution.markerEmitted) {
@@ -643,6 +648,11 @@ export class CloudflareDetector {
           const label = self.state.buildCompoundLabel(targetId);
           self.events.emitSolved(active, resolved.result, label, { skipMarker: active.resolution.markerEmitted });
         } else {
+          yield* Effect.annotateCurrentSpan({
+            'cf.resolution_outcome': 'failed',
+            'cf.fail_reason': resolved.reason,
+            'cf.elapsed_ms': resolved.duration_ms,
+          });
           self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=failed reason=${resolved.reason} elapsed_ms=${resolved.duration_ms}`);
           if (!active.resolution.markerEmitted) {
             const phase_label = resolved.phase_label ?? `✗ ${resolved.reason}`;
@@ -653,6 +663,12 @@ export class CloudflareDetector {
         }
       } else {
         // Timeout — zombie detection caught. Settle and emit.
+        yield* Effect.annotateCurrentSpan({
+          'cf.resolution_outcome': 'timeout',
+          'cf.elapsed_ms': Date.now() - active.startTime,
+          'cf.had_click': !!active.clickDelivered,
+          'cf.iframe_bound': !!active.iframeCdpSessionId,
+        });
         self.log.warn(`CF lifecycle: resolution_timeout target=${targetId.slice(0,8)} session=${self.sid} elapsed_ms=${Date.now() - active.startTime}`);
         yield* Effect.logWarning('CF lifecycle: resolution_timeout diagnostic').pipe(
           Effect.annotateLogs({
@@ -828,7 +844,10 @@ export class CloudflareDetector {
       if (self.state.registry.has(targetId)) return;
       // PHANTOM GUARD: Skip detection on pages that already solved CF — new OOPIFs
       // spawned post-solve are not real challenges. See solvedPages JSDoc.
-      if (self.state.solvedPages.has(targetId)) return;
+      if (self.state.solvedPages.has(targetId)) {
+        yield* Effect.annotateCurrentSpan({ 'cf.phantom': true });
+        return;
+      }
 
       const startTime = Date.now();
 
@@ -943,6 +962,12 @@ export class CloudflareDetector {
           // Guard: if aborted, scope finalizer or emitSolveFailure handles emission
           if (active.aborted) return;
           if (outcome._tag === 'solved') {
+            // PHANTOM GUARD: Set solvedPages in the Resolution callback (synchronous)
+            // so the guard fires immediately for ALL solve signals (bridge_solved,
+            // page_navigated, etc.). The awaitResolutionRace also sets it, but there's
+            // a scheduling window between callback and Effect wakeup where phantom
+            // OOPIFs could trigger a false detection.
+            self.state.solvedPages.add(targetId);
             self.state.pushPhase(targetId, outcome.result.type, outcome.result.phase_label || '→');
             self.events.marker(targetId, 'cf.solved', {
               type: outcome.result.type, method: outcome.result.method,
