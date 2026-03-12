@@ -290,7 +290,10 @@ describe.concurrent('CF Solver Multi-Site', () => {
                 p.goto(site.url, { waitUntil: 'load', timeout: 10_000 }).catch(() => {}),
               );
 
-              yield* waitForSolve(p, site.waitStrategy, site.waitMs ?? 8_000);
+              // Interstitials need more time — CF can take 10-15s to verify and navigate.
+              // Turnstile tokens appear faster (5-8s). Both fit well under 60s test timeout.
+              const defaultWaitMs = site.waitStrategy === 'interstitial' ? 20_000 : 8_000;
+              yield* waitForSolve(p, site.waitStrategy, site.waitMs ?? defaultWaitMs);
 
               return p;
             }),
