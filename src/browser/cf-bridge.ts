@@ -14,13 +14,41 @@ import { setupTurnstileHooks } from './turnstile-hooks';
 import { setupErrorMonitor } from './turnstile-error';
 import type { BridgeEvent } from './types';
 
+// ── Buffered emit ─────────────────────────────────────────────────────
+// Runtime.addBinding is async — on navigation, the bridge script fires BEFORE
+// Chrome registers __rrwebPush in the new execution context. Without buffering,
+// solved events are silently dropped (tokenReported=true prevents retry),
+// causing 50-60s ghost traces while awaitResolutionRace waits for a signal
+// that was lost. Buffer events and flush when the binding appears.
+const pendingEvents: string[] = [];
+let flushTimer: ReturnType<typeof setInterval> | null = null;
+
+function flushPending(): void {
+  while (pendingEvents.length > 0) {
+    try { window.__rrwebPush!(pendingEvents.shift()!); } catch (_) {}
+  }
+  if (flushTimer) {
+    clearInterval(flushTimer);
+    flushTimer = null;
+  }
+}
+
 function emit(event: BridgeEvent): void {
-  // Multiplex through rrweb binding — avoids adding a new detectable binding.
-  // Server distinguishes bridge events (object with type) from rrweb batches (array).
+  const payload = JSON.stringify(event);
   if (typeof window.__rrwebPush === 'function') {
-    try {
-      window.__rrwebPush(JSON.stringify(event));
-    } catch (_) {}
+    if (pendingEvents.length > 0) flushPending();
+    try { window.__rrwebPush(payload); } catch (_) {}
+  } else {
+    pendingEvents.push(payload);
+    if (!flushTimer) {
+      flushTimer = setInterval(() => {
+        if (typeof window.__rrwebPush === 'function') flushPending();
+      }, 50);
+      // Stop after 10s — binding should appear within milliseconds
+      setTimeout(() => {
+        if (flushTimer) { clearInterval(flushTimer); flushTimer = null; }
+      }, 10000);
+    }
   }
 }
 

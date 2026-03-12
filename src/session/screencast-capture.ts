@@ -75,6 +75,7 @@ const targetConsumer = (
 ): Effect.Effect<number> =>
   Effect.fn('screencast.target')(function*() {
     yield* Effect.annotateCurrentSpan({ 'screencast.target_id': cdpSessionId });
+    const startTime = Date.now();
     let frameCount = 0;
 
     // Ref holds the current fallback fiber so we can interrupt+restart it
@@ -137,7 +138,13 @@ const targetConsumer = (
     const fb = yield* Ref.get(fallbackRef);
     if (fb) yield* Fiber.interrupt(fb).pipe(Effect.ignore);
 
-    yield* Effect.annotateCurrentSpan({ 'screencast.frame_count': frameCount });
+    const durationSec = (Date.now() - startTime) / 1000;
+    const fps = durationSec > 0 ? frameCount / durationSec : 0;
+    yield* Effect.annotateCurrentSpan({
+      'screencast.frame_count': frameCount,
+      'screencast.fps': Math.round(fps * 100) / 100,
+      'screencast.duration_s': Math.round(durationSec * 100) / 100,
+    });
     return frameCount;
   })();
 

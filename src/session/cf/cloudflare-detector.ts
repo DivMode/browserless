@@ -647,6 +647,15 @@ export class CloudflareDetector {
 
       const maybeResolved = yield* active.resolution.awaitBounded;
 
+      // Tasks 2+4: Click timing attributes — distinguish pre-click vs post-click timeout
+      yield* Effect.annotateCurrentSpan({
+        'cf.click_delivered': !!active.clickDelivered,
+        ...(active.clickDeliveredAt ? {
+          'cf.click_delivered_at_ms': active.clickDeliveredAt,
+          'cf.click_to_resolve_ms': Date.now() - active.clickDeliveredAt,
+        } : {}),
+      });
+
       if (maybeResolved._tag === 'Some') {
         const resolved = maybeResolved.value;
         if (resolved._tag === 'solved') {

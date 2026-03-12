@@ -788,12 +788,19 @@ export class CloudflareSolveStrategies {
           (t: { targetId?: string }) => t.targetId && solvedCFTargetIds?.has(t.targetId),
         );
 
+        const solvedSetSize = solvedCFTargetIds?.size ?? 0;
+        if (solvedSetSize > 50) {
+          yield* Effect.logWarning('cf.detect.solved_set_size exceeds 50').pipe(
+            Effect.annotateLogs({ solved_set_size: solvedSetSize }),
+          );
+        }
+
         yield* Effect.annotateCurrentSpan({
           'cf.detect.total_targets': targetInfos.length,
           'cf.detect.cf_targets': cfTargets.length,
           'cf.detect.filtered_stale': filteredOut.length,
           'cf.detect.fresh': matched.length,
-          'cf.detect.solved_set_size': solvedCFTargetIds?.size ?? 0,
+          'cf.detect.solved_set_size': solvedSetSize,
           'cf.detect.matched_urls': matched.map((t: { url?: string; targetId?: string }) => `${t.targetId?.slice(0, 8)}=${t.url}`).join(' | '),
           'cf.detect.filtered_ids': filteredOut.map((t: { targetId?: string }) => t.targetId?.slice(0, 8)).join(','),
         });
