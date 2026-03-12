@@ -472,7 +472,7 @@ export class CdpSession {
           if (!target.failedReconnect && this.runtime && this._fiberMap) {
             target.failedReconnect = true;
             const tab = this.tabs.get(target.targetId);
-            if (tab) {
+            if (tab && tab.scope.state._tag === 'Open') {
               forkTracedFiber(this.runtime, this._fiberMap, `pageWs:${target.targetId}`, this.openPageWs(target.targetId), tab.context);
             }
           }
@@ -767,10 +767,13 @@ export class CdpSession {
       //    callback + target removal → tab span end + tab.closed event
       //    Scope.close is idempotent — already-closed scopes (from handleTargetDestroyed) are no-ops.
       //    sessionSpan is alive here (only ended in sessionSpanLayer release, after destroyEffect).
+      //    Don't clear tabs here — context must survive for late bridge events.
+      //    ensuring block does the final tabs.clear().
       for (const [, tab] of session.tabs) {
-        yield* Scope.close(tab.scope, Exit.void).pipe(Effect.ignore);
+        if (tab.scope.state._tag === 'Open') {
+          yield* Scope.close(tab.scope, Exit.void).pipe(Effect.ignore);
+        }
       }
-      session.tabs.clear();
 
       // 3. Destroy CF solver — ManagedRuntime disposal.
       //    Per-tab CF cleanup is already done (tab scope finalizers ran first).
@@ -781,11 +784,13 @@ export class CdpSession {
       // All span.end() calls are idempotent — no-ops if scope finalizers / Layer
       // release already ended them. Defense-in-depth for interruption edge cases.
       Effect.ensuring(Effect.sync(() => {
-        // Safety net: tab spans (primary path = tab scope finalizers)
+        // Safety net: end spans for any tabs whose scope didn't close cleanly
         for (const [, tab] of session.tabs) {
-          tab.span.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
+          if (tab.scope.state._tag !== 'Closed') {
+            tab.span.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
+          }
         }
-        session.tabs.clear();
+        session.tabs.clear(); // Final deletion — session is done, nothing needs context
         // Safety net: session span (primary path = sessionSpanLayer release)
         if (session.sessionSpan) {
           session.sessionSpan.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
@@ -904,13 +909,13 @@ export class CdpSession {
     const isLifecycle = msg.method === 'Target.attachedToTarget' || msg.method === 'Target.targetDestroyed';
 
     const tab = this.tabs.get(targetId);
-    if (tab && !isLifecycle) {
-      // Per-tab path: tab exists → context is GUARANTEED (same struct).
+    if (tab && tab.scope.state._tag === 'Open' && !isLifecycle) {
+      // Per-tab path: scope open → FiberMap live → route to tab trace
       return FiberMap.run(tab.fibers, msg.method,
         effect.pipe(Effect.withParentSpan(tab.context)));
     }
 
-    // Session path: lifecycle events, broadcast events, unknown targets.
+    // Session path: closed tabs, lifecycle events, broadcast events, unknown targets.
     const traced = this.sessionContext
       ? effect.pipe(Effect.withParentSpan(this.sessionContext))
       : effect;
@@ -966,10 +971,11 @@ export class CdpSession {
                 ),
               ),
             );
-            // Prefer tab context; fall back to session context for late bridge events
-            // that arrive after tab scope close (e.g., beacon → bridge during teardown).
-            const bridgeSpan = this.tabs.get(targetId)?.context ?? this.sessionContext;
-            forkTracedFiber(this.runtime, this._fiberMap, `cf:bridge:${targetId}`, bridgeEffect, bridgeSpan);
+            // Tab context is always valid — TabState stays in map after scope close.
+            // context is immutable ExternalSpan data, not a live resource.
+            const tab = this.tabs.get(targetId);
+            if (!tab) return; // Tab never existed — discard
+            forkTracedFiber(this.runtime, this._fiberMap, `cf:bridge:${targetId}`, bridgeEffect, tab.context);
           }
           return;
         }
@@ -1178,13 +1184,13 @@ export class CdpSession {
         // TAB SPAN FINALIZER — registered FIRST, runs LAST (LIFO)
         // Guaranteed to run on Scope.close, even if other cleanup fails.
         // span.end() is idempotent — safe if ensuring block also ends it.
-        // Deletes entire TabState atomically — zero partial cleanup.
+        // NO tabs.delete — context must survive for late bridge events.
+        // Scope.state transitions to "Closed" — routeCdpEvent checks this.
         yield* Scope.addFinalizer(tabScope, Effect.sync(() => {
           if (session.sessionSpan) {
             session.sessionSpan.event('tab.closed', BigInt(Date.now()) * 1_000_000n, { 'tab.target_id': targetId });
           }
           tabSpan.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
-          session.tabs.delete(targetId);
         }));
 
         // FINALIZER 4 (registered 2nd = runs 5th): callback + video + target removal
@@ -1416,16 +1422,19 @@ export class CdpSession {
       //   1. CF cleanup (markers injected while queue is open)
       //   2. Queue end + consumer drain (replay file written)
       //   3. Callback + video + target removal
+      // Scope.close is idempotent — already-closed scopes are no-ops.
+      // Tab stays in map after close — context survives for bridge events.
       const tab = session.tabs.get(targetId);
-      if (tab) {
+      if (tab && tab.scope.state._tag === 'Open') {
         yield* Scope.close(tab.scope, Exit.void);
-      } else {
+      } else if (!tab) {
         // Non-tab target (iframe) or no scope — direct cleanup
         yield* session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
           Effect.timeout('3 seconds'), Effect.ignore);
         session.targets.remove(targetId);
         session.targets.removeIframeTarget(targetId);
       }
+      // If tab exists but scope already closed — no-op (idempotent)
 
       // Tab span ending is handled by the tab scope finalizer (registered FIRST, runs LAST).
       // Scope.close at line above triggers LIFO finalizers → tab span end + tab.closed event.
