@@ -4,7 +4,6 @@ import path from 'path';
 
 import { Duration, Effect, ManagedRuntime, Queue } from 'effect';
 import {
-  Logger,
   exists,
 } from '@browserless.io/browserless';
 
@@ -40,7 +39,6 @@ interface EncodeJob {
  */
 export class VideoEncoder {
   private static readonly SEGMENT_DURATION = 10;
-  private log = new Logger('video-encoder');
   private progress = new Map<string, EncodingProgress>();
   private runtime = ManagedRuntime.make(SharedTracerLayer);
   private effectQueue: Queue.Queue<EncodeJob> | null = null;
@@ -77,11 +75,11 @@ export class VideoEncoder {
   queueEncode(sessionId: string, videosDir: string, totalFrames: number = 0): void {
     // Prevent duplicate queue entries (two viewers racing)
     if (this.progress.has(sessionId)) {
-      this.log.debug(`Session ${sessionId} already queued/encoding, skipping`);
+      this.runtime.runFork(Effect.logDebug(`Session ${sessionId} already queued/encoding, skipping`));
       return;
     }
 
-    this.log.info(`Queuing video encode for session ${sessionId}`);
+    this.runtime.runFork(Effect.logInfo(`Queuing video encode for session ${sessionId}`));
 
     this.progress.set(sessionId, {
       framesProcessed: 0,
@@ -130,7 +128,7 @@ export class VideoEncoder {
         if (entry.isDirectory() && entry.name !== 'frames') {
           const framesDir = path.join(videosDir, entry.name, 'frames');
           if (await exists(framesDir)) {
-            this.log.info(`Cleaning up orphaned frames: ${entry.name}`);
+            this.runtime.runFork(Effect.logInfo(`Cleaning up orphaned frames: ${entry.name}`));
             await rm(path.join(videosDir, entry.name), { recursive: true });
             cleaned++;
           }
@@ -138,10 +136,10 @@ export class VideoEncoder {
       }
 
       if (cleaned > 0) {
-        this.log.info(`Cleaned up ${cleaned} orphaned frame directories`);
+        this.runtime.runFork(Effect.logInfo(`Cleaned up ${cleaned} orphaned frame directories`));
       }
     } catch (e) {
-      this.log.warn(`Orphan cleanup failed: ${e instanceof Error ? e.message : String(e)}`);
+      this.runtime.runFork(Effect.logWarning(`Orphan cleanup failed: ${e instanceof Error ? e.message : String(e)}`));
     }
   }
 
@@ -163,7 +161,7 @@ export class VideoEncoder {
     const playlistPath = path.join(sessionDir, 'playlist.m3u8');
 
     if (!(await exists(framesDir))) {
-      this.log.warn(`No frames directory for ${sessionId}, skipping`);
+      this.runtime.runFork(Effect.logWarning(`No frames directory for ${sessionId}, skipping`));
       this.updateProgress(sessionId, { status: 'failed' });
       return;
     }
@@ -176,7 +174,7 @@ export class VideoEncoder {
         .sort();
 
       if (files.length === 0) {
-        this.log.warn(`No frames found for ${sessionId}`);
+        this.runtime.runFork(Effect.logWarning(`No frames found for ${sessionId}`));
         this.updateProgress(sessionId, { status: 'failed' });
         return;
       }
@@ -245,7 +243,7 @@ export class VideoEncoder {
       try { await rm(concatPath); } catch {}
       try { await rm(path.join(sessionDir, '_encoding.m3u8')); } catch {}
 
-      this.log.info(`Video encoded: ${sessionId} (${files.length} frames)`);
+      this.runtime.runFork(Effect.logInfo(`Video encoded: ${sessionId} (${files.length} frames)`));
 
       // Schedule progress cleanup after 30s
       this.runtime.runFork(
@@ -254,7 +252,7 @@ export class VideoEncoder {
         ),
       );
     } catch (e) {
-      this.log.error(`Encoding failed for ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
+      this.runtime.runFork(Effect.logError(`Encoding failed for ${sessionId}: ${e instanceof Error ? e.message : String(e)}`));
       this.updateProgress(sessionId, { status: 'failed' });
       // Clean up progress entry after 30s (same as success path) to unblock re-encode attempts
       this.runtime.runFork(

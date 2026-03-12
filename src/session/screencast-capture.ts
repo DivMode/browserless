@@ -20,7 +20,6 @@
 import { mkdir, writeFile } from 'fs/promises';
 import path from 'path';
 
-import { Logger } from '@browserless.io/browserless';
 import { Cause, Effect, Fiber, Queue, Ref, Stream } from 'effect';
 
 import type { FrameParams, SendCommand, VideoHooks } from './video-services.js';
@@ -153,7 +152,6 @@ const targetConsumer = (
  * No class, no `this` — state is closure-scoped.
  */
 export const createScreencastCapture = () => {
-  const log = new Logger('screencast-capture');
   const sessions = new Map<string, SessionState>();
 
   // ── initSession ──────────────────────────────────────────────────
@@ -169,7 +167,7 @@ export const createScreencastCapture = () => {
       targets: new Map(),
       totalFrames: 0,
     });
-    log.debug(`Screencast session initialized: ${sessionId}`);
+    // Session initialized — screencast frames will be captured
   };
 
   // ── addTarget ────────────────────────────────────────────────────
@@ -205,7 +203,7 @@ export const createScreencastCapture = () => {
       );
       session.targets.set(cdpSessionId, { queue, fiber, frameCount: 0 });
 
-      log.debug(`Screencast started on target (session ${sessionId})`);
+      yield* Effect.logDebug(`Screencast started on target (session ${sessionId})`);
     })();
 
   // ── handleFrame (sync — hot path) ────────────────────────────────
@@ -259,7 +257,7 @@ export const createScreencastCapture = () => {
       const count = target.frameCount;
       session.targets.delete(cdpSessionId);
 
-      log.info(`Screencast stopped for target ${cdpSessionId}: ${count} frames`);
+      yield* Effect.logInfo(`Screencast stopped for target ${cdpSessionId}: ${count} frames`);
       return count;
     })();
 
@@ -292,7 +290,7 @@ export const createScreencastCapture = () => {
       session.targets.clear();
       sessions.delete(sessionId);
 
-      log.info(`Screencast stopped for session ${sessionId}: ${frameCount} frames`);
+      yield* Effect.logInfo(`Screencast stopped for session ${sessionId}: ${frameCount} frames`);
       return frameCount;
     })();
 

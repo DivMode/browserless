@@ -1,5 +1,5 @@
 import { Cause, Data, Effect, Latch } from 'effect';
-import { Logger } from '@browserless.io/browserless';
+import { runForkInServer } from '../../otel-runtime.js';
 import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, CloudflareType, EmbeddedInfo, InterstitialCFType } from '../../shared/cloudflare-detection.js';
 import { isInterstitialType, isCFInterstitialTitle } from '../../shared/cloudflare-detection.js';
 import { DETECTION_POLL_DELAY, EMBEDDED_RESOLUTION_TIMEOUT, INTERSTITIAL_RESOLUTION_TIMEOUT, MAX_RECHALLENGES, RECHALLENGE_DELAY_MS } from './cf-schedules.js';
@@ -269,7 +269,6 @@ export const classifyNavigationOutcome = (
  * from Effect generators rather than injected via constructor callbacks.
  */
 export class CloudflareDetector {
-  private log = new Logger('cf-detect');
   private enabled = false;
 
   constructor(
@@ -292,7 +291,11 @@ export class CloudflareDetector {
     if (config) {
       this.state.config = { ...this.state.config, ...config };
     }
-    this.log.info('Cloudflare solver enabled (zero-injection mode)');
+    runForkInServer(
+      Effect.logInfo('Cloudflare solver enabled (zero-injection mode)').pipe(
+        Effect.annotateLogs({ session_id: this.sessionId }),
+      ),
+    );
 
     // Check existing pages for CF URLs (no JS injection).
     // We don't have URLs for already-attached pages, so fall back to DOM walk.
@@ -374,7 +377,9 @@ export class CloudflareDetector {
 
           case 'TurnstileToCF':
             yield* abortAndResolve();
-            self.log.info(`Turnstile detection interrupted by navigation to CF URL — discarding (not a rechallenge)`);
+            yield* Effect.logInfo('Turnstile detection interrupted by navigation to CF URL — discarding (not a rechallenge)').pipe(
+              Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid }),
+            );
             self.state.bindingSolvedTargets.add(targetId);
             break; // fall through to Phase C
 
@@ -409,14 +414,18 @@ export class CloudflareDetector {
             });
             const rechallengeLabel = outcome.clickDelivered ? '✓' : '→';
             yield* active.resolution.fail('rechallenge', outcome.duration, rechallengeLabel);
-            self.log.info(`Navigation from ${active.info.type} landed on another CF challenge (rechallenge ${outcome.rechallengeCount}/${MAX_RECHALLENGES}) — suppressing cf.solved`);
+            yield* Effect.logInfo('Navigation landed on another CF challenge — suppressing cf.solved').pipe(
+              Effect.annotateLogs({ cf_type: active.info.type, rechallenge_count: outcome.rechallengeCount, max_rechallenges: MAX_RECHALLENGES, target_id: targetId.slice(0, 8), session_id: self.sid }),
+            );
             self.state.pendingRechallengeCount.set(targetId, outcome.rechallengeCount);
             break;
           }
 
           case 'RechallengeLimitReached': {
             yield* abortAndResolve();
-            self.log.info(`Rechallenge limit reached (${outcome.rechallengeCount}) for ${active.info.type} — emitting cf.failed`);
+            yield* Effect.logInfo('Rechallenge limit reached — emitting cf.failed').pipe(
+              Effect.annotateLogs({ rechallenge_count: outcome.rechallengeCount, cf_type: active.info.type, target_id: targetId.slice(0, 8), session_id: self.sid }),
+            );
             const rechallengeLabel = outcome.clickDelivered ? '✓' : '→';
             yield* active.resolution.fail('rechallenge_limit', outcome.duration, rechallengeLabel);
             self.state.bindingSolvedTargets.add(targetId);
@@ -549,7 +558,11 @@ export class CloudflareDetector {
   private emitSolveFailure(active: ActiveDetection, targetId: TargetId, reason: string): Effect.Effect<void> {
     if (active.aborted) {
       const ctx = this.state.registry.getContext(targetId);
-      this.log.warn(`CF lifecycle: emit_failure_skipped target=${targetId.slice(0,8)} session=${this.sid} reason=abort_guard resolution_done=${ctx?.resolved ?? 'no_ctx'}`);
+      runForkInServer(
+        Effect.logWarning('CF lifecycle: emit_failure_skipped').pipe(
+          Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: this.sid, reason: 'abort_guard', resolution_done: ctx?.resolved ?? 'no_ctx' }),
+        ),
+      );
       return Effect.void;
     }
     const duration = Date.now() - active.startTime;
@@ -628,7 +641,9 @@ export class CloudflareDetector {
     return Effect.fn('cf.resolutionRace')({ self }, function*() {
       const active = ctx.mutableActive;
       const targetId = active.pageTargetId;
-      self.log.info(`CF lifecycle: resolution_race target=${targetId.slice(0,8)} session=${self.sid} resolution_done=${active.resolution.isDone} aborted=${active.aborted}`);
+      yield* Effect.logInfo('CF lifecycle: resolution_race').pipe(
+        Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, resolution_done: active.resolution.isDone, aborted: active.aborted }),
+      );
 
       const maybeResolved = yield* active.resolution.awaitBounded;
 
@@ -640,7 +655,9 @@ export class CloudflareDetector {
             'cf.solve_method': resolved.result.method,
             'cf.elapsed_ms': Date.now() - active.startTime,
           });
-          self.log.info(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=solved method=${resolved.result.method} elapsed_ms=${Date.now() - active.startTime}`);
+          yield* Effect.logInfo('CF lifecycle: resolution_result').pipe(
+            Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, result: 'solved', method: resolved.result.method, elapsed_ms: Date.now() - active.startTime }),
+          );
           if (opts.addToSolvedPages) self.state.solvedPages.add(targetId);
           if (!active.resolution.markerEmitted) {
             self.state.pushPhase(targetId, resolved.result.type, resolved.result.phase_label || '→');
@@ -653,7 +670,9 @@ export class CloudflareDetector {
             'cf.fail_reason': resolved.reason,
             'cf.elapsed_ms': resolved.duration_ms,
           });
-          self.log.warn(`CF lifecycle: resolution_result target=${targetId.slice(0,8)} session=${self.sid} result=failed reason=${resolved.reason} elapsed_ms=${resolved.duration_ms}`);
+          yield* Effect.logWarning('CF lifecycle: resolution_result').pipe(
+            Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, result: 'failed', reason: resolved.reason, elapsed_ms: resolved.duration_ms }),
+          );
           if (!active.resolution.markerEmitted) {
             const phase_label = resolved.phase_label ?? `✗ ${resolved.reason}`;
             self.state.pushPhase(targetId, active.info.type, phase_label);
@@ -669,7 +688,9 @@ export class CloudflareDetector {
           'cf.had_click': !!active.clickDelivered,
           'cf.iframe_bound': !!active.iframeCdpSessionId,
         });
-        self.log.warn(`CF lifecycle: resolution_timeout target=${targetId.slice(0,8)} session=${self.sid} elapsed_ms=${Date.now() - active.startTime}`);
+        yield* Effect.logWarning('CF lifecycle: resolution_timeout').pipe(
+          Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, elapsed_ms: Date.now() - active.startTime }),
+        );
         yield* Effect.logWarning('CF lifecycle: resolution_timeout diagnostic').pipe(
           Effect.annotateLogs({
             session_id: self.sid,
@@ -712,7 +733,9 @@ export class CloudflareDetector {
       });
       if (self.state.destroyed || !self.enabled) return;
       if (self.state.registry.has(targetId)) {
-        self.log.info(`triggerSolveFromUrl: SKIPPED — activeDetection already exists for ${targetId} (type=${self.state.registry.get(targetId)!.info.type})`);
+        yield* Effect.logInfo('triggerSolveFromUrl: SKIPPED — activeDetection already exists').pipe(
+          Effect.annotateLogs({ target_id: targetId, cf_type: self.state.registry.get(targetId)!.info.type, session_id: self.sid }),
+        );
         return;
       }
       if (self.state.bindingSolvedTargets.has(targetId)) return;
@@ -782,18 +805,24 @@ export class CloudflareDetector {
       if (typeof rawOutcome === 'object' && '_tag' in rawOutcome) {
         switch (rawOutcome._tag) {
           case 'NoClick':
-            self.log.warn(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=widget_not_found`);
+            yield* Effect.logWarning('CF lifecycle: emit_failure').pipe(
+              Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, reason: 'widget_not_found' }),
+            );
             yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
             break;
           case 'NoCheckbox':
             // Interstitial: no checkbox ever rendered. Don't fast-fail —
             // wait for bridge cf_error_page or auto-nav via resolution.awaitBounded below.
-            self.log.info(`CF lifecycle: no_checkbox target=${targetId.slice(0,8)} — waiting for bridge/auto-nav`);
+            yield* Effect.logInfo('CF lifecycle: no_checkbox — waiting for bridge/auto-nav').pipe(
+              Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid }),
+            );
             break;
           case 'Aborted':
             if (!active.aborted) {
               const reason = active.clickDelivered ? 'session_gone_after_click' : 'session_gone';
-              self.log.warn(`CF lifecycle: emit_failure target=${targetId.slice(0,8)} session=${self.sid} reason=${reason} click_delivered=${!!active.clickDelivered}`);
+              yield* Effect.logWarning('CF lifecycle: emit_failure').pipe(
+                Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, reason, click_delivered: !!active.clickDelivered }),
+              );
               yield* self.emitSolveFailure(active, targetId, reason);
             }
             break;
@@ -999,7 +1028,9 @@ export class CloudflareDetector {
         yield* ctx.bindOOPIF(pending.iframeTargetId, pending.iframeCdpSessionId);
         self.state.pendingIframes.delete(targetId);
       }
-      self.log.info(`CF lifecycle: registered target=${targetId.slice(0,8)} session=${self.sid} pending_oopif=${!!pending}`);
+      yield* Effect.logInfo('CF lifecycle: registered').pipe(
+        Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, pending_oopif: !!pending }),
+      );
       self.events.emitDetected(active);
       self.events.marker(targetId, 'cf.detected', {
         type: 'turnstile', method: 'cdp_dom_walk',
@@ -1010,7 +1041,9 @@ export class CloudflareDetector {
         sitekey: meta?.sitekey ?? null,
         oopif_mode: meta?.mode ?? null,
       });
-      self.log.info(`CF lifecycle: detected target=${targetId.slice(0,8)} session=${self.sid} sitekey=${meta?.sitekey ?? 'none'}`);
+      yield* Effect.logInfo('CF lifecycle: detected').pipe(
+        Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, sitekey: meta?.sitekey ?? 'none' }),
+      );
 
       // Skip Turnstile rechallenges — detected by the navigation tracker
       // (pendingRechallengeCount), NOT by URL parsing (/rch/ is in ALL OOPIF URLs).
@@ -1030,7 +1063,9 @@ export class CloudflareDetector {
       // No per-detection Runtime.evaluate needed — hooks are already loaded.
 
       // Dispatch solve via Effect service — no more Promise bridge
-      self.log.info(`CF lifecycle: dispatch_start target=${targetId.slice(0,8)} session=${self.sid}`);
+      yield* Effect.logInfo('CF lifecycle: dispatch_start').pipe(
+        Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid }),
+      );
       const dispatchStartMs = Date.now();
       const dispatcher = yield* SolveDispatcher;
       const outcome: SolveDetectionResult = yield* dispatcher.dispatch(active).pipe(
@@ -1043,10 +1078,14 @@ export class CloudflareDetector {
         }),
       );
       const outcomeTag = outcome._tag;
-      self.log.info(`CF lifecycle: dispatch_end target=${targetId.slice(0,8)} session=${self.sid} outcome=${outcomeTag} aborted=${active.aborted} elapsed_ms=${Date.now() - dispatchStartMs}`);
+      yield* Effect.logInfo('CF lifecycle: dispatch_end').pipe(
+        Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, outcome: outcomeTag, aborted: active.aborted, elapsed_ms: Date.now() - dispatchStartMs }),
+      );
       // Solver is advisory — its exit does NOT kill the detection.
       // Resolution comes from push signals (beacon/bridge/navigation) or session close.
-      self.log.info(`CF lifecycle: solver_exit target=${targetId.slice(0,8)} session=${self.sid} result=${outcomeTag} resolution_done=${active.resolution.isDone}`);
+      yield* Effect.logInfo('CF lifecycle: solver_exit').pipe(
+        Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, result: outcomeTag, resolution_done: active.resolution.isDone }),
+      );
 
       // Await Resolution via race: resolution vs timeout (baked into Resolution deadline).
       yield* self.awaitResolutionRace(ctx, {

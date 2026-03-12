@@ -1,5 +1,6 @@
-import { Logger } from '@browserless.io/browserless';
 import { Effect, Schedule } from 'effect';
+
+import { runForkInServer } from '../../otel-runtime.js';
 import {
   activityLoopSchedule,
 } from './cf-schedules.js';
@@ -64,7 +65,6 @@ export function deriveFailLabel(reason: string) {
  *       pendingIframes, knownPages, iframeToPage
  */
 export class CloudflareStateTracker {
-  private log = new Logger('cf-state');
   readonly registry: DetectionRegistry;
   readonly iframeToPage = new Map<TargetId, TargetId>();
   readonly knownPages = new Map<TargetId, CdpSessionId>();
@@ -114,7 +114,7 @@ export class CloudflareStateTracker {
     this.registry = new DetectionRegistry((active, signal) => {
       const duration = Date.now() - active.startTime;
       const attr = deriveSolveAttribution(signal, !!active.clickDelivered);
-      this.log.info(`Scope finalizer fallback: emitting solved for orphaned detection on ${active.pageTargetId}`);
+      runForkInServer(Effect.logInfo(`Scope finalizer fallback: emitting solved for orphaned detection on ${active.pageTargetId}`));
       this.pushPhase(active.pageTargetId, active.info.type, attr.label);
       const label = this.buildCompoundLabel(active.pageTargetId);
       this.events.emitSolved(active, {
@@ -139,7 +139,7 @@ export class CloudflareStateTracker {
       const active = tracker.registry.getActive(pageTargetId);
       if (!active || active.aborted) return;
 
-      tracker.log.info(`Turnstile state change: ${state} for page ${pageTargetId}`);
+      yield* Effect.logInfo(`Turnstile state change: ${state} for page ${pageTargetId}`);
       tracker.events.emitProgress(active, state);
 
       if (state === 'success') {
@@ -148,7 +148,7 @@ export class CloudflareStateTracker {
         // CF hasn't redirected yet. Resolving here would close the browser too early → rechallenge.
         // Let the page_navigated signal handle interstitial resolution.
         if (isInterstitialType(active.info.type)) {
-          tracker.log.info(`OOPIF success for interstitial ${pageTargetId} — waiting for page navigation`);
+          yield* Effect.logInfo(`OOPIF success for interstitial ${pageTargetId} — waiting for page navigation`);
           tracker.events.marker(active.pageTargetId, 'cf.oopif_success_interstitial', {
             waiting_for: 'page_navigated',
           });
@@ -186,7 +186,7 @@ export class CloudflareStateTracker {
           if (failCtx) {
             failCtx.resetForRetry();
           }
-          tracker.log.info(`Retrying CF detection (attempt ${active.attempt})`);
+          yield* Effect.logInfo(`Retrying CF detection (attempt ${active.attempt})`);
         } else {
           const duration = Date.now() - active.startTime;
           yield* active.resolution.fail(state, duration);

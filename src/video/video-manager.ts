@@ -2,10 +2,11 @@ import { rm } from 'fs/promises';
 import path from 'path';
 
 import {
-  Logger,
   exists,
 } from '@browserless.io/browserless';
+import { Effect } from 'effect';
 
+import { runForkInServer } from '../otel-runtime.js';
 import type { VideoEncoder } from './encoder.js';
 
 /**
@@ -21,7 +22,6 @@ import type { VideoEncoder } from './encoder.js';
  * - Provide videosDir access for video routes
  */
 export class VideoManager {
-  private log = new Logger('video-manager');
   private encoder?: VideoEncoder;
   private videosDir: string;
 
@@ -84,7 +84,7 @@ export class VideoManager {
         deleted = true;
       }
       if (deleted) {
-        this.log.info(`Deleted video frames for replay ${id}`);
+        runForkInServer(Effect.logInfo(`Deleted video frames for replay ${id}`));
       }
       return deleted;
     } catch {

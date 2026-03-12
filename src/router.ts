@@ -21,8 +21,9 @@ import { EventEmitter } from 'events';
 import micromatch from 'micromatch';
 import stream from 'stream';
 
+import { runForkInServer } from './otel-runtime.js';
+
 export class Router extends EventEmitter {
-  protected log = new Logger('router');
   protected httpRoutes: Array<HTTPRoute | BrowserHTTPRoute> = [];
   protected webSocketRoutes: Array<WebSocketRoute | BrowserWebsocketRoute> = [];
 
@@ -42,22 +43,22 @@ export class Router extends EventEmitter {
   }
 
   protected onQueueFullHTTP(_req: Request, res: Response) {
-    this.log.warn(`Queue is full, sending 429 response`);
+    runForkInServer(Effect.logWarning(`Queue is full, sending 429 response`));
     return writeResponse(res, 429, 'Too many requests');
   }
 
   protected onQueueFullWebSocket(_req: Request, socket: stream.Duplex) {
-    this.log.warn(`Queue is full, sending 429 response`);
+    runForkInServer(Effect.logWarning(`Queue is full, sending 429 response`));
     return writeResponse(socket, 429, 'Too many requests');
   }
 
   protected onHTTPTimeout(_req: Request, res: Response) {
-    this.log.error(`HTTP job has timedout, sending 429 response`);
+    runForkInServer(Effect.logError(`HTTP job has timedout, sending 408 response`));
     return writeResponse(res, 408, 'Request has timed out');
   }
 
   protected onWebsocketTimeout(_req: Request, socket: stream.Duplex) {
-    this.log.error(`Websocket job has timedout, sending 429 response`);
+    runForkInServer(Effect.logError(`Websocket job has timedout, sending 408 response`));
     return writeResponse(socket, 408, 'Request has timed out');
   }
 
@@ -104,7 +105,7 @@ export class Router extends EventEmitter {
                 ]),
               );
             } finally {
-              router.log.trace(`HTTP Request handler has finished.`);
+              runForkInServer(Effect.logDebug(`HTTP Request handler has finished.`));
               router.browserManager.complete(browser);
             }
           }
@@ -157,7 +158,7 @@ export class Router extends EventEmitter {
                 ]),
               );
             } finally {
-              router.log.trace(`WebSocket Request handler has finished.`);
+              runForkInServer(Effect.logDebug(`WebSocket Request handler has finished.`));
               router.browserManager.complete(browser);
             }
             return;
@@ -173,9 +174,9 @@ export class Router extends EventEmitter {
   public registerHTTPRoute(
     route: HTTPRoute | BrowserHTTPRoute,
   ): HTTPRoute | BrowserHTTPRoute {
-    this.log.trace(
+    runForkInServer(Effect.logDebug(
       `Registering HTTP ${route.method.toUpperCase()} ${route.path}`,
-    );
+    ));
 
     const bound = route.handler.bind(route);
     const wrapped = this.wrapHTTPHandler(route, bound);
@@ -195,7 +196,7 @@ export class Router extends EventEmitter {
     );
 
     if (duplicatePaths.length) {
-      this.log.warn(`Found duplicate routes: ${duplicatePaths.join(', ')}`);
+      runForkInServer(Effect.logWarning(`Found duplicate routes: ${duplicatePaths.join(', ')}`));
     }
     this.httpRoutes.push(route);
 
@@ -205,7 +206,7 @@ export class Router extends EventEmitter {
   public registerWebSocketRoute(
     route: WebSocketRoute | BrowserWebsocketRoute,
   ): WebSocketRoute | BrowserWebsocketRoute {
-    this.log.trace(`Registering WebSocket "${route.path}"`);
+    runForkInServer(Effect.logDebug(`Registering WebSocket "${route.path}"`));
 
     const bound = route.handler.bind(route);
     const wrapped = this.wrapWebSocketHandler(route, bound);
@@ -225,7 +226,7 @@ export class Router extends EventEmitter {
     );
 
     if (duplicatePaths.length) {
-      this.log.warn(`Found duplicate routes: ${duplicatePaths.join(', ')}`);
+      runForkInServer(Effect.logWarning(`Found duplicate routes: ${duplicatePaths.join(', ')}`));
     }
     this.webSocketRoutes.push(route);
     return route;

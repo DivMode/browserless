@@ -33,6 +33,7 @@ import { Page } from 'puppeteer-core';
 import micromatch from 'micromatch';
 import path from 'path';
 
+import { runForkInServer } from '../otel-runtime.js';
 import { SessionRegistry } from '../session/session-registry.js';
 import { SessionCoordinator } from '../session/session-coordinator.js';
 
@@ -57,8 +58,6 @@ export class BrowserLauncher {
     FirefoxPlaywright.name,
     WebKitPlaywright.name,
   ];
-  private log = new Logger('browser-launcher');
-
   constructor(
     private config: Config,
     private hooks: Hooks,
@@ -268,14 +267,14 @@ export class BrowserLauncher {
               onTabReplayComplete: (metadata) => {
                 if (isReplayCapable(browser)) {
                   browser.sendTabReplayComplete(metadata).catch((e) => {
-                    launcher.log.warn(`Failed to send tab replay event: ${e instanceof Error ? e.message : String(e)}`);
+                    runForkInServer(Effect.logWarning(`Failed to send tab replay event: ${e instanceof Error ? e.message : String(e)}`));
                   });
                 }
               },
               onAntibotReport: (report) => {
                 if (browser instanceof ChromiumCDP) {
                   browser.emitAntibotReport(report).catch((e) => {
-                    launcher.log.warn(`Failed to emit antibot report: ${e instanceof Error ? e.message : String(e)}`);
+                    runForkInServer(Effect.logWarning(`Failed to emit antibot report: ${e instanceof Error ? e.message : String(e)}`));
                   });
                 }
               },
@@ -328,7 +327,7 @@ export class BrowserLauncher {
     if (found) {
       const [browser, session] = found;
       ++session.numbConnected;
-      this.log.debug(`Located browser with ID ${id}`);
+      runForkInServer(Effect.logDebug(`Located browser with ID ${id}`));
       return browser;
     }
 
@@ -370,7 +369,7 @@ export class BrowserLauncher {
       if (found) {
         const session = this.registry.get(found.browser)!;
         ++session.numbConnected;
-        this.log.debug(`Page connection: session ${session.id} numbConnected=${session.numbConnected} pageId=${id}`);
+        runForkInServer(Effect.logDebug(`Page connection: session ${session.id} numbConnected=${session.numbConnected} pageId=${id}`));
         return found.browser;
       }
 

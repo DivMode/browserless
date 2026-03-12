@@ -10,7 +10,6 @@
  * Lifecycle: INITIALIZING → ACTIVE → DRAINING → DESTROYED
  */
 import {
-  Logger,
   type TabReplayCompleteParams,
 } from '@browserless.io/browserless';
 
@@ -33,7 +32,7 @@ import type { CloudflareHooks } from './cloudflare-hooks.js';
 import type { VideoHooks } from './video-services.js';
 
 import { CF_BRIDGE_JS } from '../generated/cf-bridge.js';
-import { SharedTracerLayer } from '../otel-runtime.js';
+import { SharedTracerLayer, runForkInServer } from '../otel-runtime.js';
 import { AntibotHandler, type AntibotBrowserReport } from './antibot/antibot-handler.js';
 import { withSessionSpan, forkTracedFiber } from './trace-helpers.js';
 
@@ -65,7 +64,6 @@ type SessionR =
   | typeof ReplayMetrics.Identifier;
 
 export class CdpSession {
-  private log = new Logger('cdp-session');
   private state: CdpSessionState = 'INITIALIZING';
   private destroyPromise: Promise<void> | null = null;
 
@@ -318,7 +316,11 @@ export class CdpSession {
 
           // CRITICAL: Attach error handler synchronously before any async work
           ws.on('error', (err: Error) => {
-            self.log.debug(`CDP WebSocket error: ${err.message}`);
+            self.runtime?.runFork(
+              Effect.logDebug('CDP WebSocket error').pipe(
+                Effect.annotateLogs({ error: err.message, session_id: self.sessionId }),
+              ),
+            );
           });
 
           // Wait for open
@@ -356,7 +358,9 @@ export class CdpSession {
             waitForDebuggerOnStart: true,
             flatten: true,
           });
-          self.log.info(`Target.setAutoAttach succeeded for session ${self.sessionId}`);
+          yield* Effect.logInfo('Target.setAutoAttach succeeded').pipe(
+            Effect.annotateLogs({ session_id: self.sessionId }),
+          );
 
           yield* sendRetry('Target.setDiscoverTargets', { discover: true });
 
@@ -365,7 +369,9 @@ export class CdpSession {
               self.videoHooks!.onInit(self.sessionId, self.sendCommand.bind(self) as any, self.videosDir!));
           }
 
-          self.log.debug(`CDP auto-attach enabled for session ${self.sessionId}`);
+          yield* Effect.logDebug('CDP auto-attach enabled').pipe(
+            Effect.annotateLogs({ session_id: self.sessionId }),
+          );
         })().pipe(
           // Catch setup errors — match current behavior (log + continue)
           Effect.catch(() => Effect.logWarning('cdp.wsLifecycle: setup failed')),
@@ -640,7 +646,11 @@ export class CdpSession {
   injectMarkerByTargetId(targetId: TargetId, tag: string, payload?: object): void {
     const resolvedTargetId = targetId || this.targets.firstTargetId();
     if (!resolvedTargetId) {
-      this.log.warn(`[replay-marker] no target available for tag=${tag}`);
+      runForkInServer(
+        Effect.logWarning('[replay-marker] no target available').pipe(
+          Effect.annotateLogs({ tag, session_id: this.sessionId }),
+        ),
+      );
       return;
     }
     this.offerEvents(resolvedTargetId, [{
@@ -673,7 +683,13 @@ export class CdpSession {
               conn?.handleResponse(msg);
             } catch {}
           });
-          pageWs.on('error', (err: Error) => { session.log.warn(`Per-page WS error for ${targetId}: ${err.message}`); });
+          pageWs.on('error', (err: Error) => {
+            session.runtime?.runFork(
+              Effect.logWarning('Per-page WS error').pipe(
+                Effect.annotateLogs({ target_id: targetId, error: err.message, session_id: session.sessionId }),
+              ),
+            );
+          });
           pageWs.on('close', () => {
             const target = session.targets.getByTarget(targetId);
             if (target && target.pageWebSocket === pageWs) {
@@ -700,7 +716,9 @@ export class CdpSession {
           session.pageWsCmdId += 10_000;
           (pageWs as any).__cdpConn = pageConn;
 
-          session.log.debug(`Per-page WS opened for target ${targetId}`);
+          yield* Effect.logDebug('Per-page WS opened').pipe(
+            Effect.annotateLogs({ target_id: targetId, session_id: session.sessionId }),
+          );
 
           return pageWs;
         }),
@@ -744,7 +762,9 @@ export class CdpSession {
           });
         });
         if (!gotPong) {
-          session.log.warn(`Per-page WS for ${targetId} missed pong — closing (fallback to browser WS)`);
+          yield* Effect.logWarning('Per-page WS missed pong — closing (fallback to browser WS)').pipe(
+            Effect.annotateLogs({ target_id: targetId, session_id: session.sessionId }),
+          );
           pageWs.terminate();
           break;
         }
@@ -772,12 +792,16 @@ export class CdpSession {
         'cdp.destroy_source': source,
       });
       session.state = 'DRAINING';
-      session.log.info(`CdpSession destroying (${source}) for session ${session.sessionId}, targets=${session.targets.size}, tabs=${session.tabs.size}`);
+      yield* Effect.logInfo('CdpSession destroying').pipe(
+        Effect.annotateLogs({ source, session_id: session.sessionId, targets: session.targets.size, tabs: session.tabs.size }),
+      );
 
       // Unregister Prometheus gauges
       const hadGauges = !!session.unregisterGauges;
       session.unregisterGauges?.();
-      session.log.info(`CdpSession gauges unregistered (had=${hadGauges}) for session ${session.sessionId}`);
+      yield* Effect.logInfo('CdpSession gauges unregistered').pipe(
+        Effect.annotateLogs({ had_gauges: hadGauges, session_id: session.sessionId }),
+      );
 
       // Tab spans: ended by tab scope finalizers (registered FIRST = LIFO runs LAST).
       // Session span: ended by sessionSpanLayer release during runtime.dispose().
@@ -840,19 +864,19 @@ export class CdpSession {
       ? this.runtime.runPromise(destroy)
       : Effect.runPromise(destroy);
     await run.catch((e) => {
-      this.log.warn(`destroyEffect error: session_id=${this.sessionId} source=${source} error=${e instanceof Error ? e.message : String(e)}`);
+      console.error(JSON.stringify({ message: 'destroyEffect error', level: 'error', session_id: this.sessionId, source, error: e instanceof Error ? e.message : String(e) }));
     });
 
     // Dispose runtime — Layer release closes WS, clears FiberMap, ends Queue
     if (this.runtime) {
       await this.runtime.dispose().catch((e) => {
-        this.log.warn(`Runtime dispose error: ${e instanceof Error ? e.message : String(e)}`);
+        console.error(JSON.stringify({ message: 'Runtime dispose error', level: 'error', session_id: this.sessionId, error: e instanceof Error ? e.message : String(e) }));
       });
       this.runtime = null;
     }
     // No more browserWsScope.close — Layer handles WS cleanup
 
-    this.log.info(`CdpSession destroyed (${source}) for session ${this.sessionId}`);
+    console.error(JSON.stringify({ message: `CdpSession destroyed (${source})`, level: 'info', session_id: this.sessionId }));
   }
 
   // ─── CDP Message Routing ───────────────────────────────────────────────
@@ -914,7 +938,11 @@ export class CdpSession {
         Queue.offerUnsafe(this.cdpEventQueue, msg);
       }
     } catch (e) {
-      this.log.debug(`Error processing CDP message: ${e}`);
+      this.runtime?.runFork(
+        Effect.logDebug('Error processing CDP message').pipe(
+          Effect.annotateLogs({ error: String(e), session_id: this.sessionId }),
+        ),
+      );
     }
   }
 
@@ -1017,7 +1045,11 @@ export class CdpSession {
           this.offerEvents(targetId, events as any[]);
         }
       } catch (e) {
-        this.log.debug(`rrweb push parse failed: ${e instanceof Error ? e.message : String(e)}`);
+        this.runtime?.runFork(
+          Effect.logDebug('rrweb push parse failed').pipe(
+            Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e), session_id: this.sessionId }),
+          ),
+        );
       }
     }
   }
@@ -1144,7 +1176,11 @@ export class CdpSession {
       // Also log diagnostics to server for specific tags
       const text = args.join(' ');
       if (text.includes('[browserless-ext]') || text.includes('[rrweb-diag]')) {
-        this.log.info(`[page-console] ${text}`);
+        this.runtime?.runFork(
+          Effect.logInfo('[page-console]').pipe(
+            Effect.annotateLogs({ text, session_id: this.sessionId }),
+          ),
+        );
       }
 
       this.offerEvents(pageTargetId, [{
@@ -1173,7 +1209,9 @@ export class CdpSession {
         'cdp.session_id': session.sessionId,
       });
       if (targetInfo.type === 'page') {
-        session.log.info(`Target attached (paused=${waitingForDebugger}): targetId=${targetId} url=${targetInfo.url} type=${targetInfo.type}`);
+        yield* Effect.logInfo('Target attached').pipe(
+          Effect.annotateLogs({ paused: waitingForDebugger, target_id: targetId, url: targetInfo.url, type: targetInfo.type, session_id: session.sessionId }),
+        );
         session.targets.add(targetId, cdpSessionId);
 
         // ── Per-tab scope: LIFO finalizers guarantee cleanup ordering ──
@@ -1244,7 +1282,9 @@ export class CdpSession {
                 videoUrl: undefined,
               });
             } catch (e) {
-              session.log.warn(`onTabReplayComplete callback failed: ${e instanceof Error ? e.message : String(e)}`);
+              yield* Effect.logWarning('onTabReplayComplete callback failed').pipe(
+                Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e), session_id: session.sessionId, target_id: targetId }),
+              );
             }
           }
           if (target) {
@@ -1327,7 +1367,9 @@ export class CdpSession {
                 })`,
                 returnByValue: true,
               }, cdpSessionId).pipe(Effect.orElseSucceed(() => null));
-              if (result) session.log.info(`[rrweb-diag] target=${targetId} ${result?.result?.value}`);
+              if (result) yield* Effect.logInfo('[rrweb-diag]').pipe(
+                Effect.annotateLogs({ target_id: targetId, value: result?.result?.value, session_id: session.sessionId }),
+              );
             }).pipe(Effect.ignore);
             // Parent under per-tab span so probe appears in the tab's trace tree
             forkTracedFiber(session.runtime, session._fiberMap, `probe:${targetId}`, probeEffect, tabContext);
@@ -1355,7 +1397,9 @@ export class CdpSession {
           yield* session.send('Page.addScriptToEvaluateOnNewDocument', {
             source: ANTIBOT_DETECT_JS,
           }, cdpSessionId).pipe(Effect.ignore);
-          session.log.debug(`Antibot detection injected for target ${targetId}`);
+          yield* Effect.logDebug('Antibot detection injected').pipe(
+            Effect.annotateLogs({ target_id: targetId, session_id: session.sessionId }),
+          );
         }
 
         // Set session ID for extension
@@ -1399,7 +1443,9 @@ export class CdpSession {
 
       // Cross-origin iframes (e.g., Cloudflare Turnstile)
       if (targetInfo.type === 'iframe') {
-        session.log.debug(`Iframe target attached (paused=${waitingForDebugger}): ${targetId} url=${targetInfo.url}`);
+        yield* Effect.logDebug('Iframe target attached').pipe(
+          Effect.annotateLogs({ paused: waitingForDebugger, target_id: targetId, url: targetInfo.url, session_id: session.sessionId }),
+        );
         session.targets.addIframeTarget(targetId, cdpSessionId);
 
         if (waitingForDebugger) {
@@ -1429,7 +1475,9 @@ export class CdpSession {
         'cdp.url': targetInfo.url?.substring(0, 200) ?? '',
       });
       if (targetInfo.type === 'page' && !session.targets.has(TargetId.makeUnsafe(targetInfo.targetId))) {
-        session.log.info(`Discovered external target ${targetInfo.targetId} (url=${targetInfo.url}), attaching...`);
+        yield* Effect.logInfo('Discovered external target, attaching...').pipe(
+          Effect.annotateLogs({ target_id: targetInfo.targetId, url: targetInfo.url, session_id: session.sessionId }),
+        );
         yield* session.send('Target.attachToTarget', {
           targetId: targetInfo.targetId,
           flatten: true,

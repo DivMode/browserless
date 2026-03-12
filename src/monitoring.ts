@@ -1,10 +1,9 @@
-import { Config, IResourceLoad, Logger } from '@browserless.io/browserless';
+import { Config, IResourceLoad } from '@browserless.io/browserless';
 import { Effect } from 'effect';
 import { EventEmitter } from 'events';
 import si from 'systeminformation';
 
 export class Monitoring extends EventEmitter {
-  protected log = new Logger('hardware');
   constructor(protected config: Config) {
     super();
   }

@@ -3,7 +3,6 @@ import {
   BrowserlessRoutes,
   HTTPManagementRoutes,
   HTTPRoute,
-  Logger,
   Methods,
   Request,
   contentTypes,
@@ -31,8 +30,6 @@ export default class CfSolvedPostRoute extends HTTPRoute {
   path = HTTPManagementRoutes.cfSolved;
   tags = [APITags.management];
 
-  private log = new Logger('cf-solved-route');
-
   async handler(_req: Request, res: ServerResponse): Promise<void> {
     const route = this;
     return Effect.runPromise(
@@ -40,7 +37,7 @@ export default class CfSolvedPostRoute extends HTTPRoute {
         try {
           // Log ALL incoming requests to diagnose if beacons arrive at all
           const rawBody = _req.body;
-          route.log.info(`Beacon request: type=${typeof rawBody} content-type=${_req.headers['content-type']} len=${typeof rawBody === 'string' ? rawBody.length : JSON.stringify(rawBody)?.length ?? 0}`);
+          yield* Effect.logInfo(`Beacon request: type=${typeof rawBody} content-type=${_req.headers['content-type']} len=${typeof rawBody === 'string' ? rawBody.length : JSON.stringify(rawBody)?.length ?? 0}`);
 
           // sendBeacon sends text/plain — body may be a string or pre-parsed object
           let body: { s?: string; t?: string; l?: number } | undefined;
@@ -54,7 +51,7 @@ export default class CfSolvedPostRoute extends HTTPRoute {
           const tokenLength = body?.l ?? 0;
 
           if (!targetId) {
-            route.log.info(`Beacon 400: no targetId. s=${sessionId ?? 'null'} t=${targetId ?? 'null'} body=${JSON.stringify(body)?.slice(0, 200)}`);
+            yield* Effect.logInfo(`Beacon 400: no targetId. s=${sessionId ?? 'null'} t=${targetId ?? 'null'} body=${JSON.stringify(body)?.slice(0, 200)}`);
             res.writeHead(400);
             res.end();
             return;
@@ -65,15 +62,15 @@ export default class CfSolvedPostRoute extends HTTPRoute {
           const handled = sessionCoordinator.handleCfBeacon(sessionId ?? '', targetId, tokenLength);
 
           if (handled) {
-            route.log.info(`Beacon: session=${sessionId ? sessionId.slice(0, 8) : 'broadcast'} target=${targetId.slice(0, 8)} len=${tokenLength}`);
+            yield* Effect.logInfo(`Beacon: session=${sessionId ? sessionId.slice(0, 8) : 'broadcast'} target=${targetId.slice(0, 8)} len=${tokenLength}`);
           } else {
-            route.log.info(`Beacon: no solver for session=${sessionId ? sessionId.slice(0, 8) : 'empty'} (already cleaned up)`);
+            yield* Effect.logInfo(`Beacon: no solver for session=${sessionId ? sessionId.slice(0, 8) : 'empty'} (already cleaned up)`);
           }
 
           res.writeHead(204);
           res.end();
         } catch (e) {
-          route.log.debug(`Beacon error: ${e instanceof Error ? e.message : String(e)}`);
+          yield* Effect.logDebug(`Beacon error: ${e instanceof Error ? e.message : String(e)}`);
           res.writeHead(204);
           res.end();
         }

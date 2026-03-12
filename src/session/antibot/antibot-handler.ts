@@ -6,7 +6,9 @@
  *
  * Emits a unified report as a custom CDP event and replay marker.
  */
-import { Logger } from '@browserless.io/browserless';
+import { Effect } from 'effect';
+
+import { runForkInServer } from '../../otel-runtime.js';
 
 /** Browser-side evidence from antibot-detect.ts */
 interface BrowserEvidence {
@@ -200,7 +202,6 @@ export interface AntibotResult {
 }
 
 export class AntibotHandler {
-  private log = new Logger('antibot');
   private observedUrls = new Set<string>();
   private observedHeaders = new Map<string, string[]>(); // url → header names
   private result: AntibotResult | null = null;
@@ -328,14 +329,14 @@ export class AntibotHandler {
       timing: report.timing,
     };
 
-    this.log.info(
+    runForkInServer(Effect.logInfo(
       `Antibot report: ${detections.length} detections ` +
       `(${detections.filter(d => d.category === 'antibot').length} antibot, ` +
       `${detections.filter(d => d.category === 'captcha').length} captcha, ` +
       `${detections.filter(d => d.category === 'fingerprint').length} fingerprint) ` +
       `hooks=${Object.keys(report.hookCounts).length} ` +
       `timing=${report.timing.totalMs.toFixed(0)}ms`,
-    );
+    ));
 
     return this.result;
   }

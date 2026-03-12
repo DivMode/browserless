@@ -29,6 +29,7 @@ import { Effect } from 'effect';
 import { EventEmitter } from 'events';
 
 import EnjoiResolver from './shared/utils/enjoi-resolver.js';
+import { runForkInServer } from './otel-runtime.js';
 import { getCollectedSpans, clearCollectedSpans } from './testing/span-collector.js';
 
 export interface HTTPServerOptions {
@@ -43,7 +44,6 @@ export class HTTPServer extends EventEmitter {
   protected server: http.Server = http.createServer();
   protected port: number;
   protected host?: string;
-  protected logger = new BlessLogger('server');
 
   constructor(
     protected config: Config,
@@ -57,8 +57,10 @@ export class HTTPServer extends EventEmitter {
     this.host = config.getHost();
     this.port = config.getPort();
 
-    this.logger.info(
-      `Server instantiated with host "${this.host}" on port "${this.port}`,
+    runForkInServer(
+      Effect.logInfo(
+        `Server instantiated with host "${this.host}" on port "${this.port}"`,
+      ),
     );
   }
 
@@ -85,25 +87,25 @@ export class HTTPServer extends EventEmitter {
 
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.includes('socket has been ended') || msg.includes('ECONNRESET')) {
-      this.logger.warn(`Client disconnected: ${msg}`);
+      runForkInServer(Effect.logWarning(`Client disconnected: ${msg}`));
     } else {
-      this.logger.error(`Error handling request: ${e}\n${e.stack}`);
+      runForkInServer(Effect.logError(`Error handling request: ${e}\n${e.stack}`));
     }
 
     return writeResponse(res, 500, e.toString());
   }
 
   protected onHTTPUnauthorized(_req: Request, res: Response) {
-    this.logger.error(
-      `HTTP request is not properly authorized, responding with 401`,
+    runForkInServer(
+      Effect.logError(`HTTP request is not properly authorized, responding with 401`),
     );
     this.metrics.addUnauthorized();
     return writeResponse(res, 401, 'Bad or missing authentication.');
   }
 
   protected onWebsocketUnauthorized(_req: Request, socket: stream.Duplex) {
-    this.logger.error(
-      `Websocket request is not properly authorized, responding with 401`,
+    runForkInServer(
+      Effect.logError(`Websocket request is not properly authorized, responding with 401`),
     );
     this.metrics.addUnauthorized();
     return writeResponse(socket, 401, 'Bad or missing authentication.');
