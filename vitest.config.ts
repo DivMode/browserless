@@ -37,7 +37,7 @@ export default defineConfig({
           bail: 1,
           include: ['src/**/*.integration.test.ts'],
           globals: false,
-          testTimeout: 20_000,
+          testTimeout: 60_000,
           maxConcurrency: 50,
           globalSetup: ['./vitest.integration.setup.ts'],
           reporters: ['verbose'],

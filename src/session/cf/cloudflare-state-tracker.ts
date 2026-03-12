@@ -103,6 +103,8 @@ export class CloudflareStateTracker {
   readonly solvedPages = new Set<TargetId>();
   readonly pendingIframes = new Map<TargetId, { iframeCdpSessionId: CdpSessionId; iframeTargetId: TargetId }>();
   readonly pendingRechallengeCount = new Map<TargetId, number>();
+  /** Per-page reload count for widget-not-rendered recovery. Reset on solve. */
+  readonly widgetReloadCount = new Map<TargetId, number>();
   config: Required<CloudflareConfig> = { maxAttempts: 3, attemptTimeout: 30000, recordingMarkers: true };
   destroyed = false;
   /** Per-page accumulator of solved/failed phases for compound summary labels. */

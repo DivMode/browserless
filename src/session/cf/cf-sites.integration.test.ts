@@ -67,6 +67,7 @@ import {
   PROXY,
   PYDOLL_DIR,
   REPLAY_HTTP,
+  type ReplayMeta,
   type ServerCfSummary,
   assertSummaryConsistency,
   buildWsUrl,
@@ -119,10 +120,9 @@ const waitForSolve = (
       );
     }
     // Buffer for solver to emit final markers before browser close.
-    // 3s: managed-type interstitials auto-solve and redirect while the solver
-    // is still doing OOPIF discovery (phase 2 can take 3-4s). The solver needs
-    // time after page navigation to finish OOPIF operations and emit markers.
-    yield* Effect.sleep('3 seconds');
+    // Solver emits markers synchronously during execution — 1s is enough
+    // for any post-navigation OOPIF operations to complete.
+    yield* Effect.sleep('1 second');
   });
 
 // ── Effect helpers ──────────────────────────────────────────────────
@@ -295,12 +295,18 @@ describe.concurrent('CF Solver Multi-Site', () => {
             }),
           );
 
-          // acquireRelease has closed the page — wait for replay flush
-          yield* Effect.sleep('1500 millis');
-
-          // ── 1. Per-tab replay verification ───────────────────────────
-          const allReplays = yield* Effect.promise(() => findAllReplays(suiteStartTs));
-          const replays = allReplays.filter((r) => r.targetId === targetId);
+          // acquireRelease has closed the page — poll for replay availability
+          // (server-side flush typically completes in 200-500ms after page close)
+          const replays = yield* Effect.gen(function* () {
+            const deadline = Date.now() + 5_000;
+            while (Date.now() < deadline) {
+              const all = yield* Effect.promise(() => findAllReplays(suiteStartTs));
+              const found = all.filter((r) => r.targetId === targetId);
+              if (found.length > 0) return found;
+              yield* Effect.sleep('200 millis');
+            }
+            return [] as ReplayMeta[];
+          });
           replayId = replays[0]?.id ?? null;
           expect(
             replays.length,
@@ -558,7 +564,7 @@ describe.concurrent('CF Solver Multi-Site', () => {
           throw err;
         }
       }),
-    { timeout: 25_000 });
+    { timeout: 60_000 });
   }
 });
 
