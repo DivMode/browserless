@@ -58,6 +58,7 @@
  */
 import { describe, expect, it } from '@effect/vitest';
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 import { Effect } from 'effect';
 import type { Scope } from 'effect';
 import { afterAll, beforeAll } from 'vitest';
@@ -629,7 +630,22 @@ describe('Pydoll Pipeline', () => {
   // degrade pass rates as Ahrefs/CF rate-limits the carrier block after ~30 rapid
   // requests. The FIRST run is the meaningful result. If you need to re-run, wait
   // 10+ minutes for IP rotation.
+  //
+  // Cooldown enforced: if cf-stress passed within the last 10 minutes, skip it.
+  // The pre-push hook runs `npx vitest run` which re-runs the full suite — without
+  // this cooldown, cf-stress always fails on push after an explicit test run.
   it('cf-stress passes >=80% with 15 concurrent tabs', { timeout: 65_000 }, () => {
+    const COOLDOWN_FILE = '/tmp/cf-stress-last-pass';
+    const COOLDOWN_MS = 10 * 60 * 1000;
+    try {
+      const lastPass = fs.statSync(COOLDOWN_FILE).mtimeMs;
+      if (Date.now() - lastPass < COOLDOWN_MS) {
+        const agoSec = Math.round((Date.now() - lastPass) / 1000);
+        console.log(`  cf-stress: skipping — passed ${agoSec}s ago (IP needs ${Math.round(COOLDOWN_MS / 1000)}s cooldown)`);
+        return;
+      }
+    } catch { /* file doesn't exist — first run */ }
+
     let stdout: string;
     try {
       stdout = execFileSync('uv', ['run', 'pydoll', 'cf-stress', '--concurrent', '15', '--chrome-endpoint=local-browserless'], {
@@ -649,6 +665,9 @@ describe('Pydoll Pipeline', () => {
     expect(passMatch, 'No pass count in cf-stress output').toBeTruthy();
     const passed = Number(passMatch![1]);
     expect(passed, `Only ${passed}/15 passed (need >=12 for 80%)`).toBeGreaterThanOrEqual(12);
+
+    // Mark pass time — subsequent runs within cooldown will skip
+    fs.writeFileSync(COOLDOWN_FILE, '');
   });
 
   it('pydoll unit tests pass', { timeout: 10_000 }, () => {
