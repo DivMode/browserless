@@ -66,9 +66,6 @@ export class CloudflareSolver {
   private createIsolatedConn: (() => IsolatedConnection) | null = null;
   private createIsolatedConnScoped: (() => IsolatedConnectionScoped) | null = null;
   private _setRealEmit: (fn: EmitClientEvent) => void;
-  /** Session-level span reference — fallback for detection fibers without a tab-specific span.
-   * Set via setSessionSpan() — receives an ExternalSpan from cdp-session (never null after init). */
-  private sessionContext: Tracer.AnySpan | null = null;
   /** Per-tab spans — detection fibers are parented under the tab's trace for per-tab isolation. */
   private readonly tabContexts = new Map<string, Tracer.AnySpan>();
 
@@ -341,8 +338,9 @@ export class CloudflareSolver {
     this._setRealEmit(fn);
   }
 
-  setSessionSpan(span: Tracer.AnySpan): void {
-    this.sessionContext = span;
+  setSessionSpan(_span: Tracer.AnySpan): void {
+    // No-op — session span fallback eliminated. Per-tab spans are authoritative.
+    // Method kept for CloudflareHooks interface contract.
   }
 
   setTabSpan(targetId: TargetId, span: Tracer.AnySpan): void {
@@ -438,8 +436,9 @@ export class CloudflareSolver {
       ),
     );
     // Parent under per-tab span so detection traces join the tab's trace tree.
-    // Falls back to session span for targets without a tab context.
-    const parentSpan = this.tabContexts.get(targetId) ?? this.sessionContext;
+    // No fallback — if the tab context is gone, the tab is gone, don't start detection.
+    const parentSpan = this.tabContexts.get(targetId);
+    if (!parentSpan) return; // Tab was destroyed during 500ms bridge sleep — discard
     forkTracedFiber(this.runtime, this.detectionFibers, targetId, guarded, parentSpan);
   }
 
@@ -494,9 +493,10 @@ export class CloudflareSolver {
     const effect = this.stateTracker.onBeaconSolved(targetId, tokenLength);
     // Inject the detection's parent span so the beacon span joins the same trace
     // instead of creating an orphan root span (beacon arrives via HTTP, not CDP).
+    // If no detection context, beacon is stale — discard.
     const ctx = this.stateTracker.registry.getContext(targetId);
-    const parentSpan = ctx?.parentSpan ?? this.sessionContext;
-    const parented = withSessionSpan(effect, parentSpan);
+    if (!ctx) return; // Detection was already cleaned up — discard stale beacon
+    const parented = withSessionSpan(effect, ctx.parentSpan);
     await this.runtime.runPromise(parented)
       .catch((e) => Effect.runSync(
         Effect.logError('CF runtime defect').pipe(Effect.annotateLogs({ method: 'onBeaconSolved', error: String(e) })),
