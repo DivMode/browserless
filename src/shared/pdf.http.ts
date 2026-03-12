@@ -7,7 +7,6 @@ import {
   CDPLaunchOptions,
   ChromiumCDP,
   HTTPRoutes,
-  Logger,
   Methods,
   Request,
   SystemQueryParameters,
@@ -31,6 +30,7 @@ import {
 import { Page } from 'puppeteer-core';
 import { Effect } from 'effect';
 import { ServerResponse } from 'http';
+import { runForkInServer } from '../otel-runtime.js';
 
 export interface BodySchema {
   addScriptTag?: Array<Parameters<Page['addScriptTag']>[0]>;
@@ -86,12 +86,11 @@ export default class ChromiumPDFPostRoute extends BrowserHTTPRoute {
   async handler(
     req: Request,
     res: ServerResponse,
-    logger: Logger,
     browser: BrowserInstance,
   ): Promise<void> {
     return Effect.runPromise(
       Effect.fn('route.pdf.post')(function* () {
-        logger.info('PDF API invoked with body:', req.body);
+        yield* Effect.logInfo('PDF API invoked with body: ' + JSON.stringify(req.body));
         const contentType =
           !req.headers.accept || req.headers.accept?.includes('*')
             ? 'application/pdf'
@@ -182,7 +181,7 @@ export default class ChromiumPDFPostRoute extends BrowserHTTPRoute {
               !!rejectRequestPattern.find((pattern) => req.url().match(pattern)) ||
               rejectResourceTypes.includes(req.resourceType())
             ) {
-              logger.debug(`Aborting request ${req.method()}: ${req.url()}`);
+              runForkInServer(Effect.logDebug(`Aborting request ${req.method()}: ${req.url()}`));
               return req.abort();
             }
             const interceptor = requestInterceptors.find((r) =>
@@ -275,7 +274,7 @@ export default class ChromiumPDFPostRoute extends BrowserHTTPRoute {
                 );
               })
               .catch((e) => {
-                logger.warn('Failed to evaluate page height:', e);
+                runForkInServer(Effect.logWarning('Failed to evaluate page height: ' + String(e)));
                 return 480; // default Puppeteer viewport height
               }),
           );
@@ -295,7 +294,7 @@ export default class ChromiumPDFPostRoute extends BrowserHTTPRoute {
 
         page.close().catch(noop);
 
-        logger.debug('PDF API request completed');
+        yield* Effect.logDebug('PDF API request completed');
       })(),
     );
   }

@@ -14,7 +14,6 @@ import {
   EdgePlaywright,
   FirefoxPlaywright,
   Hooks,
-  Logger,
   NotFound,
   Request,
   WebKitPlaywright,
@@ -82,10 +81,9 @@ export class BrowserLauncher {
   async getBrowserForRequest(
     req: Request,
     router: BrowserHTTPRoute | BrowserWebsocketRoute,
-    logger: Logger,
   ): Promise<BrowserInstance> {
     return Effect.runPromise(
-      this.getBrowserForRequestEffect(req, router, logger),
+      this.getBrowserForRequestEffect(req, router),
     );
   }
 
@@ -96,7 +94,6 @@ export class BrowserLauncher {
   private getBrowserForRequestEffect(
     req: Request,
     router: BrowserHTTPRoute | BrowserWebsocketRoute,
-    logger: Logger,
   ): Effect.Effect<BrowserInstance> {
     const launcher = this;
 
@@ -198,7 +195,6 @@ export class BrowserLauncher {
         blockAds,
         config: launcher.config,
         enableReplay,
-        logger,
         userDataDir,
       });
 
@@ -245,12 +241,6 @@ export class BrowserLauncher {
       // Get session ID from wsEndpoint
       const sessionId = getFinalPathSegment(browser.wsEndpoint()!)!;
       session.id = sessionId;
-
-      // Update logger context
-      logger.setSessionContext({
-        trackingId,
-        sessionId,
-      });
 
       // Register session
       launcher.registry.register(browser, session);

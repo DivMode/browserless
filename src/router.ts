@@ -6,7 +6,6 @@ import {
   HTTPManagementRoutes,
   HTTPRoute,
   Limiter,
-  Logger,
   Methods,
   PathTypes,
   Request,
@@ -31,7 +30,6 @@ export class Router extends EventEmitter {
     protected config: Config,
     protected browserManager: BrowserManager,
     protected limiter: Limiter,
-    protected logger: typeof Logger,
   ) {
     super();
   }
@@ -74,14 +72,13 @@ export class Router extends EventEmitter {
             yield* Effect.logWarning(`HTTP Request has closed prior to running`);
             return;
           }
-          const logger = new router.logger(route.name, req);
           if (
             Object.getPrototypeOf(route) instanceof BrowserHTTPRoute &&
             'browser' in route &&
             route.browser
           ) {
             const browser = yield* Effect.promise(() =>
-              router.browserManager.getBrowserForRequest(req, route, logger),
+              router.browserManager.getBrowserForRequest(req, route),
             );
 
             try {
@@ -93,7 +90,7 @@ export class Router extends EventEmitter {
               yield* Effect.logTrace(`Running found HTTP handler.`);
               return yield* Effect.promise(() =>
                 Promise.race([
-                  handler(req, res, logger, browser),
+                  handler(req, res, browser),
                   new Promise((resolve, reject) => {
                     res.once('close', () => {
                       if (!res.writableEnded) {
@@ -111,7 +108,7 @@ export class Router extends EventEmitter {
           }
 
           return yield* Effect.promise(() =>
-            (handler as HTTPRoute['handler'])(req, res, logger),
+            (handler as HTTPRoute['handler'])(req, res),
           );
         })(),
       );
@@ -130,14 +127,13 @@ export class Router extends EventEmitter {
             yield* Effect.logWarning(`WebSocket Request has closed prior to running`);
             return;
           }
-          const logger = new router.logger(route.name, req);
           if (
             Object.getPrototypeOf(route) instanceof BrowserWebsocketRoute &&
             'browser' in route &&
             route.browser
           ) {
             const browser = yield* Effect.promise(() =>
-              router.browserManager.getBrowserForRequest(req, route, logger),
+              router.browserManager.getBrowserForRequest(req, route),
             );
 
             try {
@@ -149,7 +145,7 @@ export class Router extends EventEmitter {
               yield* Effect.logTrace(`Running found WebSocket handler.`);
               yield* Effect.promise(() =>
                 Promise.race([
-                  handler(req, socket, head, logger, browser),
+                  handler(req, socket, head, browser),
                   new Promise<void>((resolve) => {
                     socket.once('close', resolve);
                     socket.once('end', resolve);
@@ -164,7 +160,7 @@ export class Router extends EventEmitter {
             return;
           }
           return yield* Effect.promise(() =>
-            (handler as WebSocketRoute['handler'])(req, socket, head, logger),
+            (handler as WebSocketRoute['handler'])(req, socket, head),
           );
         })(),
       );

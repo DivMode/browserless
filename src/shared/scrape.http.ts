@@ -8,7 +8,6 @@ import {
   ChromiumCDP,
   HTTPRoutes,
   InBoundRequest,
-  Logger,
   Methods,
   OutBoundRequest,
   Request,
@@ -38,6 +37,7 @@ import {
 import { Cookie, Page } from 'puppeteer-core';
 import { Effect } from 'effect';
 import { ServerResponse } from 'http';
+import { runForkInServer } from '../otel-runtime.js';
 
 export interface BodySchema {
   addScriptTag?: Array<Parameters<Page['addScriptTag']>[0]>;
@@ -238,12 +238,11 @@ export default class ChromiumScrapePostRoute extends BrowserHTTPRoute {
   async handler(
     req: Request,
     res: ServerResponse,
-    logger: Logger,
     browser: BrowserInstance,
   ) {
     return Effect.runPromise(
       Effect.fn('route.scrape.post')(function* () {
-        logger.info('Scrape API invoked with body:', req.body);
+        yield* Effect.logInfo('Scrape API invoked with body: ' + JSON.stringify(req.body));
         const contentType =
           !req.headers.accept || req.headers.accept?.includes('*')
             ? contentTypes.html
@@ -367,7 +366,7 @@ export default class ChromiumScrapePostRoute extends BrowserHTTPRoute {
               rejectResourceTypes.includes(req.resourceType()) ||
               !!rejectRequestPattern.find((pattern) => req.url().match(pattern))
             ) {
-              logger.debug(`Aborting request ${req.method()}: ${req.url()}`);
+              runForkInServer(Effect.logDebug(`Aborting request ${req.method()}: ${req.url()}`));
               return req.abort();
             }
             const interceptor = requestInterceptors.find((r) =>
@@ -485,7 +484,7 @@ export default class ChromiumScrapePostRoute extends BrowserHTTPRoute {
 
         page.close().catch(noop);
 
-        logger.debug('Scrape API request completed');
+        yield* Effect.logDebug('Scrape API request completed');
 
         return jsonResponse(res, 200, response, false);
       })(),

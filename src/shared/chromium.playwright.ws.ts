@@ -5,7 +5,6 @@ import {
   BrowserWebsocketRoute,
   BrowserlessRoutes,
   ChromiumPlaywright,
-  Logger,
   Request,
   SystemQueryParameters,
   WebsocketRoutes,
@@ -32,7 +31,6 @@ export default class ChromiumPlaywrightWebSocketRoute extends BrowserWebsocketRo
     req: Request,
     socket: Duplex,
     head: Buffer,
-    _logger: Logger,
     browser: ChromiumPlaywright,
   ): Promise<void> {
     return Effect.runPromise(

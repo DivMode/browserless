@@ -4,7 +4,6 @@ import {
   BrowserlessRoutes,
   HTTPRoute,
   HTTPRoutes,
-  Logger,
   Methods,
   Request,
   Response,
@@ -13,6 +12,8 @@ import {
   jsonResponse,
   writeResponse,
 } from '@browserless.io/browserless';
+import { Effect } from 'effect';
+import { runForkInServer } from '../otel-runtime.js';
 
 export type ResponseSchema = UnwrapPromise<
   ReturnType<BrowserManager['getVersionJSON']>
@@ -31,7 +32,7 @@ export default class ChromiumJSONVersionGetRoute extends HTTPRoute {
   method = Methods.get;
   path = HTTPRoutes.jsonVersion;
   tags = [APITags.browserAPI];
-  async handler(req: Request, res: Response, logger: Logger): Promise<void> {
+  async handler(req: Request, res: Response): Promise<void> {
     const baseUrl = req.parsed.host;
     const protocol = req.parsed.protocol.includes('s') ? 'wss' : 'ws';
 
@@ -39,13 +40,13 @@ export default class ChromiumJSONVersionGetRoute extends HTTPRoute {
       if (!this.cachedJSON) {
         const browserManager = this.browserManager();
         this.cachedJSON = {
-          ...(await browserManager.getVersionJSON(logger)),
+          ...(await browserManager.getVersionJSON()),
           webSocketDebuggerUrl: `${protocol}://${baseUrl}`,
         };
       }
       return jsonResponse(res, 200, this.cachedJSON);
     } catch (err) {
-      logger.warn(`Error handling request`, err);
+      runForkInServer(Effect.logWarning(`Error handling request: ` + String(err)));
       return writeResponse(
         res,
         500,

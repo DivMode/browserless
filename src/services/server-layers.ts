@@ -196,7 +196,7 @@ export const sessionRegistryFromInstance = (registry: SessionRegistryClass) =>
 export const browserManagerFromInstance = (manager: BrowserManagerClass) =>
   Layer.succeed(BrowserManagerService, {
     getBrowserForRequest: (req, route) =>
-      Effect.tryPromise(() => manager.getBrowserForRequest(req, route, {} as any)),
+      Effect.tryPromise(() => manager.getBrowserForRequest(req, route)),
     close: (browser, session, force) =>
       Effect.tryPromise(() => manager.close(browser, session, force)),
     complete: (browser) =>
@@ -206,9 +206,9 @@ export const browserManagerFromInstance = (manager: BrowserManagerClass) =>
     getAllSessions: (trackingId) =>
       Effect.tryPromise(() => manager.getAllSessions(trackingId)),
     getProtocolJSON: () =>
-      Effect.tryPromise(() => manager.getProtocolJSON({} as any)),
+      Effect.tryPromise(() => manager.getProtocolJSON()),
     getVersionJSON: () =>
-      Effect.tryPromise(() => manager.getVersionJSON({} as any)),
+      Effect.tryPromise(() => manager.getVersionJSON()),
     getJSONList: () =>
       Effect.tryPromise(() => manager.getJSONList()),
   });

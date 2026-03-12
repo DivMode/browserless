@@ -3,7 +3,6 @@ import {
   BrowserlessRoutes,
   HTTPManagementRoutes,
   HTTPRoute,
-  Logger,
   Methods,
   NotFound,
   Request,
@@ -15,6 +14,7 @@ import { ServerResponse } from 'http';
 import { createReadStream } from 'fs';
 import path from 'path';
 import { Effect } from 'effect';
+import { runForkInServer } from '../../../otel-runtime.js';
 
 const pathMap: Map<
   string,
@@ -25,21 +25,20 @@ const pathMap: Map<
 > = new Map();
 
 const streamFile = (
-  logger: Logger,
   res: ServerResponse,
   file: string,
   contentType?: string,
 ): Promise<void> =>
   new Promise((resolve, reject) => {
     if (contentType) {
-      logger.debug(`Setting content-type ${contentType}`);
+      runForkInServer(Effect.logDebug(`Setting content-type ${contentType}`));
       res.setHeader('Content-Type', contentType);
     }
 
     return createReadStream(file)
       .on('error', (error) => {
         if (error) {
-          logger.error(`Error finding file ${file}, sending 404`);
+          runForkInServer(Effect.logError(`Error finding file ${file}, sending 404`));
           pathMap.delete(file);
           return reject(
             new NotFound(`Request for file "${file}" was not found`),
@@ -64,7 +63,6 @@ export default class StaticGetRoute extends HTTPRoute {
   async handler(
     req: Request,
     res: ServerResponse,
-    logger: Logger,
   ): Promise<unknown> {
     const route = this;
     return Effect.runPromise(
@@ -74,7 +72,7 @@ export default class StaticGetRoute extends HTTPRoute {
 
         if (fileCache) {
           return yield* Effect.promise(() =>
-            streamFile(logger, res, fileCache.path, fileCache.contentType),
+            streamFile(res, fileCache.path, fileCache.contentType),
           );
         }
 
@@ -119,13 +117,13 @@ export default class StaticGetRoute extends HTTPRoute {
         }
 
         if (foundFilePaths.length > 1) {
-          logger.warn(
+          yield* Effect.logWarning(
             `Multiple files found for request to "${pathname}". Only the first file is served, so please name your files uniquely.`,
           );
         }
 
         const [foundFilePath] = foundFilePaths;
-        logger.info(
+        yield* Effect.logInfo(
           `Found new file "${foundFilePath}", caching path and serving`,
         );
 
@@ -142,7 +140,7 @@ export default class StaticGetRoute extends HTTPRoute {
         });
 
         return yield* Effect.promise(() =>
-          streamFile(logger, res, foundFilePath, contentType),
+          streamFile(res, foundFilePath, contentType),
         );
       })(),
     );

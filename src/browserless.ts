@@ -2,7 +2,6 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 
 import {
-  Logger as BlessLogger,
   BrowserHTTPRoute,
   BrowserManager,
   BrowserWebsocketRoute,
@@ -67,7 +66,6 @@ export class Browserless extends EventEmitter {
   protected fileSystem: FileSystem;
   protected hooks: Hooks;
   protected limiter: Limiter;
-  protected Logger: typeof BlessLogger;
   protected metrics: Metrics;
   protected monitoring: Monitoring;
   protected router: Router;
@@ -90,7 +88,6 @@ export class Browserless extends EventEmitter {
     fileSystem,
     hooks,
     limiter,
-    Logger: LoggerOverride,
     metrics,
     monitoring,
     router,
@@ -98,7 +95,6 @@ export class Browserless extends EventEmitter {
     webhooks,
     videoManager,
   }: {
-    Logger?: Browserless['Logger'];
     browserManager?: Browserless['browserManager'];
     config?: Browserless['config'];
     fileSystem?: Browserless['fileSystem'];
@@ -112,7 +108,6 @@ export class Browserless extends EventEmitter {
     videoManager?: Browserless['videoManager'];
   } = {}) {
     super();
-    this.Logger = LoggerOverride ?? BlessLogger;
     this.config = config || new Config();
     this.metrics = metrics || new Metrics();
     this.token = token || new Token(this.config);
@@ -135,7 +130,7 @@ export class Browserless extends EventEmitter {
       );
     this.router =
       router ||
-      new Router(this.config, this.browserManager, this.limiter, this.Logger);
+      new Router(this.config, this.browserManager, this.limiter);
   }
 
   // Filter out routes that are not able to work on the arm64 architecture
@@ -508,7 +503,6 @@ export class Browserless extends EventEmitter {
         this.token,
         this.router,
         this.hooks,
-        this.Logger,
       );
 
       // Initialize server-scoped OTLP runtime — must happen before any sessions.
@@ -570,7 +564,6 @@ export class Browserless extends EventEmitter {
       fileSystem: c.resolve<FileSystem>(Services.FileSystem),
       hooks: c.resolve<Hooks>(Services.Hooks),
       limiter: c.resolve<Limiter>(Services.Limiter),
-      Logger: c.resolve<typeof BlessLogger>(Services.Logger),
       metrics: c.resolve<Metrics>(Services.Metrics),
       monitoring: c.resolve<Monitoring>(Services.Monitoring),
       router: c.resolve<Router>(Services.Router),

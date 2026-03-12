@@ -2,7 +2,6 @@ import {
   BrowserLauncherOptions,
   BrowserServerOptions,
   Config,
-  Logger,
   Request,
   ServerError,
   chromeExecutablePath,
@@ -10,9 +9,12 @@ import {
 } from '@browserless.io/browserless';
 import playwright, { Page } from 'playwright-core';
 import { Duplex } from 'stream';
+import { Effect } from 'effect';
 import { EventEmitter } from 'events';
 import httpProxy from 'http-proxy';
 import path from 'path';
+
+import { runForkInServer } from '../otel-runtime.js';
 
 enum PlaywrightBrowserTypes {
   chromium = 'chromium',
@@ -24,7 +26,6 @@ class BasePlaywright extends EventEmitter {
   protected config: Config;
   protected userDataDir: string | null;
   protected running = false;
-  protected logger: Logger;
   protected socket: Duplex | null = null;
   protected proxy = httpProxy.createProxyServer();
   protected browser: playwright.BrowserServer | null = null;
@@ -38,19 +39,16 @@ class BasePlaywright extends EventEmitter {
   constructor({
     config,
     userDataDir,
-    logger,
   }: {
     config: Config;
-    logger: Logger;
     userDataDir: BasePlaywright['userDataDir'];
   }) {
     super();
 
     this.userDataDir = userDataDir;
     this.config = config;
-    this.logger = logger;
 
-    this.logger.info(`Starting new ${this.constructor.name} instance`);
+    runForkInServer(Effect.logInfo(`Starting new ${this.constructor.name} instance`));
   }
 
   protected cleanListeners() {
@@ -96,9 +94,9 @@ class BasePlaywright extends EventEmitter {
 
   public async close(): Promise<void> {
     if (this.browser) {
-      this.logger.info(
+      runForkInServer(Effect.logInfo(
         `Closing ${this.constructor.name} process and all listeners`,
-      );
+      ));
       this.socket?.destroy();
       this.emit('close');
       // Store reference before nulling
@@ -110,7 +108,7 @@ class BasePlaywright extends EventEmitter {
       try {
         await browser.close();
       } catch (e) {
-        this.logger.warn(`Error closing browser: ${e}`);
+        runForkInServer(Effect.logWarning(`Error closing browser: ${e}`));
       }
       // Clean up listeners AFTER browser is fully closed
       this.cleanListeners();
@@ -149,7 +147,7 @@ class BasePlaywright extends EventEmitter {
     launcherOpts: BrowserLauncherOptions,
   ): Promise<playwright.BrowserServer> {
     const { options, pwVersion } = launcherOpts;
-    this.logger.info(`Launching ${this.constructor.name} Handler`);
+    runForkInServer(Effect.logInfo(`Launching ${this.constructor.name} Handler`));
 
     const opts = this.makeLaunchOptions(options);
     const versionedPw = await this.config.loadPwVersion(pwVersion!);
@@ -159,9 +157,9 @@ class BasePlaywright extends EventEmitter {
     });
     const browserWSEndpoint = browser.wsEndpoint();
 
-    this.logger.info(
+    runForkInServer(Effect.logInfo(
       `${this.constructor.name} is running on ${browserWSEndpoint}`,
-    );
+    ));
     this.running = true;
     this.browserWSEndpoint = browserWSEndpoint;
     this.browser = browser;
@@ -191,7 +189,7 @@ class BasePlaywright extends EventEmitter {
   }
 
   public async proxyPageWebSocket() {
-    this.logger.error(`Not yet implemented in ${this.constructor.name}`);
+    runForkInServer(Effect.logError(`Not yet implemented in ${this.constructor.name}`));
   }
 
   public async proxyWebSocket(
@@ -208,9 +206,9 @@ class BasePlaywright extends EventEmitter {
       }
       socket.once('close', resolve);
 
-      this.logger.info(
+      runForkInServer(Effect.logInfo(
         `Proxying ${req.parsed.href} to ${this.constructor.name} ${this.browserWSEndpoint}`,
-      );
+      ));
 
       // Delete headers known to cause issues
       delete req.headers.origin;
@@ -226,9 +224,9 @@ class BasePlaywright extends EventEmitter {
           target: this.browserWSEndpoint,
         },
         (error) => {
-          this.logger.error(
+          runForkInServer(Effect.logError(
             `Error proxying session to ${this.constructor.name}: ${error}`,
-          );
+          ));
           this.close();
           return reject(error);
         },

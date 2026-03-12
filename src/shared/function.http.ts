@@ -7,7 +7,6 @@ import {
   CDPLaunchOptions,
   ChromiumCDP,
   HTTPRoutes,
-  Logger,
   Methods,
   Request,
   SystemQueryParameters,
@@ -59,21 +58,20 @@ export default class ChromiumFunctionPostRoute extends BrowserHTTPRoute {
   async handler(
     req: Request,
     res: ServerResponse,
-    logger: Logger,
     browser: BrowserInstance,
   ): Promise<void> {
     const config = this.config();
     return Effect.runPromise(
       Effect.fn('route.function.post')(function* () {
         const timeout = req.parsed.searchParams.get('timeout');
-        const handler = functionHandler(config, logger, {
+        const handler = functionHandler(config, {
           protocolTimeout: timeout ? +timeout : undefined,
         });
         const { contentType, payload, page } = yield* Effect.promise(() =>
           handler(req, browser),
         );
 
-        logger.info(`Got function response of "${contentType}"`);
+        yield* Effect.logInfo(`Got function response of "${contentType}"`);
         page.close();
         page.removeAllListeners();
 
@@ -88,7 +86,7 @@ export default class ChromiumFunctionPostRoute extends BrowserHTTPRoute {
           if (!type) {
             throw new BadRequest(`Couldn't determine function's response type.`);
           } else {
-            logger.info(`Sending file-type response of "${type}"`);
+            yield* Effect.logInfo(`Sending file-type response of "${type}"`);
             const readStream = new Stream.PassThrough();
             readStream.end(response);
             res.setHeader('Content-Type', type);

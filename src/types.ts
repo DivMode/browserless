@@ -9,7 +9,6 @@ import {
   FirefoxPlaywright,
   HTTPManagementRoutes,
   HTTPRoutes,
-  Logger,
   Methods,
   Metrics,
   Request,
@@ -268,7 +267,6 @@ export abstract class HTTPRoute extends BasicHTTPRoute {
   abstract handler(
     req: Request,
     res: http.ServerResponse,
-    logger: Logger,
   ): Promise<unknown>;
 }
 
@@ -289,7 +287,6 @@ export abstract class BrowserHTTPRoute extends BasicHTTPRoute {
   abstract handler(
     req: Request,
     res: http.ServerResponse,
-    logger: Logger,
     browser: BrowserInstance,
   ): Promise<unknown>;
 
@@ -314,7 +311,6 @@ export abstract class WebSocketRoute extends Route {
     req: Request,
     socket: stream.Duplex,
     head: Buffer,
-    logger: Logger,
   ): Promise<unknown>;
 
   /**
@@ -345,7 +341,6 @@ export abstract class BrowserWebsocketRoute extends Route {
     req: Request,
     socket: stream.Duplex,
     head: Buffer,
-    logger: Logger,
     browser: BrowserInstance,
   ): Promise<unknown>;
 

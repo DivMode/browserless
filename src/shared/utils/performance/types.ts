@@ -1,4 +1,4 @@
-import { BrowserInstance, Logger } from '@browserless.io/browserless';
+import { BrowserInstance } from '@browserless.io/browserless';
 import { Config, Flags } from 'lighthouse';
 
 export interface Message {
@@ -14,7 +14,6 @@ export interface mainOptions {
     config?: unknown;
     url: string;
   };
-  logger: Logger;
   timeout: number;
 }
 
