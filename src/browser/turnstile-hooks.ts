@@ -119,6 +119,7 @@ export function setupTurnstileHooks(emit: Emit): void {
   // Poll for turnstile creation — CF's api.js loads async and creates
   // window.turnstile. Fast poll (20ms) to hook render() before first call.
   // Abort immediately if _cf_chl_opt detected (CF challenge page).
+  let hooksInstalled = false;
   const pollId = setInterval(() => {
     if (isCFChallengePage()) { clearInterval(pollId); return; }
     if (window.turnstile) {
@@ -127,11 +128,29 @@ export function setupTurnstileHooks(emit: Emit): void {
         emit({ type: 'timing', event: 'api_loaded', ts: Date.now() });
       }
       hookAndCheck(window.turnstile, emit);
-      if (window.turnstile.__cbHooked && window.turnstile.__grHooked) clearInterval(pollId);
+      if (window.turnstile.__cbHooked && window.turnstile.__grHooked) {
+        hooksInstalled = true;
+        clearInterval(pollId);
+      }
     }
   }, 20);
   setTimeout(() => {
     clearInterval(pollId);
     document.removeEventListener('load', captureLoadHandler, true);
   }, 30000);
+
+  // Slow fallback poll — catches tokens from managed/invisible widgets that
+  // auto-solve AFTER the fast poll stops. The render() callback wrapper handles
+  // most cases, but managed widgets can solve after 30-60s. Without this poll,
+  // the token is only detected when the page navigates (auto_navigation),
+  // causing 50-60s ghost traces in cf.resolutionRace.
+  const tokenPollId = setInterval(() => {
+    if (tokenReported || isCFChallengePage()) { clearInterval(tokenPollId); return; }
+    if (!hooksInstalled) return; // wait for hooks first
+    try {
+      const token = window.turnstile?.getResponse?.();
+      if (token) reportSolved(emit, token);
+    } catch (_) {}
+  }, 1000);
+  setTimeout(() => clearInterval(tokenPollId), 90000);
 }
