@@ -15,7 +15,7 @@
  * Resolution is identity-safe via DetectionContext.resolve() — no targetId-based resolve.
  */
 
-import { Effect, Exit, Option, Scope } from 'effect';
+import { Effect, Exit, Option, Scope, Tracer } from 'effect';
 import type { TargetId } from '../../shared/cloudflare-detection.js';
 import type { ActiveDetection, ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
 import type { SolveSignal } from './cloudflare-state-tracker.js';
@@ -44,7 +44,9 @@ export class DetectionRegistry {
     // this gives us the parent span (e.g. cf.handleEmbeddedDetection) so that
     // onBeaconSolved can join the same trace as a sibling of cf.solveDetection.
     return Effect.flatMap(
-      Effect.currentSpan.pipe(Effect.option),
+      Effect.withFiber((fiber) => Effect.succeed(
+        fiber.currentSpan ? Option.some(fiber.currentSpan) : Option.none() as Option.Option<Tracer.AnySpan>,
+      )),
       (callerSpan) => Effect.fn('cf.registry.register')(function*() {
       // Extract domain from page URL for Tempo filtering
       let domain = 'unknown';
