@@ -128,6 +128,7 @@ export class SessionCoordinator {
       onBridgeEvent: (tid, event) => cloudflareSolver.onBridgeEvent(tid, event),
       onTargetDestroyed: (tid) => cloudflareSolver.stopTargetDetection(tid),
       setSessionSpan: (span) => cloudflareSolver.setSessionSpan(span),
+      setTabSpan: (tid, span) => cloudflareSolver.setTabSpan(tid, span),
       destroy: () => cloudflareSolver.destroyEffect,
     };
 

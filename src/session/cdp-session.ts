@@ -109,6 +109,11 @@ export class CdpSession {
   // (CF cleanup → queue drain → callback + target removal)
   private readonly tabScopes = new Map<string, Scope.Closeable>();
 
+  // Per-tab root traces — each tab gets its own trace linked back to session.
+  // Keeps session trace lightweight; tab traces contain replay, screencast, CF detection.
+  private readonly tabSpans = new Map<string, Tracer.Span>();
+  private readonly tabContexts = new Map<string, Tracer.ExternalSpan>();
+
   // WebSocket
   private ws: InstanceType<any> | null = null;
   private WebSocket: any = null;
@@ -716,6 +721,20 @@ export class CdpSession {
       session.unregisterGauges?.();
       session.log.info(`CdpSession gauges unregistered (had=${hadGauges}) for session ${session.sessionId}`);
 
+      // End trace spans EARLY — gives the OTLP exporter time to flush during
+      // the subsequent tab scope close + CF solver cleanup operations (several seconds).
+      // If ended in the `ensuring` block (right before runtime.dispose()), the
+      // exporter is killed before it can flush the just-ended spans.
+      // Span.end() is idempotent — safe to call again in ensuring as safety net.
+      // sessionContext (ExternalSpan) continues working for parenting destroy-time spans.
+      for (const [, span] of session.tabSpans) {
+        span.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
+      }
+      if (session.sessionSpan) {
+        session.sessionSpan.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
+        session.sessionSpan = null;
+      }
+
       // 1. Finalize all tabs — flush rrweb buffers into queues (before scope close)
       if (source === 'cleanup') {
         for (const target of [...session.targets]) {
@@ -738,8 +757,12 @@ export class CdpSession {
     })().pipe(
       // Guaranteed cleanup — runs even if Effect times out or fails
       Effect.ensuring(Effect.sync(() => {
-        // End session-level root span — pushes to server exporter (not per-session).
-        // Server exporter is alive → root span exported on next 5s cycle.
+        // Safety net — end any spans not ended above (e.g., if main body timed out)
+        for (const [, span] of session.tabSpans) {
+          span.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
+        }
+        session.tabSpans.clear();
+        session.tabContexts.clear();
         if (session.sessionSpan) {
           session.sessionSpan.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
           session.sessionSpan = null;
@@ -834,7 +857,7 @@ export class CdpSession {
       }
 
       // Routed CDP events — dispatched as tracked fibers
-      // Session span injected as parent → all CDP handlers share one traceId
+      // Tab-specific events use per-tab trace; session-level events use session trace
       if (msg.method && this.runtime && this._fiberMap) {
         const handler = this.effectHandlers.get(msg.method);
         if (handler) {
@@ -843,7 +866,10 @@ export class CdpSession {
             Effect.tapError((e) => Effect.logWarning(`CDP handler error: method=${msg.method} target=${targetId} error=${e}`)),
             Effect.ignore,
           );
-          forkTracedFiber(this.runtime, this._fiberMap, `msg:${msg.method}:${targetId}`, baseEffect, this.sessionContext);
+          // Use per-tab span if available (targetDestroyed, targetInfoChanged),
+          // fall back to session span (attachedToTarget before tab span exists, targetCreated)
+          const parentSpan = this.tabContexts.get(targetId) ?? this.sessionContext;
+          forkTracedFiber(this.runtime, this._fiberMap, `msg:${msg.method}:${targetId}`, baseEffect, parentSpan);
         }
       }
     } catch (e) {
@@ -1131,6 +1157,30 @@ export class CdpSession {
           session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
             Effect.timeout('3 seconds'), Effect.ignore));
 
+        // ── Per-tab root trace — independent trace linked back to session ──
+        // Each tab gets its own traceId (~50-500 spans), well under Tempo's 5MB limit.
+        // The session trace stays lightweight (just metadata + lifecycle events).
+        const tabSpan = yield* Effect.makeSpan(`tab:${targetId}`, {
+          root: true,
+          links: session.sessionContext ? [{ span: session.sessionContext, attributes: {} }] : [],
+        });
+        tabSpan.attribute('tab.target_id', targetId);
+        tabSpan.attribute('session.id', session.sessionId);
+        tabSpan.attribute('tab.url', targetInfo.url?.substring(0, 200) ?? '');
+        const tabContext = Tracer.externalSpan({
+          spanId: tabSpan.spanId,
+          traceId: tabSpan.traceId,
+          sampled: true,
+        });
+        session.tabSpans.set(targetId, tabSpan);
+        session.tabContexts.set(targetId, tabContext);
+        session.cloudflareHooks.setTabSpan(targetId, tabContext);
+
+        // Record tab open on session span
+        if (session.sessionSpan) {
+          session.sessionSpan.event('tab.opened', BigInt(Date.now()) * 1_000_000n, { 'tab.target_id': targetId });
+        }
+
         // Notify CF solver — tracked fiber
         if (session._fiberMap) {
           yield* FiberMap.run(session._fiberMap, `cf:attach:${targetId}`,
@@ -1145,8 +1195,8 @@ export class CdpSession {
           const sessionIdBranded = SessionId.makeUnsafe(session.sessionId);
           if (session._fiberMap) {
             // Fork via runtime.runFork — tabConsumer requires ReplayWriter/ReplayMetrics in R
-            // Parent under session span so replay.tab appears in the session trace tree
-            forkTracedFiber(session.runtime, session._fiberMap, `tab:${targetId}`, tabConsumer(queue, sessionIdBranded, targetId), session.sessionContext);
+            // Parent under per-tab span so replay.tab appears in the tab's trace tree
+            forkTracedFiber(session.runtime, session._fiberMap, `tab:${targetId}`, tabConsumer(queue, sessionIdBranded, targetId), tabContext);
           }
 
           // Diagnostic probe: check rrweb state 2s after target resumes
@@ -1170,8 +1220,8 @@ export class CdpSession {
               }, cdpSessionId).pipe(Effect.orElseSucceed(() => null));
               if (result) session.log.info(`[rrweb-diag] target=${targetId} ${result?.result?.value}`);
             }).pipe(Effect.ignore);
-            // Parent under session span so probe appears in the session trace tree
-            forkTracedFiber(session.runtime, session._fiberMap, `probe:${targetId}`, probeEffect, session.sessionContext);
+            // Parent under per-tab span so probe appears in the tab's trace tree
+            forkTracedFiber(session.runtime, session._fiberMap, `probe:${targetId}`, probeEffect, tabContext);
           }
         }
 
@@ -1219,17 +1269,22 @@ export class CdpSession {
         }
 
         // Start screencast — fully decoupled via VideoHooks
+        // Parent under per-tab span so screencast.target appears in the tab's trace tree
         if (session.video && session.videoHooks && session._fiberMap) {
           yield* FiberMap.run(session._fiberMap, `screencast:${targetId}`,
-            session.videoHooks.onTargetAttached(session.sessionId, session.sendCommand.bind(session) as any, cdpSessionId, targetId).pipe(
-              Effect.ignore,
+            withSessionSpan(
+              session.videoHooks.onTargetAttached(session.sessionId, session.sendCommand.bind(session) as any, cdpSessionId, targetId).pipe(
+                Effect.ignore,
+              ),
+              tabContext,
             ),
           );
         }
 
         // Open per-page WebSocket for zero-contention
+        // Parent under per-tab span so cdp.openPageWs appears in the tab's trace tree
         if (session._fiberMap) {
-          yield* FiberMap.run(session._fiberMap, `pageWs:${targetId}`, session.openPageWs(targetId));
+          yield* FiberMap.run(session._fiberMap, `pageWs:${targetId}`, withSessionSpan(session.openPageWs(targetId), tabContext));
         }
       }
 
@@ -1302,6 +1357,18 @@ export class CdpSession {
           Effect.timeout('3 seconds'), Effect.ignore);
         session.targets.remove(targetId);
         session.targets.removeIframeTarget(targetId);
+      }
+
+      // End per-tab trace span — AFTER all cleanup so span encompasses full tab lifecycle.
+      // Only for page targets (they have tab spans); workers/iframes are session-level.
+      const tabSpan = session.tabSpans.get(targetId);
+      if (tabSpan) {
+        if (session.sessionSpan) {
+          session.sessionSpan.event('tab.closed', BigInt(Date.now()) * 1_000_000n, { 'tab.target_id': targetId });
+        }
+        tabSpan.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
+        session.tabSpans.delete(targetId);
+        session.tabContexts.delete(targetId);
       }
     })();
   }

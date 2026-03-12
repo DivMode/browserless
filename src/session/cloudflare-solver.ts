@@ -65,9 +65,11 @@ export class CloudflareSolver {
   private createIsolatedConn: (() => IsolatedConnection) | null = null;
   private createIsolatedConnScoped: (() => IsolatedConnectionScoped) | null = null;
   private _setRealEmit: (fn: EmitClientEvent) => void;
-  /** Session-level span reference for parenting detection fibers under the session trace.
+  /** Session-level span reference — fallback for detection fibers without a tab-specific span.
    * Set via setSessionSpan() — receives an ExternalSpan from cdp-session (never null after init). */
   private sessionContext: Tracer.AnySpan | null = null;
+  /** Per-tab spans — detection fibers are parented under the tab's trace for per-tab isolation. */
+  private readonly tabContexts = new Map<string, Tracer.AnySpan>();
 
   // ── Eager scope + scope-bound FiberMap (CDPProxy pattern) ──────────
   // Never null, never late-initialized. Scope.close() drains all fibers
@@ -341,6 +343,10 @@ export class CloudflareSolver {
     this.sessionContext = span;
   }
 
+  setTabSpan(targetId: TargetId, span: Tracer.AnySpan): void {
+    this.tabContexts.set(targetId, span);
+  }
+
   /** Interrupt and stop the detection fiber for a target (e.g. on tab close). */
   stopTargetDetection(targetId: TargetId): Effect.Effect<void> {
     // Record destroyed target — prevents stale OOPIF re-detection if Chrome
@@ -409,9 +415,10 @@ export class CloudflareSolver {
         })(),
       ),
     );
-    // Parent under session span so detection traces join the session trace tree
-    // instead of creating orphan root spans (cf.detectTurnstileWidget as root).
-    forkTracedFiber(this.runtime, this.detectionFibers, targetId, guarded, this.sessionContext);
+    // Parent under per-tab span so detection traces join the tab's trace tree.
+    // Falls back to session span for targets without a tab context.
+    const parentSpan = this.tabContexts.get(targetId) ?? this.sessionContext;
+    forkTracedFiber(this.runtime, this.detectionFibers, targetId, guarded, parentSpan);
   }
 
   setSendViaProxy(fn: SendCommand): void {

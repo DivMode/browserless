@@ -42,6 +42,30 @@ export const forkTracedFiber = <K extends string>(
  * filters ExternalSpans — causing solver effects to become orphaned when the
  * parent is the session's ExternalSpan.
  */
+/**
+ * Fork a fiber as an independent root trace, linked back to the session span.
+ * Creates a NEW traceId (root: true) with a span link for correlation.
+ * Use this when a fiber should form its own trace rather than joining the session trace.
+ */
+export const forkLinkedRootFiber = <K extends string>(
+  runtime: ManagedRuntime.ManagedRuntime<any, never>,
+  fiberMap: FiberMap.FiberMap<K>,
+  key: K,
+  spanName: string,
+  effect: Effect.Effect<void, never, any>,
+  sessionSpan: Tracer.AnySpan | null | undefined,
+): void => {
+  const linked = sessionSpan
+    ? effect.pipe(
+        Effect.withSpan(spanName, {
+          root: true,
+          links: [{ span: sessionSpan, attributes: {} }],
+        }),
+      )
+    : effect.pipe(Effect.withSpan(spanName, { root: true }));
+  runtime.runFork(FiberMap.run(fiberMap, key, linked));
+};
+
 export const bridgeRuntime = <R>(
   runtime: ManagedRuntime.ManagedRuntime<R, never>,
 ) => <A, E>(
