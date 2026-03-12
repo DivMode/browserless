@@ -140,7 +140,10 @@ const runSession: Effect.Effect<
       { timeout: 8_000, polling: 500 },
     ).catch(() => {}),
   );
-  yield* Effect.sleep('500 millis'); // buffer for final markers
+  // Buffer for server-side solver to finish. When CF serves a non-interactive
+  // auto-solve, turnstile.getResponse() returns a token in ~1s but the server
+  // solver is still in phase 3 polling. 3s lets the bridge push propagate.
+  yield* Effect.sleep('3 seconds');
   console.log(`  [${Date.now() - testStartTs}ms] wait done`);
 
   // Close browser to flush replay data
