@@ -14,7 +14,7 @@ import {
   type TabReplayCompleteParams,
 } from '@browserless.io/browserless';
 
-import { Cause, Effect, Exit, Fiber, FiberMap, Layer, ManagedRuntime, Metric, Queue, Schedule, Scope, Tracer } from 'effect';
+import { Cause, Effect, Exit, Fiber, FiberMap, Layer, ManagedRuntime, Metric, Queue, Schedule, Scope, Stream, Tracer } from 'effect';
 import { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
 import { decodeCDPMessage, decodeRrwebEventBatch } from '../shared/cdp-schemas.js';
 import { CdpConnection } from '../shared/cdp-rpc.js';
@@ -88,6 +88,10 @@ export class CdpSession {
   // Single runtime + FiberMap for all fibers (replay consumers + per-page WS + probes)
   private _fiberMap: FiberMap.FiberMap<string> | null = null;
   private runtime: ManagedRuntime.ManagedRuntime<SessionR, never> | null = null;
+
+  // CDP event Queue — bridges sync WS callback to Effect consumer fiber.
+  // Same pattern as replay-pipeline.ts: Queue.offerUnsafe in sync, Stream.fromQueue in Effect.
+  private cdpEventQueue: Queue.Queue<any, Cause.Done> | null = null;
   /**
    * Session-level root span — started via Effect.makeSpan('session') in initialize(),
    * ended manually via span.end() during destroy. Pushed to the server-scoped OTLP
@@ -106,8 +110,12 @@ export class CdpSession {
   private readonly eventCounts = new Map<string, number>();
 
   // Per-tab scopes: LIFO finalizers guarantee cleanup ordering
-  // (CF cleanup → queue drain → callback + target removal)
+  // (FiberMap interrupt → CF cleanup → queue drain → callback + target removal)
   private readonly tabScopes = new Map<string, Scope.Closeable>();
+
+  // Per-tab FiberMaps: CDP event fibers for each tab, interrupted on tab scope close.
+  // Fixes ghost detection fibers that survived tab close in the session-level FiberMap.
+  private readonly tabEventFibers = new Map<string, FiberMap.FiberMap<string>>();
 
   // Per-tab root traces — each tab gets its own trace linked back to session.
   // Keeps session trace lightweight; tab traces contain replay, screencast, CF detection.
@@ -118,7 +126,6 @@ export class CdpSession {
   private ws: InstanceType<any> | null = null;
   private WebSocket: any = null;
   private unregisterGauges: (() => void) | null = null;
-  private readonly browserWsScope = Scope.makeUnsafe();
 
   // Declarative CDP message routing — Effect-native handlers dispatched as tracked fibers
   private readonly effectHandlers = new Map<string, (msg: any) => Effect.Effect<void>>();
@@ -252,16 +259,17 @@ export class CdpSession {
       registerSession: (state) => Effect.sync(() => registerSessionState(state)),
     }));
 
-    // LifecycleLayer — acquireRelease: FiberMap + cleanup
+    // LifecycleLayer — acquireRelease: FiberMap + Queue + cleanup
     const lifecycleLayer = Layer.effectDiscard(
       Effect.acquireRelease(
         Effect.gen(function*() {
           self._fiberMap = yield* FiberMap.make<string>();
+          self.cdpEventQueue = yield* Queue.unbounded<any, Cause.Done>();
         }),
         () => Effect.sync(() => {
-          // Close all per-page WebSockets (scope-guaranteed cleanup)
+          if (self.cdpEventQueue) Queue.endUnsafe(self.cdpEventQueue);
+          self.cdpEventQueue = null;
           self.targets.clear();
-          // browserConn cleanup handled by browserWsScope finalizer
           self._fiberMap = null;
         }),
       ),
@@ -275,11 +283,113 @@ export class CdpSession {
       }),
     ));
 
+    // WsLayer — browser WebSocket + CdpConnection lifecycle
+    const sendRetry = (method: string, params: object = {}) =>
+      Effect.tryPromise({
+        try: () => self.sendCommand(method, params),
+        catch: (e) => e instanceof Error ? e : new Error(String(e)),
+      }).pipe(
+        Effect.retry({ times: 2, schedule: Schedule.exponential('1 second') }),
+      );
+
+    const wsLayer = Layer.effectDiscard(
+      Effect.acquireRelease(
+        Effect.fn('cdp.wsLifecycle')(function*() {
+          const ws = new self.WebSocket(self.wsEndpoint);
+          Effect.runSync(incCounter(wsLifecycle, { type: 'session_browser', action: 'create' }));
+
+          // CRITICAL: Attach error handler synchronously before any async work
+          ws.on('error', (err: Error) => {
+            self.log.debug(`CDP WebSocket error: ${err.message}`);
+          });
+
+          // Wait for open
+          yield* Effect.callback<void, Error>((resume) => {
+            ws.once('open', () => resume(Effect.void));
+            return Effect.sync(() => ws.close());
+          }).pipe(Effect.timeout('10 seconds'), Effect.catch(() =>
+            Effect.fail(new Error('WebSocket open timed out after 10s')),
+          ));
+
+          // CdpConnection
+          self.browserConn = new CdpConnection(ws, { startId: 1, defaultTimeout: 30_000 });
+          self.ws = ws;
+
+          // Wire message handler (sync — offers CDP events to Queue)
+          ws.on('message', (data: Buffer) => self.handleCDPMessage(data));
+          ws.on('close', () => {
+            self.browserConn?.dispose();
+            self.destroy('ws_close');
+          });
+
+          // Prometheus gauges
+          const targets = self.targets;
+          self.unregisterGauges = registerSessionState({
+            pageWebSockets: { get size() { return targets.pageWsCount; } },
+            trackedTargets: targets,
+            pendingCommands: { get size() { return self.browserConn?.pendingCount ?? 0; } },
+            getPagePendingCount: () => targets.getPagePendingCount(),
+            getEstimatedBytes: () => 0,
+          });
+
+          // CDP setup
+          yield* sendRetry('Target.setAutoAttach', {
+            autoAttach: true,
+            waitForDebuggerOnStart: true,
+            flatten: true,
+          });
+          self.log.info(`Target.setAutoAttach succeeded for session ${self.sessionId}`);
+
+          yield* sendRetry('Target.setDiscoverTargets', { discover: true });
+
+          if (self.video && self.videosDir && self.videoHooks) {
+            yield* Effect.tryPromise(() =>
+              self.videoHooks!.onInit(self.sessionId, self.sendCommand.bind(self) as any, self.videosDir!));
+          }
+
+          self.log.debug(`CDP auto-attach enabled for session ${self.sessionId}`);
+        })().pipe(
+          // Catch setup errors — match current behavior (log + continue)
+          Effect.catch(() => Effect.logWarning('cdp.wsLifecycle: setup failed')),
+        ),
+        () => Effect.sync(() => {
+          self.browserConn?.dispose();
+          self.browserConn = null;
+          self.ws?.removeAllListeners();
+          self.ws?.terminate();
+          self.ws = null;
+          self.unregisterGauges?.();
+          self.unregisterGauges = null;
+          Effect.runSync(incCounter(wsLifecycle, { type: 'session_browser', action: 'destroy' }));
+        }),
+      ),
+    );
+
+    // SessionSpanLayer — session root span lifecycle tied to Layer.
+    // acquireRelease guarantees span is ended during runtime.dispose().
+    // SharedTracerLayer provides the server-scoped exporter — still alive
+    // during session Layer teardown, so the ended span is always flushed.
+    // Acquire is empty — span creation is deferred to initialize() which
+    // needs the runtime to be built first. Only the release matters here.
+    const sessionSpanLayer = Layer.effectDiscard(
+      Effect.acquireRelease(
+        Effect.void,
+        () => Effect.sync(() => {
+          if (self.sessionSpan) {
+            self.sessionSpan.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
+            self.sessionSpan = null;
+          }
+        }),
+      ),
+    );
+
     return Layer.mergeAll(
       cdpSenderLayer,
       writerLayer,
       metricsLayer,
       Layer.merge(lifecycleLayer, Layer.provide(sessionLifecycleLayer, lifecycleLayer)),
+      wsLayer,
+      sessionSpanLayer,
       SharedTracerLayer,
     );
   }
@@ -291,12 +401,11 @@ export class CdpSession {
    * Transitions: INITIALIZING → ACTIVE
    */
   async initialize(): Promise<void> {
+    // Import ws BEFORE building the layer — wsLayer uses self.WebSocket
     this.WebSocket = (await import('ws')).default;
 
-    // Build the single runtime (replaces both cdpRuntime and sessionRuntime)
+    // Build the single runtime — Layer evaluation opens WS, creates FiberMap, Queue, CDP setup
     this.runtime = ManagedRuntime.make(this.buildLayer());
-
-    // Force Layer evaluation — creates FiberMap before CDP messages arrive
     await this.runtime.runPromise(Effect.void);
 
     // Create session-level root span — parent for all CDP handlers.
@@ -316,97 +425,15 @@ export class CdpSession {
     });
     this.cloudflareHooks.setSessionSpan(this.sessionContext);
 
-    const ws = new this.WebSocket(this.wsEndpoint);
-    this.ws = ws;
-    Effect.runSync(incCounter(wsLifecycle, { type: 'session_browser', action: 'create' }));
-
-    // CRITICAL: Attach error handler synchronously before any async work
-    ws.on('error', (err: Error) => {
-      this.log.debug(`CDP WebSocket error: ${err.message}`);
-    });
-
-    // Register live data structures for Prometheus gauges
-    const targets = this.targets;
-    const self = this;
-    this.unregisterGauges = registerSessionState({
-      pageWebSockets: { get size() { return targets.pageWsCount; } },
-      trackedTargets: targets,
-      pendingCommands: { get size() { return self.browserConn?.pendingCount ?? 0; } },
-      getPagePendingCount: () => targets.getPagePendingCount(),
-      getEstimatedBytes: () => 0,
-    });
-
-    // Create CdpConnection for browser-level WS
-    this.browserConn = new CdpConnection(ws, { startId: 1, defaultTimeout: 30_000 });
-
-    // Register guaranteed cleanup — scope close handles WS teardown
-    Effect.runSync(Scope.addFinalizer(this.browserWsScope, Effect.sync(() => {
-      this.browserConn?.dispose();
-      this.browserConn = null;
-      this.ws?.removeAllListeners();
-      this.ws?.terminate();
-      this.ws = null;
-      Effect.runSync(incCounter(wsLifecycle, { type: 'session_browser', action: 'destroy' }));
-    })));
-
-    // Wire up WS message handler
-    ws.on('message', (data: Buffer) => this.handleCDPMessage(data));
-
-    // Wire up WS close handler
-    ws.on('close', () => {
-      this.browserConn?.dispose();
-      this.destroy('ws_close');
-    });
-
-    // Await WebSocket open + CDP setup via Effect
-    const openWs = Effect.callback<void, Error>((resume) => {
-      const setupTimeout = setTimeout(() => {
-        resume(Effect.fail(new Error('WebSocket open + setAutoAttach timed out after 10s')));
-      }, 10_000);
-      ws.once('open', () => {
-        clearTimeout(setupTimeout);
-        resume(Effect.void);
-      });
-      return Effect.sync(() => clearTimeout(setupTimeout));
-    });
-
-    // CDP command with exponential backoff retry (3 attempts: 0ms, 1s, 2s)
-    const sendRetry = (method: string, params: object = {}) =>
-      Effect.tryPromise({
-        try: () => this.sendCommand(method, params),
-        catch: (e) => e instanceof Error ? e : new Error(String(e)),
-      }).pipe(
-        Effect.retry({ times: 2, schedule: Schedule.exponential('1 second') }),
-      );
-
+    // Start CDP event Stream consumer — processes events inside the Effect runtime.
+    // Runs in the session FiberMap → interrupted when lifecycle layer releases.
+    // FiberMap.run is native Effect — no runtime.runFork bridge needed.
     const session = this;
-    const setupCdp = Effect.gen(function*() {
-      yield* openWs;
-
-      yield* sendRetry('Target.setAutoAttach', {
-        autoAttach: true,
-        waitForDebuggerOnStart: true,
-        flatten: true,
-      });
-      session.log.info(`Target.setAutoAttach succeeded for session ${session.sessionId}`);
-
-      yield* sendRetry('Target.setDiscoverTargets', { discover: true });
-
-      if (session.video && session.videosDir && session.videoHooks) {
-        yield* Effect.tryPromise(() =>
-          session.videoHooks!.onInit(session.sessionId, session.sendCommand.bind(session) as any, session.videosDir!));
-      }
-
-      session.log.debug(`CDP auto-attach enabled for session ${session.sessionId}`);
-    });
-
-    // Run CDP setup — recording failures don't block the session
-    await Effect.runPromise(
-      setupCdp.pipe(
-        Effect.catch(() => {
-          this.log.warn(`Failed to set up CDP`);
-          return Effect.void;
-        }),
+    await this.runtime.runPromise(
+      FiberMap.run(this._fiberMap!, '__cdp_consumer',
+        Stream.fromQueue(session.cdpEventQueue!).pipe(
+          Stream.runForEach((msg: any) => session.routeCdpEvent(msg)),
+        ),
       ),
     );
 
@@ -721,19 +748,9 @@ export class CdpSession {
       session.unregisterGauges?.();
       session.log.info(`CdpSession gauges unregistered (had=${hadGauges}) for session ${session.sessionId}`);
 
-      // End trace spans EARLY — gives the OTLP exporter time to flush during
-      // the subsequent tab scope close + CF solver cleanup operations (several seconds).
-      // If ended in the `ensuring` block (right before runtime.dispose()), the
-      // exporter is killed before it can flush the just-ended spans.
-      // Span.end() is idempotent — safe to call again in ensuring as safety net.
-      // sessionContext (ExternalSpan) continues working for parenting destroy-time spans.
-      for (const [, span] of session.tabSpans) {
-        span.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
-      }
-      if (session.sessionSpan) {
-        session.sessionSpan.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
-        session.sessionSpan = null;
-      }
+      // Tab spans: ended by tab scope finalizers (registered FIRST = LIFO runs LAST).
+      // Session span: ended by sessionSpanLayer release during runtime.dispose().
+      // Both are idempotent — ensuring block has safety-net calls.
 
       // 1. Finalize all tabs — flush rrweb buffers into queues (before scope close)
       if (source === 'cleanup') {
@@ -743,8 +760,10 @@ export class CdpSession {
       }
 
       // 2. Close all tab scopes — each handles its own cleanup via LIFO finalizers:
-      //    CF cleanup → queue drain → callback + target removal
+      //    FiberMap interrupt → FiberMap delete → CF cleanup → queue drain →
+      //    callback + target removal → tab span end + tab.closed event
       //    Scope.close is idempotent — already-closed scopes (from handleTargetDestroyed) are no-ops.
+      //    sessionSpan is alive here (only ended in sessionSpanLayer release, after destroyEffect).
       for (const [, scope] of session.tabScopes) {
         yield* Scope.close(scope, Exit.void).pipe(Effect.ignore);
       }
@@ -755,19 +774,23 @@ export class CdpSession {
       //    Must happen AFTER tab scopes close: per-tab onTargetDestroyed uses the solver's runtime.
       yield* session.cloudflareHooks.destroy();
     })().pipe(
-      // Guaranteed cleanup — runs even if Effect times out or fails
+      // Guaranteed cleanup — runs even if destroyEffect fails before scope close.
+      // All span.end() calls are idempotent — no-ops if scope finalizers / Layer
+      // release already ended them. Defense-in-depth for interruption edge cases.
       Effect.ensuring(Effect.sync(() => {
-        // Safety net — end any spans not ended above (e.g., if main body timed out)
+        // Safety net: tab spans (primary path = tab scope finalizers)
         for (const [, span] of session.tabSpans) {
           span.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
         }
         session.tabSpans.clear();
         session.tabContexts.clear();
+        // Safety net: session span (primary path = sessionSpanLayer release)
         if (session.sessionSpan) {
           session.sessionSpan.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
           session.sessionSpan = null;
         }
         // sessionContext stays set — immutable, no cleanup needed
+        session.tabEventFibers.clear();
         session.eventCounts.clear();
         session.state = 'DESTROYED';
       })),
@@ -786,18 +809,14 @@ export class CdpSession {
       this.log.warn(`destroyEffect error: session_id=${this.sessionId} source=${source} error=${e instanceof Error ? e.message : String(e)}`);
     });
 
-    // Dispose unified runtime — interrupt all fibers, cleanup FiberMap,
-    // targets.clear(), browserConn.dispose(), close per-page WS
+    // Dispose runtime — Layer release closes WS, clears FiberMap, ends Queue
     if (this.runtime) {
       await this.runtime.dispose().catch((e) => {
         this.log.warn(`Runtime dispose error: ${e instanceof Error ? e.message : String(e)}`);
       });
       this.runtime = null;
     }
-
-    // Close main WS via scope finalizer (handles browserConn + WS cleanup)
-    await Effect.runPromise(Scope.close(this.browserWsScope, Exit.void));
-    this.unregisterGauges = null;
+    // No more browserWsScope.close — Layer handles WS cleanup
 
     this.log.info(`CdpSession destroyed (${source}) for session ${this.sessionId}`);
   }
@@ -856,25 +875,43 @@ export class CdpSession {
         }
       }
 
-      // Routed CDP events — dispatched as tracked fibers
-      // Tab-specific events use per-tab trace; session-level events use session trace
-      if (msg.method && this.runtime && this._fiberMap) {
-        const handler = this.effectHandlers.get(msg.method);
-        if (handler) {
-          const targetId = msg.params?.targetInfo?.targetId ?? msg.params?.targetId ?? '';
-          const baseEffect = handler(msg).pipe(
-            Effect.tapError((e) => Effect.logWarning(`CDP handler error: method=${msg.method} target=${targetId} error=${e}`)),
-            Effect.ignore,
-          );
-          // Use per-tab span if available (targetDestroyed, targetInfoChanged),
-          // fall back to session span (attachedToTarget before tab span exists, targetCreated)
-          const parentSpan = this.tabContexts.get(targetId) ?? this.sessionContext;
-          forkTracedFiber(this.runtime, this._fiberMap, `msg:${msg.method}:${targetId}`, baseEffect, parentSpan);
-        }
+      // Effect handlers — offer to Queue for Stream consumer (pure Effect, no sync bridge)
+      if (msg.method && this.cdpEventQueue && this.effectHandlers.has(msg.method)) {
+        Queue.offerUnsafe(this.cdpEventQueue, msg);
       }
     } catch (e) {
       this.log.debug(`Error processing CDP message: ${e}`);
     }
+  }
+
+  /**
+   * Pure Effect CDP event dispatch — called from Stream consumer inside the runtime.
+   * Routes tab events to per-tab FiberMaps for structured concurrency (ghost fix).
+   * Lifecycle events (attachedToTarget, targetDestroyed) stay session-level.
+   */
+  private routeCdpEvent(msg: any): Effect.Effect<void> {
+    const handler = this.effectHandlers.get(msg.method);
+    if (!handler) return Effect.void;
+
+    const targetId = msg.params?.targetInfo?.targetId ?? msg.params?.targetId ?? '';
+    const effect = handler(msg).pipe(
+      Effect.tapError((e) => Effect.logWarning(`CDP handler error: method=${msg.method} target=${targetId} error=${e}`)),
+      Effect.ignore,
+    );
+
+    // Use per-tab span if available, fall back to session span
+    const parentSpan = this.tabContexts.get(targetId) ?? this.sessionContext;
+    const traced = parentSpan ? effect.pipe(Effect.withParentSpan(parentSpan)) : effect;
+
+    // Per-tab routing: tab events fork into tab's FiberMap for automatic cleanup.
+    // Lifecycle events (attachedToTarget, targetDestroyed) stay session-level
+    // because they CREATE/DESTROY the tab scope.
+    const tabFibers = this.tabEventFibers.get(targetId);
+    if (tabFibers && msg.method !== 'Target.targetDestroyed' && msg.method !== 'Target.attachedToTarget') {
+      return FiberMap.run(tabFibers, msg.method, traced);
+    }
+
+    return FiberMap.run(this._fiberMap!, `msg:${msg.method}:${targetId}`, traced);
   }
 
   private handleBindingCalled(msg: any): void {
@@ -1102,13 +1139,52 @@ export class CdpSession {
         // ── Per-tab scope: LIFO finalizers guarantee cleanup ordering ──
         // Scope.close() replaces the manual 12-step cleanup in handleTargetDestroyedEffect.
         // Registration order = reverse execution order (LIFO):
-        //   Registered 1st → runs LAST:  callback + video + target removal
-        //   Registered 2nd → runs 2nd:   queue end + consumer drain
-        //   Registered 3rd → runs FIRST: CF cleanup (markers land in still-open queue)
+        //   Registered 1st → runs LAST:  tab span end + tab.closed event
+        //   Registered 2nd → runs 5th:   callback + video + target removal
+        //   Registered 3rd → runs 4th:   queue end + consumer drain
+        //   Registered 4th → runs 3rd:   CF cleanup (markers land in still-open queue)
+        //   Registered 5th → runs 2nd:   per-tab FiberMap cleanup (delete from Map)
+        //   FiberMap.make  → runs 1st:   FiberMap finalizer (interrupt all event fibers)
         const tabScope = yield* Scope.make();
         session.tabScopes.set(targetId, tabScope);
 
-        // FINALIZER 3 (registered first = runs LAST): callback + video + target removal
+        // ── Per-tab root trace — independent trace linked back to session ──
+        // Each tab gets its own traceId (~50-500 spans), well under Tempo's 5MB limit.
+        // Registered FIRST → LIFO runs LAST → span encompasses full tab lifecycle.
+        const tabSpan = yield* Effect.makeSpan(`tab:${targetId}`, {
+          root: true,
+          links: session.sessionContext ? [{ span: session.sessionContext, attributes: {} }] : [],
+        });
+        tabSpan.attribute('tab.target_id', targetId);
+        tabSpan.attribute('session.id', session.sessionId);
+        tabSpan.attribute('tab.url', targetInfo.url?.substring(0, 200) ?? '');
+        const tabContext = Tracer.externalSpan({
+          spanId: tabSpan.spanId,
+          traceId: tabSpan.traceId,
+          sampled: true,
+        });
+        session.tabSpans.set(targetId, tabSpan);
+        session.tabContexts.set(targetId, tabContext);
+        session.cloudflareHooks.setTabSpan(targetId, tabContext);
+
+        // Record tab open on session span
+        if (session.sessionSpan) {
+          session.sessionSpan.event('tab.opened', BigInt(Date.now()) * 1_000_000n, { 'tab.target_id': targetId });
+        }
+
+        // TAB SPAN FINALIZER — registered FIRST, runs LAST (LIFO)
+        // Guaranteed to run on Scope.close, even if other cleanup fails.
+        // span.end() is idempotent — safe if ensuring block also ends it.
+        yield* Scope.addFinalizer(tabScope, Effect.sync(() => {
+          if (session.sessionSpan) {
+            session.sessionSpan.event('tab.closed', BigInt(Date.now()) * 1_000_000n, { 'tab.target_id': targetId });
+          }
+          tabSpan.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
+          session.tabSpans.delete(targetId);
+          session.tabContexts.delete(targetId);
+        }));
+
+        // FINALIZER 4 (registered 2nd = runs 5th): callback + video + target removal
         yield* Scope.addFinalizer(tabScope, Effect.gen(function*() {
           const target = session.targets.getByTarget(targetId);
           if (session.onTabReplayComplete && target) {
@@ -1135,7 +1211,7 @@ export class CdpSession {
           session.targets.removeIframeTarget(targetId);
         }));
 
-        // FINALIZER 2 (registered second = runs SECOND): queue end + consumer drain
+        // FINALIZER 3 (registered 3rd = runs 4th): queue end + consumer drain
         yield* Scope.addFinalizer(tabScope, Effect.gen(function*() {
           const tabQueue = session.tabQueues.get(targetId);
           if (tabQueue) {
@@ -1151,35 +1227,27 @@ export class CdpSession {
           }
         }));
 
-        // FINALIZER 1 (registered third = runs FIRST): CF cleanup
-        // Markers injected here land in the queue (still open — queue end is finalizer 2)
+        // FINALIZER 2 (registered 4th = runs 3rd): CF cleanup
+        // Markers injected here land in the queue (still open — queue end is finalizer 3)
+        // Effect.suspend: stopTargetDetection has synchronous side effects (destroyedTargets.add)
+        // that MUST run at destruction time, not at registration time.
         yield* Scope.addFinalizer(tabScope,
-          session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
-            Effect.timeout('3 seconds'), Effect.ignore));
+          Effect.suspend(() =>
+            session.cloudflareHooks.onTargetDestroyed(targetId).pipe(
+              Effect.timeout('3 seconds'), Effect.ignore)));
 
-        // ── Per-tab root trace — independent trace linked back to session ──
-        // Each tab gets its own traceId (~50-500 spans), well under Tempo's 5MB limit.
-        // The session trace stays lightweight (just metadata + lifecycle events).
-        const tabSpan = yield* Effect.makeSpan(`tab:${targetId}`, {
-          root: true,
-          links: session.sessionContext ? [{ span: session.sessionContext, attributes: {} }] : [],
-        });
-        tabSpan.attribute('tab.target_id', targetId);
-        tabSpan.attribute('session.id', session.sessionId);
-        tabSpan.attribute('tab.url', targetInfo.url?.substring(0, 200) ?? '');
-        const tabContext = Tracer.externalSpan({
-          spanId: tabSpan.spanId,
-          traceId: tabSpan.traceId,
-          sampled: true,
-        });
-        session.tabSpans.set(targetId, tabSpan);
-        session.tabContexts.set(targetId, tabContext);
-        session.cloudflareHooks.setTabSpan(targetId, tabContext);
+        // FINALIZER 1 (registered 5th = runs 2nd via LIFO): per-tab FiberMap
+        // Interrupts all CDP event fibers for this tab — kills ghost detection fibers
+        // that previously survived tab close in the session-level FiberMap.
+        const tabEventFibers = yield* FiberMap.make<string>().pipe(
+          Effect.provideService(Scope.Scope, tabScope),
+        );
+        session.tabEventFibers.set(targetId, tabEventFibers);
 
-        // Record tab open on session span
-        if (session.sessionSpan) {
-          session.sessionSpan.event('tab.opened', BigInt(Date.now()) * 1_000_000n, { 'tab.target_id': targetId });
-        }
+        // Scope-managed cleanup — no manual delete in handleTargetDestroyedEffect
+        yield* Scope.addFinalizer(tabScope, Effect.sync(() => {
+          session.tabEventFibers.delete(targetId);
+        }));
 
         // Notify CF solver — tracked fiber
         if (session._fiberMap) {
@@ -1359,17 +1427,8 @@ export class CdpSession {
         session.targets.removeIframeTarget(targetId);
       }
 
-      // End per-tab trace span — AFTER all cleanup so span encompasses full tab lifecycle.
-      // Only for page targets (they have tab spans); workers/iframes are session-level.
-      const tabSpan = session.tabSpans.get(targetId);
-      if (tabSpan) {
-        if (session.sessionSpan) {
-          session.sessionSpan.event('tab.closed', BigInt(Date.now()) * 1_000_000n, { 'tab.target_id': targetId });
-        }
-        tabSpan.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
-        session.tabSpans.delete(targetId);
-        session.tabContexts.delete(targetId);
-      }
+      // Tab span ending is handled by the tab scope finalizer (registered FIRST, runs LAST).
+      // Scope.close at line above triggers LIFO finalizers → tab span end + tab.closed event.
     })();
   }
 

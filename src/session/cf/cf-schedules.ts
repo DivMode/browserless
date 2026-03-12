@@ -60,7 +60,7 @@ export const RECHALLENGE_DELAY_MS = 500;
 export const MAX_OOPIF_POLLS = 6;
 
 /** Phase 3 checkbox polling: max attempts. */
-export const MAX_CHECKBOX_POLLS = 8;
+export const MAX_CHECKBOX_POLLS = 16;
 
 /** Phase 3 checkbox polling: interval between attempts (ms).
  * Reduced from 500 to 200 — DOM.getDocument is ~2-6ms, so 200ms gives

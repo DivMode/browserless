@@ -56,6 +56,7 @@ type SolverR =
  * FiberMap manages detection loop fibers with automatic cleanup on scope close.
  */
 export class CloudflareSolver {
+  private sessionId: string;
   private detector: CloudflareDetector;
   private strategies: CloudflareSolveStrategies;
   private stateTracker: CloudflareStateTracker;
@@ -75,6 +76,12 @@ export class CloudflareSolver {
   // Never null, never late-initialized. Scope.close() drains all fibers
   // atomically — no manual FiberMap.clear() needed before disposeEffect.
   private readonly solverScope = Scope.makeUnsafe();
+
+  /** Synchronous cross-runtime guard: set by stopTargetDetection (session runtime),
+   * checked by startDetectionFiber (solver runtime). Prevents ghost detection fibers
+   * when onPageNavigatedEffect's 500ms sleep completes AFTER FiberMap.remove ran.
+   * JS single-threadedness guarantees add() at ~7ms is visible to has() at ~500ms. */
+  private readonly destroyedTargets = new Set<string>();
   private readonly detectionFibers = Effect.runSync(
     FiberMap.make<TargetId>().pipe(
       Effect.provideService(Scope.Scope, this.solverScope),
@@ -90,6 +97,7 @@ export class CloudflareSolver {
   }
 
   constructor(sendCommand: SendCommand, injectMarker: InjectMarker, chromePort?: string, sessionId?: string) {
+    this.sessionId = sessionId ?? '';
     this.sendCommand = sendCommand;
     // Mutable closure: emitClientEvent is set after construction by session-coordinator.ts
     let realEmit: EmitClientEvent = async () => {};
@@ -349,6 +357,12 @@ export class CloudflareSolver {
 
   /** Interrupt and stop the detection fiber for a target (e.g. on tab close). */
   stopTargetDetection(targetId: TargetId): Effect.Effect<void> {
+    // Synchronous guard — prevents startDetectionFiber from forking a ghost
+    // when onPageNavigatedEffect's 500ms sleep completes after FiberMap.remove.
+    // Must be synchronous (not inside Effect) because startDetectionFiber reads
+    // it from a different runtime. JS single-threadedness makes this safe.
+    this.destroyedTargets.add(targetId);
+
     // Record destroyed target — prevents stale OOPIF re-detection if Chrome
     // fires targetDestroyed after our detection poll but before cleanup
     this.stateTracker.solvedCFTargetIds.add(targetId as unknown as string);
@@ -390,6 +404,20 @@ export class CloudflareSolver {
   }
 
   private startDetectionFiber(targetId: TargetId, cdpSessionId: CdpSessionId): void {
+    // Guard: tab was destroyed while onPageNavigatedEffect slept 500ms across
+    // the runtime boundary. The solver runtime doesn't see the session's interrupt.
+    if (this.destroyedTargets.has(targetId)) {
+      this.runtime.runFork(
+        Effect.logWarning('CF ghost prevented — tab destroyed during 500ms bridge sleep').pipe(
+          Effect.annotateLogs({
+            target_id: targetId,
+            session_id: this.sessionId,
+          }),
+        ),
+      );
+      return;
+    }
+
     // FiberMap.run auto-interrupts existing fiber for same key.
     // The detection effect is wrapped in catchAllCause to prevent silent fiber
     // death — without this, defects (NPE in emitClientEvent, etc.) kill the fiber

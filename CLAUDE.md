@@ -167,6 +167,12 @@ Key environment variables (see `src/config.ts`):
 
 ### Effect v4 Rules
 
+**ALWAYS use Effect logging. NEVER use `Logger` class or `console.log`/`console.error`.**
+
+Effect logging (`Effect.logWarning`, `Effect.logError`, `Effect.logInfo`, `Effect.logDebug`) goes through the OTel pipeline — structured, queryable, correlated with spans. The `Logger` class (debug npm module, `this.log.warn(...)`) is legacy. `console.error`/`console.log` doesn't go to Loki. If you need observability from a sync context (outside an Effect), use `runtime.runFork(Effect.logWarning(...).pipe(Effect.annotateLogs({...})))` to fire-and-forget an Effect log.
+
+**WARNING: 23+ files in this codebase still use `new Logger(...)`. This is legacy debt — DO NOT copy it.** You will see `private log = new Logger('cf-detect')` in `cloudflare-detector.ts`, `cdp-session.ts`, `session-coordinator.ts`, and many other files. These are all pre-Effect migration code. All new logging MUST use Effect logging. Never add a new `Logger` instance.
+
 **ALWAYS `Effect.fn`, NEVER `Effect.gen`.**
 
 `Effect.fn('span.name')` creates a traced span visible in Grafana Tempo. `Effect.gen` is untraced — invisible in traces. There is zero reason to use `Effect.gen` in this codebase.
