@@ -37,6 +37,17 @@ export class SessionCoordinator {
   }
 
   /**
+   * End all root spans across all active CdpSessions immediately.
+   * Called during graceful shutdown BEFORE slow cleanup so spans reach
+   * the OTLP exporter buffer before the process is killed.
+   */
+  flushAllRootSpans(): void {
+    for (const [, cdpSession] of this.cdpSessions) {
+      cdpSession.flushRootSpans();
+    }
+  }
+
+  /**
    * Check if replay is enabled (always true — replay uses external server).
    */
   isEnabled(): boolean {

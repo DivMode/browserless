@@ -151,6 +151,26 @@ export class CdpSession {
     return this.targets.size;
   }
 
+  /**
+   * End all root spans immediately — called during graceful shutdown BEFORE
+   * slow cleanup (replay flush, browser.close). Pushes spans to the OTLP
+   * exporter buffer so they survive even if the process is killed mid-cleanup.
+   *
+   * SpanProto.end() pushes to the server exporter via export(). Tempo
+   * deduplicates by spanId, so the safety-net end() calls in ensuring/
+   * destroyEffect are no-ops in practice (same spanId, already ingested).
+   */
+  flushRootSpans(): void {
+    const now = BigInt(Date.now()) * 1_000_000n;
+    for (const [, tab] of this.tabs) {
+      tab.span.end(now, Exit.void);
+    }
+    if (this.sessionSpan) {
+      this.sessionSpan.end(now, Exit.void);
+      this.sessionSpan = null;
+    }
+  }
+
   // ─── Layer Construction ───────────────────────────────────────────────
 
   /**

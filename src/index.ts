@@ -25,7 +25,10 @@ const program = Effect.fn('browserless.main')(function* () {
   const shutdown = (_reason: string, code: number) =>
     Effect.runPromise(
       Effect.tryPromise(() => browserless.stop()).pipe(
-        Effect.timeout('10 seconds'),
+        // 25s — enough for session cleanup (replay flush + browser close) + OTLP export.
+        // Docker stop_timeout must be > this (set to 30s in infra config).
+        // Previous 10s timeout killed the process during replay flush, losing root spans.
+        Effect.timeout('25 seconds'),
         Effect.catch(() => Effect.void),
       ),
     ).finally(() => process.exit(code));

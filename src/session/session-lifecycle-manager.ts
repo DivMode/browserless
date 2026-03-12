@@ -393,6 +393,13 @@ export class SessionLifecycleManager {
   async shutdown(): Promise<void> {
     this.log.info('Closing down browser sessions');
 
+    // Step 0: Flush all root spans IMMEDIATELY — before any slow cleanup.
+    // This pushes session + tab root spans to the OTLP exporter buffer so
+    // they survive even if the process is killed during replay/browser cleanup.
+    // Without this, container restart (SIGTERM → timeout → SIGKILL) loses
+    // in-memory root spans, creating orphan `?` traces in Tempo.
+    this.sessionCoordinator?.flushAllRootSpans();
+
     // Stop watchdog
     if (this.watchdogFiber) {
       await Effect.runPromise(Fiber.interrupt(this.watchdogFiber));
