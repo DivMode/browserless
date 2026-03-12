@@ -443,6 +443,14 @@ export class CdpSession {
     });
     this.cloudflareHooks.setSessionSpan(this.sessionContext);
 
+    // Announce root span to Tempo BEFORE any children are exported.
+    // OTLP batch exporters only send spans on end(). Root spans end LAST (scope
+    // close), so children arrive at Tempo first → search shows `?`. Calling end()
+    // immediately pushes a placeholder (duration=0) into the exporter buffer.
+    // SpanProto.end() has no guard — each call pushes. The ensuring block calls
+    // end() again with the real endTime. Tempo deduplicates by spanId (PR #2095).
+    this.sessionSpan.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
+
     // Start CDP event Stream consumer — processes events inside the Effect runtime.
     // Runs in the session FiberMap → interrupted when lifecycle layer releases.
     // FiberMap.run is native Effect — no runtime.runFork bridge needed.
@@ -1195,6 +1203,12 @@ export class CdpSession {
           sampled: true,
         });
         session.cloudflareHooks.setTabSpan(targetId, tabContext);
+
+        // Announce tab root span to Tempo BEFORE any children are exported.
+        // Same pattern as session root — end() immediately to push placeholder
+        // into exporter buffer. Scope finalizer calls end() again with real
+        // endTime. Tempo deduplicates by spanId (PR #2095 combiner fix).
+        tabSpan.end(BigInt(Date.now()) * 1_000_000n, Exit.void);
 
         // Record tab open on session span
         if (session.sessionSpan) {
