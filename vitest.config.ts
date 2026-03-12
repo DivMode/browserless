@@ -15,6 +15,8 @@ const resolveConfig = {
 export default defineConfig({
   test: {
     bail: 1,
+    reporters: ['default', 'json'],
+    outputFile: { json: '/tmp/vitest-results.json' },
     projects: [
       {
         resolve: resolveConfig,

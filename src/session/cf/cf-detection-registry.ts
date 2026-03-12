@@ -51,7 +51,10 @@ export class DetectionRegistry {
       // Extract domain from page URL for Tempo filtering
       let domain = 'unknown';
       try {
-        if (active.info.url) domain = new URL(active.info.url).hostname;
+        if (active.info.url) {
+          const hostname = new URL(active.info.url).hostname;
+          domain = hostname || 'unknown';
+        }
       } catch { /* malformed URL */ }
 
       // Assign detectionId — groups all solve spans for this challenge

@@ -1535,6 +1535,12 @@ export class CdpSession {
         'cdp.url': targetInfo.url?.substring(0, 200) ?? '',
       });
       if (targetInfo.type === 'page') {
+        // Update tab span URL attribute — shows final URL, not initial about:blank
+        const tab = session.tabs.get(changedTargetId);
+        if (tab && targetInfo.url) {
+          tab.span.attribute('tab.url', targetInfo.url.substring(0, 200));
+        }
+
         const target = session.targets.getByTarget(changedTargetId);
         if (target) {
           // Re-enable CDP domains that Chrome resets on same-target navigation
