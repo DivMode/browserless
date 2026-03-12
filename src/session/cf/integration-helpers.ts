@@ -7,8 +7,10 @@
 
 // ── Config ──────────────────────────────────────────────────────────
 
+import { execFile } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { Schema } from 'effect';
 
@@ -298,4 +300,81 @@ export function dumpRechallengeDiag(markers: ReplayMarker[], replayId: string | 
     console.error(`  +${f.timestamp}ms  reason=${f.payload.reason} duration=${f.payload.duration_ms}ms`);
   }
   if (replayId) dumpReplayHint(replayId);
+}
+
+// ── Pydoll subprocess helpers ─────────────────────────────────────
+
+export const PYDOLL_DIR = '/Users/peter/Developer/catchseo/packages/pydoll-scraper';
+
+/**
+ * Typed result from pydoll CLI JSON output.
+ *
+ * `data` is the raw Ahrefs API result — `websiteData` is a 2-element array
+ * where [1].data.domainRating has the DR value.
+ *
+ * `replay` has `url` (full player URL like `/replay/ID`) but no direct `replay_id`.
+ * Use `extractReplayId()` to get the ID from the URL.
+ */
+export interface PydollResult {
+  success: boolean;
+  domain: string;
+  data?: {
+    websiteData?: [unknown, { data?: { domainRating?: number } }];
+  };
+  replay?: { url?: string; event_count?: number; duration_ms?: number };
+  cloudflare_metrics?: {
+    cf_summary_label?: string;
+    cf_type?: string;
+    cf_method?: string;
+    cf_signal?: string;
+    cf_duration_ms?: number;
+    cf_solved?: boolean;
+  };
+}
+
+/** Extract replay ID from a replay player URL like `http://host/replay/REPLAY_ID`. */
+export function extractReplayId(replayUrl: string): string | null {
+  const match = replayUrl.match(/\/replay\/([^/?#]+)/);
+  return match?.[1] ?? null;
+}
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Run a pydoll CLI command and parse the JSON result from stdout.
+ *
+ * Pydoll outputs text lines (e.g. `[Turnstile] ...`) followed by a JSON blob.
+ * This skips text lines and JSON.parse's the structured result.
+ *
+ * Uses async execFile (not execFileSync) to keep the event loop alive —
+ * execFileSync blocks for ~12s, causing undici's connection pool to hold
+ * stale TCP connections that get ECONNRESET on reuse by fetchSignals.
+ *
+ * LOCAL_MOBILE_PROXY is inherited from process.env (set in .zshenv) —
+ * no env spreading needed.
+ */
+export async function runPydoll(args: string[], timeoutMs: number): Promise<PydollResult> {
+  const proxy = process.env.LOCAL_MOBILE_PROXY;
+  if (!proxy) throw new Error('LOCAL_MOBILE_PROXY not in environment — check .zshenv');
+
+  let stdout: string;
+  try {
+    const result = await execFileAsync('uv', ['run', 'pydoll', ...args], {
+      cwd: PYDOLL_DIR,
+      encoding: 'utf-8',
+      timeout: timeoutMs,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    stdout = result.stdout;
+  } catch (err: unknown) {
+    const execErr = err as { stderr?: string; stdout?: string };
+    throw new Error(
+      `pydoll ${args[0]} failed:\n${execErr.stderr || ''}\n\nstdout:\n${execErr.stdout || ''}`,
+    );
+  }
+
+  // Skip text lines (e.g. [Turnstile] ...) before the JSON blob
+  const jsonStart = stdout.indexOf('{');
+  if (jsonStart === -1) throw new Error(`No JSON in pydoll output:\n${stdout.slice(0, 500)}`);
+  return JSON.parse(stdout.slice(jsonStart)) as PydollResult;
 }

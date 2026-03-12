@@ -35,27 +35,26 @@
  *
  * ## Ad-hoc Debugging Commands (manual, not part of vitest)
  *
- * All from /Users/peter/Developer/catchseo/packages/pydoll-scraper with proxy:
- *   LOCAL_MOBILE_PROXY=$(op read "op://Catchseo.com/Proxies/local_mobile_proxy")
+ * All from /Users/peter/Developer/catchseo/packages/pydoll-scraper.
+ * LOCAL_MOBILE_PROXY is already set via .zshenv — no `op read` prefix needed.
  *
  *   # Nopecha serverside (browserless solver only)
- *   $LOCAL_MOBILE_PROXY uv run pydoll nopecha --serverside --chrome-endpoint=local-browserless
+ *   uv run pydoll nopecha --serverside --chrome-endpoint=local-browserless
  *
  *   # Ahrefs fast (production path)
- *   $LOCAL_MOBILE_PROXY uv run pydoll ahrefs-fast etsy.com --chrome-endpoint=local-browserless
+ *   uv run pydoll ahrefs-fast etsy.com --chrome-endpoint=local-browserless
  *
  *   # Any URL with solver
- *   $LOCAL_MOBILE_PROXY uv run pydoll navigate https://nopecha.com/demo/cloudflare --serverside --chrome-endpoint=local-browserless
+ *   uv run pydoll navigate https://nopecha.com/demo/cloudflare --serverside --chrome-endpoint=local-browserless
  *
  *   # Multi-run reliability (5x)
- *   for i in $(seq 1 5); do $LOCAL_MOBILE_PROXY uv run pydoll nopecha --serverside --chrome-endpoint=local-browserless; done
+ *   for i in $(seq 1 5); do uv run pydoll nopecha --serverside --chrome-endpoint=local-browserless; done
  *
  *   # Stress test
- *   $LOCAL_MOBILE_PROXY uv run pydoll cf-stress --concurrent 15 --chrome-endpoint=local-browserless
+ *   uv run pydoll cf-stress --concurrent 15 --chrome-endpoint=local-browserless
  *
  * Run:
- *   LOCAL_MOBILE_PROXY=$(op read "op://Catchseo.com/Proxies/local_mobile_proxy") \
- *     npx vitest run --config vitest.integration.config.ts
+ *   npx vitest run --config vitest.integration.config.ts
  */
 import { describe, expect, it } from '@effect/vitest';
 import { execFileSync } from 'node:child_process';
@@ -66,16 +65,16 @@ import puppeteer, { type Browser, type Page } from 'puppeteer-core';
 
 import {
   PROXY,
+  PYDOLL_DIR,
   REPLAY_HTTP,
   type ServerCfSummary,
   assertSummaryConsistency,
   buildWsUrl,
-  dumpMarkerTimeline,
-  dumpRechallengeDiag,
-  dumpReplayHint,
+  extractReplayId,
   failWithEvidence,
   fetchSignals,
   findAllReplays,
+  runPydoll,
   writeSiteResult,
 } from './integration-helpers';
 
@@ -562,57 +561,59 @@ describe.concurrent('CF Solver Multi-Site', () => {
 
 // ── Pydoll subprocess tests ────────────────────────────────────────
 //
-// These run pydoll CLI commands as child processes, parsing stdout for
-// expected output. This puts the ENTIRE test pyramid — browserless unit
-// tests, integration tests, pydoll live tests, and stress tests — under
-// a single `npx vitest run --config vitest.integration.config.ts` command.
-
-const PYDOLL_DIR = '/Users/peter/Developer/catchseo/packages/pydoll-scraper';
-
-/** Run a command with proxy env var and return stdout. Stderr is captured and only surfaced on failure. */
-function runWithProxy(args: string[], timeoutMs: number): string {
-  const proxy = process.env.LOCAL_MOBILE_PROXY;
-  if (!proxy) throw new Error('LOCAL_MOBILE_PROXY required for pydoll tests');
-  try {
-    return execFileSync('uv', ['run', 'pydoll', ...args], {
-      cwd: PYDOLL_DIR,
-      env: { ...process.env, LOCAL_MOBILE_PROXY: proxy },
-      encoding: 'utf-8',
-      timeout: timeoutMs,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      maxBuffer: 10 * 1024 * 1024,
-    });
-  } catch (err: unknown) {
-    const execErr = err as { stderr?: string; stdout?: string; message?: string };
-    const stderr = execErr.stderr || '';
-    const stdout = execErr.stdout || '';
-    throw new Error(
-      `pydoll ${args[0]} failed:\n${stderr}\n\nstdout:\n${stdout}`,
-    );
-  }
-}
+// These run pydoll CLI commands as child processes.
+// ahrefs-fast: JSON.parse of stdout + replay server cross-validation.
+// cf-stress / pydoll-unit: regex parsing of stdout for pass counts.
+//
+// This puts the ENTIRE test pyramid — browserless unit tests, integration
+// tests, pydoll live tests, and stress tests — under a single
+// `npx vitest run --config vitest.integration.config.ts` command.
 
 describe('Pydoll Pipeline', () => {
-  it('ahrefs-fast produces valid DR and CF summary', { timeout: 30_000 }, () => {
-    const stdout = runWithProxy(
+  it('ahrefs-fast produces valid DR and CF summary', { timeout: 30_000 }, async () => {
+    // 1. Run pydoll → structured JSON result (replaces regex parsing)
+    const result = await runPydoll(
       ['ahrefs-fast', 'etsy.com', '--chrome-endpoint=local-browserless'],
       25_000,
     );
+    expect(result.success, 'ahrefs-fast scrape failed').toBe(true);
 
-    // Must have a [Turnstile] summary line
-    const summaryMatch = stdout.match(/\[Turnstile\]\s+(.+)/);
-    expect(summaryMatch, 'No [Turnstile] summary in ahrefs-fast output').toBeTruthy();
-    const summary = summaryMatch![1];
+    // 2. Business result — DR is in websiteData[1].data.domainRating
+    const dr = result.data?.websiteData?.[1]?.data?.domainRating ?? 0;
+    expect(dr, 'No domainRating').toBeGreaterThan(0);
 
-    // Must contain Int→ or Emb→ (auto-solve paths)
-    const hasValidSummary = /(?:Int[→✓]|Emb[→✓])/.test(summary);
-    expect(hasValidSummary, `Unexpected summary: ${summary}`).toBe(true);
+    // 3. Replay must exist — extract ID from replay player URL
+    const replayUrl = result.replay?.url;
+    expect(replayUrl, 'No replay URL in result').toBeTruthy();
+    const replayId = extractReplayId(replayUrl!);
+    expect(replayId, `Could not extract replay ID from URL: ${replayUrl}`).toBeTruthy();
 
-    // Must have DR value in JSON output
-    const drMatch = stdout.match(/"domainRating":\s*(\d+)/);
-    expect(drMatch, 'No domainRating in ahrefs-fast output').toBeTruthy();
-    const dr = Number(drMatch![1]);
-    expect(dr).toBeGreaterThan(0);
+    // 4. Fetch signals from replay server (source of truth)
+    const signals = await fetchSignals(replayId!);
+    expect(signals, `/signals 404 for ${replayId}`).not.toBeNull();
+    expect(signals!.event_count, 'Empty replay').toBeGreaterThan(0);
+    expect(signals!.cf_marker_count, 'No CF markers').toBeGreaterThan(0);
+
+    // 5. Cross-validate: pydoll label vs replay server label
+    const pydollLabel = result.cloudflare_metrics?.cf_summary_label;
+    const replayLabel = signals!.summary?.label;
+    expect(replayLabel, 'Replay server produced no summary').toBeTruthy();
+    if (pydollLabel) {
+      expect(replayLabel).toBe(pydollLabel);
+    }
+
+    // 6. Valid solve label
+    expect(replayLabel).toMatch(/(?:Int[→✓]|Emb[→✓])/);
+
+    // 7. No rechallenge
+    expect(signals!.summary!.rechallenge, 'Rechallenge detected').toBe(false);
+
+    // 8. Consistency checks (method/signal match label, no orphaned detections)
+    const markers = signals!.cf_markers.map(m => ({
+      tag: m.tag, payload: m.payload, timestamp: m.timestamp,
+    }));
+    const inconsistency = assertSummaryConsistency(signals!.summary!, markers);
+    expect(inconsistency, `Summary/replay mismatch: ${inconsistency}`).toBeNull();
   });
 
   // WARNING: cf-stress burns proxy IP. Run ONCE per session — back-to-back runs
@@ -620,10 +621,19 @@ describe('Pydoll Pipeline', () => {
   // requests. The FIRST run is the meaningful result. If you need to re-run, wait
   // 10+ minutes for IP rotation.
   it('cf-stress passes >=80% with 15 concurrent tabs', { timeout: 65_000 }, () => {
-    const stdout = runWithProxy(
-      ['cf-stress', '--concurrent', '15', '--chrome-endpoint=local-browserless'],
-      60_000,
-    );
+    let stdout: string;
+    try {
+      stdout = execFileSync('uv', ['run', 'pydoll', 'cf-stress', '--concurrent', '15', '--chrome-endpoint=local-browserless'], {
+        cwd: PYDOLL_DIR,
+        encoding: 'utf-8',
+        timeout: 60_000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        maxBuffer: 10 * 1024 * 1024,
+      });
+    } catch (err: unknown) {
+      const e = err as { stderr?: string; stdout?: string };
+      throw new Error(`pydoll cf-stress failed:\n${e.stderr || ''}\n\nstdout:\n${e.stdout || ''}`);
+    }
 
     // Parse results table: "N/15 passed"
     const passMatch = stdout.match(/(\d+)\/15 passed/);
