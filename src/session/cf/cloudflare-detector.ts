@@ -2,7 +2,7 @@ import { Cause, Data, Effect, Latch } from 'effect';
 import { runForkInServer } from '../../otel-runtime.js';
 import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, CloudflareType, EmbeddedInfo, InterstitialCFType } from '../../shared/cloudflare-detection.js';
 import { isInterstitialType, isCFInterstitialTitle } from '../../shared/cloudflare-detection.js';
-import { DETECTION_POLL_DELAY, EMBEDDED_RESOLUTION_TIMEOUT, INTERSTITIAL_RESOLUTION_TIMEOUT, MAX_RECHALLENGES, RECHALLENGE_DELAY_MS } from './cf-schedules.js';
+import { DETECTION_POLL_DELAY, EMBEDDED_RESOLUTION_TIMEOUT, INTERSTITIAL_RESOLUTION_TIMEOUT, MAX_RECHALLENGES, MAX_WIDGET_RELOADS, RECHALLENGE_DELAY_MS, WIDGET_RELOAD_GRACE } from './cf-schedules.js';
 import { incCounter, cfResolutionTimeouts } from '../../effect-metrics.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
 import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection, CFEvents } from './cloudflare-event-emitter.js';
@@ -1095,6 +1095,48 @@ export class CloudflareDetector {
       yield* Effect.logInfo('CF lifecycle: solver_exit').pipe(
         Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, result: outcomeTag, resolution_done: active.resolution.isDone }),
       );
+
+      // ── Widget reload: if solver found no checkbox, reload page ──────
+      // When the Turnstile OOPIF exists but the widget content doesn't render,
+      // the solver exhausts click attempts with NoCheckbox and returns NoClick.
+      // Instead of waiting the full 60s resolution timeout, reload the page
+      // to give CF a fresh chance to render the widget.
+      if (outcomeTag === 'NoClick' && !active.aborted && !active.resolution.isDone) {
+        const reloadCount = self.state.widgetReloadCount.get(targetId) ?? 0;
+        if (reloadCount < MAX_WIDGET_RELOADS) {
+          // Grace period — bridge might auto-solve without checkbox (non-interactive)
+          yield* Effect.sleep(WIDGET_RELOAD_GRACE).pipe(
+            Effect.withSpan('cf.widgetReloadGrace', { attributes: { 'cf.reload_attempt': reloadCount } }),
+          );
+
+          if (!active.resolution.isDone && !active.aborted) {
+            // Widget didn't render and no bridge signal — reload page
+            self.state.widgetReloadCount.set(targetId, reloadCount + 1);
+            const duration = Date.now() - active.startTime;
+
+            yield* Effect.logWarning('CF lifecycle: widget_reload').pipe(
+              Effect.annotateLogs({
+                target_id: targetId.slice(0, 8), session_id: self.sid,
+                reload_count: reloadCount + 1, max_reloads: MAX_WIDGET_RELOADS,
+                elapsed_ms: duration,
+              }),
+            );
+            self.events.marker(targetId, 'cf.widget_reload', {
+              reload_count: reloadCount + 1, max_reloads: MAX_WIDGET_RELOADS,
+              elapsed_ms: duration,
+            });
+
+            // Settle current detection — phase label ↻ (reload) instead of ✗
+            yield* active.resolution.fail('widget_reload', duration, '↻');
+            yield* ctx.resolve();
+
+            // Reload the page — triggers new navigation → new detection cycle
+            const cdp = yield* CdpSender;
+            yield* cdp.send('Page.reload').pipe(Effect.ignore);
+            return;
+          }
+        }
+      }
 
       // Await Resolution via race: resolution vs timeout (baked into Resolution deadline).
       yield* self.awaitResolutionRace(ctx, {

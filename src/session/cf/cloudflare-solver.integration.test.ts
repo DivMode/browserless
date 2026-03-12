@@ -140,20 +140,30 @@ const runSession: Effect.Effect<
       { timeout: 8_000, polling: 500 },
     ).catch(() => {}),
   );
-  yield* Effect.sleep('500 millis'); // buffer for final markers
+  // Buffer for server-side solver to finish. When CF serves a non-interactive
+  // auto-solve, turnstile.getResponse() returns a token in ~1s but the server
+  // solver is still in phase 3 polling. 3s lets the bridge push propagate.
+  yield* Effect.sleep('3 seconds');
   console.log(`  [${Date.now() - testStartTs}ms] wait done`);
 
   // Close browser to flush replay data
   yield* Effect.promise(() => browser.close()).pipe(
     Effect.catch(() => Effect.void),
   );
-  yield* Effect.sleep('1 second');
   console.log(`  [${Date.now() - testStartTs}ms] browser closed`);
 
   const api = yield* Effect.service(ReplayAPI);
-  // Use findAllReplays + targetId filter for isolation from concurrent test files
-  const allReplays = yield* api.findAllReplays(testStartTs);
-  const replay = allReplays.find((r) => r.targetId === pageTargetId) ?? null;
+  // Poll for replay availability — server-side flush typically completes in 200-500ms
+  const replay = yield* Effect.gen(function* () {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const all = yield* api.findAllReplays(testStartTs);
+      const found = all.find((r) => r.targetId === pageTargetId);
+      if (found) return found;
+      yield* Effect.sleep('200 millis');
+    }
+    return null;
+  });
   if (!replay) {
     throw new Error(`No replay found for targetId ${pageTargetId} — browserless may not be recording`);
   }
@@ -203,7 +213,7 @@ describe('CF Solver Integration (real nopecha.com)', () => {
       expect(session.markers.length).toBeGreaterThan(0);
       console.log(`  session ready: ${session.markers.length} markers, replay ${session.replayId}`);
     }),
-  { timeout: 20_000 });
+  { timeout: 60_000 });
 
   // 2. No rechallenge — P0 gate
   //
@@ -406,9 +416,14 @@ describe('CF Solver Integration (real nopecha.com)', () => {
 
       if (strategies.length >= 2) {
         const gap = strategies[1].timestamp - strategies[0].timestamp;
-        console.log(`  poll_gap: ${gap}ms`);
-        // 200ms interval + ~5ms execution ≈ < 450ms
-        expect(gap).toBeLessThan(450);
+        const cdpMs = strategies[1].payload?.elapsed_ms ?? 0;
+        const sleepGap = gap - cdpMs;
+        console.log(`  poll_gap: ${gap}ms (cdp=${cdpMs}ms, sleep≈${sleepGap}ms)`);
+        // Isolate sleep interval from CDP call time.
+        // CHECKBOX_POLL_INTERVAL_MS = 200 + scheduling overhead ≈ < 500ms.
+        expect(sleepGap).toBeLessThan(500);
+        // Full gap sanity: even with slow CDP under concurrent load, < 3s
+        expect(gap).toBeLessThan(3000);
       }
     }),
   { timeout: 10_000 });

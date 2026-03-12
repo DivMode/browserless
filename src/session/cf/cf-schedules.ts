@@ -50,6 +50,16 @@ export const NAV_WAIT_MS = 3_000;
 /** Max click attempts in solveByClicking / solveTurnstile loops. */
 export const MAX_CLICK_ATTEMPTS = 6;
 
+/** Max page reloads when Turnstile widget fails to render (no checkbox found).
+ * After solver exhausts click attempts with NoCheckbox, reload the page to give
+ * CF a fresh chance to render the widget. Prevents 60s dead waits. */
+export const MAX_WIDGET_RELOADS = 2;
+
+/** Grace period after solver returns NoClick before reloading.
+ * Gives bridge time to push auto-solve signal for non-interactive widgets
+ * that solve without a visible checkbox. */
+export const WIDGET_RELOAD_GRACE = '5 seconds' as const;
+
 /** Max rechallenge loops before giving up. */
 export const MAX_RECHALLENGES = 6;
 
