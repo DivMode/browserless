@@ -587,6 +587,23 @@ export class CloudflareSolveStrategies {
       // Bare press + hold + release — NO mouseMoved (matches pydoll exactly).
       // mouseMoved causes 283-5600ms compositor init stall on isolated WS.
       const { pressResponse, releaseResponse, holdMs } = yield* Effect.fn('cf.phase4_dispatch')(function*() {
+        yield* Effect.annotateCurrentSpan({
+          'cf.phase4.oopif_session_id': oopifSessionId.substring(0, 16),
+          'cf.phase4.click_x': clickX,
+          'cf.phase4.click_y': clickY,
+          'cf.phase4.page_abs_x': pageAbsX ?? 'null',
+          'cf.phase4.page_abs_y': pageAbsY ?? 'null',
+        });
+
+        // ── Diagnostic: Verify OOPIF identity before click ──
+        const oopifUrlResult = yield* verifySend('Runtime.evaluate', {
+          expression: 'location.href',
+          returnByValue: true,
+        }, oopifSessionId).pipe(Effect.orElseSucceed(() => null));
+        yield* Effect.annotateCurrentSpan({
+          'cf.phase4.oopif_url': ((oopifUrlResult as any)?.result?.value || 'unknown').substring(0, 100),
+        });
+
         // Install click verification listener (OOPIF session — safe, separate V8 isolate)
         yield* verifySend('Runtime.evaluate', {
           expression: `window.__bClkV=false;document.addEventListener('mousedown',function(){window.__bClkV=true},{once:true,capture:true});true`,
@@ -648,7 +665,20 @@ export class CloudflareSolveStrategies {
           verifyError = verifyResult;
         }
 
-        yield* Effect.annotateCurrentSpan({ 'cf.click_verified': clickVerified });
+        // ── Diagnostic: Detailed checkbox state for wrong-OOPIF analysis ──
+        const detailResult = yield* verifySend('Runtime.evaluate', {
+          expression: `JSON.stringify({
+            clicked: window.__bClkV,
+            checkboxChecked: document.querySelector('[type="checkbox"]')?.checked ?? null,
+            activeTag: document.activeElement?.tagName ?? null,
+          })`,
+          returnByValue: true,
+        }, oopifSessionId).pipe(Effect.orElseSucceed(() => null));
+
+        yield* Effect.annotateCurrentSpan({
+          'cf.click_verified': clickVerified,
+          'cf.phase4.verify_detail': (detailResult as any)?.result?.value ?? 'null',
+        });
         return { clickVerified, verifyError };
       })();
 

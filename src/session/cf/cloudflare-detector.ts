@@ -977,6 +977,10 @@ export class CloudflareDetector {
         'cf.target_id': targetId,
         'cf.type': 'turnstile',
         'cf.detection_method': 'cdp_dom_walk',
+        'cf.detect.oopif_target_id': detection.targets[0]?.targetId?.substring(0, 16) ?? 'none',
+        'cf.detect.oopif_url': detection.targets[0]?.url?.substring(0, 80) ?? 'none',
+        'cf.detect.sitekey': meta?.sitekey ?? 'none',
+        'cf.detect.target_count': detection.targets.length,
       });
       const rechallengeCount = self.state.pendingRechallengeCount.get(targetId) || 0;
       self.state.pendingRechallengeCount.delete(targetId);
