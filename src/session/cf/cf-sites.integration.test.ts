@@ -118,8 +118,11 @@ const waitForSolve = (
           .catch(() => {}),
       );
     }
-    // Buffer for solver to emit final markers before browser close
-    yield* Effect.sleep('1 second');
+    // Buffer for solver to emit final markers before browser close.
+    // 3s: managed-type interstitials auto-solve and redirect while the solver
+    // is still doing OOPIF discovery (phase 2 can take 3-4s). The solver needs
+    // time after page navigation to finish OOPIF operations and emit markers.
+    yield* Effect.sleep('3 seconds');
   });
 
 // ── Effect helpers ──────────────────────────────────────────────────
@@ -188,7 +191,7 @@ interface CfTestSite {
  *
  * | Name            | URL                                                | Type          | Expected              | Notes                                           |
  * |-----------------|----------------------------------------------------|---------------|-----------------------|-------------------------------------------------|
- * | `2captcha-cf`   | `2captcha.com/demo/cloudflare-turnstile-challenge` | interstitial  | `Int→` or `Int✓`      | 2Captcha challenge page (403 = serving challenge)|
+ * | `2captcha-cf`   | `2captcha.com/demo/cloudflare-turnstile-challenge` | interstitial/managed | `Int→` or `Int✓` | 2Captcha challenge page — CF type varies         |
  * | `nopecha-ts`    | `nopecha.com/captcha/turnstile`                    | turnstile     | `Emb✓` or `Emb→`     | Real sitekey embedded Turnstile                  |
  * | `peet-managed`  | `peet.ws/turnstile-test/managed.html`              | turnstile     | `Emb✓` or `Emb→`     | Real sitekey. Managed (interactive) Turnstile    |
  * | `peet-nonint`   | `peet.ws/turnstile-test/non-interactive.html`      | turnstile     | `Emb→`               | Non-interactive — auto-solves                    |
@@ -205,7 +208,7 @@ const CF_TEST_SITES: CfTestSite[] = [
   {
     name: '2captcha-cf',
     url: 'https://2captcha.com/demo/cloudflare-turnstile-challenge',
-    expectedTypes: ['interstitial', 'turnstile'],
+    expectedTypes: ['interstitial', 'turnstile', 'managed'],
     waitStrategy: 'interstitial', // safe for both — no Runtime.evaluate
     expectedSummaries: ['Int→', 'Int✓', 'Emb→', 'Emb✓', 'Int→ Emb→', 'Int→ Emb✓', 'Int✓ Emb→', 'Int✓ Emb✓'],
   },

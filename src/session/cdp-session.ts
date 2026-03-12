@@ -561,11 +561,6 @@ export class CdpSession {
     })();
   }
 
-  /** Promise bridge for collectAllEvents (public API). */
-  private async collectEvents(targetId: TargetId, timeoutMs = 30_000): Promise<void> {
-    await Effect.runPromise(this.collectEventsEffect(targetId, timeoutMs).pipe(Effect.ignore));
-  }
-
   /** Finalize a tab — flush buffer, mark as finalized (Effect-native). */
   private finalizeTabEffect(targetId: TargetId, timeoutMs = 30_000): Effect.Effect<void> {
     const session = this;
@@ -583,12 +578,13 @@ export class CdpSession {
   }
 
 
-  /** Flush all in-page push buffers then collect remaining events for all targets. */
-  async collectAllEvents(): Promise<void> {
-    for (const target of this.targets) {
-      // Flush in-page push buffer before collecting remaining events
-      try {
-        await this.sendCommand('Runtime.evaluate', {
+  /** Flush all in-page push buffers then collect remaining events for all targets (Effect-native). */
+  private collectAllEventsEffect(): Effect.Effect<void> {
+    const session = this;
+    return Effect.fn('cdp.collectAllEvents')(function*() {
+      for (const target of session.targets) {
+        // Flush in-page push buffer before collecting remaining events
+        yield* session.send('Runtime.evaluate', {
           expression: `(function() {
             var rec = window.__browserlessRecording;
             if (!rec) return;
@@ -599,10 +595,15 @@ export class CdpSession {
             }
           })()`,
           returnByValue: true,
-        }, target.cdpSessionId);
-      } catch {}
-      await this.collectEvents(target.targetId);
-    }
+        }, target.cdpSessionId).pipe(Effect.ignore);
+        yield* session.collectEventsEffect(target.targetId).pipe(Effect.ignore);
+      }
+    })();
+  }
+
+  /** Promise bridge for collectAllEventsEffect. */
+  async collectAllEvents(): Promise<void> {
+    await Effect.runPromise(this.collectAllEventsEffect().pipe(Effect.ignore));
   }
 
   /** Inject a server-side rrweb marker event. Empty targetId → first target. */

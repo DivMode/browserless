@@ -161,8 +161,8 @@ describe('SessionLifecycleManager', () => {
     await lifecycle.close(browser, session, false);
 
     // Timer should be set for keep-alive
-    expect(lifecycle.getTimers().size).toBe(1);
-    expect(lifecycle.getTimers().has('s1')).toBe(true);
+    expect(lifecycle.getTimerCount()).toBe(1);
+    expect(lifecycle.hasTimer('s1')).toBe(true);
 
     // Cleanup
     lifecycle.clearTimers();
@@ -170,9 +170,9 @@ describe('SessionLifecycleManager', () => {
 
   it('clearTimers() removes all timer fibers', () => {
     // clearTimers is the explicit cleanup path
-    expect(lifecycle.getTimers().size).toBe(0);
+    expect(lifecycle.getTimerCount()).toBe(0);
     lifecycle.clearTimers();
-    expect(lifecycle.getTimers().size).toBe(0);
+    expect(lifecycle.getTimerCount()).toBe(0);
   });
 
   it('close(force=true) removes temp data directory', async () => {

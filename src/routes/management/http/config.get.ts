@@ -9,6 +9,7 @@ import {
   jsonResponse,
 } from '@browserless.io/browserless';
 import { ServerResponse } from 'http';
+import { Effect } from 'effect';
 
 export interface ResponseSchema {
   allowCORS: boolean;
@@ -45,31 +46,36 @@ export default class ConfigGetRoute extends HTTPRoute {
   path = HTTPManagementRoutes.config;
   tags = [APITags.management];
   async handler(_req: Request, res: ServerResponse): Promise<void> {
-    const config = this.config();
+    const route = this;
+    return Effect.runPromise(
+      Effect.fn('route.config.get')(function* () {
+        const config = route.config();
 
-    const response: ResponseSchema = {
-      allowCORS: config.getAllowCORS(),
-      allowFileProtocol: config.getAllowFileProtocol(),
-      allowGetCalls: config.getAllowGetCalls(),
-      concurrent: config.getConcurrent(),
-      data: await config.getDataDir(),
-      debug: config.getDebug(),
-      errorAlertURL: config.getErrorAlertURL(),
-      healthFailureURL: config.getFailedHealthURL(),
-      host: config.getHost(),
-      maxCPU: config.getCPULimit(),
-      maxMemory: config.getMemoryLimit(),
-      metricsJSONPath: config.getMetricsJSONPath(),
-      port: config.getPort(),
-      queued: config.getQueued(),
-      queuedAlertURL: config.getQueueAlertURL(),
-      rejectAlertURL: config.getRejectAlertURL(),
-      retries: config.getRetries(),
-      timeout: config.getTimeout(),
-      timeoutAlertURL: config.getTimeoutAlertURL(),
-      token: config.getToken(),
-    };
+        const response: ResponseSchema = {
+          allowCORS: config.getAllowCORS(),
+          allowFileProtocol: config.getAllowFileProtocol(),
+          allowGetCalls: config.getAllowGetCalls(),
+          concurrent: config.getConcurrent(),
+          data: yield* Effect.promise(() => config.getDataDir()),
+          debug: config.getDebug(),
+          errorAlertURL: config.getErrorAlertURL(),
+          healthFailureURL: config.getFailedHealthURL(),
+          host: config.getHost(),
+          maxCPU: config.getCPULimit(),
+          maxMemory: config.getMemoryLimit(),
+          metricsJSONPath: config.getMetricsJSONPath(),
+          port: config.getPort(),
+          queued: config.getQueued(),
+          queuedAlertURL: config.getQueueAlertURL(),
+          rejectAlertURL: config.getRejectAlertURL(),
+          retries: config.getRetries(),
+          timeout: config.getTimeout(),
+          timeoutAlertURL: config.getTimeoutAlertURL(),
+          token: config.getToken(),
+        };
 
-    return jsonResponse(res, 200, response);
+        return jsonResponse(res, 200, response);
+      })(),
+    );
   }
 }

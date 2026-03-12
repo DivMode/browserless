@@ -16,6 +16,7 @@ import { ServerResponse } from 'http';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import { Effect } from 'effect';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -95,15 +96,21 @@ export default class MetaGetRoute extends HTTPRoute {
   path = HTTPManagementRoutes.meta;
   tags = [APITags.management];
   async handler(_req: Request, res: ServerResponse): Promise<void> {
-    const installedBrowsers = await availableBrowsers;
-    const response: ResponseSchema = {
-      version: blessPackageJSON.version,
-      chromium: installedBrowsers.includes(ChromiumCDP) ? chromium : null,
-      firefox: installedBrowsers.includes(FirefoxPlaywright) ? firefox : null,
-      webkit: installedBrowsers.includes(WebKitPlaywright) ? webkit : null,
-      playwright: [...new Set(playwright)],
-      puppeteer: [puppeteer],
-    };
-    return jsonResponse(res, 200, response);
+    return Effect.runPromise(
+      Effect.fn('route.meta.get')(function* () {
+        const installedBrowsers = yield* Effect.promise(() => availableBrowsers);
+        const response: ResponseSchema = {
+          version: blessPackageJSON.version,
+          chromium: installedBrowsers.includes(ChromiumCDP) ? chromium : null,
+          firefox: installedBrowsers.includes(FirefoxPlaywright)
+            ? firefox
+            : null,
+          webkit: installedBrowsers.includes(WebKitPlaywright) ? webkit : null,
+          playwright: [...new Set(playwright)],
+          puppeteer: [puppeteer],
+        };
+        return jsonResponse(res, 200, response);
+      })(),
+    );
   }
 }

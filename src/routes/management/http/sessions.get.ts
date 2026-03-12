@@ -11,6 +11,7 @@ import {
   jsonResponse,
 } from '@browserless.io/browserless';
 import { ServerResponse } from 'http';
+import { Effect } from 'effect';
 
 export interface QuerySchema extends SystemQueryParameters {
   token?: string;
@@ -31,11 +32,17 @@ export default class SessionsGetRoute extends HTTPRoute {
   path = HTTPManagementRoutes.sessions;
   tags = [APITags.management];
   async handler(req: Request, res: ServerResponse): Promise<void> {
-    const trackingId = (req.queryParams.trackingId as string) || undefined;
-    const browserManager = this.browserManager();
-    const response: ResponseSchema =
-      await browserManager.getAllSessions(trackingId);
+    const route = this;
+    return Effect.runPromise(
+      Effect.fn('route.sessions.get')(function* () {
+        const trackingId = (req.queryParams.trackingId as string) || undefined;
+        const browserManager = route.browserManager();
+        const response: ResponseSchema = yield* Effect.promise(() =>
+          browserManager.getAllSessions(trackingId),
+        );
 
-    return jsonResponse(res, 200, response);
+        return jsonResponse(res, 200, response);
+      })(),
+    );
   }
 }

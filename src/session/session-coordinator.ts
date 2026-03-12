@@ -69,98 +69,110 @@ export class SessionCoordinator {
 
   /**
    * Set up CDP session with replay, CF solver, and screencast for ALL tabs.
-   *
-   * Wires CdpSession + CloudflareHooks adapter together.
-   * Replay capture is now internal to CdpSession (no separate factory).
+   * Effect pipeline — wires CdpSession + CloudflareHooks adapter together.
    */
+  setupSessionEffect(
+    browser: BrowserInstance,
+    sessionId: string,
+    options?: { video?: boolean; onTabReplayComplete?: (metadata: TabReplayCompleteParams) => void; antibot?: boolean; onAntibotReport?: (report: object) => void },
+  ): Effect.Effect<void> {
+    const coordinator = this;
+
+    return Effect.fn('coordinator.setupSession')(function*() {
+      const wsEndpoint = browser.wsEndpoint();
+      if (!wsEndpoint) {
+        yield* Effect.logDebug('setupSession: wsEndpoint is null/undefined, returning early');
+        return;
+      }
+
+      // Deferred resolves when CdpSession is initialized — solver's callbacks await it
+      const sessionDeferred = yield* Deferred.make<CdpSession, Error>();
+
+      const sendViaSession = (method: string, params?: object, cdpSid?: CdpSessionId, timeoutMs?: number): Promise<any> =>
+        Effect.runPromise(
+          Deferred.await(sessionDeferred).pipe(
+            Effect.flatMap((s) => Effect.tryPromise(() => s.sendCommand(method, params ?? {}, cdpSid, timeoutMs))),
+          ),
+        );
+
+      // Create solver — injectMarker calls CdpSession directly
+      const chromePort = new URL(wsEndpoint).port;
+      let sessionRef: CdpSession | null = null;
+      const cloudflareSolver = new CloudflareSolver(
+        sendViaSession,
+        (targetId: TargetId, tag: string, payload?: object) => {
+          // Synchronous marker injection — sessionRef is set after CdpSession.initialize().
+          // During cleanup (scope finalizers), the session always exists.
+          if (sessionRef) {
+            sessionRef.injectMarkerByTargetId(targetId, tag, payload);
+          } else {
+            // Session not yet initialized — async fallback (rare: markers during init)
+            Effect.runPromise(
+              Deferred.await(sessionDeferred).pipe(
+                Effect.flatMap((s) => Effect.sync(() => s.injectMarkerByTargetId(targetId, tag, payload))),
+                Effect.ignore,
+              ),
+            );
+          }
+        },
+        chromePort,
+        sessionId,
+      );
+      coordinator.cloudflareSolvers.set(sessionId, cloudflareSolver);
+
+      // CloudflareHooks adapter — direct passthrough (solver methods now return Effect)
+      const cloudflareHooks: CloudflareHooks = {
+        onPageAttached: (tid, sid, url) => cloudflareSolver.onPageAttached(tid, sid, url),
+        onPageNavigated: (tid, sid, url, title) => cloudflareSolver.onPageNavigated(tid, sid, url, title),
+        onIframeAttached: (tid, sid, url, parentTid) => cloudflareSolver.onIframeAttached(tid, sid, url, parentTid),
+        onIframeNavigated: (tid, sid, url) => cloudflareSolver.onIframeNavigated(tid, sid, url),
+        onBridgeEvent: (tid, event) => cloudflareSolver.onBridgeEvent(tid, event),
+        onTargetDestroyed: (tid) => cloudflareSolver.stopTargetDetection(tid),
+        setSessionSpan: (span) => cloudflareSolver.setSessionSpan(span),
+        setTabSpan: (tid, span) => cloudflareSolver.setTabSpan(tid, span),
+        destroy: () => cloudflareSolver.destroyEffect,
+      };
+
+      const cdpSession = new CdpSession({
+        sessionId,
+        wsEndpoint,
+        video: options?.video,
+        videosDir: coordinator.videoMgr?.getVideosDir(),
+        videoHooks: options?.video ? coordinator.screencast.hooks : undefined,
+        cloudflareHooks,
+        baseUrl: coordinator.baseUrl,
+        replayBaseUrl: coordinator.replayBaseUrl,
+        onTabReplayComplete: options?.onTabReplayComplete,
+        antibot: options?.antibot,
+        onAntibotReport: options?.onAntibotReport,
+      });
+
+      // Initialize — on success wire up, on failure cleanup and swallow error
+      yield* Effect.tryPromise(() => cdpSession.initialize()).pipe(
+        Effect.tap(() => Effect.sync(() => {
+          sessionRef = cdpSession;
+          coordinator.cdpSessions.set(sessionId, cdpSession);
+        })),
+        Effect.tap(() => Deferred.succeed(sessionDeferred, cdpSession)),
+        Effect.catch((e: unknown) =>
+          Deferred.fail(sessionDeferred, e instanceof Error ? e : new Error(String(e))).pipe(
+            Effect.ignore,
+            Effect.tap(() => Effect.logWarning(`Failed to setup session: ${e instanceof Error ? e.message : String(e)}`)),
+            Effect.tap(() => Effect.sync(() => coordinator.cloudflareSolvers.delete(sessionId))),
+            Effect.tap(() => Effect.tryPromise(() => cdpSession.destroy('error')).pipe(Effect.ignore)),
+          ),
+        ),
+      );
+    })();
+  }
+
+  /** Promise bridge for setupSessionEffect — callers not yet Effect-capable. */
   async setupSession(
     browser: BrowserInstance,
     sessionId: string,
     options?: { video?: boolean; onTabReplayComplete?: (metadata: TabReplayCompleteParams) => void; antibot?: boolean; onAntibotReport?: (report: object) => void },
   ): Promise<void> {
-    const wsEndpoint = browser.wsEndpoint();
-    if (!wsEndpoint) {
-      this.log.debug(`setupSession: wsEndpoint is null/undefined, returning early`);
-      return;
-    }
-
-    // Deferred resolves when CdpSession is initialized — solver's callbacks await it
-    const sessionDeferred = await Effect.runPromise(Deferred.make<CdpSession, Error>());
-
-    const sendViaSession = (method: string, params?: object, cdpSid?: CdpSessionId, timeoutMs?: number): Promise<any> =>
-      Effect.runPromise(
-        Deferred.await(sessionDeferred).pipe(
-          Effect.flatMap((s) => Effect.tryPromise(() => s.sendCommand(method, params ?? {}, cdpSid, timeoutMs))),
-        ),
-      );
-
-    // Create solver — injectMarker calls CdpSession directly
-    const chromePort = new URL(wsEndpoint).port;
-    let sessionRef: CdpSession | null = null;
-    const cloudflareSolver = new CloudflareSolver(
-      sendViaSession,
-      (targetId: TargetId, tag: string, payload?: object) => {
-        // Synchronous marker injection — sessionRef is set after CdpSession.initialize().
-        // During cleanup (scope finalizers), the session always exists.
-        if (sessionRef) {
-          sessionRef.injectMarkerByTargetId(targetId, tag, payload);
-        } else {
-          // Session not yet initialized — async fallback (rare: markers during init)
-          Effect.runPromise(
-            Deferred.await(sessionDeferred).pipe(
-              Effect.flatMap((s) => Effect.sync(() => s.injectMarkerByTargetId(targetId, tag, payload))),
-              Effect.ignore,
-            ),
-          );
-        }
-      },
-      chromePort,
-      sessionId,
-    );
-    this.cloudflareSolvers.set(sessionId, cloudflareSolver);
-
-    // CloudflareHooks adapter — direct passthrough (solver methods now return Effect)
-    const cloudflareHooks: CloudflareHooks = {
-      onPageAttached: (tid, sid, url) => cloudflareSolver.onPageAttached(tid, sid, url),
-      onPageNavigated: (tid, sid, url, title) => cloudflareSolver.onPageNavigated(tid, sid, url, title),
-      onIframeAttached: (tid, sid, url, parentTid) => cloudflareSolver.onIframeAttached(tid, sid, url, parentTid),
-      onIframeNavigated: (tid, sid, url) => cloudflareSolver.onIframeNavigated(tid, sid, url),
-      onBridgeEvent: (tid, event) => cloudflareSolver.onBridgeEvent(tid, event),
-      onTargetDestroyed: (tid) => cloudflareSolver.stopTargetDetection(tid),
-      setSessionSpan: (span) => cloudflareSolver.setSessionSpan(span),
-      setTabSpan: (tid, span) => cloudflareSolver.setTabSpan(tid, span),
-      destroy: () => cloudflareSolver.destroyEffect,
-    };
-
-    const cdpSession = new CdpSession({
-      sessionId,
-      wsEndpoint,
-      video: options?.video,
-      videosDir: this.videoMgr?.getVideosDir(),
-      videoHooks: options?.video ? this.screencast.hooks : undefined,
-      cloudflareHooks,
-      baseUrl: this.baseUrl,
-      replayBaseUrl: this.replayBaseUrl,
-      onTabReplayComplete: options?.onTabReplayComplete,
-      antibot: options?.antibot,
-      onAntibotReport: options?.onAntibotReport,
-    });
-
-    try {
-      await cdpSession.initialize();
-      sessionRef = cdpSession;
-      await Effect.runPromise(Deferred.succeed(sessionDeferred, cdpSession));
-    } catch (e) {
-      await Effect.runPromise(Deferred.fail(sessionDeferred, e instanceof Error ? e : new Error(String(e))).pipe(Effect.ignore));
-      this.log.warn(`Failed to setup session: ${e instanceof Error ? e.message : String(e)}`);
-      this.cloudflareSolvers.delete(sessionId);
-      await cdpSession.destroy('error').catch((e) => {
-        this.log.warn(`destroy after init failure: ${e instanceof Error ? e.message : String(e)}`);
-      });
-      return;
-    }
-
-    this.cdpSessions.set(sessionId, cdpSession);
+    return Effect.runPromise(this.setupSessionEffect(browser, sessionId, options));
   }
 
   /**
@@ -221,23 +233,29 @@ export class SessionCoordinator {
   }
 
   /**
-   * Nuclear cleanup for watchdog — force-destroy a session's resources.
+   * Nuclear cleanup — force-destroy a session's resources.
    * Best-effort: catches all errors, guaranteed to clean up Maps.
    */
-  async forceCleanup(sessionId: string): Promise<void> {
-    const cdpSession = this.cdpSessions.get(sessionId);
-    if (cdpSession) {
-      await Effect.runPromise(
-        Effect.tryPromise(() => cdpSession.destroy('error')).pipe(
+  forceCleanupEffect(sessionId: string): Effect.Effect<void> {
+    const coordinator = this;
+    return Effect.fn('coordinator.forceCleanup')(function*() {
+      const cdpSession = coordinator.cdpSessions.get(sessionId);
+      if (cdpSession) {
+        yield* Effect.tryPromise(() => cdpSession.destroy('error')).pipe(
           Effect.timeout('5 seconds'),
           Effect.ignore,
-        ),
-      );
-    }
-    this.cdpSessions.delete(sessionId);
-    const solver = this.cloudflareSolvers.get(sessionId);
-    if (solver) await Effect.runPromise(solver.destroyEffect);
-    this.cloudflareSolvers.delete(sessionId);
+        );
+      }
+      coordinator.cdpSessions.delete(sessionId);
+      const solver = coordinator.cloudflareSolvers.get(sessionId);
+      if (solver) yield* solver.destroyEffect;
+      coordinator.cloudflareSolvers.delete(sessionId);
+    })();
+  }
+
+  /** Promise bridge for forceCleanupEffect. */
+  async forceCleanup(sessionId: string): Promise<void> {
+    return Effect.runPromise(this.forceCleanupEffect(sessionId));
   }
 
   /**

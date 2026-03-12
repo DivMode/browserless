@@ -16,6 +16,7 @@ import {
   isConnected,
   writeResponse,
 } from '@browserless.io/browserless';
+import { Effect } from 'effect';
 import { EventEmitter } from 'events';
 import micromatch from 'micromatch';
 import stream from 'stream';
@@ -64,52 +65,55 @@ export class Router extends EventEmitter {
     route: HTTPRoute | BrowserHTTPRoute,
     handler: HTTPRoute['handler'] | BrowserHTTPRoute['handler'],
   ) {
+    const router = this;
     return async (req: Request, res: Response) => {
-      if (!isConnected(res)) {
-        this.log.warn(`HTTP Request has closed prior to running`);
-        return Promise.resolve();
-      }
-      const logger = new this.logger(route.name, req);
-      if (
-        Object.getPrototypeOf(route) instanceof BrowserHTTPRoute &&
-        'browser' in route &&
-        route.browser
-      ) {
-        // Launch + register INSIDE try so complete() in finally covers all paths.
-        // Previously, if code between getBrowserForRequest() and try threw,
-        // the session would leak from the registry.
-        let browser = await this.browserManager.getBrowserForRequest(
-          req,
-          route,
-          logger,
-        );
-
-        try {
+      return Effect.runPromise(
+        Effect.fn('router.httpHandler')(function*() {
           if (!isConnected(res)) {
-            this.log.warn(`HTTP Request has closed prior to running`);
+            yield* Effect.logWarning(`HTTP Request has closed prior to running`);
             return;
           }
+          const logger = new router.logger(route.name, req);
+          if (
+            Object.getPrototypeOf(route) instanceof BrowserHTTPRoute &&
+            'browser' in route &&
+            route.browser
+          ) {
+            const browser = yield* Effect.promise(() =>
+              router.browserManager.getBrowserForRequest(req, route, logger),
+            );
 
-          this.log.trace(`Running found HTTP handler.`);
-          return await Promise.race([
-            handler(req, res, logger, browser),
-            new Promise((resolve, reject) => {
-              res.once('close', () => {
-                if (!res.writableEnded) {
-                  reject(new Error(`Request closed prior to writing results`));
-                }
-                this.log.trace(`Response has been written, resolving`);
-                resolve(null);
-              });
-            }),
-          ]);
-        } finally {
-          this.log.trace(`HTTP Request handler has finished.`);
-          this.browserManager.complete(browser);
-        }
-      }
+            try {
+              if (!isConnected(res)) {
+                yield* Effect.logWarning(`HTTP Request has closed prior to running`);
+                return;
+              }
 
-      return (handler as HTTPRoute['handler'])(req, res, logger);
+              yield* Effect.logTrace(`Running found HTTP handler.`);
+              return yield* Effect.promise(() =>
+                Promise.race([
+                  handler(req, res, logger, browser),
+                  new Promise((resolve, reject) => {
+                    res.once('close', () => {
+                      if (!res.writableEnded) {
+                        reject(new Error(`Request closed prior to writing results`));
+                      }
+                      resolve(null);
+                    });
+                  }),
+                ]),
+              );
+            } finally {
+              router.log.trace(`HTTP Request handler has finished.`);
+              router.browserManager.complete(browser);
+            }
+          }
+
+          return yield* Effect.promise(() =>
+            (handler as HTTPRoute['handler'])(req, res, logger),
+          );
+        })(),
+      );
     };
   }
 
@@ -117,46 +121,52 @@ export class Router extends EventEmitter {
     route: WebSocketRoute | BrowserWebsocketRoute,
     handler: WebSocketRoute['handler'] | BrowserWebsocketRoute['handler'],
   ) {
+    const router = this;
     return async (req: Request, socket: stream.Duplex, head: Buffer) => {
-      if (!isConnected(socket)) {
-        this.log.warn(`WebSocket Request has closed prior to running`);
-        return Promise.resolve();
-      }
-      const logger = new this.logger(route.name, req);
-      if (
-        Object.getPrototypeOf(route) instanceof BrowserWebsocketRoute &&
-        'browser' in route &&
-        route.browser
-      ) {
-        // Launch + register INSIDE try so complete() in finally covers all paths.
-        const browser = await this.browserManager.getBrowserForRequest(
-          req,
-          route,
-          logger,
-        );
-
-        try {
+      return Effect.runPromise(
+        Effect.fn('router.wsHandler')(function*() {
           if (!isConnected(socket)) {
-            this.log.warn(`WebSocket Request has closed prior to running`);
+            yield* Effect.logWarning(`WebSocket Request has closed prior to running`);
             return;
           }
+          const logger = new router.logger(route.name, req);
+          if (
+            Object.getPrototypeOf(route) instanceof BrowserWebsocketRoute &&
+            'browser' in route &&
+            route.browser
+          ) {
+            const browser = yield* Effect.promise(() =>
+              router.browserManager.getBrowserForRequest(req, route, logger),
+            );
 
-          this.log.trace(`Running found WebSocket handler.`);
-          await Promise.race([
-            handler(req, socket, head, logger, browser),
-            new Promise<void>((resolve) => {
-              socket.once('close', resolve);
-              socket.once('end', resolve);
-              socket.once('error', resolve);
-            }),
-          ]);
-        } finally {
-          this.log.trace(`WebSocket Request handler has finished.`);
-          this.browserManager.complete(browser);
-        }
-        return;
-      }
-      return (handler as WebSocketRoute['handler'])(req, socket, head, logger);
+            try {
+              if (!isConnected(socket)) {
+                yield* Effect.logWarning(`WebSocket Request has closed prior to running`);
+                return;
+              }
+
+              yield* Effect.logTrace(`Running found WebSocket handler.`);
+              yield* Effect.promise(() =>
+                Promise.race([
+                  handler(req, socket, head, logger, browser),
+                  new Promise<void>((resolve) => {
+                    socket.once('close', resolve);
+                    socket.once('end', resolve);
+                    socket.once('error', resolve);
+                  }),
+                ]),
+              );
+            } finally {
+              router.log.trace(`WebSocket Request handler has finished.`);
+              router.browserManager.complete(browser);
+            }
+            return;
+          }
+          return yield* Effect.promise(() =>
+            (handler as WebSocketRoute['handler'])(req, socket, head, logger),
+          );
+        })(),
+      );
     };
   }
 
@@ -227,39 +237,49 @@ export class Router extends EventEmitter {
     ) as HTTPRoute;
   }
 
-  public async getRouteForHTTPRequest(req: Request) {
-    const accepts = (req.headers['accept']?.toLowerCase() || '*/*').split(',');
-    const contentType = req.headers['content-type']
-      ?.toLowerCase()
-      ?.split(';')
-      .shift() as contentTypes | undefined;
+  public getRouteForHTTPRequestEffect(req: Request) {
+    return Effect.fn('router.getRouteForHTTPRequest')({ self: this }, function*() {
+      const accepts = (req.headers['accept']?.toLowerCase() || '*/*').split(',');
+      const contentType = req.headers['content-type']
+        ?.toLowerCase()
+        ?.split(';')
+        .shift() as contentTypes | undefined;
 
-    return (
-      this.httpRoutes.find(
-        (r) =>
-          // Once registered, paths are always an array here.
-          (r.path as Array<PathTypes>).some((p) =>
-            micromatch.isMatch(req.parsed.pathname, p),
-          ) &&
-          r.method === (req.method?.toLocaleLowerCase() as Methods) &&
-          (accepts.some((a) => a.includes('*/*')) ||
-            r.contentTypes.some((contentType) =>
-              accepts.includes(contentType),
-            )) &&
-          ((!contentType && r.accepts.includes(contentTypes.any)) ||
-            r.accepts.includes(contentType as contentTypes)),
-      ) ||
-      (req.method?.toLowerCase() === 'get' ? this.getStaticHandler() : null)
-    );
+      return (
+        this.httpRoutes.find(
+          (r) =>
+            (r.path as Array<PathTypes>).some((p) =>
+              micromatch.isMatch(req.parsed.pathname, p),
+            ) &&
+            r.method === (req.method?.toLocaleLowerCase() as Methods) &&
+            (accepts.some((a) => a.includes('*/*')) ||
+              r.contentTypes.some((contentType) =>
+                accepts.includes(contentType),
+              )) &&
+            ((!contentType && r.accepts.includes(contentTypes.any)) ||
+              r.accepts.includes(contentType as contentTypes)),
+        ) ||
+        (req.method?.toLowerCase() === 'get' ? this.getStaticHandler() : null)
+      );
+    })();
+  }
+
+  public async getRouteForHTTPRequest(req: Request) {
+    return Effect.runPromise(this.getRouteForHTTPRequestEffect(req));
+  }
+
+  public getRouteForWebSocketRequestEffect(req: Request) {
+    return Effect.fn('router.getRouteForWebSocketRequest')({ self: this }, function*() {
+      const { pathname } = req.parsed;
+
+      return this.webSocketRoutes.find((r) =>
+        (r.path as Array<PathTypes>).some((p) => micromatch.isMatch(pathname, p)),
+      );
+    })();
   }
 
   public async getRouteForWebSocketRequest(req: Request) {
-    const { pathname } = req.parsed;
-
-    return this.webSocketRoutes.find((r) =>
-      // Once registered, paths are always an array here.
-      (r.path as Array<PathTypes>).some((p) => micromatch.isMatch(pathname, p)),
-    );
+    return Effect.runPromise(this.getRouteForWebSocketRequestEffect(req));
   }
 
   /**

@@ -14,6 +14,7 @@ import {
 import { ServerResponse } from 'http';
 import { createReadStream } from 'fs';
 import path from 'path';
+import { Effect } from 'effect';
 
 const pathMap: Map<
   string,
@@ -65,67 +66,85 @@ export default class StaticGetRoute extends HTTPRoute {
     res: ServerResponse,
     logger: Logger,
   ): Promise<unknown> {
-    const { pathname } = req.parsed;
-    const fileCache = pathMap.get(pathname);
+    const route = this;
+    return Effect.runPromise(
+      Effect.fn('route.static.get')(function* () {
+        const { pathname } = req.parsed;
+        const fileCache = pathMap.get(pathname);
 
-    if (fileCache) {
-      return streamFile(logger, res, fileCache.path, fileCache.contentType);
-    }
+        if (fileCache) {
+          return yield* Effect.promise(() =>
+            streamFile(logger, res, fileCache.path, fileCache.contentType),
+          );
+        }
 
-    const config = this.config();
-    const sdkDir = this.staticSDKDir();
-    const file = path.join(config.getStatic(), pathname);
-    const indexFile = path.join(file, 'index.html');
-    const locations = [file, indexFile];
+        const config = route.config();
+        const sdkDir = route.staticSDKDir();
+        const file = path.join(config.getStatic(), pathname);
+        const indexFile = path.join(file, 'index.html');
+        const locations = [file, indexFile];
 
-    const pagesDir = path.join(config.getStatic(), '..', 'pages');
-    const pagesFile = path.join(pagesDir, pathname);
-    locations.push(pagesFile, path.join(pagesFile, 'index.html'));
+        const pagesDir = path.join(config.getStatic(), '..', 'pages');
+        const pagesFile = path.join(pagesDir, pathname);
+        locations.push(pagesFile, path.join(pagesFile, 'index.html'));
 
-    if (sdkDir) {
-      const sdkPath = path.join(sdkDir, pathname);
-      locations.push(...[sdkPath, path.join(sdkPath, 'index.html')]);
-    }
+        if (sdkDir) {
+          const sdkPath = path.join(sdkDir, pathname);
+          locations.push(...[sdkPath, path.join(sdkPath, 'index.html')]);
+        }
 
-    if (pathname.includes('/debugger/') && !(await config.hasDebugger())) {
-      throw new NotFound(
-        `No route or file found for resource ${req.method}: ${pathname}`,
-      );
-    }
+        if (
+          pathname.includes('/debugger/') &&
+          !(yield* Effect.promise(() => config.hasDebugger()))
+        ) {
+          throw new NotFound(
+            `No route or file found for resource ${req.method}: ${pathname}`,
+          );
+        }
 
-    const foundFilePaths = (
-      await Promise.all(
-        locations.map((l) => fileExists(l).then((e) => (e ? l : undefined))),
-      )
-    ).filter((_) => !!_) as string[];
+        const foundFilePaths = (
+          yield* Effect.promise(() =>
+            Promise.all(
+              locations.map((l) =>
+                fileExists(l).then((e) => (e ? l : undefined)),
+              ),
+            ),
+          )
+        ).filter((_) => !!_) as string[];
 
-    if (!foundFilePaths.length) {
-      throw new NotFound(
-        `No route or file found for resource ${req.method}: ${pathname}`,
-      );
-    }
+        if (!foundFilePaths.length) {
+          throw new NotFound(
+            `No route or file found for resource ${req.method}: ${pathname}`,
+          );
+        }
 
-    if (foundFilePaths.length > 1) {
-      logger.warn(
-        `Multiple files found for request to "${pathname}". Only the first file is served, so please name your files uniquely.`,
-      );
-    }
+        if (foundFilePaths.length > 1) {
+          logger.warn(
+            `Multiple files found for request to "${pathname}". Only the first file is served, so please name your files uniquely.`,
+          );
+        }
 
-    const [foundFilePath] = foundFilePaths;
-    logger.info(`Found new file "${foundFilePath}", caching path and serving`);
+        const [foundFilePath] = foundFilePaths;
+        logger.info(
+          `Found new file "${foundFilePath}", caching path and serving`,
+        );
 
-    const contentType = mimeTypes.get(path.extname(foundFilePath));
+        const contentType = mimeTypes.get(path.extname(foundFilePath));
 
-    if (contentType) {
-      res.setHeader('Content-Type', contentType);
-    }
+        if (contentType) {
+          res.setHeader('Content-Type', contentType);
+        }
 
-    // Cache the file as being found so we don't have to call 'stat'
-    pathMap.set(pathname, {
-      contentType,
-      path: foundFilePath,
-    });
+        // Cache the file as being found so we don't have to call 'stat'
+        pathMap.set(pathname, {
+          contentType,
+          path: foundFilePath,
+        });
 
-    return streamFile(logger, res, foundFilePath, contentType);
+        return yield* Effect.promise(() =>
+          streamFile(logger, res, foundFilePath, contentType),
+        );
+      })(),
+    );
   }
 }

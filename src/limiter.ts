@@ -8,6 +8,7 @@ import {
   TooManyRequests,
   WebHooks,
 } from '@browserless.io/browserless';
+import { Effect } from 'effect';
 import q from 'queue';
 
 export type LimitFn<TArgs extends unknown[], TResult> = (
@@ -188,6 +189,77 @@ export class Limiter extends q {
     };
   }
 
+  private enqueueJobEffect<TArgs extends unknown[], TResult>(
+    args: TArgs,
+    limitFn: LimitFn<TArgs, TResult>,
+    overCapacityFn: ErrorFn<TArgs>,
+    onTimeoutFn: ErrorFn<TArgs>,
+    timeout: number,
+  ) {
+    return Effect.fn('limiter.enqueueJob')({ self: this }, function*() {
+      if (this.config.getHealthChecksEnabled()) {
+        const { cpuOverloaded, memoryOverloaded } =
+          yield* Effect.promise(() => this.monitor.overloaded());
+
+        if (cpuOverloaded || memoryOverloaded) {
+          this.logQueue(`Health checks have failed, rejecting`);
+          this.webhooks.callFailedHealthURL();
+          this.metrics.addRejected();
+          overCapacityFn(...args);
+          throw new Error(`Health checks have failed, rejecting`);
+        }
+      }
+
+      if (!this.hasCapacity) {
+        this.logQueue(`Concurrency and queue is at capacity`);
+        this.webhooks.callRejectAlertURL();
+        this.metrics.addRejected();
+        overCapacityFn(...args);
+        const concurrencyLimit = this.concurrency;
+        const queueLimit = this.queued;
+        throw new TooManyRequests(
+          `Your plan allows ${concurrencyLimit} concurrent sessions and ${queueLimit} queued requests, but both limits have been reached. Possible causes: 1) Your plan has reached maximum capacity, 2) Your token may not have access to this version, 3) Your requests are coming too quickly.`,
+        );
+      }
+
+      if (this.willQueue) {
+        this.logQueue(`Concurrency is at capacity, queueing`);
+        this.webhooks.callQueueAlertURL();
+        this.metrics.addQueued();
+      }
+
+      // This Promise is intentionally used — the `queue` library
+      // requires a job function that it will call later.
+      // The Promise bridges the queue's callback-based API.
+      return yield* Effect.promise(() =>
+        new Promise<TResult | unknown>((res, rej) => {
+          const bound: () => Promise<TResult | unknown> = async () => {
+            this.logQueue(`Starting new job`);
+            this.metrics.addRunning();
+
+            try {
+              const result = await limitFn(...args);
+              res(result);
+              return;
+            } catch (err) {
+              rej(err);
+              throw err;
+            }
+          };
+
+          const job: Job = Object.assign(bound, {
+            args,
+            onTimeoutFn: () => onTimeoutFn(...args),
+            start: Date.now(),
+            timeout,
+          });
+
+          this.push(job);
+        }),
+      );
+    })();
+  }
+
   private async enqueueJob<TArgs extends unknown[], TResult>(
     args: TArgs,
     limitFn: LimitFn<TArgs, TResult>,
@@ -195,64 +267,9 @@ export class Limiter extends q {
     onTimeoutFn: ErrorFn<TArgs>,
     timeout: number,
   ): Promise<unknown> {
-    if (this.config.getHealthChecksEnabled()) {
-      const { cpuOverloaded, memoryOverloaded } =
-        await this.monitor.overloaded();
-
-      if (cpuOverloaded || memoryOverloaded) {
-        this.logQueue(`Health checks have failed, rejecting`);
-        this.webhooks.callFailedHealthURL();
-        this.metrics.addRejected();
-        overCapacityFn(...args);
-        throw new Error(`Health checks have failed, rejecting`);
-      }
-    }
-
-    if (!this.hasCapacity) {
-      this.logQueue(`Concurrency and queue is at capacity`);
-      this.webhooks.callRejectAlertURL();
-      this.metrics.addRejected();
-      overCapacityFn(...args);
-      const concurrencyLimit = this.concurrency;
-      const queueLimit = this.queued;
-      throw new TooManyRequests(
-        `Your plan allows ${concurrencyLimit} concurrent sessions and ${queueLimit} queued requests, but both limits have been reached. Possible causes: 1) Your plan has reached maximum capacity, 2) Your token may not have access to this version, 3) Your requests are coming too quickly.`,
-      );
-    }
-
-    if (this.willQueue) {
-      this.logQueue(`Concurrency is at capacity, queueing`);
-      this.webhooks.callQueueAlertURL();
-      this.metrics.addQueued();
-    }
-
-    // This Promise is intentionally used — the `queue` library
-    // requires a job function that it will call later.
-    // The Promise bridges the queue's callback-based API.
-    return new Promise<TResult | unknown>((res, rej) => {
-      const bound: () => Promise<TResult | unknown> = async () => {
-        this.logQueue(`Starting new job`);
-        this.metrics.addRunning();
-
-        try {
-          const result = await limitFn(...args);
-          res(result);
-          return;
-        } catch (err) {
-          rej(err);
-          throw err;
-        }
-      };
-
-      const job: Job = Object.assign(bound, {
-        args,
-        onTimeoutFn: () => onTimeoutFn(...args),
-        start: Date.now(),
-        timeout,
-      });
-
-      this.push(job);
-    });
+    return Effect.runPromise(
+      this.enqueueJobEffect(args, limitFn, overCapacityFn, onTimeoutFn, timeout),
+    );
   }
 
   /**

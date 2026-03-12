@@ -1,4 +1,5 @@
 import { Config, fetchTimeout, noop } from '@browserless.io/browserless';
+import { Effect } from 'effect';
 import { EventEmitter } from 'events';
 
 export class WebHooks extends EventEmitter {
@@ -15,6 +16,16 @@ export class WebHooks extends EventEmitter {
     }
 
     return;
+  }
+
+  protected callURLEffect(url: string | null) {
+    return Effect.fn('webhooks.callURL')(function* () {
+      if (url) {
+        yield* Effect.tryPromise(() =>
+          fetchTimeout(url, { method: 'GET', timeout: 10000 }),
+        ).pipe(Effect.ignore);
+      }
+    })();
   }
 
   public callFailedHealthURL() {
@@ -49,6 +60,38 @@ export class WebHooks extends EventEmitter {
         `Issue calling error hook: "${err}". Did you set a working ERROR_ALERT_URL env variable?`,
       );
     }
+  }
+
+  public callFailedHealthURLEffect() {
+    return this.callURLEffect(this.config.getFailedHealthURL());
+  }
+
+  public callQueueAlertURLEffect() {
+    return this.callURLEffect(this.config.getQueueAlertURL());
+  }
+
+  public callRejectAlertURLEffect() {
+    return this.callURLEffect(this.config.getRejectAlertURL());
+  }
+
+  public callTimeoutAlertURLEffect() {
+    return this.callURLEffect(this.config.getTimeoutAlertURL());
+  }
+
+  public callErrorAlertURLEffect(message: string) {
+    const webhooks = this;
+    return Effect.fn('webhooks.callErrorAlertURL')(function* () {
+      const url = webhooks.config.getErrorAlertURL();
+      try {
+        const fullURL = new URL(url ?? '');
+        fullURL.searchParams.set('error', message);
+        yield* webhooks.callURLEffect(fullURL.href);
+      } catch (err) {
+        yield* Effect.logError(
+          `Issue calling error hook: "${err}". Did you set a working ERROR_ALERT_URL env variable?`,
+        );
+      }
+    })();
   }
 
   /**

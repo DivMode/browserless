@@ -13,6 +13,7 @@ import {
   contentTypes,
   jsonResponse,
 } from '@browserless.io/browserless';
+import { Effect } from 'effect';
 import { ServerResponse } from 'http';
 
 import main from './utils/performance/main.js';
@@ -52,13 +53,19 @@ export default class PerformancePost extends BrowserHTTPRoute {
     browser: BrowserInstance,
   ): Promise<void> {
     const config = this.config();
-    const response = await main({
-      browser,
-      context: req.body as BodySchema,
-      logger: _logger,
-      timeout: config.getTimeout(),
-    });
+    return Effect.runPromise(
+      Effect.fn('route.performance.post')(function* () {
+        const response = yield* Effect.promise(() =>
+          main({
+            browser,
+            context: req.body as BodySchema,
+            logger: _logger,
+            timeout: config.getTimeout(),
+          }),
+        );
 
-    return jsonResponse(res, 200, response);
+        return jsonResponse(res, 200, response);
+      })(),
+    );
   }
 }

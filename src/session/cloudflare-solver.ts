@@ -138,31 +138,28 @@ export class CloudflareSolver {
     const strategies = this.strategies;
     const self = this;
 
+    // Lift a Promise-based send function into Effect, mapping rejections to CdpSessionGone.
+    const liftSend = (
+      fn: SendCommand,
+      method: string, params: object | undefined, sessionId: CdpSessionId | undefined, timeoutMs: number | undefined,
+    ) =>
+      Effect.tryPromise({
+        try: () => fn(method, params, sessionId, timeoutMs),
+        catch: () => new CdpSessionGone({
+          sessionId: sessionId ?? CdpSessionId.makeUnsafe(''),
+          method,
+        }),
+      });
+
+    const proxyOrDirect: SendCommand = (...args) => (self.sendViaProxy || sendCommand)(...args);
+
     const cdpSenderLayer = Layer.succeed(CdpSender, CdpSender.of({
       send: (method, params, sessionId, timeoutMs) =>
-        Effect.tryPromise({
-          try: () => sendCommand(method, params, sessionId, timeoutMs),
-          catch: () => new CdpSessionGone({
-            sessionId: sessionId ?? CdpSessionId.makeUnsafe(''),
-            method,
-          }),
-        }),
+        liftSend(sendCommand, method, params, sessionId, timeoutMs),
       sendViaProxy: (method, params, sessionId, timeoutMs) =>
-        Effect.tryPromise({
-          try: () => (self.sendViaProxy || sendCommand)(method, params, sessionId, timeoutMs),
-          catch: () => new CdpSessionGone({
-            sessionId: sessionId ?? CdpSessionId.makeUnsafe(''),
-            method,
-          }),
-        }),
+        liftSend(proxyOrDirect, method, params, sessionId, timeoutMs),
       sendViaBrowser: (method, params, sessionId, timeoutMs) =>
-        Effect.tryPromise({
-          try: () => (self.sendViaProxy || sendCommand)(method, params, sessionId, timeoutMs),
-          catch: () => new CdpSessionGone({
-            sessionId: sessionId ?? CdpSessionId.makeUnsafe(''),
-            method,
-          }),
-        }),
+        liftSend(proxyOrDirect, method, params, sessionId, timeoutMs),
     }));
 
     const solverEventsLayer = Layer.succeed(SolverEvents, SolverEvents.of({
@@ -186,10 +183,9 @@ export class CloudflareSolver {
           Effect.provideService(SolverEvents, solverEvents),
         ),
         simulatePresence: (active) =>
-          Effect.tryPromise({
-            try: () => simulateHumanPresence(sendCommand, active.pageCdpSessionId, 2.0 + Math.random() * 2.0),
-            catch: () => new Error('simulatePresence failed'),
-          }).pipe(Effect.asVoid, Effect.orElseSucceed(() => {})),
+          Effect.tryPromise(() =>
+            simulateHumanPresence(sendCommand, active.pageCdpSessionId, 2.0 + Math.random() * 2.0),
+          ).pipe(Effect.ignore),
         startActivityLoopEmbedded: (active) => stateTracker.activityLoopEmbedded(active).pipe(
           Effect.provideService(OOPIFChecker, oopifChecker),
         ),
@@ -281,9 +277,7 @@ export class CloudflareSolver {
                 yield* incCounter(wsLifecycle, { type: 'solver_isolated', action: 'destroy' });
               })(),
             ).pipe(
-              Effect.tap((isolated) => isolated.waitForOpen.pipe(
-                Effect.catch(() => Effect.succeed(undefined as void)),
-              )),
+              Effect.tap((isolated) => isolated.waitForOpen.pipe(Effect.ignore)),
               Effect.flatMap((isolated) => provideServices(active, CdpSender.of({
                 send: originalSender.send,
                 sendViaProxy: (method, params, sessionId, timeoutMs) =>
@@ -396,10 +390,10 @@ export class CloudflareSolver {
     const fibers = this.detectionFibers;
     const tracker = this.stateTracker;
     return this.runInSolver(
-      Effect.gen(function*() {
+      Effect.fn('cf.stopTargetDetection')(function*() {
         yield* FiberMap.remove(fibers, targetId).pipe(Effect.ignore);
         yield* tracker.unregisterPage(targetId);
-      }),
+      })(),
     );
   }
 

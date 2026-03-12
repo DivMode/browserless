@@ -13,6 +13,7 @@ import {
   writeResponse,
 } from '@browserless.io/browserless';
 import { ServerResponse } from 'http';
+import { Effect } from 'effect';
 
 export type ResponseSchema = ReplayCompleteParams[];
 
@@ -35,13 +36,20 @@ export default class KillGetRoute extends HTTPRoute {
   tags = [APITags.management];
 
   async handler(req: Request, res: ServerResponse): Promise<void> {
-    const target = getFinalPathSegment(req.parsed.pathname)!;
-    const browserManager = this.browserManager();
-    try {
-      const recordings = await browserManager.killSessions(target);
-      return jsonResponse(res, 200, recordings);
-    } catch {
-      return writeResponse(res, 404, '');
-    }
+    const route = this;
+    return Effect.runPromise(
+      Effect.fn('route.kill.get')(function* () {
+        const target = getFinalPathSegment(req.parsed.pathname)!;
+        const browserManager = route.browserManager();
+        try {
+          const recordings = yield* Effect.promise(() =>
+            browserManager.killSessions(target),
+          );
+          return jsonResponse(res, 200, recordings);
+        } catch {
+          return writeResponse(res, 404, '');
+        }
+      })(),
+    );
   }
 }
