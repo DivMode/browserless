@@ -134,10 +134,8 @@ export const activeHandlesByType = Metric.gauge('browserless_active_handles_by_t
   attributes: { unit: '{count}' },
 });
 
-export const socketHandles = Metric.gauge('browserless_socket_handles', {
-  description: 'Active socket handles by remote address',
-  attributes: { unit: '{count}' },
-});
+// browserless_socket_handles removed — per-IP label creates unbounded cardinality
+// (also dropped at Alloy level in otelcol.processor.filter "drop_unused")
 
 // Node.js runtime gauges (replaces prom-client default collectors)
 export const processHeapUsed = Metric.gauge('process_heap_used', {
@@ -264,20 +262,6 @@ export const gaugeCollector = Effect.gen(function*() {
       }
       for (const [type, count] of counts) {
         yield* Metric.update(activeHandlesByType.pipe(Metric.withAttributes({ type })), count);
-      }
-
-      // Socket handles by remote address
-      const socketCounts = new Map<string, number>();
-      for (const h of (process as any)._getActiveHandles() as any[]) {
-        if (h?.constructor?.name === 'Socket') {
-          const remote = h.remoteAddress
-            ? `${h.remoteAddress}:${h.remotePort}`
-            : h.destroyed ? 'destroyed' : 'no-remote';
-          socketCounts.set(remote, (socketCounts.get(remote) || 0) + 1);
-        }
-      }
-      for (const [remote, count] of socketCounts) {
-        yield* Metric.update(socketHandles.pipe(Metric.withAttributes({ remote })), count);
       }
 
       // Node.js runtime metrics
