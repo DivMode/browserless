@@ -264,7 +264,7 @@ describe.concurrent('CF Solver Multi-Site', () => {
       browserWSEndpoint: wsUrl,
       defaultViewport: null,
     });
-  });
+  }, 30_000);
 
   afterAll(async () => {
     await browser?.close().catch(() => {});
