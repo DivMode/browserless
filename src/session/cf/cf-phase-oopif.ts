@@ -1,15 +1,18 @@
 /**
  * Phase 2: OOPIF Resolution — attach to the CF Turnstile OOPIF target.
  *
- * Extracted from cloudflare-solve-strategies.ts for maintainability.
- * Pydoll creates a new ConnectionHandler, calls Target.getTargets,
- * then for each target: attachToTarget → Page.getFrameTree → DOM.getFrameOwner
- * → match backendNodeId from Phase 1.
+ * Matching priority (tried on each poll):
+ * 1. frameId match — Phase 1's DOM.describeNode gave us the iframe's frameId
+ * 2. parentFrameId match — page's frame tree root matches OOPIF's parent
+ *
+ * NEVER falls back to unfiltered candidates. A wrong-OOPIF click is worse
+ * than no click — ghost clicks waste 60s resolution timeout and produce
+ * false-positive click verification (mousedown fires on the wrong widget).
  */
 import { Effect } from 'effect';
 import type { CdpSessionId, TargetId } from '../../shared/cloudflare-detection.js';
 import { SolverEvents } from './cf-services.js';
-import { MAX_OOPIF_POLLS } from './cf-schedules.js';
+import { MAX_OOPIF_POLLS, OOPIF_POLL_DELAY } from './cf-schedules.js';
 
 /** Effect-returning CDP sender — eliminates the Promise bridge. */
 type EffectSend = (
@@ -19,24 +22,50 @@ type EffectSend = (
   timeoutMs?: number,
 ) => Effect.Effect<any>;
 
+/** Filtered candidate from Target.getTargets. */
+interface OOPIFCandidate {
+  readonly targetId: string;
+  readonly type: string;
+  readonly url?: string;
+  readonly parentFrameId?: string;
+}
+
+/** Successful OOPIF match result. */
+interface OOPIFMatch {
+  readonly sessionId: CdpSessionId;
+  readonly target: OOPIFCandidate;
+  readonly method: 'frameId_match' | 'parentFrameId';
+}
+
 /**
  * Cloudflare's well-known test sitekey prefixes.
  * These appear in the OOPIF URL path and always auto-pass/block — skip them.
  */
 const CF_TEST_SITEKEY_PREFIXES = ['1x00000000', '2x00000000', '3x00000000'];
 
-/** Returns true if the OOPIF URL contains a CF test sitekey. */
 function isCFTestWidget(url: string | undefined): boolean {
   if (!url) return false;
   return CF_TEST_SITEKEY_PREFIXES.some((prefix) => url.includes(prefix));
 }
 
+function isCFCandidate(t: { type: string; url?: string }): boolean {
+  return (t.type === 'iframe' || t.type === 'page')
+    && !!t.url?.includes('challenges.cloudflare.com')
+    && !isCFTestWidget(t.url);
+}
+
 /**
  * Phase 2: Discover and attach to the CF Turnstile OOPIF.
  *
- * 1. Target.getTargets → filter by challenges.cloudflare.com
- * 2. Primary: match by frameId from Phase 1's DOM.describeNode
- * 3. Fallback: parentFrameId filter + polling for late-appearing OOPIFs
+ * Polls Target.getTargets up to MAX_OOPIF_POLLS times. On each poll:
+ * 1. frameId match: attach each candidate → Page.getFrameTree → compare
+ *    frame tree root ID against Phase 1's iframeFrameId
+ * 2. parentFrameId match: filter candidates by parentFrameId === page's
+ *    root frameId → attach first match → cross-validate if iframeFrameId
+ *    is available
+ *
+ * Returns null when no positive match is found — caller retries on next
+ * detection cycle rather than clicking the wrong OOPIF.
  */
 export function phase2OOPIFResolution(
   send: EffectSend,
@@ -53,226 +82,188 @@ export function phase2OOPIFResolution(
       'cf.has_iframe_frame_id': !!iframeFrameId,
     });
     const events = yield* SolverEvents;
-    const targetsResult = yield* send('Target.getTargets').pipe(
-      Effect.orElseSucceed(() => ({ targetInfos: [] as any[] })),
-    );
-    const targetInfos = targetsResult?.targetInfos;
-    if (!targetInfos?.length) return null;
-
-    // Filter out test widgets
-    const candidates = targetInfos.filter(
-      (t: { type: string; url?: string }) =>
-        (t.type === 'iframe' || t.type === 'page')
-        && t.url?.includes('challenges.cloudflare.com')
-        && !isCFTestWidget(t.url),
-    );
-
-    // ── Diagnostic: Log all OOPIF candidates for wrong-target analysis ──
-    yield* Effect.annotateCurrentSpan({
-      'cf.phase2.total_targets': targetInfos.length,
-      'cf.phase2.cf_candidates': candidates.length,
-      'cf.phase2.candidate_ids': candidates.map((t: any) => t.targetId?.substring(0, 16)).join(','),
-      'cf.phase2.candidate_urls': candidates.map((t: any) => (t.url || '').substring(0, 80)).join(' | '),
-      'cf.phase2.candidate_parents': candidates.map((t: any) => (t.parentFrameId || 'none').substring(0, 16)).join(','),
-    });
-
-    let oopifSessionId: CdpSessionId | null = null;
-    let selectedTargetId: string | null = null;
-    let selectedUrl: string | null = null;
-    let selectedParentFrame: string | null = null;
-    let matchMethod: string | null = null;
-
-    // ── Instrumentation: Phase 2 timing ─────────────────────────────
     const phase2Start = Date.now();
+
+    // ── Resolve page's own frameId upfront (stable across polls) ────
+    const pageFrameId: string | null = yield* pageSend('Page.getFrameTree', {}, pageCdpSessionId).pipe(
+      Effect.map((r: any) => (r?.frameTree?.frame?.id as string) ?? null),
+      Effect.orElseSucceed(() => null as string | null),
+    );
+
+    yield* Effect.annotateCurrentSpan({
+      'cf.phase2.page_frame_id': pageFrameId?.substring(0, 16) ?? 'null',
+    });
     yield* events.marker(pageTargetId, 'cf.phase2_start', {
-      candidate_count: candidates.length,
       has_iframe_frame_id: !!iframeFrameId,
+      page_frame_id: pageFrameId?.substring(0, 16) ?? null,
       via,
     });
 
-    // Primary: match by frameId from page-side DOM.describeNode
-    // The iframe element's frameId (from page session) matches the target's
-    // frame tree root frame ID. frameId is a global Chrome identifier (unlike
-    // backendNodeId which is per-connection).
-    if (iframeFrameId && candidates.length > 0) {
-      for (const target of candidates) {
-        const attachStart = Date.now();
-        const trySessionId = yield* send('Target.attachToTarget', {
-          targetId: target.targetId,
-          flatten: true,
-        }).pipe(Effect.map((r: any) => r?.sessionId ?? null));
+    // ── Closured CDP helpers ────────────────────────────────────────
 
+    /** Fetch CF OOPIF candidates (re-executed each poll — Effect is lazy). */
+    const fetchCandidates = send('Target.getTargets').pipe(
+      Effect.orElseSucceed(() => ({ targetInfos: [] as any[] })),
+      Effect.map((r: any) =>
+        ((r?.targetInfos ?? []) as OOPIFCandidate[]).filter(isCFCandidate),
+      ),
+    );
+
+    /** Attach to a target, emit diagnostic marker, return sessionId or null. */
+    const attachToTarget = (target: OOPIFCandidate, strategy: string, poll: number) =>
+      Effect.fn('cf.phase2.attach')(function*() {
+        const start = Date.now();
+        const sessionId: CdpSessionId | null = yield* send('Target.attachToTarget', {
+          targetId: target.targetId, flatten: true,
+        }).pipe(
+          Effect.map((r: any) => (r?.sessionId as CdpSessionId) ?? null),
+          Effect.orElseSucceed(() => null as CdpSessionId | null),
+        );
         yield* events.marker(pageTargetId, 'cf.phase2_attach', {
           targetId: target.targetId.substring(0, 20),
-          success: !!trySessionId,
-          elapsed_ms: Date.now() - attachStart,
-          loop: 'primary',
+          success: !!sessionId,
+          elapsed_ms: Date.now() - start,
+          poll, strategy,
         });
+        return sessionId;
+      })();
 
-        if (!trySessionId) continue; // This target didn't match — try next
+    /** Get the frame tree root frameId for an attached OOPIF session. */
+    const getFrameTreeId = (sessionId: CdpSessionId): Effect.Effect<string | null> =>
+      send('Page.getFrameTree', {}, sessionId).pipe(
+        Effect.map((r: any) => (r?.frameTree?.frame?.id as string) ?? null),
+        Effect.orElseSucceed(() => null as string | null),
+      );
 
-        const ft = yield* send('Page.getFrameTree', {}, trySessionId);
-        const frameId = ft?.frameTree?.frame?.id;
-        if (!frameId) continue; // This target didn't match — try next
+    // ── Matching strategies ─────────────────────────────────────────
 
-        if (frameId === iframeFrameId || target.targetId === iframeFrameId) {
-          oopifSessionId = trySessionId;
-          selectedTargetId = target.targetId;
-          selectedUrl = target.url ?? null;
-          selectedParentFrame = target.parentFrameId ?? null;
-          matchMethod = 'frameId_match';
-          yield* events.marker(pageTargetId, 'cf.oopif_discovered', {
-            method: 'active', via,
-            filter: 'frameId_match',
-            targetId: target.targetId,
-            url: target.url?.substring(0, 100),
-            total_candidates: candidates.length,
-          });
-          break;
-        }
-      }
-    }
-
-    // Fallback: parentFrameId filter (if page-side traversal failed)
-    // When iframeFrameId is set but frameId_match failed, the correct OOPIF
-    // likely hasn't appeared in Target.getTargets yet (Chrome registers OOPIFs
-    // asynchronously after the iframe element appears in the DOM). Poll for it.
-    if (!oopifSessionId) {
-      const maxOopifPolls = iframeFrameId ? MAX_OOPIF_POLLS : 1; // 6 × 500ms = 3s max wait
-      for (let oopifPoll = 0; oopifPoll < maxOopifPolls; oopifPoll++) {
-        if (oopifPoll > 0) {
-          yield* Effect.sleep('500 millis').pipe(
-            Effect.withSpan('cf.phase2.pollSleep', { attributes: { 'cf.poll': oopifPoll } }),
-          );
-          // Re-fetch targets — the correct OOPIF may have appeared
-          const refreshed = yield* send('Target.getTargets').pipe(
-            Effect.orElseSucceed(() => ({ targetInfos: [] as any[] })),
-          );
-          const refreshedCandidates = (refreshed.targetInfos ?? []).filter(
-            (t: { type: string; url?: string }) =>
-              (t.type === 'iframe' || t.type === 'page')
-              && t.url?.includes('challenges.cloudflare.com')
-              && !isCFTestWidget(t.url),
-          );
-          // Try frameId_match on refreshed targets
-          for (const target of refreshedCandidates) {
-            const attachStart = Date.now();
-            const trySessionId = yield* send('Target.attachToTarget', {
-              targetId: target.targetId,
-              flatten: true,
-            }).pipe(Effect.map((r: any) => r?.sessionId ?? null));
-
-            yield* events.marker(pageTargetId, 'cf.phase2_attach', {
-              targetId: target.targetId.substring(0, 20),
-              success: !!trySessionId,
-              elapsed_ms: Date.now() - attachStart,
-              loop: 'fallback_retry',
-              poll: oopifPoll,
+    /**
+     * Try frameId match: Phase 1 gave us the iframe's frameId — attach
+     * each candidate and compare frame tree root ID against iframeFrameId.
+     */
+    const tryFrameIdMatch = (
+      candidates: readonly OOPIFCandidate[],
+      poll: number,
+    ): Effect.Effect<OOPIFMatch | null> => {
+      if (!iframeFrameId) return Effect.succeed(null);
+      return Effect.fn('cf.phase2.frameIdScan')(function*() {
+        for (const target of candidates) {
+          const sid = yield* attachToTarget(target, 'frameId', poll);
+          if (!sid) continue;
+          const fid = yield* getFrameTreeId(sid);
+          if (fid && (fid === iframeFrameId || target.targetId === iframeFrameId)) {
+            yield* events.marker(pageTargetId, 'cf.oopif_discovered', {
+              method: 'active', via, filter: 'frameId_match',
+              targetId: target.targetId, url: target.url?.substring(0, 100),
+              total_candidates: candidates.length, poll,
             });
+            return { sessionId: sid, target, method: 'frameId_match' as const };
+          }
+        }
+        return null;
+      })();
+    };
 
-            if (!trySessionId) continue;
-            const ft = yield* send('Page.getFrameTree', {}, trySessionId);
-            const frameId = ft?.frameTree?.frame?.id;
-            if (frameId && (frameId === iframeFrameId || target.targetId === iframeFrameId)) {
-              oopifSessionId = trySessionId;
-              selectedTargetId = target.targetId;
-              selectedUrl = target.url ?? null;
-              selectedParentFrame = target.parentFrameId ?? null;
-              matchMethod = 'frameId_match_retry';
-              yield* events.marker(pageTargetId, 'cf.oopif_discovered', {
-                method: 'active', via,
-                filter: 'frameId_match_retry',
-                targetId: target.targetId,
-                url: target.url?.substring(0, 100),
-                total_candidates: refreshedCandidates.length,
-                poll: oopifPoll,
+    /**
+     * Try parentFrameId match: filter candidates whose parentFrameId matches
+     * the page's root frameId, then cross-validate against iframeFrameId
+     * when available to reject stale OOPIFs.
+     */
+    const tryParentMatch = (
+      candidates: readonly OOPIFCandidate[],
+      poll: number,
+    ): Effect.Effect<OOPIFMatch | null> => {
+      if (!pageFrameId) return Effect.succeed(null);
+      const filtered = candidates.filter((t) => t.parentFrameId === pageFrameId);
+      if (filtered.length === 0) return Effect.succeed(null);
+      return Effect.fn('cf.phase2.parentScan')(function*() {
+        for (const target of filtered) {
+          const sid = yield* attachToTarget(target, 'parentFrameId', poll);
+          if (!sid) continue;
+          // Cross-validate against Phase 1 frameId when available
+          if (iframeFrameId) {
+            const fid = yield* getFrameTreeId(sid);
+            if (fid && fid !== iframeFrameId && target.targetId !== iframeFrameId) {
+              yield* events.marker(pageTargetId, 'cf.oopif_stale', {
+                via, targetId: target.targetId,
+                expected_frame_id: (iframeFrameId as string).substring(0, 20),
+                actual_frame_id: fid.substring(0, 20),
+                poll,
               });
-              break;
+              continue;
             }
           }
-          if (oopifSessionId) break;
-          continue;
+          yield* events.marker(pageTargetId, 'cf.oopif_discovered', {
+            method: 'active', via, filter: 'parentFrameId',
+            targetId: target.targetId, url: target.url?.substring(0, 100),
+            total_candidates: filtered.length, poll,
+          });
+          return { sessionId: sid, target, method: 'parentFrameId' as const };
         }
+        return null;
+      })();
+    };
 
-        // First poll (oopifPoll === 0): use parentFrameId filter on existing candidates
-        let pageFrameId: string | null = null;
-        const frameTree = yield* pageSend('Page.getFrameTree', {}, pageCdpSessionId);
-        pageFrameId = frameTree?.frameTree?.frame?.id ?? null;
+    // ── Poll loop ────────────────────────────────────────────────────
+    // Object wrapper: TS control flow analysis doesn't narrow properties,
+    // so mutations inside Effect.fn callbacks are tracked correctly.
+    const result: { match: OOPIFMatch | null; pollsUsed: number } = {
+      match: null,
+      pollsUsed: 0,
+    };
 
-        let cfTargets = pageFrameId
-          ? candidates.filter(
-              (t: { parentFrameId?: string }) => t.parentFrameId === pageFrameId,
-            )
-          : [];
+    for (let poll = 0; poll < MAX_OOPIF_POLLS && !result.match; poll++) {
+      result.pollsUsed = poll + 1;
+      yield* Effect.fn('cf.phase2.poll')(function*() {
+        yield* Effect.annotateCurrentSpan({ 'cf.phase2.poll': poll });
+        if (poll > 0) yield* Effect.sleep(OOPIF_POLL_DELAY);
 
-        if (cfTargets.length === 0) cfTargets = candidates;
+        const candidates = yield* fetchCandidates;
 
         yield* Effect.annotateCurrentSpan({
-          'cf.phase2.page_frame_id': pageFrameId?.substring(0, 16) ?? 'null',
-          'cf.phase2.parent_filtered_count': cfTargets.length,
+          'cf.phase2.cf_candidates': candidates.length,
+          'cf.phase2.candidate_ids': candidates.map((t) => t.targetId?.substring(0, 16)).join(','),
+          'cf.phase2.candidate_urls': candidates.map((t) => (t.url || '').substring(0, 80)).join(' | '),
+          'cf.phase2.candidate_parents': candidates.map((t) => (t.parentFrameId || 'none').substring(0, 16)).join(','),
         });
 
-        if (cfTargets.length > 0) {
-          const target = cfTargets[0];
-          const attachStart = Date.now();
-          const sessionId = yield* send('Target.attachToTarget', {
-            targetId: target.targetId,
-            flatten: true,
-          }).pipe(Effect.map((r: any) => r?.sessionId ?? null));
+        if (candidates.length === 0) return;
 
-          yield* events.marker(pageTargetId, 'cf.phase2_attach', {
-            targetId: target.targetId.substring(0, 20),
-            success: !!sessionId,
-            elapsed_ms: Date.now() - attachStart,
-            loop: 'fallback_first',
-          });
+        // Priority 1: frameId match (Phase 1 anchor)
+        const frameMatch = yield* tryFrameIdMatch(candidates, poll);
+        if (frameMatch) { result.match = frameMatch; return; }
 
-          if (sessionId) {
-            // If we have iframeFrameId, verify this OOPIF matches before committing
-            if (iframeFrameId) {
-              const ft = yield* send('Page.getFrameTree', {}, sessionId);
-              const frameId = ft?.frameTree?.frame?.id;
-              if (frameId && frameId !== iframeFrameId && target.targetId !== iframeFrameId) {
-                // Stale OOPIF — doesn't match our Phase 1 iframe. Keep polling.
-                yield* events.marker(pageTargetId, 'cf.oopif_stale', {
-                  via, targetId: target.targetId,
-                  expected_frame_id: (iframeFrameId as string).substring(0, 20),
-                  actual_frame_id: frameId?.substring(0, 20),
-                  poll: oopifPoll,
-                });
-                continue;
-              }
-            }
-            oopifSessionId = sessionId;
-            selectedTargetId = target.targetId;
-            selectedUrl = target.url ?? null;
-            selectedParentFrame = target.parentFrameId ?? null;
-            matchMethod = pageFrameId ? 'parentFrameId' : 'url';
-            yield* events.marker(pageTargetId, 'cf.oopif_discovered', {
-              method: 'active', via,
-              filter: pageFrameId ? 'parentFrameId' : 'url',
-              targetId: target.targetId,
-              url: target.url?.substring(0, 100),
-              total_candidates: cfTargets.length,
-            });
-            break;
-          }
-        }
-      }
+        // Priority 2: parentFrameId match (page frameId anchor)
+        const parentMatch = yield* tryParentMatch(candidates, poll);
+        if (parentMatch) { result.match = parentMatch; return; }
+
+        // No match this poll
+        yield* events.marker(pageTargetId, 'cf.phase2_no_match', {
+          poll, candidates: candidates.length,
+          has_iframe_frame_id: !!iframeFrameId,
+          has_page_frame_id: !!pageFrameId,
+        });
+      })();
     }
 
+    // ── Final annotations ────────────────────────────────────────────
+    const { match, pollsUsed } = result;
+
     yield* Effect.annotateCurrentSpan({
-      'cf.oopif_found': !!oopifSessionId,
-      'cf.phase2.selected_target_id': selectedTargetId?.substring(0, 16) ?? 'none',
-      'cf.phase2.selected_url': selectedUrl?.substring(0, 80) ?? 'none',
-      'cf.phase2.selected_parent_frame': selectedParentFrame?.substring(0, 16) ?? 'none',
-      'cf.phase2.match_method': matchMethod ?? 'none',
+      'cf.oopif_found': !!match,
+      'cf.phase2.polls_used': pollsUsed,
+      'cf.phase2.selected_target_id': match?.target.targetId?.substring(0, 16) ?? 'none',
+      'cf.phase2.selected_url': match?.target.url?.substring(0, 80) ?? 'none',
+      'cf.phase2.selected_parent_frame': match?.target.parentFrameId?.substring(0, 16) ?? 'none',
+      'cf.phase2.match_method': match?.method ?? 'none',
     });
     yield* events.marker(pageTargetId, 'cf.phase2_end', {
-      found: !!oopifSessionId,
+      found: !!match,
       elapsed_ms: Date.now() - phase2Start,
-      candidates_tried: candidates.length,
+      polls_used: pollsUsed,
+      method: match?.method ?? 'none',
     });
-    return oopifSessionId;
+
+    return match?.sessionId ?? null;
   })();
 }
