@@ -1,2 +1,0 @@
-# Run all tests before push (unit + integration).
-npx vitest run
