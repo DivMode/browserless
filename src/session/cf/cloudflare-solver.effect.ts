@@ -83,7 +83,14 @@ export const solveDetection = (
           yield* deps.startActivityLoopInterstitial(interstitial).pipe(Effect.forkChild);
         }
 
-        const clicked = yield* solveByClicking(active, deps);
+        // Race click attempts against auto-solve detection.
+        // Managed interstitials may auto-solve without a clickable checkbox —
+        // without this race, solveByClicking burns 6 × ~3.5s = 22s polling
+        // for a checkbox that doesn't exist, while CF auto-solves at ~3-8s.
+        const clicked = yield* Effect.raceFirst(
+          solveByClicking(active, deps),
+          active.abortLatch.await.pipe(Effect.map(() => false)),
+        );
         if (active.aborted) return SO.Aborted();
         if (clicked) return SO.ClickDispatched();
 

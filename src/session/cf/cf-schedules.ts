@@ -69,8 +69,10 @@ export const RECHALLENGE_DELAY_MS = 500;
 /** OOPIF polling: max retry polls when frameId doesn't match. */
 export const MAX_OOPIF_POLLS = 6;
 
-/** OOPIF polling: delay between poll attempts. */
-export const OOPIF_POLL_DELAY = '500 millis' as const;
+/** OOPIF polling: delay between poll attempts.
+ * Reduced from 500 to 200 — Target.getTargets is ~2ms, so 200ms gives
+ * plenty of margin while discovering the OOPIF 2.5× faster. */
+export const OOPIF_POLL_DELAY = '200 millis' as const;
 
 /** Phase 3 checkbox polling: max attempts. */
 export const MAX_CHECKBOX_POLLS = 16;

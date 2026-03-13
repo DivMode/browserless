@@ -205,6 +205,9 @@ interface CfTestSite {
  * - `nowsecure.nl`: test sitekey `3x00000000...` — auto-passes, not useful
  * - `cloudflarechallenge.com`: times out — WebAuthn challenge type we don't target
  */
+// NEVER CHANGE THESE EXPECTED SUMMARIES. They are the contract.
+// If a run produces a label not in this list, the SOLVER is broken — fix the solver, not the test.
+// Int✗, Emb✗, session_close, no_resolution are ALL failures. NEVER add them here.
 const CF_TEST_SITES: CfTestSite[] = [
   {
     name: '2captcha-cf',
@@ -212,7 +215,6 @@ const CF_TEST_SITES: CfTestSite[] = [
     expectedTypes: ['interstitial', 'turnstile', 'managed'],
     waitStrategy: 'interstitial', // safe for both — no Runtime.evaluate
     expectedSummaries: ['Int→', 'Int✓', 'Emb→', 'Emb✓', 'Int→ Emb→', 'Int→ Emb✓', 'Int✓ Emb→', 'Int✓ Emb✓'],
-    maySkip: true, // 2captcha demo has its own rate limits — CF may refuse to resolve
   },
   {
     name: 'nopecha-ts',

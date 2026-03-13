@@ -180,6 +180,7 @@ describe('classifyOOPIFDetection', () => {
  */
 function makeActive(overrides: {
   type?: CloudflareInfo['type'];
+  url?: string;
   clickDelivered?: boolean;
   clickDeliveredAt?: number;
   rechallengeCount?: number;
@@ -188,7 +189,7 @@ function makeActive(overrides: {
 }): ActiveDetection {
   const type = overrides.type ?? 'interstitial';
   const info: CloudflareInfo = {
-    type, url: 'https://example.com', detectionMethod: 'url_pattern',
+    type, url: overrides.url ?? 'https://example.com', detectionMethod: 'url_pattern',
   };
   return {
     info,
@@ -332,9 +333,14 @@ effectDescribe('classifyNavigationOutcome', () => {
   // The old code would abort+resolve here, killing the solver fiber.
   // The fix: classify as CosmeticUrlChange → don't touch detection state.
 
-  effectIt.live('CosmeticUrlChange — clean URL but CF title still showing (the 67040.info bug)', () =>
+  effectIt.live('CosmeticUrlChange — same origin+path, only query params stripped (the 67040.info bug)', () =>
     Effect.gen(function*() {
-      const active = makeActive({ type: 'interstitial', clickDelivered: false });
+      // Detection URL had __cf_chl_rt_tk query param; CF stripped it via history.replaceState.
+      // Same origin + same path → cosmetic (replaceState can only modify within same origin+path).
+      const active = makeActive({
+        type: 'interstitial', clickDelivered: false,
+        url: 'https://67040.info/?__cf_chl_rt_tk=abc123',
+      });
       const outcome = yield* classifyNavigationOutcome(
         active, 'https://67040.info/', 'Just a moment...', noCF,
       );
@@ -346,12 +352,15 @@ effectDescribe('classifyNavigationOutcome', () => {
     }),
   );
 
-  effectIt.live('InterstitialSolved — stale CF title after cosmeticNavSeen (the 2captcha-cf fix)', () =>
+  effectIt.live('InterstitialSolved — same-origin same-path after cosmeticNavSeen (the 2captcha-cf fix)', () =>
     Effect.gen(function*() {
       // Simulates: first targetInfoChanged was classified as CosmeticUrlChange (set flag),
-      // then Chrome fires a second targetInfoChanged with stale title. The one-shot guard
-      // ensures this falls through to InterstitialSolved instead of being swallowed.
-      const active = makeActive({ type: 'interstitial', clickDelivered: true, cosmeticNavSeen: true });
+      // then Chrome fires a second targetInfoChanged with same URL. The one-shot guard
+      // ensures this falls through to InterstitialSolved instead of being swallowed again.
+      const active = makeActive({
+        type: 'interstitial', clickDelivered: true, cosmeticNavSeen: true,
+        url: 'https://67040.info/?__cf_chl_rt_tk=abc',
+      });
       const outcome = yield* classifyNavigationOutcome(
         active, 'https://67040.info/', 'Just a moment...', noCF,
       );
@@ -363,13 +372,54 @@ effectDescribe('classifyNavigationOutcome', () => {
     }),
   );
 
-  effectIt.live('CosmeticUrlChange — "Attention Required" title variant', () =>
+  effectIt.live('CosmeticUrlChange — same-origin same-path with CF title is cosmetic', () =>
     Effect.gen(function*() {
-      const active = makeActive({ type: 'interstitial' });
+      // Same origin + same path + title still a CF challenge title → cosmetic (replaceState).
+      // history.replaceState strips __cf_chl_rt_tk but cannot change document.title.
+      const active = makeActive({ type: 'interstitial', url: 'https://example.com/?__cf_chl_rt_tk=x' });
       const outcome = yield* classifyNavigationOutcome(
-        active, 'https://example.com/', 'Attention Required! | Cloudflare', noCF,
+        active, 'https://example.com/', 'Just a moment...', noCF,
       );
       expect(outcome._tag).toBe('CosmeticUrlChange');
+    }),
+  );
+
+  effectIt.live('InterstitialSolved — same-origin same-path with non-CF title is a real solve (2captcha-cf)', () =>
+    Effect.gen(function*() {
+      // Same origin+path BUT title changed from CF challenge to real content.
+      // history.replaceState CANNOT change document.title — title change proves
+      // cross-document navigation. This is a real auto-solve, not cosmetic.
+      // Catches the 2captcha-cf bug: managed challenge auto-solves to same URL,
+      // title changes from "Just a moment..." to the site's real title.
+      const active = makeActive({ type: 'interstitial', url: 'https://2captcha.com/demo/cloudflare-turnstile-challenge?__cf_chl_rt_tk=abc' });
+      const outcome = yield* classifyNavigationOutcome(
+        active, 'https://2captcha.com/demo/cloudflare-turnstile-challenge', '2captcha Turnstile Challenge Demo', noCF,
+      );
+      expect(outcome._tag).toBe('InterstitialSolved');
+    }),
+  );
+
+  effectIt.live('InterstitialSolved — different path is NOT cosmetic (real navigation)', () =>
+    Effect.gen(function*() {
+      // CF interstitial at /challenge redirects to /dashboard after solve.
+      // Different pathname → replaceState impossible → real navigation → solved.
+      const active = makeActive({ type: 'interstitial', clickDelivered: true, url: 'https://example.com/challenge' });
+      const outcome = yield* classifyNavigationOutcome(
+        active, 'https://example.com/dashboard', 'Dashboard', noCF,
+      );
+      expect(outcome._tag).toBe('InterstitialSolved');
+    }),
+  );
+
+  effectIt.live('InterstitialSolved — different origin is NOT cosmetic (cross-origin redirect)', () =>
+    Effect.gen(function*() {
+      // Detection on CF domain, navigation lands on the actual site.
+      // Different origin → replaceState impossible → real navigation → solved.
+      const active = makeActive({ type: 'interstitial', clickDelivered: true, url: 'https://challenges.cloudflare.com/page' });
+      const outcome = yield* classifyNavigationOutcome(
+        active, 'https://example.com/', 'Example', noCF,
+      );
+      expect(outcome._tag).toBe('InterstitialSolved');
     }),
   );
 

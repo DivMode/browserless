@@ -380,7 +380,7 @@ export class CloudflareSolveStrategies {
       );
       if (!checkboxResult) return ClickResult.NoCheckbox();
 
-      const { checkbox, method: cbMethod, checkboxFoundAt } = checkboxResult;
+      const { checkbox, method: cbMethod } = checkboxResult;
 
       // ── Phase 4: Visibility check, scroll, bounds, click ─────────────
       // No delay — pydoll clicks immediately after finding the checkbox.
@@ -388,7 +388,7 @@ export class CloudflareSolveStrategies {
       // All Input events on isolated WS (same as DOM/Runtime).
       const clickResult = yield* strategies.phase4Click(
         send, send, send, oopifSessionId, active,
-        checkbox, cbMethod, iframeBackendNodeId, cleanConn, via, attempt, solveStart, checkboxFoundAt,
+        checkbox, cbMethod, iframeBackendNodeId, cleanConn, via, attempt, solveStart,
       );
 
       // ── CF Network timing: query Performance API for CF resource load times ──
@@ -458,10 +458,17 @@ export class CloudflareSolveStrategies {
     via: string,
     attempt: number,
     solveStart: number,
-    checkboxFoundAt: number,
   ): Effect.Effect<ClickResult, never, typeof SolverEvents.Identifier> {
     const pageTargetId = active.pageTargetId;
     return Effect.fn('cf.phase4Click')(function*() {
+      // checkboxFoundAt and phase4Start are the SAME instant.
+      // Captured FIRST — before any span annotations or service lookups.
+      // This eliminates the timing gap between phase 3→4 where Effect span
+      // machinery (ending phase 3 span, context switch, creating phase 4 span)
+      // would inject 10-20ms, making checkbox_to_click_ms > phase4_duration_ms.
+      const checkboxFoundAt = Date.now();
+      const phase4Start = checkboxFoundAt;
+
       yield* Effect.annotateCurrentSpan({
         'cf.type': active.info.type,
         'cf.target_id': pageTargetId,
@@ -470,7 +477,6 @@ export class CloudflareSolveStrategies {
         'cf.checkbox_method': method,
       });
       const events = yield* SolverEvents;
-      const phase4Start = Date.now();
 
       yield* events.marker(pageTargetId, 'cf.phase4_start', { via, attempt });
 
