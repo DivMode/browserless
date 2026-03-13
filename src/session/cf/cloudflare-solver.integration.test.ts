@@ -404,9 +404,9 @@ describe('CF Solver Integration (real nopecha.com)', () => {
       const polls = Number(checkboxFound!.payload.polls ?? 0);
       console.log(`  checkbox: found_at=${findMs}ms polls=${polls} method=${checkboxFound!.payload.method}`);
 
-      // MAX_CHECKBOX_POLLS = 16 in cf-schedules.ts — solver's actual polling budget.
+      // MAX_CHECKBOX_POLLS = 64 in cf-schedules.ts — solver's actual polling budget.
       // nopecha.com's Turnstile widget render time varies by CF's server-side timing.
-      expect(polls).toBeLessThanOrEqual(16);
+      expect(polls).toBeLessThanOrEqual(64);
       expect(findMs).toBeLessThan(10_000);
 
       // Verify poll interval via phase3_strategy markers
@@ -420,7 +420,7 @@ describe('CF Solver Integration (real nopecha.com)', () => {
         const sleepGap = gap - cdpMs;
         console.log(`  poll_gap: ${gap}ms (cdp=${cdpMs}ms, sleep≈${sleepGap}ms)`);
         // Isolate sleep interval from CDP call time.
-        // CHECKBOX_POLL_INTERVAL_MS = 200 + scheduling overhead ≈ < 500ms.
+        // CHECKBOX_POLL_INTERVAL_MS = 50 + scheduling overhead ≈ < 500ms.
         expect(sleepGap).toBeLessThan(500);
         // Full gap sanity: even with slow CDP under concurrent load, < 3s
         expect(gap).toBeLessThan(3000);
