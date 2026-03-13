@@ -94,7 +94,7 @@ RUN curl -fsSL https://bun.com/install | bash && \
 
 COPY package.json package-lock.json ./
 
-RUN npm clean-install
+RUN npm clean-install --ignore-scripts
 
 COPY assets assets
 COPY bin bin
