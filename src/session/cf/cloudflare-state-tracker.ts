@@ -365,9 +365,9 @@ export class CloudflareStateTracker {
   addSolvedCFTarget(oopifId: string, pageTargetId: TargetId): Effect.Effect<void> {
     const tracker = this;
     return Effect.suspend(() => {
-      tracker.solvedCFTargetIds.add(oopifId);
       const scope = tracker.pageCleanupScopes.get(pageTargetId);
-      if (!scope) return Effect.void;  // safety: no scope = cleanup falls to destroy()
+      if (!scope) return Effect.void;  // no scope = entry would leak without cleanup finalizer
+      tracker.solvedCFTargetIds.add(oopifId);
       return Scope.addFinalizer(scope, Effect.sync(() => {
         tracker.solvedCFTargetIds.delete(oopifId);
       }));
@@ -379,9 +379,9 @@ export class CloudflareStateTracker {
    * where we're outside an Effect generator context.
    */
   addSolvedCFTargetSync(oopifId: string, pageTargetId: TargetId): void {
-    this.solvedCFTargetIds.add(oopifId);
     const scope = this.pageCleanupScopes.get(pageTargetId);
-    if (!scope) return;  // safety: no scope = cleanup falls to destroy()
+    if (!scope) return;  // no scope = entry would leak without cleanup finalizer
+    this.solvedCFTargetIds.add(oopifId);
     Effect.runSync(Scope.addFinalizer(scope, Effect.sync(() => {
       this.solvedCFTargetIds.delete(oopifId);
     })));
