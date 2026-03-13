@@ -74,6 +74,11 @@ export const MAX_OOPIF_POLLS = 6;
  * plenty of margin while discovering the OOPIF 2.5× faster. */
 export const OOPIF_POLL_DELAY = '200 millis' as const;
 
+/** OOPIF probe: per-candidate timeout for attach+getFrameTree.
+ * Normal attach+getFrameTree is <35ms. 3s gives generous headroom while
+ * preventing stale/closing OOPIFs from blocking for the 30s CDP default. */
+export const OOPIF_PROBE_TIMEOUT = '3 seconds' as const;
+
 /** Phase 3 checkbox polling: max attempts. */
 export const MAX_CHECKBOX_POLLS = 16;
 

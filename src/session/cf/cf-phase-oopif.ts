@@ -12,7 +12,7 @@
 import { Effect } from 'effect';
 import type { CdpSessionId, TargetId } from '../../shared/cloudflare-detection.js';
 import { SolverEvents } from './cf-services.js';
-import { MAX_OOPIF_POLLS, OOPIF_POLL_DELAY } from './cf-schedules.js';
+import { MAX_OOPIF_POLLS, OOPIF_POLL_DELAY, OOPIF_PROBE_TIMEOUT } from './cf-schedules.js';
 
 /** Effect-returning CDP sender — eliminates the Promise bridge. */
 type EffectSend = (
@@ -138,36 +138,49 @@ export function phase2OOPIFResolution(
     // ── Matching strategies ─────────────────────────────────────────
 
     /**
-     * Try frameId match: Phase 1 gave us the iframe's frameId — attach
-     * each candidate and compare frame tree root ID against iframeFrameId.
+     * Try frameId match: Phase 1 gave us the iframe's frameId — race all
+     * candidates concurrently. First match wins, losers interrupted.
+     *
+     * Pre-filters by parentFrameId to skip OOPIFs from sibling tabs.
+     * Per-probe timeout prevents stale targets from blocking (30s CDP default).
      */
     const tryFrameIdMatch = (
       candidates: readonly OOPIFCandidate[],
       poll: number,
     ): Effect.Effect<OOPIFMatch | null> => {
       if (!iframeFrameId) return Effect.succeed(null);
+      // Pre-filter: only scan OOPIFs parented to OUR page
+      const ours = pageFrameId
+        ? candidates.filter((t) => t.parentFrameId === pageFrameId)
+        : candidates;
+      if (ours.length === 0) return Effect.succeed(null);
       return Effect.fn('cf.phase2.frameIdScan')(function*() {
-        for (const target of candidates) {
-          const sid = yield* attachToTarget(target, 'frameId', poll);
-          if (!sid) continue;
-          const fid = yield* getFrameTreeId(sid);
-          if (fid && (fid === iframeFrameId || target.targetId === iframeFrameId)) {
-            yield* events.marker(pageTargetId, 'cf.oopif_discovered', {
-              method: 'active', via, filter: 'frameId_match',
-              targetId: target.targetId, url: target.url?.substring(0, 100),
-              total_candidates: candidates.length, poll,
-            });
-            return { sessionId: sid, target, method: 'frameId_match' as const };
-          }
-        }
-        return null;
+        // Race all candidates — first frameId match wins, losers interrupted
+        return yield* Effect.raceAll(
+          ours.map((target) =>
+            Effect.fn('cf.phase2.probe')(function*() {
+              const sid = yield* attachToTarget(target, 'frameId', poll);
+              if (!sid) return yield* Effect.fail('no-session' as const);
+              const fid = yield* getFrameTreeId(sid);
+              if (!fid || (fid !== iframeFrameId && target.targetId !== iframeFrameId)) {
+                return yield* Effect.fail('no-match' as const);
+              }
+              yield* events.marker(pageTargetId, 'cf.oopif_discovered', {
+                method: 'active', via, filter: 'frameId_match',
+                targetId: target.targetId, url: target.url?.substring(0, 100),
+                total_candidates: ours.length, poll,
+              });
+              return { sessionId: sid, target, method: 'frameId_match' as const } satisfies OOPIFMatch;
+            })().pipe(Effect.timeout(OOPIF_PROBE_TIMEOUT)),
+          ),
+        ).pipe(Effect.orElseSucceed(() => null as OOPIFMatch | null));
       })();
     };
 
     /**
      * Try parentFrameId match: filter candidates whose parentFrameId matches
-     * the page's root frameId, then cross-validate against iframeFrameId
-     * when available to reject stale OOPIFs.
+     * the page's root frameId, race concurrently, cross-validate against
+     * iframeFrameId when available.
      */
     const tryParentMatch = (
       candidates: readonly OOPIFCandidate[],
@@ -177,30 +190,33 @@ export function phase2OOPIFResolution(
       const filtered = candidates.filter((t) => t.parentFrameId === pageFrameId);
       if (filtered.length === 0) return Effect.succeed(null);
       return Effect.fn('cf.phase2.parentScan')(function*() {
-        for (const target of filtered) {
-          const sid = yield* attachToTarget(target, 'parentFrameId', poll);
-          if (!sid) continue;
-          // Cross-validate against Phase 1 frameId when available
-          if (iframeFrameId) {
-            const fid = yield* getFrameTreeId(sid);
-            if (fid && fid !== iframeFrameId && target.targetId !== iframeFrameId) {
-              yield* events.marker(pageTargetId, 'cf.oopif_stale', {
-                via, targetId: target.targetId,
-                expected_frame_id: (iframeFrameId as string).substring(0, 20),
-                actual_frame_id: fid.substring(0, 20),
-                poll,
+        return yield* Effect.raceAll(
+          filtered.map((target) =>
+            Effect.fn('cf.phase2.probe')(function*() {
+              const sid = yield* attachToTarget(target, 'parentFrameId', poll);
+              if (!sid) return yield* Effect.fail('no-session' as const);
+              // Cross-validate against Phase 1 frameId when available
+              if (iframeFrameId) {
+                const fid = yield* getFrameTreeId(sid);
+                if (fid && fid !== iframeFrameId && target.targetId !== iframeFrameId) {
+                  yield* events.marker(pageTargetId, 'cf.oopif_stale', {
+                    via, targetId: target.targetId,
+                    expected_frame_id: (iframeFrameId as string).substring(0, 20),
+                    actual_frame_id: fid.substring(0, 20),
+                    poll,
+                  });
+                  return yield* Effect.fail('stale' as const);
+                }
+              }
+              yield* events.marker(pageTargetId, 'cf.oopif_discovered', {
+                method: 'active', via, filter: 'parentFrameId',
+                targetId: target.targetId, url: target.url?.substring(0, 100),
+                total_candidates: filtered.length, poll,
               });
-              continue;
-            }
-          }
-          yield* events.marker(pageTargetId, 'cf.oopif_discovered', {
-            method: 'active', via, filter: 'parentFrameId',
-            targetId: target.targetId, url: target.url?.substring(0, 100),
-            total_candidates: filtered.length, poll,
-          });
-          return { sessionId: sid, target, method: 'parentFrameId' as const };
-        }
-        return null;
+              return { sessionId: sid, target, method: 'parentFrameId' as const } satisfies OOPIFMatch;
+            })().pipe(Effect.timeout(OOPIF_PROBE_TIMEOUT)),
+          ),
+        ).pipe(Effect.orElseSucceed(() => null as OOPIFMatch | null));
       })();
     };
 

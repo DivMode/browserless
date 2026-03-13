@@ -543,8 +543,10 @@ describe.concurrent('CF Solver Multi-Site', () => {
             const labelHasClick = summary!.label.includes('✓');
             const labelEndsAuto = summary!.label.endsWith('→');
 
-            // Click delivered → label MUST be ✓ (the original phantom bug: click_solve overwritten to →)
-            if (hasClickMarker && labelEndsAuto) {
+            // Click delivered → label MUST contain ✓ (the original phantom bug: click_solve overwritten to →)
+            // For compound labels (Int✓ Emb→), the ✓ is from the click phase and → from a separate
+            // auto-solve phase — both are legitimate. Only fail when NO ✓ exists despite a click.
+            if (hasClickMarker && labelEndsAuto && !labelHasClick) {
               throw fail(
                 `cf.oopif_click ok=true but label '${summary!.label}' shows auto (→) — ` +
                 `phantom auto_solve overwrote click_solve`,
