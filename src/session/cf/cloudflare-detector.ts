@@ -1,4 +1,4 @@
-import { Cause, Data, Effect, Latch } from 'effect';
+import { Cause, Data, Effect, Latch, Match, pipe } from 'effect';
 import { runForkInServer } from '../../otel-runtime.js';
 import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, CloudflareType, EmbeddedInfo, InterstitialCFType } from '../../shared/cloudflare-detection.js';
 import { isInterstitialType, isCFInterstitialTitle } from '../../shared/cloudflare-detection.js';
@@ -383,8 +383,8 @@ export class CloudflareDetector {
         );
 
         // ── Phase B: Dispatch ────────────────────────────────────────
-        switch (outcome._tag) {
-          case 'CosmeticUrlChange':
+        const skipPhaseC: boolean = yield* pipe(Match.value(outcome),
+          Match.tag('CosmeticUrlChange', (o) => {
             // DO NOT abort, DO NOT resolve — solver keeps running.
             // CF stripped __cf_chl_rt_tk from URL via history.replaceState. The page
             // is still showing the challenge. Set one-shot flag so the NEXT
@@ -395,104 +395,113 @@ export class CloudflareDetector {
             active.cosmeticNavSeen = true;
             active.verificationEvidence = 'cosmetic_nav';
             self.events.marker(targetId, 'cf.cosmetic_url_change', {
-              title: outcome.title.substring(0, 50), url: outcome.url.substring(0, 200),
+              title: o.title.substring(0, 50), url: o.url.substring(0, 200),
             });
-            break; // fall through to Phase C
-
-          case 'TurnstileToCF':
-            yield* abortAndResolve();
-            yield* Effect.logInfo('Turnstile detection interrupted by navigation to CF URL — discarding (not a rechallenge)').pipe(
-              Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid }),
-            );
-            self.state.bindingSolvedTargets.add(targetId);
-            break; // fall through to Phase C
-
-          case 'TurnstileSolved': {
-            yield* abortAndResolve();
-            // PHANTOM GUARD: Set solvedPages HERE (producer side) before falling through
-            // to detection loop. triggerSolveFromUrlEffect sets it on the consumer side
-            // but runs in a separate fiber that hasn't woken up yet.
-            self.state.solvedPages.add(targetId);
-            const attr = deriveSolveAttribution('page_navigated', outcome.clickDelivered);
-            const result = {
-              solved: true as const, type: 'turnstile' as const, method: attr.method,
-              signal: 'page_navigated', duration_ms: outcome.duration,
-              attempts: active.attempt, auto_resolved: attr.autoResolved,
-              phase_label: attr.label,
-            };
-            yield* active.resolution.solve(result);
-            if (attr.method === 'click_navigation' && outcome.clickDeliveredAt) {
-              self.events.marker(targetId, 'cf.click_to_nav', {
-                click_to_nav_ms: Date.now() - outcome.clickDeliveredAt, type: 'turnstile',
+            return Effect.succeed(false);
+          }),
+          Match.tag('TurnstileToCF', () =>
+            abortAndResolve().pipe(
+              Effect.andThen(Effect.logInfo('Turnstile detection interrupted by navigation to CF URL — discarding (not a rechallenge)').pipe(
+                Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid }),
+              )),
+              Effect.andThen(Effect.sync(() => { self.state.bindingSolvedTargets.add(targetId); })),
+              Effect.map(() => false),
+            ),
+          ),
+          Match.tag('TurnstileSolved', (o) =>
+            Effect.fn('cf.nav.turnstileSolved')(function*() {
+              yield* abortAndResolve();
+              // PHANTOM GUARD: Set solvedPages HERE (producer side) before falling through
+              // to detection loop. triggerSolveFromUrlEffect sets it on the consumer side
+              // but runs in a separate fiber that hasn't woken up yet.
+              self.state.solvedPages.add(targetId);
+              const attr = deriveSolveAttribution('page_navigated', o.clickDelivered);
+              const result = {
+                solved: true as const, type: 'turnstile' as const, method: attr.method,
+                signal: 'page_navigated', duration_ms: o.duration,
+                attempts: active.attempt, auto_resolved: attr.autoResolved,
+                phase_label: attr.label,
+              };
+              yield* active.resolution.solve(result);
+              if (attr.method === 'click_navigation' && o.clickDeliveredAt) {
+                self.events.marker(targetId, 'cf.click_to_nav', {
+                  click_to_nav_ms: Date.now() - o.clickDeliveredAt, type: 'turnstile',
+                });
+              }
+              return false;
+            })(),
+          ),
+          Match.tag('Rechallenge', (o) =>
+            Effect.fn('cf.nav.rechallenge')(function*() {
+              yield* abortAndResolve();
+              self.events.marker(targetId, 'cf.rechallenge', {
+                type: active.info.type, duration_ms: o.duration,
+                click_delivered: o.clickDelivered,
+                rechallenge_count: o.rechallengeCount,
               });
-            }
-            break;
-          }
+              const rechallengeLabel = o.clickDelivered ? '✓' : '→';
+              yield* active.resolution.fail('rechallenge', o.duration, rechallengeLabel);
+              yield* Effect.logInfo('Navigation landed on another CF challenge — suppressing cf.solved').pipe(
+                Effect.annotateLogs({ cf_type: active.info.type, rechallenge_count: o.rechallengeCount, max_rechallenges: MAX_RECHALLENGES, target_id: targetId.slice(0, 8), session_id: self.sid }),
+              );
+              self.state.pendingRechallengeCount.set(targetId, o.rechallengeCount);
+              return false;
+            })(),
+          ),
+          Match.tag('RechallengeLimitReached', (o) =>
+            Effect.fn('cf.nav.rechallengeLimitReached')(function*() {
+              yield* abortAndResolve();
+              yield* Effect.logInfo('Rechallenge limit reached — emitting cf.failed').pipe(
+                Effect.annotateLogs({ rechallenge_count: o.rechallengeCount, cf_type: active.info.type, target_id: targetId.slice(0, 8), session_id: self.sid }),
+              );
+              const rechallengeLabel = o.clickDelivered ? '✓' : '→';
+              yield* active.resolution.fail('rechallenge_limit', o.duration, rechallengeLabel);
+              self.state.bindingSolvedTargets.add(targetId);
+              return true; // skip Phase C
+            })(),
+          ),
+          Match.tag('InterstitialSolved', (o) =>
+            Effect.fn('cf.nav.interstitialSolved')(function*() {
+              // Emit cf.solved marker BEFORE abortAndResolve — the abort closes the
+              // scope and by the time resolution.solve wakes up the consumer, a new
+              // cf.detected (turnstile) may already be in the replay. Emitting here
+              // ensures the interstitial's cf.solved precedes any turnstile cf.detected.
+              const attr = deriveSolveAttribution('page_navigated', o.clickDelivered);
+              const result = {
+                solved: true as const, type: o.emitType, method: attr.method,
+                signal: 'page_navigated', duration_ms: o.duration,
+                attempts: active.attempt, auto_resolved: attr.autoResolved,
+                phase_label: attr.label,
+              };
+              self.state.pushPhase(targetId, o.emitType, attr.label);
+              const label = self.state.buildCompoundLabel(targetId);
+              self.events.emitSolved(active, result, label);
+              active.resolution.markerEmitted = true;
 
-          case 'Rechallenge': {
-            yield* abortAndResolve();
-            self.events.marker(targetId, 'cf.rechallenge', {
-              type: active.info.type, duration_ms: outcome.duration,
-              click_delivered: outcome.clickDelivered,
-              rechallenge_count: outcome.rechallengeCount,
-            });
-            const rechallengeLabel = outcome.clickDelivered ? '✓' : '→';
-            yield* active.resolution.fail('rechallenge', outcome.duration, rechallengeLabel);
-            yield* Effect.logInfo('Navigation landed on another CF challenge — suppressing cf.solved').pipe(
-              Effect.annotateLogs({ cf_type: active.info.type, rechallenge_count: outcome.rechallengeCount, max_rechallenges: MAX_RECHALLENGES, target_id: targetId.slice(0, 8), session_id: self.sid }),
-            );
-            self.state.pendingRechallengeCount.set(targetId, outcome.rechallengeCount);
-            break;
-          }
-
-          case 'RechallengeLimitReached': {
-            yield* abortAndResolve();
-            yield* Effect.logInfo('Rechallenge limit reached — emitting cf.failed').pipe(
-              Effect.annotateLogs({ rechallenge_count: outcome.rechallengeCount, cf_type: active.info.type, target_id: targetId.slice(0, 8), session_id: self.sid }),
-            );
-            const rechallengeLabel = outcome.clickDelivered ? '✓' : '→';
-            yield* active.resolution.fail('rechallenge_limit', outcome.duration, rechallengeLabel);
-            self.state.bindingSolvedTargets.add(targetId);
-            return; // skip Phase C
-          }
-
-          case 'InterstitialSolved': {
-            // Emit cf.solved marker BEFORE abortAndResolve — the abort closes the
-            // scope and by the time resolution.solve wakes up the consumer, a new
-            // cf.detected (turnstile) may already be in the replay. Emitting here
-            // ensures the interstitial's cf.solved precedes any turnstile cf.detected.
-            const attr = deriveSolveAttribution('page_navigated', outcome.clickDelivered);
-            const result = {
-              solved: true as const, type: outcome.emitType, method: attr.method,
-              signal: 'page_navigated', duration_ms: outcome.duration,
-              attempts: active.attempt, auto_resolved: attr.autoResolved,
-              phase_label: attr.label,
-            };
-            self.state.pushPhase(targetId, outcome.emitType, attr.label);
-            const label = self.state.buildCompoundLabel(targetId);
-            self.events.emitSolved(active, result, label);
-            active.resolution.markerEmitted = true;
-
-            yield* abortAndResolve();
-            // NOTE: Do NOT add to solvedPages here. Interstitial solves don't produce
-            // phantom OOPIFs (they redirect to the real page). Only TURNSTILE solves
-            // produce phantom token-refresh OOPIFs. Adding interstitial solves to
-            // solvedPages blocks the embedded Turnstile detection in multi-phase
-            // (Int→Emb) flows — a P0 regression proven in production 2026-03-02.
-            yield* active.resolution.solve(result);
-            if (attr.method === 'click_navigation' && outcome.clickDeliveredAt) {
-              self.events.marker(targetId, 'cf.click_to_nav', {
-                click_to_nav_ms: Date.now() - outcome.clickDeliveredAt, type: outcome.emitType,
-              });
-            }
-            break;
-          }
-
-          case 'NonInteractiveFailed':
-            yield* abortAndResolve();
-            yield* active.resolution.fail('page_navigated', outcome.duration);
-            break;
-        }
+              yield* abortAndResolve();
+              // NOTE: Do NOT add to solvedPages here. Interstitial solves don't produce
+              // phantom OOPIFs (they redirect to the real page). Only TURNSTILE solves
+              // produce phantom token-refresh OOPIFs. Adding interstitial solves to
+              // solvedPages blocks the embedded Turnstile detection in multi-phase
+              // (Int→Emb) flows — a P0 regression proven in production 2026-03-02.
+              yield* active.resolution.solve(result);
+              if (attr.method === 'click_navigation' && o.clickDeliveredAt) {
+                self.events.marker(targetId, 'cf.click_to_nav', {
+                  click_to_nav_ms: Date.now() - o.clickDeliveredAt, type: o.emitType,
+                });
+              }
+              return false;
+            })(),
+          ),
+          Match.tag('NonInteractiveFailed', (o) =>
+            abortAndResolve().pipe(
+              Effect.andThen(active.resolution.fail('page_navigated', o.duration)),
+              Effect.map(() => false),
+            ),
+          ),
+          Match.exhaustive,
+        ) as Effect.Effect<boolean>;
+        if (skipPhaseC) return;
       }
 
       // ── Phase C: Post-navigation detection ─────────────────────────
@@ -853,31 +862,34 @@ export class CloudflareDetector {
           // Complete Resolution for immediate failures — these are known outcomes
           // that don't require waiting for async signals.
           if (typeof rawOutcome === 'object' && '_tag' in rawOutcome) {
-            switch (rawOutcome._tag) {
-              case 'NoClick':
-                yield* Effect.logWarning('CF lifecycle: emit_failure').pipe(
+            yield* pipe(Match.value(rawOutcome as SolveOutcome),
+              Match.tag('NoClick', () =>
+                Effect.logWarning('CF lifecycle: emit_failure').pipe(
                   Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, reason: 'widget_not_found' }),
-                );
-                yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
-                break;
-              case 'NoCheckbox':
+                  Effect.andThen(self.emitSolveFailure(active, targetId, 'widget_not_found')),
+                ),
+              ),
+              Match.tag('NoCheckbox', () =>
                 // Interstitial: no checkbox ever rendered. Don't fast-fail —
                 // wait for bridge cf_error_page or auto-nav via resolution.awaitBounded below.
-                yield* Effect.logInfo('CF lifecycle: no_checkbox — waiting for bridge/auto-nav').pipe(
+                Effect.logInfo('CF lifecycle: no_checkbox — waiting for bridge/auto-nav').pipe(
                   Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid }),
-                );
-                break;
-              case 'Aborted':
+                ),
+              ),
+              Match.tag('Aborted', () => {
                 if (!active.aborted) {
                   const reason = active.clickDelivered ? 'session_gone_after_click' : 'session_gone';
-                  yield* Effect.logWarning('CF lifecycle: emit_failure').pipe(
+                  return Effect.logWarning('CF lifecycle: emit_failure').pipe(
                     Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, reason, click_delivered: !!active.clickDelivered }),
+                    Effect.andThen(self.emitSolveFailure(active, targetId, reason)),
                   );
-                  yield* self.emitSolveFailure(active, targetId, reason);
                 }
-                break;
+                return Effect.void;
+              }),
               // ClickDispatched, AutoHandled — no action, fall through to resolution.awaitBounded
-            }
+              Match.tags({ ClickDispatched: () => Effect.void, AutoHandled: () => Effect.void }),
+              Match.exhaustive,
+            ) as Effect.Effect<void>;
           }
 
           // NOTE: No gap fix here for interstitials. When outcome='aborted' && active.aborted,
@@ -924,6 +936,7 @@ export class CloudflareDetector {
       });
       if (self.state.destroyed || !self.enabled) return;
       if (self.state.registry.has(targetId)) return;
+
       // PHANTOM GUARD: Skip detection on pages that already solved CF — new OOPIFs
       // spawned post-solve are not real challenges. See solvedPages JSDoc.
       if (self.state.solvedPages.has(targetId)) {
@@ -932,6 +945,19 @@ export class CloudflareDetector {
       }
 
       const startTime = Date.now();
+
+      // Resolve page's root frameId once (reused across all polls).
+      // Page.getFrameTree is a read-only CDP command — no V8 evaluation, safe for all page types.
+      const cdp = yield* CdpSender;
+      const pageFrameId: string | null = yield* cdp.send(
+        'Page.getFrameTree', {}, cdpSessionId,
+      ).pipe(
+        Effect.map((r: any) => (r?.frameTree?.frame?.id as string) ?? null),
+        Effect.orElseSucceed(() => null as string | null),
+      );
+      yield* Effect.annotateCurrentSpan({
+        'cf.detect.page_frame_id': pageFrameId?.substring(0, 16) ?? 'null',
+      });
 
       while (true) {
         if (self.state.destroyed || !self.enabled) return;
@@ -966,28 +992,51 @@ export class CloudflareDetector {
             continue;
           }
 
-          const filteredDetection = { ...detection, targets: ownedTargets };
+          // PARENT FILTER: Use parentFrameId from Target.getTargets to catch
+          // cross-tab OOPIFs that iframeToPage missed (race condition where
+          // onIframeAttached callback hasn't fired yet).
+          // Keep targets with: matching parentFrameId, OR unknown parent (conservative).
+          const parentFiltered = pageFrameId
+            ? ownedTargets.filter(t => !t.parentFrameId || t.parentFrameId === pageFrameId)
+            : ownedTargets;
+
+          if (parentFiltered.length === 0) {
+            // All targets belong to other pages (parentFrameId mismatch)
+            self.events.marker(targetId, 'cf.cross_tab_parent_filtered', {
+              page: targetId.slice(0, 8),
+              page_frame_id: pageFrameId?.substring(0, 16) ?? 'null',
+              targets: ownedTargets.map(t => ({
+                id: t.targetId.slice(0, 8),
+                parent: t.parentFrameId?.substring(0, 16) ?? 'unknown',
+              })),
+            });
+            yield* Effect.sleep(DETECTION_POLL_DELAY);
+            continue;
+          }
+
+          const filteredDetection = { ...detection, targets: parentFiltered };
 
           // Classify using all signals BEFORE dispatching to handler
           const pageInfo = self.strategies.getPageInfo(targetId as string);
           const classified = classifyOOPIFDetection(filteredDetection, pageInfo);
 
-          switch (classified._tag) {
-            case 'EmbeddedTurnstile':
-              yield* self.handleEmbeddedDetection(
-                targetId, cdpSessionId, classified.detection, classified.meta, startTime, pageInfo?.url,
-              );
-              break;
-            case 'InlineInterstitial':
+          yield* pipe(Match.value(classified),
+            Match.tag('EmbeddedTurnstile', (c) =>
+              self.handleEmbeddedDetection(
+                targetId, cdpSessionId, c.detection, c.meta, startTime, pageInfo?.url,
+              ),
+            ),
+            Match.tag('InlineInterstitial', (c) => {
               self.events.marker(targetId, 'cf.inline_interstitial_detected', {
-                title: classified.pageTitle.substring(0, 50),
-                page_url: classified.pageUrl.substring(0, 100),
-                oopif_url: classified.oopifUrl?.substring(0, 100),
-                sitekey: classified.meta?.sitekey ?? null,
+                title: c.pageTitle.substring(0, 50),
+                page_url: c.pageUrl.substring(0, 100),
+                oopif_url: c.oopifUrl?.substring(0, 100),
+                sitekey: c.meta?.sitekey ?? null,
               });
-              yield* self.triggerSolveFromUrlEffect(targetId, cdpSessionId, classified.pageUrl, 'managed');
-              break;
-          }
+              return self.triggerSolveFromUrlEffect(targetId, cdpSessionId, c.pageUrl, 'managed');
+            }),
+            Match.exhaustive,
+          ) as Effect.Effect<void, never, DetectorR>;
 
           // Common cleanup — scope-bound so entries are removed when page is destroyed
           for (const t of filteredDetection.targets) {

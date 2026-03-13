@@ -1,4 +1,4 @@
-import { Effect, Latch } from 'effect';
+import { Effect, Latch, Match } from 'effect';
 
 import { runForkInServer } from '../../otel-runtime.js';
 import { CdpSessionId } from '../../shared/cloudflare-detection.js';
@@ -48,8 +48,8 @@ export class CloudflareTracker {
   }
 
   onProgress(state: string, extra?: Record<string, any>): void {
-    switch (state) {
-      case 'widget_found':
+    Match.value(state).pipe(
+      Match.when('widget_found', () => {
         this.widgetFound = true;
         if (extra?.method) {
           this.widgetFindMethods.push(extra.method);
@@ -58,30 +58,24 @@ export class CloudflareTracker {
         if (extra?.x != null) this.widgetX = extra.x;
         if (extra?.y != null) this.widgetY = extra.y;
         if (extra?.debug) this.widgetFindDebug = extra.debug;
-        break;
-      case 'clicked':
+      }),
+      Match.when('clicked', () => {
         this.clicked = true;
         this.clickCount++;
         if (extra?.x != null) this.clickX = extra.x;
         if (extra?.y != null) this.clickY = extra.y;
         if (extra?.checkbox_to_click_ms != null) this.checkboxToClickMs = extra.checkbox_to_click_ms;
         if (extra?.phase4_duration_ms != null) this.phase4DurationMs = extra.phase4_duration_ms;
-        break;
-      case 'presence_complete':
+      }),
+      Match.when('presence_complete', () => {
         this.presencePhases++;
         if (extra?.presence_duration_ms != null)
           this.presenceDurationMs = extra.presence_duration_ms;
-        break;
-      case 'approach_complete':
-        this.approachPhases++;
-        break;
-      case 'activity_poll':
-        this.activityPollCount++;
-        break;
-      case 'false_positive':
-        this.falsePositiveCount++;
-        break;
-      case 'widget_error':
+      }),
+      Match.when('approach_complete', () => { this.approachPhases++; }),
+      Match.when('activity_poll', () => { this.activityPollCount++; }),
+      Match.when('false_positive', () => { this.falsePositiveCount++; }),
+      Match.when('widget_error', () => {
         this.widgetErrorCount++;
         if (extra?.error_type) this.lastErrorType = extra.error_type;
         if (extra?.diag_alive != null) {
@@ -93,15 +87,12 @@ export class CloudflareTracker {
             bodyLen: extra.diag_body_len,
           };
         }
-        break;
-      case 'success':
-      case 'verifying':
-      case 'fail':
-      case 'expired':
-      case 'timeout':
-        this.iframeStates.push(state);
-        break;
-    }
+      }),
+      Match.whenOr('success', 'verifying', 'fail', 'expired', 'timeout', (s) => {
+        this.iframeStates.push(s);
+      }),
+      Match.orElse(() => {}),
+    );
   }
 
   snapshot(): CloudflareSnapshot {

@@ -1,4 +1,4 @@
-import { Effect, Exit, Schedule, Scope } from 'effect';
+import { Effect, Exit, Match, pipe, Schedule, Scope } from 'effect';
 
 import { runForkInServer } from '../../otel-runtime.js';
 import {
@@ -223,30 +223,31 @@ export class CloudflareStateTracker {
       // targetId pre-resolved by CdpSession via TargetRegistry — no stale-map lookup.
       const pageTargetId = targetId;
 
-      switch (parsed.type) {
-        case 'solved': {
-          const token = parsed.token as string;
-          const tokenLength = parsed.tokenLength as number;
-          const active = tracker.registry.getActive(pageTargetId);
+      yield* Match.value(parsed.type).pipe(
+        Match.when('solved', () =>
+          Effect.fn('cf.bridge.solved')(function*() {
+            const token = parsed.token as string;
+            const tokenLength = parsed.tokenLength as number;
+            const active = tracker.registry.getActive(pageTargetId);
 
-          if (active && !active.aborted) {
-            // Bridge solved events only resolve embedded types (turnstile/non_interactive/invisible).
-            // Interstitials solve via page navigation — bridge events on the CF challenge page
-            // must not steal the resolution from the page_navigated signal.
-            if (isInterstitialType(active.info.type)) return;
-            yield* tracker.resolveAutoSolved(active as EmbeddedDetection, 'bridge_solved', token);
-            return;
-          }
+            if (active && !active.aborted) {
+              // Bridge solved events only resolve embedded types (turnstile/non_interactive/invisible).
+              // Interstitials solve via page navigation — bridge events on the CF challenge page
+              // must not steal the resolution from the page_navigated signal.
+              if (isInterstitialType(active.info.type)) return;
+              yield* tracker.resolveAutoSolved(active as EmbeddedDetection, 'bridge_solved', token);
+              return;
+            }
 
-          // No active detection — standalone Turnstile (fast-path auto-solve)
-          if (!tracker.bindingSolvedTargets.has(pageTargetId)) {
-            yield* Effect.annotateCurrentSpan({ 'cf.token_length': tokenLength });
-            tracker.events.emitStandaloneAutoSolved(pageTargetId, 'bridge_solved', tokenLength, tracker.knownPages.get(pageTargetId));
-            tracker.bindingSolvedTargets.add(pageTargetId);
-          }
-          break;
-        }
-        case 'error': {
+            // No active detection — standalone Turnstile (fast-path auto-solve)
+            if (!tracker.bindingSolvedTargets.has(pageTargetId)) {
+              yield* Effect.annotateCurrentSpan({ 'cf.token_length': tokenLength });
+              tracker.events.emitStandaloneAutoSolved(pageTargetId, 'bridge_solved', tokenLength, tracker.knownPages.get(pageTargetId));
+              tracker.bindingSolvedTargets.add(pageTargetId);
+            }
+          })(),
+        ),
+        Match.when('error', () => {
           const active = tracker.registry.get(pageTargetId);
           if (active && !active.aborted) {
             tracker.events.marker(pageTargetId, 'cf.bridge.widget_error', {
@@ -256,9 +257,9 @@ export class CloudflareStateTracker {
               error_type: parsed.errorType, has_token: parsed.hasToken,
             });
           }
-          break;
-        }
-        case 'timing': {
+          return Effect.void;
+        }),
+        Match.when('timing', () => {
           // Browser-side timing events — record as replay markers + span events
           const timingEvent = parsed.event as string;
           const browserTs = parsed.ts as number;
@@ -269,36 +270,37 @@ export class CloudflareStateTracker {
           });
           // Timing info captured via replay marker above — no manual span event needed.
           // Session-level root span provides unified tracing via Effect.withParentSpan.
-          break;
-        }
-        case 'detected': {
-          tracker.events.marker(pageTargetId, 'cf.bridge.detected', {
-            method: parsed.method,
-          });
-          const active = tracker.registry.getActive(pageTargetId);
-          const outcome = classifyBridgeDetected(active, parsed.method as string);
+          return Effect.void;
+        }),
+        Match.when('detected', () =>
+          Effect.fn('cf.bridge.detected')(function*() {
+            tracker.events.marker(pageTargetId, 'cf.bridge.detected', {
+              method: parsed.method,
+            });
+            const active = tracker.registry.getActive(pageTargetId);
+            const outcome = classifyBridgeDetected(active, parsed.method as string);
 
-          switch (outcome._tag) {
-            case 'InterstitialPostSolveErrorPage': {
-              const attr = deriveSolveAttribution('page_navigated', outcome.clickDelivered);
-              yield* active!.resolution.solve({
-                solved: true, type: outcome.type, method: attr.method,
-                duration_ms: outcome.duration, attempts: outcome.attempts,
-                auto_resolved: attr.autoResolved, signal: 'page_navigated',
-                phase_label: attr.label,
-              });
-              break;
-            }
-            case 'EmbeddedErrorPage':
-              yield* active!.resolution.fail('cf_error_page', outcome.duration);
-              break;
-            case 'Informational':
-            case 'NoActiveDetection':
-              break; // marker already emitted above
-          }
-          break;
-        }
-      }
+            yield* pipe(Match.value(outcome),
+              Match.tag('InterstitialPostSolveErrorPage', (o) => {
+                const attr = deriveSolveAttribution('page_navigated', o.clickDelivered);
+                return active!.resolution.solve({
+                  solved: true, type: o.type, method: attr.method,
+                  duration_ms: o.duration, attempts: o.attempts,
+                  auto_resolved: attr.autoResolved, signal: 'page_navigated',
+                  phase_label: attr.label,
+                });
+              }),
+              Match.tag('EmbeddedErrorPage', (o) =>
+                active!.resolution.fail('cf_error_page', o.duration),
+              ),
+              // marker already emitted above
+              Match.tags({ Informational: () => Effect.void, NoActiveDetection: () => Effect.void }),
+              Match.exhaustive,
+            );
+          })(),
+        ),
+        Match.orElse(() => Effect.void),
+      );
     })();
   }
 

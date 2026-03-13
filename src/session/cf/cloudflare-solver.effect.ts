@@ -8,7 +8,7 @@
  * The CloudflareSolver bridge (cloudflare-solver.ts) provides the services
  * via ManagedRuntime and calls these via runtime.runPromise().
  */
-import { Cause, Data, Effect } from 'effect';
+import { Cause, Data, Effect, Match, pipe } from 'effect';
 import { SolveOutcome } from './cloudflare-solve-strategies.js';
 import { DetectionContext } from './cf-detection-context.js';
 import { ClickResult } from './cloudflare-solve-strategies.js';
@@ -73,74 +73,72 @@ export const solveDetection = (
     const events = yield* SolverEvents;
     const deps = yield* SolveDeps;
 
-    switch (active.info.type) {
-      case 'managed':
-      case 'interstitial': {
-        const interstitial = narrowInterstitial(active);
-        // Interstitial activity loop — NO Runtime.evaluate (page IS the CF challenge)
-        if (!active.activityLoopStarted) {
-          yield* deps.markActivityLoopStarted();
-          yield* deps.startActivityLoopInterstitial(interstitial).pipe(Effect.forkChild);
-        }
+    return yield* Match.value(active.info.type).pipe(
+      Match.whenOr('managed', 'interstitial', () =>
+        Effect.fn('cf.solveInterstitial')(function*() {
+          const interstitial = narrowInterstitial(active);
+          // Interstitial activity loop — NO Runtime.evaluate (page IS the CF challenge)
+          if (!active.activityLoopStarted) {
+            yield* deps.markActivityLoopStarted();
+            yield* deps.startActivityLoopInterstitial(interstitial).pipe(Effect.forkChild);
+          }
 
-        // Race click attempts against auto-solve detection.
-        // Managed interstitials may auto-solve without a clickable checkbox —
-        // without this race, solveByClicking burns 6 × ~3.5s = 22s polling
-        // for a checkbox that doesn't exist, while CF auto-solves at ~3-8s.
-        const clicked = yield* Effect.raceFirst(
-          solveByClicking(active, deps),
-          active.abortLatch.await.pipe(Effect.map(() => false)),
-        );
-        if (active.aborted) return SO.Aborted();
-        if (clicked) return SO.ClickDispatched();
+          // Race click attempts against auto-solve detection.
+          // Managed interstitials may auto-solve without a clickable checkbox —
+          // without this race, solveByClicking burns 6 × ~3.5s = 22s polling
+          // for a checkbox that doesn't exist, while CF auto-solves at ~3-8s.
+          const clicked = yield* Effect.raceFirst(
+            solveByClicking(active, deps),
+            active.abortLatch.await.pipe(Effect.map(() => false)),
+          );
+          if (active.aborted) return SO.Aborted() as SolveDetectionResult;
+          if (clicked) return SO.ClickDispatched() as SolveDetectionResult;
 
-        yield* events.marker(active.pageTargetId, 'cf.waiting_auto_nav', {
-          type: active.info.type,
-          attempts_exhausted: true,
-        });
+          yield* events.marker(active.pageTargetId, 'cf.waiting_auto_nav', {
+            type: active.info.type,
+            attempts_exhausted: true,
+          });
 
-        yield* waitForAutoNav(active);
-        return active.aborted ? SO.Aborted() : SO.NoClick();
-      }
+          yield* waitForAutoNav(active);
+          return (active.aborted ? SO.Aborted() : SO.NoClick()) as SolveDetectionResult;
+        })(),
+      ),
+      Match.when('turnstile', () =>
+        Effect.fn('cf.solveTurnstileDispatch')(function*() {
+          const embedded = narrowEmbedded(active);
+          // Embedded activity loop — Runtime.evaluate is safe (page is embedding site)
+          if (!active.activityLoopStarted) {
+            yield* deps.markActivityLoopStarted();
+            yield* deps.startActivityLoopEmbedded(embedded).pipe(Effect.forkChild);
+          }
 
-      case 'turnstile': {
-        const embedded = narrowEmbedded(active);
-        // Embedded activity loop — Runtime.evaluate is safe (page is embedding site)
-        if (!active.activityLoopStarted) {
-          yield* deps.markActivityLoopStarted();
-          yield* deps.startActivityLoopEmbedded(embedded).pipe(Effect.forkChild);
-        }
+          // No outer timeout. All paths wait for push signal or session close:
+          // - Clicked: pure push, no timeout (session close is structural bound)
+          // - NoClick: pure push, no timeout (session close is structural bound)
+          const result = yield* solveTurnstile(active, deps);
+          if (active.aborted) return TR.Aborted() as SolveDetectionResult;
+          // Return TurnstileResult directly — detector pattern-matches on _tag
+          return result as SolveDetectionResult;
+        })(),
+      ),
+      Match.whenOr('non_interactive', 'invisible', () =>
+        Effect.fn('cf.solveAutoDispatch')(function*() {
+          const embedded = narrowEmbedded(active);
+          // Embedded activity loop — Runtime.evaluate is safe (page is embedding site)
+          if (!active.activityLoopStarted) {
+            yield* deps.markActivityLoopStarted();
+            yield* deps.startActivityLoopEmbedded(embedded).pipe(Effect.forkChild);
+          }
 
-        // No outer timeout. All paths wait for push signal or session close:
-        // - Clicked: pure push, no timeout (session close is structural bound)
-        // - NoClick: pure push, no timeout (session close is structural bound)
-        const result = yield* solveTurnstile(active, deps);
-        if (active.aborted) return TR.Aborted();
-        // Return TurnstileResult directly — detector pattern-matches on _tag
-        return result;
-      }
-
-      case 'non_interactive':
-      case 'invisible': {
-        const embedded = narrowEmbedded(active);
-        // Embedded activity loop — Runtime.evaluate is safe (page is embedding site)
-        if (!active.activityLoopStarted) {
-          yield* deps.markActivityLoopStarted();
-          yield* deps.startActivityLoopEmbedded(embedded).pipe(Effect.forkChild);
-        }
-
-        yield* solveAutomatic(active, deps);
-        return active.aborted ? SO.Aborted() : SO.AutoHandled();
-      }
-
-      case 'block':
-        return yield* Effect.die(new Error('block type should not reach solveDetection'));
-
-      default: {
-        const _exhaustive: never = active.info.type;
-        return yield* Effect.die(new Error(`Unhandled CloudflareType: ${_exhaustive}`));
-      }
-    }
+          yield* solveAutomatic(active, deps);
+          return (active.aborted ? SO.Aborted() : SO.AutoHandled()) as SolveDetectionResult;
+        })(),
+      ),
+      Match.when('block', () =>
+        Effect.die(new Error('block type should not reach solveDetection')),
+      ),
+      Match.exhaustive,
+    );
   })().pipe(
     Effect.catchCause((cause) => {
       // Interrupt = normal shutdown (target destroyed / FiberMap.remove).
@@ -189,29 +187,27 @@ const solveByClicking = (
         Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
       );
 
-      switch (result._tag) {
-        case 'Verified':
-          yield* deps.setClickDelivered(result.clickDeliveredAt);
-          yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
-          return true;
-
-        case 'NotVerified':
-          if (result.reason === 'oopif_gone') {
-            yield* events.marker(active.pageTargetId, 'cf.oopif_dead_interstitial', { attempt });
+      const exit: boolean | null = yield* pipe(
+        Match.value(result),
+        Match.tag('Verified', (r) =>
+          deps.setClickDelivered(r.clickDeliveredAt).pipe(
+            Effect.andThen(events.emitProgress(active, 'cdp_click_complete', { success: true, attempt })),
+            Effect.map((): boolean | null => true),
+          ),
+        ),
+        Match.tag('NotVerified', (r) => {
+          if (r.reason === 'oopif_gone') {
             // OOPIF dead — break loop, fall through to waitForAutoNav
-            return false;
+            return events.marker(active.pageTargetId, 'cf.oopif_dead_interstitial', { attempt }).pipe(
+              Effect.map((): boolean | null => false),
+            );
           }
-          continue;
-
-        case 'NoCheckbox':
-        case 'ClickFailed':
-          continue;
-
-        default: {
-          result satisfies never;
-          throw new Error('Unhandled ClickResult');
-        }
-      }
+          return Effect.succeed(null as boolean | null);
+        }),
+        Match.tags({ NoCheckbox: () => Effect.succeed(null as boolean | null), ClickFailed: () => Effect.succeed(null as boolean | null) }),
+        Match.exhaustive,
+      );
+      if (exit !== null) return exit;
     }
 
     yield* events.emitProgress(active, 'cdp_click_complete', { success: false, attempts: MAX_CLICK_ATTEMPTS });
@@ -273,25 +269,25 @@ const solveTurnstile = (
     // Non-interactive widgets never render a checkbox.
     const handleClickResult = (result: ClickResult, attempt: number): Effect.Effect<TurnstileResult | null> =>
       Effect.fn('cf.handleClickResult')(function*() {
-        switch (result._tag) {
-          case 'Verified':
-            yield* deps.setClickDelivered(result.clickDeliveredAt);
-            yield* events.emitProgress(active, 'cdp_click_complete', { success: true, attempt });
-            return TR.Clicked({ attempt });
-          case 'NotVerified':
-            if (result.reason === 'oopif_gone') {
-              yield* events.marker(pageTargetId, 'cf.oopif_dead_on_verify', { attempt });
-              return TR.OopifDead({ attempt });
+        return yield* pipe(
+          Match.value(result),
+          Match.tag('Verified', (r) =>
+            deps.setClickDelivered(r.clickDeliveredAt).pipe(
+              Effect.andThen(events.emitProgress(active, 'cdp_click_complete', { success: true, attempt })),
+              Effect.map((): TurnstileResult | null => TR.Clicked({ attempt })),
+            ),
+          ),
+          Match.tag('NotVerified', (r) => {
+            if (r.reason === 'oopif_gone') {
+              return events.marker(pageTargetId, 'cf.oopif_dead_on_verify', { attempt }).pipe(
+                Effect.map((): TurnstileResult | null => TR.OopifDead({ attempt })),
+              );
             }
-            return null;
-          case 'NoCheckbox':
-          case 'ClickFailed':
-            return null;
-          default: {
-            result satisfies never;
-            throw new Error('Unhandled ClickResult');
-          }
-        }
+            return Effect.succeed(null as TurnstileResult | null);
+          }),
+          Match.tags({ NoCheckbox: () => Effect.succeed(null as TurnstileResult | null), ClickFailed: () => Effect.succeed(null as TurnstileResult | null) }),
+          Match.exhaustive,
+        );
       })();
 
     const clickLoop = Effect.fn('cf.clickLoop')(function*() {
