@@ -231,14 +231,34 @@ export const classifyNavigationOutcome = (
       });
     }
 
-    // Clean URL — verify title to distinguish real nav from cosmetic strip.
-    // One-shot guard: only classify as cosmetic ONCE per detection. Chrome fires
-    // targetInfoChanged with stale title ("Just a moment...") during REAL navigations
-    // too — the URL updates before the new page's <title> is parsed. Without the
-    // one-shot guard, real navigation events get swallowed as cosmetic, leaving
-    // the detection unresolved (the Int? bug in 2captcha-cf integration test).
-    if (isCFInterstitialTitle(title) && !active.cosmeticNavSeen) {
-      return NavigationOutcome.CosmeticUrlChange({ title, url });
+    // Clean URL — detect cosmetic replaceState vs real navigation.
+    // CF strips __cf_chl_rt_tk from the URL via history.replaceState while the
+    // challenge is still active. replaceState can ONLY modify query params within
+    // the same origin+path — it cannot change the pathname or origin.
+    // If the path or origin changed, it's definitely a real navigation.
+    // One-shot guard: only classify as cosmetic ONCE per detection, so a second
+    // targetInfoChanged (the real solve) falls through to InterstitialSolved.
+    //
+    // TITLE CHECK: history.replaceState CANNOT change document.title — only a
+    // full cross-document navigation can. If the title changed from a CF challenge
+    // title ("Just a moment...") to a non-CF title, it's a real solve navigation
+    // even when origin+path are identical (e.g., 2captcha-cf auto-solves to the
+    // same URL). Without this check, the solve is swallowed as cosmetic → Int✗.
+    const isParamStripOnly = (() => {
+      try {
+        const det = new URL(active.info.url);
+        const dest = new URL(url);
+        return det.origin === dest.origin && det.pathname === dest.pathname;
+      } catch { return false; }
+    })();
+    if (isParamStripOnly && !active.cosmeticNavSeen) {
+      // Title still looks like a CF challenge → cosmetic (replaceState URL strip).
+      // Title changed to non-CF content → real solve (cross-document navigation).
+      const titleStillCF = !title || isCFInterstitialTitle(title);
+      if (titleStillCF) {
+        return NavigationOutcome.CosmeticUrlChange({ title, url });
+      }
+      // Fall through to InterstitialSolved — title proves real navigation.
     }
 
     return NavigationOutcome.InterstitialSolved({
@@ -366,15 +386,18 @@ export class CloudflareDetector {
         switch (outcome._tag) {
           case 'CosmeticUrlChange':
             // DO NOT abort, DO NOT resolve — solver keeps running.
-            // CF stripped __cf_chl_rt_tk from URL but page is still "Just a moment..."
-            // Set one-shot flag so the NEXT targetInfoChanged (title update or real nav)
-            // falls through to InterstitialSolved instead of being swallowed here again.
+            // CF stripped __cf_chl_rt_tk from URL via history.replaceState. The page
+            // is still showing the challenge. Set one-shot flag so the NEXT
+            // targetInfoChanged falls through to InterstitialSolved.
+            // No timeout, no title check — the solver is already retrying phase 1-4.
+            // If CF auto-solves, Chrome fires targetInfoChanged with a new path →
+            // InterstitialSolved. If CF doesn't solve, session_close is correct.
             active.cosmeticNavSeen = true;
             active.verificationEvidence = 'cosmetic_nav';
             self.events.marker(targetId, 'cf.cosmetic_url_change', {
               title: outcome.title.substring(0, 50), url: outcome.url.substring(0, 200),
             });
-            return; // skip Phase C entirely
+            break; // fall through to Phase C
 
           case 'TurnstileToCF':
             yield* abortAndResolve();
@@ -807,67 +830,79 @@ export class CloudflareDetector {
       self.events.emitDetected(active);
       self.events.marker(targetId, 'cf.detected', { type: cfType, method: 'url_pattern' });
 
-      // Dispatch solve via Effect service — no more fire-and-forget Promise
-      const dispatcher = yield* SolveDispatcher;
-      const rawOutcome = yield* dispatcher.dispatch(active).pipe(
-        Effect.catchCause((cause) => {
-          const err = Cause.squash(cause);
-          return Effect.logError('cf.triggerSolve dispatch defect').pipe(
-            Effect.annotateLogs({ error: String(err) }),
-            Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
-          );
-        }),
-      );
-      // Complete Resolution for immediate failures — these are known outcomes
-      // that don't require waiting for async signals.
-      if (typeof rawOutcome === 'object' && '_tag' in rawOutcome) {
-        switch (rawOutcome._tag) {
-          case 'NoClick':
-            yield* Effect.logWarning('CF lifecycle: emit_failure').pipe(
-              Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, reason: 'widget_not_found' }),
-            );
-            yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
-            break;
-          case 'NoCheckbox':
-            // Interstitial: no checkbox ever rendered. Don't fast-fail —
-            // wait for bridge cf_error_page or auto-nav via resolution.awaitBounded below.
-            yield* Effect.logInfo('CF lifecycle: no_checkbox — waiting for bridge/auto-nav').pipe(
-              Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid }),
-            );
-            break;
-          case 'Aborted':
-            if (!active.aborted) {
-              const reason = active.clickDelivered ? 'session_gone_after_click' : 'session_gone';
-              yield* Effect.logWarning('CF lifecycle: emit_failure').pipe(
-                Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, reason, click_delivered: !!active.clickDelivered }),
+      // Fork solver dispatch as a daemon fiber so it survives handler interruption.
+      // FiberMap dispatches targetInfoChanged handlers with the same key — a second
+      // targetInfoChanged (e.g., CF's history.replaceState cosmetic URL strip) will
+      // INTERRUPT the running handler fiber, killing the solver if it's inline.
+      // The daemon fiber is tied to the detection scope via Scope.addFinalizer —
+      // when the detection resolves or the session closes, the fiber is interrupted.
+      // forkIn(scope): fiber is tied to detection scope (not handler fiber).
+      // Interrupted on scope close (detection resolve or session close).
+      yield* Effect.forkIn(
+        Effect.fn('cf.triggerSolve.solver')(function*() {
+          const dispatcher = yield* SolveDispatcher;
+          const rawOutcome = yield* dispatcher.dispatch(active).pipe(
+            Effect.catchCause((cause) => {
+              const err = Cause.squash(cause);
+              return Effect.logError('cf.triggerSolve dispatch defect').pipe(
+                Effect.annotateLogs({ error: String(err) }),
+                Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
               );
-              yield* self.emitSolveFailure(active, targetId, reason);
+            }),
+          );
+          // Complete Resolution for immediate failures — these are known outcomes
+          // that don't require waiting for async signals.
+          if (typeof rawOutcome === 'object' && '_tag' in rawOutcome) {
+            switch (rawOutcome._tag) {
+              case 'NoClick':
+                yield* Effect.logWarning('CF lifecycle: emit_failure').pipe(
+                  Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, reason: 'widget_not_found' }),
+                );
+                yield* self.emitSolveFailure(active, targetId, 'widget_not_found');
+                break;
+              case 'NoCheckbox':
+                // Interstitial: no checkbox ever rendered. Don't fast-fail —
+                // wait for bridge cf_error_page or auto-nav via resolution.awaitBounded below.
+                yield* Effect.logInfo('CF lifecycle: no_checkbox — waiting for bridge/auto-nav').pipe(
+                  Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid }),
+                );
+                break;
+              case 'Aborted':
+                if (!active.aborted) {
+                  const reason = active.clickDelivered ? 'session_gone_after_click' : 'session_gone';
+                  yield* Effect.logWarning('CF lifecycle: emit_failure').pipe(
+                    Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, reason, click_delivered: !!active.clickDelivered }),
+                  );
+                  yield* self.emitSolveFailure(active, targetId, reason);
+                }
+                break;
+              // ClickDispatched, AutoHandled — no action, fall through to resolution.awaitBounded
             }
-            break;
-          // ClickDispatched, AutoHandled — no action, fall through to resolution.awaitBounded
-        }
-      }
+          }
 
-      // NOTE: No gap fix here for interstitials. When outcome='aborted' && active.aborted,
-      // it means onPageNavigated called ctx.abort() and is sleeping RECHALLENGE_DELAY_MS
-      // before completing Resolution. Let resolution.awaitBounded below wait for it (~500ms).
-      // The turnstile handler HAS a gap fix because OOPIF destruction IS the terminal signal.
+          // NOTE: No gap fix here for interstitials. When outcome='aborted' && active.aborted,
+          // it means onPageNavigated called ctx.abort() and is sleeping RECHALLENGE_DELAY_MS
+          // before completing Resolution. Let resolution.awaitBounded below wait for it (~500ms).
+          // The turnstile handler HAS a gap fix because OOPIF destruction IS the terminal signal.
 
-      // Await Resolution via race: resolution vs timeout (baked into Resolution deadline).
-      yield* self.awaitResolutionRace(ctx, {
-        timeoutReason: 'solver_exit',  // backward compat with existing Loki queries
-        counterLabel: 'interstitial',
-      });
+          // Await Resolution via race: resolution vs timeout (baked into Resolution deadline).
+          yield* self.awaitResolutionRace(ctx, {
+            timeoutReason: 'solver_exit',  // backward compat with existing Loki queries
+            counterLabel: 'interstitial',
+          });
 
-      // Snapshot ALL current CF OOPIFs so post-navigation detection won't re-detect stale targets
-      const postSolveSnapshot = yield* self.strategies.detectTurnstileViaCDP(cdpSessionId).pipe(
-        Effect.orElseSucceed(() => ({ _tag: 'not_detected' as const })),
+          // Snapshot ALL current CF OOPIFs so post-navigation detection won't re-detect stale targets
+          const postSolveSnapshot = yield* self.strategies.detectTurnstileViaCDP(cdpSessionId).pipe(
+            Effect.orElseSucceed(() => ({ _tag: 'not_detected' as const })),
+          );
+          if (postSolveSnapshot._tag === 'detected') {
+            for (const t of postSolveSnapshot.targets) {
+              self.state.solvedCFTargetIds.add(t.targetId);
+            }
+          }
+        })(),
+        ctx.scope,
       );
-      if (postSolveSnapshot._tag === 'detected') {
-        for (const t of postSolveSnapshot.targets) {
-          self.state.solvedCFTargetIds.add(t.targetId);
-        }
-      }
     })();
   }
 
