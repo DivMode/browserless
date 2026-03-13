@@ -1,5 +1,24 @@
+import Pyroscope from '@pyroscope/nodejs';
 import { Browserless } from '@browserless.io/browserless';
 import { Effect } from 'effect';
+
+// ── Continuous profiling (Pyroscope) ─────────────────────────────────
+// Must init before any other code to capture full startup profile.
+// Gracefully skips when PYROSCOPE_SERVER_ADDRESS is unset (local dev).
+if (process.env.PYROSCOPE_SERVER_ADDRESS) {
+  Pyroscope.init({
+    serverAddress: process.env.PYROSCOPE_SERVER_ADDRESS,
+    appName: process.env.OTEL_SERVICE_NAME ?? 'browserless',
+    basicAuthUser: process.env.PYROSCOPE_BASIC_AUTH_USER ?? '',
+    basicAuthPassword: process.env.PYROSCOPE_BASIC_AUTH_PASSWORD ?? '',
+    wall: { collectCpuTime: true },
+    tags: {
+      env: process.env.OTEL_DEPLOYMENT_ENVIRONMENT ?? 'production',
+      server: 'flatcar',
+    },
+  });
+  Pyroscope.start();
+}
 
 // ── Fail-fast env validation ─────────────────────────────────────────
 // REQUIRED env vars must be present BEFORE the server accepts connections.
