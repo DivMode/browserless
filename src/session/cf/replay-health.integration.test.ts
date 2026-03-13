@@ -27,7 +27,7 @@ import {
 describe('Replay Recording Health', () => {
   const wsUrl = buildWsUrl();
 
-  it('per-tab replays store events and CF markers', { timeout: 20_000 }, async () => {
+  it('per-tab replays store events and CF markers', async () => {
     const testStartTs = Date.now();
 
     const browser = await puppeteer.connect({
