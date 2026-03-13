@@ -1,4 +1,4 @@
-import { Cause, Effect, Exit, FiberMap, Layer, ManagedRuntime, Scope, type Tracer } from 'effect';
+import { Cause, Effect, Exit, FiberMap, Layer, ManagedRuntime, Scope, Semaphore, type Tracer } from 'effect';
 import { CdpSessionId } from '../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareConfig } from '../shared/cloudflare-detection.js';
 import { CloudflareDetector } from './cf/cloudflare-detector.js';
@@ -150,13 +150,20 @@ export class CloudflareSolver {
 
     const proxyOrDirect: SendCommand = (...args) => (self.sendViaProxy || sendCommand)(...args);
 
-    const cdpSenderLayer = Layer.succeed(CdpSender, CdpSender.of({
-      send: (method, params, sessionId, timeoutMs) =>
-        liftSend(sendCommand, method, params, sessionId, timeoutMs),
-      sendViaProxy: (method, params, sessionId, timeoutMs) =>
-        liftSend(proxyOrDirect, method, params, sessionId, timeoutMs),
-      sendViaBrowser: (method, params, sessionId, timeoutMs) =>
-        liftSend(proxyOrDirect, method, params, sessionId, timeoutMs),
+    // Semaphore limits concurrent CDP commands to Chrome — prevents backpressure
+    // when multiple tabs have active detection/solve loops firing simultaneously.
+    const CDP_CONCURRENCY = 3;
+    const cdpSenderLayer = Layer.effect(CdpSender, Effect.gen(function*() {
+      const sem = yield* Semaphore.make(CDP_CONCURRENCY);
+      const throttle = <A, E>(effect: Effect.Effect<A, E>) => sem.withPermits(1)(effect);
+      return CdpSender.of({
+        send: (method, params, sessionId, timeoutMs) =>
+          throttle(liftSend(sendCommand, method, params, sessionId, timeoutMs)),
+        sendViaProxy: (method, params, sessionId, timeoutMs) =>
+          throttle(liftSend(proxyOrDirect, method, params, sessionId, timeoutMs)),
+        sendViaBrowser: (method, params, sessionId, timeoutMs) =>
+          throttle(liftSend(proxyOrDirect, method, params, sessionId, timeoutMs)),
+      });
     }));
 
     const solverEventsLayer = Layer.succeed(SolverEvents, SolverEvents.of({
@@ -196,8 +203,8 @@ export class CloudflareSolver {
     }));
 
     // SolveDispatcher — routes solve attempts through the Effect solver.
-    // Per-solve isolated WS: each solve gets its own WebSocket to Chrome,
-    // Each solve gets its own isolated WS connection, so no concurrency limit needed.
+    // Per-solve isolated WS: each solve gets its own WebSocket to Chrome.
+    // Browser-level sends (originalSender) inherit the Semaphore from cdpSenderLayer.
     const solveDispatcherLayer = Layer.effect(SolveDispatcher, Effect.gen(function*() {
       const solverEvents = yield* SolverEvents;
       const solveDeps = yield* SolveDeps;
@@ -411,7 +418,7 @@ export class CloudflareSolver {
     }
 
     // FiberMap.run auto-interrupts existing fiber for same key.
-    // The detection effect is wrapped in catchAllCause to prevent silent fiber
+    // The detection effect is wrapped in catchCause to prevent silent fiber
     // death — without this, defects (NPE in emitClientEvent, etc.) kill the fiber
     // and pydoll never receives cf.solved/cf.failed (the "events=1" failure mode).
     const guarded = this.detector.detectTurnstileWidgetEffect(targetId, cdpSessionId).pipe(

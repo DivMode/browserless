@@ -62,6 +62,7 @@
     "@divmode/rrweb-plugin-console-record": "^0.0.40",
     "@hapi/bourne": "^3.0.0",
     "@hapi/hoek": "^11.0.4",
+    "@pyroscope/nodejs": "^0.4.10",
     "better-sqlite3": "^11.10.0",
     "debug": "^4.4.1",
     "del": "^8.0.1",
