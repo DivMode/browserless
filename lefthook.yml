@@ -1,24 +1,7 @@
 commit-msg:
   commands:
-    conventional-commit:
-      run: |
-        MSG=$(grep -v '^#' "{1}" | head -1)
-        if [ -z "$MSG" ]; then exit 0; fi
-        PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?: .+'
-        if ! echo "$MSG" | grep -qE "$PATTERN"; then
-          echo ""
-          echo "  Bad commit message: $MSG"
-          echo ""
-          echo "  Must match: <type>(<scope>): <description>"
-          echo ""
-          echo "  Types: feat fix docs style refactor perf test build ci chore revert"
-          echo "  Examples:"
-          echo "    feat: add shadow DOM diagnostics"
-          echo "    fix(solver): resolve WS leak race"
-          echo "    chore: update dependencies"
-          echo ""
-          exit 1
-        fi
+    commitlint:
+      run: npx commitlint --edit {1}
 
 pre-push:
   commands:
