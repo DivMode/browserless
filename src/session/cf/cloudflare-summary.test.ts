@@ -42,12 +42,19 @@
  * ⚠ No Data        │ Zero CF events in scrape
  * cf({n})          │ CF events but unrecognized phases
  *
+ * VERIFIED SESSION CLOSE LABELS (⊘ = CF verified, session closed before navigation)
+ * ──────────────────────────────────────────────────────────────────────
+ * Int⊘               │ Interstitial: CF verified, origin slow  │ detected(int) → failed(⊘, cf_verified=true)
+ * Emb⊘               │ Embedded: CF verified, origin slow      │ detected(ts) → failed(⊘, cf_verified=true)
+ * Int→Int⊘           │ Rechallenge then verified close         │ detected → failed(→) → detected → failed(⊘)
+ *
  * FAILURE REASONS (appear in ✗ labels)
  * ──────────────────────────────────────────────────────────────────────
  * timeout             │ 30s solver timeout expired
  * widget_not_found    │ OOPIF discovered but checkbox not in DOM
  * no_resolution       │ No solve signal arrived before timeout
- * session_close       │ Browser/tab closed during solve
+ * session_close       │ Browser/tab closed during solve (NO verification evidence)
+ * verified_session_close │ Browser/tab closed but CF HAD verified (⊘ label)
  * rechallenge_limit   │ Hit MAX_RECHALLENGES (6) without passing
  * rechallenge_skipped │ Embedded turnstile rechallenge — futile, skipped
  * solver_exit         │ Solver fiber exited before Resolution settled
@@ -91,6 +98,7 @@ const makeInfo = (overrides: Partial<CloudflareInfo> = {}): CloudflareInfo => ({
 const ALL_SIGNALS: SolveSignal[] = [
   'page_navigated', 'beacon_push', 'token_poll', 'activity_poll',
   'bridge_solved', 'state_change', 'callback_binding', 'session_close', 'cdp_dom_walk',
+  'verified_session_close',
 ];
 
 describe('deriveSolveAttribution', () => {
@@ -128,6 +136,10 @@ describe('deriveFailLabel', () => {
       expect(deriveFailLabel(reason)).toEqual({ label: `✗ ${reason}` });
     },
   );
+
+  it('verified_session_close → ⊘', () => {
+    expect(deriveFailLabel('verified_session_close')).toEqual({ label: '⊘' });
+  });
 });
 
 // ── 3. buildSummaryFromMarkers ───────────────────────────────────────
@@ -535,6 +547,76 @@ describe('buildSummaryFromMarkers', () => {
       // No solved or failed for embedded — session closed
     ];
     expect(buildSummaryFromMarkers(markers)!.label).toBe('Int✓ Emb?');
+  });
+
+  // ── Verified session close (⊘) labels ────────────────────────────
+
+  it('Int⊘ — interstitial verified but session closed', () => {
+    const markers = [
+      marker(CF_MARKERS.DETECTED, { type: 'interstitial' }),
+      marker(CF_MARKERS.FAILED, { reason: 'verified_session_close', phase_label: '⊘', cf_verified: true }),
+    ];
+    const result = buildSummaryFromMarkers(markers)!;
+    expect(result.label).toBe('Int⊘');
+    expect(result.cf_verified).toBe(true);
+  });
+
+  it('Emb⊘ — embedded verified but session closed', () => {
+    const markers = [
+      marker(CF_MARKERS.DETECTED, { type: 'turnstile' }),
+      marker(CF_MARKERS.FAILED, { reason: 'verified_session_close', phase_label: '⊘', cf_verified: true }),
+    ];
+    const result = buildSummaryFromMarkers(markers)!;
+    expect(result.label).toBe('Emb⊘');
+    expect(result.cf_verified).toBe(true);
+  });
+
+  it('Int→Int⊘ — rechallenge then verified close', () => {
+    const markers = [
+      marker(CF_MARKERS.DETECTED, { type: 'interstitial' }, 0),
+      marker(CF_MARKERS.FAILED, { reason: 'rechallenge', phase_label: '→' }, 3000),
+      marker(CF_MARKERS.RECHALLENGE, { rechallenge_count: 1 }, 3000),
+      marker(CF_MARKERS.DETECTED, { type: 'interstitial' }, 3500),
+      marker(CF_MARKERS.FAILED, { reason: 'verified_session_close', phase_label: '⊘', cf_verified: true }, 15000),
+    ];
+    const result = buildSummaryFromMarkers(markers)!;
+    expect(result.label).toBe('Int→Int⊘');
+    expect(result.cf_verified).toBe(true);
+    expect(result.rechallenge).toBe(true);
+  });
+
+  it('Int⊘ Emb→ — verified close on interstitial, embedded auto-solved', () => {
+    const markers = [
+      marker(CF_MARKERS.DETECTED, { type: 'interstitial' }, 0),
+      marker(CF_MARKERS.FAILED, { reason: 'verified_session_close', phase_label: '⊘', cf_verified: true }, 5000),
+      marker(CF_MARKERS.DETECTED, { type: 'turnstile' }, 6000),
+      marker(CF_MARKERS.SOLVED, { method: 'auto_solve', signal: 'bridge_solved', phase_label: '→' }, 8000),
+    ];
+    const result = buildSummaryFromMarkers(markers)!;
+    expect(result.label).toBe('Int⊘ Emb→');
+    expect(result.cf_verified).toBe(true);
+  });
+
+  it('non-verified session_close still produces Int✗ session_close', () => {
+    const markers = [
+      marker(CF_MARKERS.DETECTED, { type: 'interstitial' }),
+      marker(CF_MARKERS.FAILED, { reason: 'session_close', phase_label: '✗ session_close' }),
+    ];
+    const result = buildSummaryFromMarkers(markers)!;
+    expect(result.label).toBe('Int✗ session_close');
+    expect(result.cf_verified).toBeUndefined();
+  });
+
+  it('⊘ label skips assertSummaryConsistency validation', () => {
+    const summary: TurnstileSummary = {
+      label: 'Int⊘', type: 'interstitial', method: '',
+      rechallenge: false, cf_verified: true,
+    };
+    const markers = [
+      marker(CF_MARKERS.DETECTED, { type: 'interstitial' }),
+      marker(CF_MARKERS.FAILED, { reason: 'verified_session_close', phase_label: '⊘', cf_verified: true }),
+    ];
+    expect(assertSummaryConsistency(summary, markers)).toBeNull();
   });
 
   it('backward compat: Emb→ auto with no phase_label (old replay)', () => {
