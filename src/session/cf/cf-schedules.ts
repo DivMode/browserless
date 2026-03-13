@@ -79,13 +79,14 @@ export const OOPIF_POLL_DELAY = '200 millis' as const;
  * preventing stale/closing OOPIFs from blocking for the 30s CDP default. */
 export const OOPIF_PROBE_TIMEOUT = '3 seconds' as const;
 
-/** Phase 3 checkbox polling: max attempts. */
-export const MAX_CHECKBOX_POLLS = 16;
+/** Phase 3 checkbox polling: max attempts.
+ * 64 × 50ms = 3.2s total window (same as previous 16 × 200ms). */
+export const MAX_CHECKBOX_POLLS = 64;
 
 /** Phase 3 checkbox polling: interval between attempts (ms).
- * Reduced from 500 to 200 — DOM.getDocument is ~2-6ms, so 200ms gives
- * plenty of margin while detecting the checkbox 2.5x faster. */
-export const CHECKBOX_POLL_INTERVAL_MS = 200;
+ * Reduced from 200 to 50 — DOM.getDocument is ~2-6ms, so 50ms gives
+ * plenty of margin. Saves ~75ms avg per scrape (1.6-4.8s CF WASM init). */
+export const CHECKBOX_POLL_INTERVAL_MS = 50;
 
 /** Clean WS open timeout (ms). */
 export const CLEAN_WS_OPEN_TIMEOUT_MS = 2_000;
