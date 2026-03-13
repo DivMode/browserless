@@ -41,7 +41,7 @@
     "test:integration": "vitest run --project=integration",
     "coverage": "npm run build:ts && c8 --reporter=text --reporter=html --reporter=lcov cross-env DEBUG=quiet mocha",
     "start": "env-cmd -f .env bun build",
-    "prepare": "husky || true"
+    "prepare": "lefthook install"
   },
   "files": [
     "assets/*",
@@ -195,7 +195,7 @@
   "devDependencies": {
     "@effect/vitest": "4.0.0-beta.31",
     "env-cmd": "^11.0.0",
-    "husky": "^9.1.7",
+    "lefthook": "^1.11.13",
     "vitest": "^4.0.18"
   }
 }
