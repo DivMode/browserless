@@ -77,6 +77,8 @@ export interface CFTargetMatch {
   readonly url: string;
   readonly type: 'iframe' | 'page';
   readonly meta: TurnstileOOPIFMeta;
+  /** Chrome-reported parent frame — used to filter cross-tab OOPIFs at detection level. */
+  readonly parentFrameId?: string;
 }
 
 /** No CF OOPIF found (or all were filtered as stale). */
@@ -843,11 +845,12 @@ export class CloudflareSolveStrategies {
 
         return {
           _tag: 'detected' as const,
-          targets: matched.map((t: { type: string; url?: string; targetId?: string }) => ({
+          targets: matched.map((t: { type: string; url?: string; targetId?: string; parentFrameId?: string }) => ({
             targetId: t.targetId!,
             url: t.url ?? '',
             type: t.type as 'iframe' | 'page',
             meta: parseTurnstileOOPIFUrl(t.url ?? ''),
+            parentFrameId: t.parentFrameId,
           })),
         };
       })();
