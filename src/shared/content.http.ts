@@ -7,7 +7,6 @@ import {
   CDPLaunchOptions,
   ChromiumCDP,
   HTTPRoutes,
-  Logger,
   Methods,
   Request,
   SystemQueryParameters,
@@ -32,6 +31,7 @@ import {
 import { Page } from 'puppeteer-core';
 import { Effect } from 'effect';
 import { ServerResponse } from 'http';
+import { runForkInServer } from '../otel-runtime.js';
 
 export interface BodySchema {
   addScriptTag?: Array<Parameters<Page['addScriptTag']>[0]>;
@@ -80,12 +80,11 @@ export default class ChromiumContentPostRoute extends BrowserHTTPRoute {
   async handler(
     req: Request,
     res: ServerResponse,
-    logger: Logger,
     browser: BrowserInstance,
   ): Promise<void> {
     return Effect.runPromise(
       Effect.fn('route.content.post')(function* () {
-        logger.info('Content API invoked with body:', req.body);
+        yield* Effect.logInfo('Content API invoked with body: ' + JSON.stringify(req.body));
         const contentType =
           !req.headers.accept || req.headers.accept?.includes('*')
             ? contentTypes.html
@@ -171,7 +170,7 @@ export default class ChromiumContentPostRoute extends BrowserHTTPRoute {
               !!rejectRequestPattern.find((pattern) => req.url().match(pattern)) ||
               rejectResourceTypes.includes(req.resourceType())
             ) {
-              logger.debug(`Aborting request ${req.method()}: ${req.url()}`);
+              runForkInServer(Effect.logDebug(`Aborting request ${req.method()}: ${req.url()}`));
               return req.abort();
             }
             const interceptor = requestInterceptors.find((r) =>
@@ -252,7 +251,7 @@ export default class ChromiumContentPostRoute extends BrowserHTTPRoute {
 
         page.close().catch(noop);
 
-        logger.info('Content API request completed');
+        yield* Effect.logInfo('Content API request completed');
 
         return writeResponse(res, 200, markup, contentTypes.html);
       })(),

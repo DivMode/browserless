@@ -6,7 +6,6 @@ import {
   CDPLaunchOptions,
   ChromiumCDP,
   HTTPRoutes,
-  Logger,
   Methods,
   NotFound,
   Request,
@@ -21,6 +20,7 @@ import {
 import { mkdir, readdir } from 'fs/promises';
 import { Effect } from 'effect';
 import { ServerResponse } from 'http';
+import { runForkInServer } from '../otel-runtime.js';
 import { createReadStream } from 'fs';
 import { deleteAsync } from 'del';
 import functionHandler from './utils/function/handler.js';
@@ -63,7 +63,6 @@ export default class ChromiumDownloadPostRoute extends BrowserHTTPRoute {
   async handler(
     req: Request,
     res: ServerResponse,
-    logger: Logger,
     browser: BrowserInstance,
   ): Promise<void> {
     const config = this.config();
@@ -74,18 +73,18 @@ export default class ChromiumDownloadPostRoute extends BrowserHTTPRoute {
           `.browserless.download.${id()}`,
         );
 
-        logger.info(`Generating a download directory at "${downloadPath}"`);
+        yield* Effect.logInfo(`Generating a download directory at "${downloadPath}"`);
         yield* Effect.promise(() => mkdir(downloadPath));
-        const handler = functionHandler(config, logger, { downloadPath });
+        const handler = functionHandler(config, { downloadPath });
         const response = yield* Effect.promise(() => handler(req, browser));
 
         const { page } = response;
-        logger.debug(`Download function has returned, finding downloads...`);
+        yield* Effect.logDebug(`Download function has returned, finding downloads...`);
         async function checkIfDownloadComplete(): Promise<string | null> {
           if (res.headersSent) {
-            logger.trace(
+            runForkInServer(Effect.logDebug(
               `Request headers have been sent, terminating download watch.`,
-            );
+            ));
             return null;
           }
           const [fileName] = await readdir(downloadPath);
@@ -94,13 +93,13 @@ export default class ChromiumDownloadPostRoute extends BrowserHTTPRoute {
             return checkIfDownloadComplete();
           }
 
-          logger.debug(`All files have finished downloading`);
+          runForkInServer(Effect.logDebug(`All files have finished downloading`));
 
           return path.join(downloadPath, fileName);
         }
 
         const filePath = yield* Effect.promise(() => checkIfDownloadComplete());
-        logger.debug(`Closing pages.`);
+        yield* Effect.logDebug(`Closing pages.`);
         page.close();
         page.removeAllListeners();
 
@@ -109,14 +108,14 @@ export default class ChromiumDownloadPostRoute extends BrowserHTTPRoute {
             filePath &&
             deleteAsync(filePath, { force: true })
               .then(() => {
-                logger.debug(
+                runForkInServer(Effect.logDebug(
                   `Successfully deleted downloads from disk at "${filePath}"`,
-                );
+                ));
               })
               .catch((err) => {
-                logger.error(
+                runForkInServer(Effect.logError(
                   `Error cleaning up downloaded files: "${err}" at "${filePath}"`,
-                );
+                ));
               }),
         );
 
@@ -145,7 +144,7 @@ export default class ChromiumDownloadPostRoute extends BrowserHTTPRoute {
                   }
                 })
                 .on('end', () => {
-                  logger.info(`Downloads successfully sent`);
+                  runForkInServer(Effect.logInfo(`Downloads successfully sent`));
                   rmDownload();
                   return resolve();
                 })

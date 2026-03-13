@@ -2,7 +2,6 @@ import {
   BLESS_PAGE_IDENTIFIER,
   BrowserLauncherOptions,
   Config,
-  Logger,
   Request,
   ServerError,
   chromeExecutablePath,
@@ -28,6 +27,7 @@ import puppeteerStealth from 'puppeteer-extra';
 
 import { CDPProxy, ReplayCapableBrowser, ReplayCompleteParams, TabReplayCompleteParams } from '../cdp-proxy.js';
 import { CloudflareSolver } from '../session/cloudflare-solver.js';
+import { runForkInServer } from '../otel-runtime.js';
 import type { CloudflareConfig } from '../shared/cloudflare-detection.js';
 puppeteerStealth.use(StealthPlugin());
 
@@ -40,7 +40,6 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   protected browser: Browser | null = null;
   protected browserWSEndpoint: string | null = null;
   protected port?: number;
-  protected logger: Logger;
   protected proxy = httpProxy.createProxyServer();
   protected executablePath = playwright.chromium.executablePath();
   // Flag to track when WE are creating a page (vs external clients like pydoll)
@@ -61,12 +60,10 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
     config,
     enableReplay,
     userDataDir,
-    logger,
   }: {
     blockAds: boolean;
     config: Config;
     enableReplay?: boolean;
-    logger: Logger;
     userDataDir: ChromiumCDP['userDataDir'];
   }) {
     super();
@@ -75,9 +72,8 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
     this.config = config;
     this.blockAds = blockAds;
     this.enableReplay = enableReplay ?? false;
-    this.logger = logger;
 
-    this.logger.info(`Starting new ${this.constructor.name} instance`);
+    runForkInServer(Effect.logInfo(`Starting new ${this.constructor.name} instance`));
   }
 
   protected cleanListeners() {
@@ -140,62 +136,62 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
       // Attaching to external targets causes CDP command conflicts and timeouts.
       if (!this.pendingInternalPage) {
         const targetId = this.getTargetId(target);
-        this.logger.trace(`Skipping external target ${targetId} (created by external CDP client)`);
+        runForkInServer(Effect.logDebug(`Skipping external target ${targetId} (created by external CDP client)`));
         return;
       }
 
       const page = await target.page().catch((e) => {
-        this.logger.error(`Error in ${this.constructor.name} new page ${e}`);
+        runForkInServer(Effect.logError(`Error in ${this.constructor.name} new page ${e}`));
         return null;
       });
 
       if (page) {
-        this.logger.trace(`Setting up file:// protocol request rejection`);
+        runForkInServer(Effect.logDebug(`Setting up file:// protocol request rejection`));
 
         page.on('error', (err) => {
-          this.logger.error(err);
+          runForkInServer(Effect.logError(String(err)));
         });
 
         page.on('pageerror', (err) => {
-          this.logger.warn(err);
+          runForkInServer(Effect.logWarning(String(err)));
         });
 
         page.on('framenavigated', (frame) => {
-          this.logger.trace(`Navigation to ${frame.url()}`);
+          runForkInServer(Effect.logDebug(`Navigation to ${frame.url()}`));
         });
 
         page.on('console', (message) => {
-          this.logger.trace(`${message.type()}: ${message.text()}`);
+          runForkInServer(Effect.logDebug(`${message.type()}: ${message.text()}`));
         });
 
         page.on('requestfailed', (req) => {
-          this.logger.warn(`"${req.failure()?.errorText}": ${req.url()}`);
+          runForkInServer(Effect.logWarning(`"${req.failure()?.errorText}": ${req.url()}`));
         });
 
         page.on('request', async (request) => {
-          this.logger.trace(`${request.method()}: ${request.url()}`);
+          runForkInServer(Effect.logDebug(`${request.method()}: ${request.url()}`));
           if (
             !this.config.getAllowFileProtocol() &&
             request.url().startsWith('file://')
           ) {
-            this.logger.error(
+            runForkInServer(Effect.logError(
               `File protocol request found in request to ${this.constructor.name}, terminating`,
-            );
+            ));
             page.close().catch(noop);
             this.close();
           }
         });
 
         page.on('response', async (response) => {
-          this.logger.trace(`${response.status()}: ${response.url()}`);
+          runForkInServer(Effect.logDebug(`${response.status()}: ${response.url()}`));
 
           if (
             !this.config.getAllowFileProtocol() &&
             response.url().startsWith('file://')
           ) {
-            this.logger.error(
+            runForkInServer(Effect.logError(
               `File protocol request found in response to ${this.constructor.name}, terminating`,
-            );
+            ));
             page.close().catch(noop);
             this.close();
           }
@@ -233,7 +229,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
     return Effect.fn('chromiumCdp.close')({ self: this }, function*() {
       if (!this.browser) return;
 
-      this.logger.info(
+      yield* Effect.logInfo(
         `Closing ${this.constructor.name} process and all listeners`,
       );
       this.emit('close');
@@ -249,13 +245,13 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
       );
 
       if (!closed && chromeProcess?.pid) {
-        this.logger.warn(
+        yield* Effect.logWarning(
           `browser.close() timed out after 5s — SIGKILL Chrome pid ${chromeProcess.pid}`,
         );
         try {
           chromeProcess.kill('SIGKILL');
         } catch (e) {
-          this.logger.warn(`SIGKILL failed: ${e}`);
+          yield* Effect.logWarning(`SIGKILL failed: ${e}`);
         }
       }
 
@@ -282,7 +278,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   }: BrowserLauncherOptions): Effect.Effect<Browser> {
     return Effect.fn('chromiumCdp.launch')({ self: this }, function*() {
       this.port = yield* Effect.promise(() => getPort());
-      this.logger.info(`${this.constructor.name} got open port ${this.port}`);
+      yield* Effect.logInfo(`${this.constructor.name} got open port ${this.port}`);
 
       const extensionLaunchArgs = options.args?.find((a) =>
         a.startsWith('--load-extension'),
@@ -441,7 +437,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
           };
           fs.writeFileSync(prefsPath, JSON.stringify(prefs));
         } catch (err) {
-          this.logger.warn(`Failed to write Chrome Preferences: ${err}`);
+          yield* Effect.logWarning(`Failed to write Chrome Preferences: ${err}`);
         }
       }
 
@@ -449,8 +445,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
         ? puppeteerStealth.launch.bind(puppeteerStealth)
         : puppeteer.launch.bind(puppeteer);
 
-      this.logger.info(
-        finalOptions,
+      yield* Effect.logInfo(
         `Launching ${this.constructor.name} Handler`,
       );
       this.browser = (yield* Effect.promise(() => launchFn(finalOptions))) as Browser;
@@ -458,7 +453,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
       this.browser.on('targetcreated', this.onTargetCreated.bind(this));
       this.running = true;
       this.browserWSEndpoint = this.browser.wsEndpoint();
-      this.logger.info(
+      yield* Effect.logInfo(
         `${this.constructor.name} is running on ${this.browserWSEndpoint}`,
       );
 
@@ -502,9 +497,9 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
       );
     }
 
-    this.logger.info(
+    runForkInServer(Effect.logInfo(
       `Proxying ${req.parsed.href} to ${this.constructor.name}`,
-    );
+    ));
 
     const shouldMakePage = req.parsed.pathname.includes(
       BLESS_PAGE_IDENTIFIER,
@@ -531,9 +526,9 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
         },
         (error) => {
           const msg = error instanceof Error ? error.message : String(error);
-          this.logger.warn(
+          runForkInServer(Effect.logWarning(
             `Proxy disconnect for PAGE session to ${this.constructor.name}: ${msg}`,
-          );
+          ));
           this.close();
           return reject(error);
         },
@@ -552,15 +547,15 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
       );
     }
 
-    this.logger.info(
+    runForkInServer(Effect.logInfo(
       `Proxying ${req.parsed.href} to ${this.constructor.name} ${this.browserWSEndpoint}`,
-    );
+    ));
 
     return new Promise<void>((resolve, reject) => {
       const close = once(async () => {
-        this.logger.debug(
+        runForkInServer(Effect.logDebug(
           `proxyWebSocket close triggered: browser=${!!this.browser} cdpProxy=${!!this.cdpProxy}`,
-        );
+        ));
         this.browser?.off('close', close);
         this.browser?.process()?.off('close', close);
         socket.off('close', close);
@@ -604,7 +599,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
         );
 
         await this.cdpProxy.connect();
-        this.logger.trace('CDPProxy connected successfully');
+        runForkInServer(Effect.logDebug('CDPProxy connected successfully'));
 
         // Wire tab count callback for tab limit enforcement
         if (this.getTabCountCallback) {
@@ -633,9 +628,9 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
       };
 
       setup().catch((error) => {
-        this.logger.error(
+        runForkInServer(Effect.logError(
           `Error proxying session to ${this.constructor.name}: ${error}`,
-        );
+        ));
         this.cdpProxy?.close();  // Triggers scope close → cleans up partial WS connections
         this.cdpProxy = null;
         this.close();
@@ -658,7 +653,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
       await this.cdpProxy.sendReplayComplete(metadata);
       return true;
     } else {
-      this.logger.warn('Cannot send replay complete: no CDPProxy available');
+      runForkInServer(Effect.logWarning('Cannot send replay complete: no CDPProxy available'));
       return false;
     }
   }
@@ -670,7 +665,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
       await this.cdpProxy.sendTabReplayComplete(metadata);
       return true;
     } else {
-      this.logger.warn('Cannot send tab replay complete: no CDPProxy available');
+      runForkInServer(Effect.logWarning('Cannot send tab replay complete: no CDPProxy available'));
       return false;
     }
   }

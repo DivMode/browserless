@@ -10,7 +10,6 @@ import {
   EdgeCDP,
   FileSystem,
   Hooks,
-  Logger,
   NotFound,
   ReplayCompleteParams,
   Request,
@@ -88,7 +87,7 @@ export class BrowserManager {
   /**
    * Returns the /json/protocol API contents from Chromium or Chrome.
    */
-  private getProtocolJSONEffect(logger: Logger): Effect.Effect<object> {
+  private getProtocolJSONEffect(): Effect.Effect<object> {
     const mgr = this;
     return Effect.fn('browserManager.getProtocolJSON')(function*() {
       const Browser = (yield* Effect.promise(() => availableBrowsers)).find(
@@ -103,7 +102,6 @@ export class BrowserManager {
       const browser = new Browser({
         blockAds: false,
         config: mgr.config,
-        logger,
         userDataDir: null,
       });
       yield* Effect.promise(() => browser.launch({ options: {} }) as Promise<unknown>);
@@ -125,14 +123,14 @@ export class BrowserManager {
     })();
   }
 
-  public async getProtocolJSON(logger: Logger): Promise<object> {
-    return Effect.runPromise(this.getProtocolJSONEffect(logger));
+  public async getProtocolJSON(): Promise<object> {
+    return Effect.runPromise(this.getProtocolJSONEffect());
   }
 
   /**
    * Returns the /json/version API from Chromium or Chrome.
    */
-  private getVersionJSONEffect(logger: Logger): Effect.Effect<CDPJSONPayload> {
+  private getVersionJSONEffect(): Effect.Effect<CDPJSONPayload> {
     const mgr = this;
     return Effect.fn('browserManager.getVersionJSON')(function*() {
       yield* Effect.logDebug(`Launching Chromium to generate /json/version results`);
@@ -149,7 +147,6 @@ export class BrowserManager {
       const browser = new Browser({
         blockAds: false,
         config: mgr.config,
-        logger,
         userDataDir: null,
       });
       yield* Effect.promise(() => browser.launch({ options: {} }) as Promise<unknown>);
@@ -178,8 +175,8 @@ export class BrowserManager {
     })();
   }
 
-  public async getVersionJSON(logger: Logger): Promise<CDPJSONPayload> {
-    return Effect.runPromise(this.getVersionJSONEffect(logger));
+  public async getVersionJSON(): Promise<CDPJSONPayload> {
+    return Effect.runPromise(this.getVersionJSONEffect());
   }
 
   /**
@@ -455,12 +452,11 @@ export class BrowserManager {
   private getBrowserForRequestEffect(
     req: Request,
     router: BrowserHTTPRoute | BrowserWebsocketRoute,
-    logger: Logger,
   ): Effect.Effect<BrowserInstance> {
     const mgr = this;
     return Effect.fn('browserManager.getBrowserForRequest')(function*() {
       const browser = yield* Effect.promise(() =>
-        mgr.launcher.getBrowserForRequest(req, router, logger),
+        mgr.launcher.getBrowserForRequest(req, router),
       );
 
       // Set up replay event handler for browsers that support it
@@ -478,10 +474,9 @@ export class BrowserManager {
   public async getBrowserForRequest(
     req: Request,
     router: BrowserHTTPRoute | BrowserWebsocketRoute,
-    logger: Logger,
   ): Promise<BrowserInstance> {
     return Effect.runPromise(
-      this.getBrowserForRequestEffect(req, router, logger),
+      this.getBrowserForRequestEffect(req, router),
     );
   }
 

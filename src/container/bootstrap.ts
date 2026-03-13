@@ -3,7 +3,6 @@ import {
   FileSystem,
   Hooks,
   Limiter,
-  Logger,
   Metrics,
   Monitoring,
   Router,
@@ -34,7 +33,6 @@ export const Services = {
   BrowserManager: 'browserManager',
   Limiter: 'limiter',
   Router: 'router',
-  Logger: 'logger',
 } as const;
 
 export type ServiceName = typeof Services[keyof typeof Services];
@@ -57,7 +55,6 @@ export interface ContainerOptions {
   browserManager?: BrowserManager;
   limiter?: Limiter;
   router?: Router;
-  Logger?: typeof Logger;
 }
 
 /**
@@ -68,15 +65,11 @@ export interface ContainerOptions {
  */
 export function createContainer(options: ContainerOptions = {}): ServiceContainer {
   const container = new ServiceContainer();
-  const LoggerClass = options.Logger ?? Logger;
 
   // Core configuration - no dependencies
   container.registerSingleton(Services.Config, () =>
     options.config ?? new Config()
   );
-
-  // Logger factory - for creating named loggers
-  container.registerSingleton(Services.Logger, () => LoggerClass);
 
   // Metrics - no dependencies
   container.registerSingleton(Services.Metrics, () =>
@@ -174,9 +167,8 @@ export function createContainer(options: ContainerOptions = {}): ServiceContaine
         c.resolve<Config>(Services.Config),
         c.resolve<BrowserManager>(Services.BrowserManager),
         c.resolve<Limiter>(Services.Limiter),
-        c.resolve<typeof Logger>(Services.Logger)
       ),
-    [Services.Config, Services.BrowserManager, Services.Limiter, Services.Logger]
+    [Services.Config, Services.BrowserManager, Services.Limiter]
   );
 
   return container;

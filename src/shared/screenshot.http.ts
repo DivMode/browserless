@@ -7,7 +7,6 @@ import {
   CDPLaunchOptions,
   ChromiumCDP,
   HTTPRoutes,
-  Logger,
   Methods,
   Request,
   SystemQueryParameters,
@@ -32,6 +31,7 @@ import {
 import { ElementHandle, Page } from 'puppeteer-core';
 import { Effect } from 'effect';
 import { ServerResponse } from 'http';
+import { runForkInServer } from '../otel-runtime.js';
 import Stream from 'stream';
 
 export interface QuerySchema extends SystemQueryParameters {
@@ -88,12 +88,11 @@ export default class ScreenshotPost extends BrowserHTTPRoute {
   async handler(
     req: Request,
     res: ServerResponse,
-    logger: Logger,
     browser: BrowserInstance,
   ): Promise<void> {
     return Effect.runPromise(
       Effect.fn('route.screenshot.post')(function* () {
-        logger.info('Screenshot API invoked with body:', req.body);
+        yield* Effect.logInfo('Screenshot API invoked with body: ' + JSON.stringify(req.body));
         const contentType =
           !req.headers.accept || req.headers.accept?.includes('*')
             ? 'image/png'
@@ -186,7 +185,7 @@ export default class ScreenshotPost extends BrowserHTTPRoute {
               !!rejectRequestPattern.find((pattern) => req.url().match(pattern)) ||
               rejectResourceTypes.includes(req.resourceType())
             ) {
-              logger.debug(`Aborting request ${req.method()}: ${req.url()}`);
+              runForkInServer(Effect.logDebug(`Aborting request ${req.method()}: ${req.url()}`));
               return req.abort();
             }
             const interceptor = requestInterceptors.find((r) =>
@@ -285,7 +284,7 @@ export default class ScreenshotPost extends BrowserHTTPRoute {
         yield* Effect.promise(() => new Promise((r) => readStream.pipe(res).once('close', r)));
 
         page.close().catch(noop);
-        logger.debug('Screenshot API request completed');
+        yield* Effect.logDebug('Screenshot API request completed');
       })(),
     );
   }

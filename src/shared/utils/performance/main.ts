@@ -1,5 +1,7 @@
 import { Message, mainOptions } from './types.js';
+import { Effect } from 'effect';
 import { fork } from 'child_process';
+import { runForkInServer } from '../../../otel-runtime.js';
 import path from 'path';
 
 const __dirname = import.meta.dirname;
@@ -10,13 +12,12 @@ const DEFAULT_AUDIT_CONFIG = {
 export default async ({
   browser,
   context,
-  logger,
   timeout,
 }: mainOptions): Promise<unknown> => {
   return new Promise((resolve, reject) => {
     const childPath = path.join(__dirname, 'child.js');
 
-    logger.trace(`Starting up child at ${childPath}`);
+    runForkInServer(Effect.logDebug(`Starting up child at ${childPath}`));
 
     const child = fork(childPath);
     const port = new URL(browser.wsEndpoint() || '').port;
@@ -47,14 +48,14 @@ export default async ({
     };
 
     child.on('error', (err) => {
-      logger.error(`Error in child process`, err);
+      runForkInServer(Effect.logError(`Error in child process: ` + String(err)));
       reject('Performance run error: ' + err.message);
       close(child.pid);
     });
 
     child.on('message', (payload: Message) => {
       if (payload.event === 'created') {
-        logger.info(`Child process is up, sending performance request`);
+        runForkInServer(Effect.logInfo(`Child process is up, sending performance request`));
         return child.send({
           config,
           event: 'start',
@@ -64,7 +65,7 @@ export default async ({
       }
 
       if (payload.event === 'complete') {
-        logger.info(`Performance gathered, closing and resolving request`);
+        runForkInServer(Effect.logInfo(`Performance gathered, closing and resolving request`));
         close(child.pid);
         return resolve({
           data: payload.data,

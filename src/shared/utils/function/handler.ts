@@ -4,7 +4,6 @@ import {
   ChromiumCDP,
   Config,
   HTTPRoutes,
-  Logger,
   Request,
   ServerError,
   UnwrapPromise,
@@ -16,7 +15,9 @@ import {
   makeExternalURL,
   mimeTypes,
 } from '@browserless.io/browserless';
+import { Effect } from 'effect';
 import { FunctionRunner } from './client.js';
+import { runForkInServer } from '../../../otel-runtime.js';
 import { Page } from 'puppeteer-core';
 import fs from 'fs';
 import path from 'path';
@@ -37,7 +38,7 @@ interface HandlerOptions {
   protocolTimeout?: number;
 }
 
-export default (config: Config, logger: Logger, options: HandlerOptions = {}) =>
+export default (config: Config, options: HandlerOptions = {}) =>
   async (
     req: Request,
     browser: BrowserInstance,
@@ -94,7 +95,7 @@ export default (config: Config, logger: Logger, options: HandlerOptions = {}) =>
      */
     page.on('request', async (request) => {
       const requestUrl = request.url();
-      logger.trace(`Outbound Page Request: "${requestUrl}"`);
+      runForkInServer(Effect.logDebug(`Outbound Page Request: "${requestUrl}"`));
       if (requestUrl.startsWith(functionRequestPath)) {
         const filename = path.basename(requestUrl);
         if (filename === functionCodeJS) {
@@ -113,27 +114,27 @@ export default (config: Config, logger: Logger, options: HandlerOptions = {}) =>
             status: 200,
           });
         }
-        logger.warn(
+        runForkInServer(Effect.logWarning(
           `Static asset request to "${requestUrl}" couldn't be found, 404-ing`,
-        );
+        ));
         return request.respond({
           body: code,
           contentType: `Couldn't locate this file "${filename}" request "${requestUrl}" in "${functionAssetLocation}"`,
           status: 404,
         });
       }
-      logger.trace(`Request: "${requestUrl}" no responder found, continuing...`);
+      runForkInServer(Effect.logDebug(`Request: "${requestUrl}" no responder found, continuing...`));
       return request.continue();
     });
 
     page.on('response', (res) => {
       if (!res.ok()) {
-        logger.warn(`Received a non-200 response for request "${res.url()}"`);
+        runForkInServer(Effect.logWarning(`Received a non-200 response for request "${res.url()}"`));
       }
     });
 
     page.on('console', (event) => {
-      logger.trace(`${event.type()}: ${event.text()}`);
+      runForkInServer(Effect.logDebug(`${event.type()}: ${event.text()}`));
     });
 
     await page.goto(functionIndexHTML);
@@ -170,7 +171,7 @@ export default (config: Config, logger: Logger, options: HandlerOptions = {}) =>
         JSON.stringify(options),
       )
       .catch((e) => {
-        logger.error(`Error running code: ${e}`);
+        runForkInServer(Effect.logError(`Error running code: ${e}`));
         throw new BadRequest(e.message);
       });
 
