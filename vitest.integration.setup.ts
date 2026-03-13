@@ -102,7 +102,43 @@ async function waitForReady(timeoutMs: number): Promise<void> {
     if (await isRunning()) return;
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
-  throw new Error(`Browserless did not start within ${timeoutMs}ms`);
+
+  // ── Diagnostic dump on startup failure ─────────────────────────────
+  // Collect everything needed to diagnose WHY the server didn't start.
+  // Without this, vitest shows "No test files found" — zero signal.
+  const diagnostics: string[] = [`Browserless did not start within ${timeoutMs}ms`];
+
+  // Server process state
+  if (serverProcess) {
+    diagnostics.push(`  PID: ${serverProcess.pid ?? 'unknown'}`);
+    diagnostics.push(`  exitCode: ${serverProcess.exitCode}`);
+    diagnostics.push(`  killed: ${serverProcess.killed}`);
+    diagnostics.push(`  signalCode: ${serverProcess.signalCode}`);
+  }
+
+  // Port ownership
+  try {
+    const lsofOut = execFileSync('lsof', ['-ti', `:${PORT}`], { encoding: 'utf-8' });
+    diagnostics.push(`  Port ${PORT} owners: ${lsofOut.trim().replace(/\n/g, ', ')}`);
+  } catch {
+    diagnostics.push(`  Port ${PORT}: no process listening`);
+  }
+
+  // Server log tail — last 20 lines
+  const logPath = path.join(BROWSERLESS_DIR, 'test-server.log');
+  if (existsSync(logPath)) {
+    const log = readFileSync(logPath, 'utf-8');
+    const lines = log.trim().split('\n');
+    const tail = lines.slice(-20).join('\n');
+    diagnostics.push(`  Server log (last ${Math.min(20, lines.length)} lines):\n${tail}`);
+  } else {
+    diagnostics.push('  Server log: file not found');
+  }
+
+  const message = diagnostics.join('\n');
+  // Print to stderr so it's visible even if vitest swallows the error
+  console.error(`\n[globalSetup] STARTUP FAILURE DIAGNOSTICS:\n${message}\n`);
+  throw new Error(message);
 }
 
 let serverProcess: ChildProcess | null = null;
@@ -182,9 +218,20 @@ export async function setup() {
     throw new Error(`Failed to spawn browserless: ${err.message}`);
   });
 
-  serverProcess.on('exit', (code) => {
+  serverProcess.on('exit', (code, signal) => {
     if (code && code !== 0) {
-      console.error(`[globalSetup] Browserless exited with code ${code}`);
+      // Dump server log on crash — visible to any agent reading stdout
+      const logPath = path.join(BROWSERLESS_DIR, 'test-server.log');
+      let logTail = '';
+      if (existsSync(logPath)) {
+        const lines = readFileSync(logPath, 'utf-8').trim().split('\n');
+        logTail = lines.slice(-10).join('\n');
+      }
+      console.error(
+        `[globalSetup] Browserless crashed!\n` +
+        `  exit code: ${code}, signal: ${signal}\n` +
+        `  Server log (last 10 lines):\n${logTail}`,
+      );
     }
   });
 

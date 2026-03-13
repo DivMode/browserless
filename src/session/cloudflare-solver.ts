@@ -355,14 +355,14 @@ export class CloudflareSolver {
     // it from a different runtime. JS single-threadedness makes this safe.
     this.destroyedTargets.add(targetId);
 
-    // Record destroyed target — prevents stale OOPIF re-detection if Chrome
-    // fires targetDestroyed after our detection poll but before cleanup
-    this.stateTracker.solvedCFTargetIds.add(targetId as unknown as string);
-
-    // Check if this target is an OOPIF child of a page detection.
-    // If so, DON'T kill the parent page's detection fiber — it needs to
-    // continue to detect navigation/token. Only abort if click was delivered.
+    // Hoist: determine owning page for scope-based cleanup
     const parentCtx = this.stateTracker.registry.findByIframeTarget(targetId);
+    const owningPageId = parentCtx?.active.pageTargetId ?? targetId;
+
+    // Race guard: prevents stale OOPIF re-detection if Chrome fires
+    // targetDestroyed after our detection poll but before cleanup.
+    // Scope-bound — entry is removed when owning page is destroyed.
+    this.stateTracker.addSolvedCFTargetSync(targetId as unknown as string, owningPageId);
     if (parentCtx) {
       if (parentCtx.oopif && parentCtx.active.clickDelivered) {
         // Post-click: close OOPIF scope — finalizer propagates abort

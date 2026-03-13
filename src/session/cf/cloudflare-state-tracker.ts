@@ -1,4 +1,4 @@
-import { Effect, Schedule } from 'effect';
+import { Effect, Exit, Schedule, Scope } from 'effect';
 
 import { runForkInServer } from '../../otel-runtime.js';
 import {
@@ -107,6 +107,8 @@ export class CloudflareStateTracker {
   readonly pendingRechallengeCount = new Map<TargetId, number>();
   /** Per-page reload count for widget-not-rendered recovery. Reset on solve. */
   readonly widgetReloadCount = new Map<TargetId, number>();
+  /** Per-page cleanup scopes — finalizers remove solvedCFTargetIds entries when a page is destroyed. */
+  private readonly pageCleanupScopes = new Map<TargetId, Scope.Closeable>();
   config: Required<CloudflareConfig> = { maxAttempts: 3, attemptTimeout: 30000, recordingMarkers: true };
   destroyed = false;
   /** Per-page accumulator of solved/failed phases for compound summary labels. */
@@ -356,6 +358,36 @@ export class CloudflareStateTracker {
   }
 
   /**
+   * Add an OOPIF target ID to solvedCFTargetIds with scope-bound cleanup.
+   * When the owning page's cleanup scope is closed (via unregisterPage),
+   * the finalizer atomically removes the entry — preventing unbounded growth.
+   */
+  addSolvedCFTarget(oopifId: string, pageTargetId: TargetId): Effect.Effect<void> {
+    const tracker = this;
+    return Effect.suspend(() => {
+      tracker.solvedCFTargetIds.add(oopifId);
+      const scope = tracker.pageCleanupScopes.get(pageTargetId);
+      if (!scope) return Effect.void;  // safety: no scope = cleanup falls to destroy()
+      return Scope.addFinalizer(scope, Effect.sync(() => {
+        tracker.solvedCFTargetIds.delete(oopifId);
+      }));
+    });
+  }
+
+  /**
+   * Synchronous variant of addSolvedCFTarget — used in stopTargetDetection
+   * where we're outside an Effect generator context.
+   */
+  addSolvedCFTargetSync(oopifId: string, pageTargetId: TargetId): void {
+    this.solvedCFTargetIds.add(oopifId);
+    const scope = this.pageCleanupScopes.get(pageTargetId);
+    if (!scope) return;  // safety: no scope = cleanup falls to destroy()
+    Effect.runSync(Scope.addFinalizer(scope, Effect.sync(() => {
+      this.solvedCFTargetIds.delete(oopifId);
+    })));
+  }
+
+  /**
    * Resolve an active detection as auto-solved (token appeared without navigation).
    * Token is provided by the CF bridge push event — no Runtime.evaluate fallback.
    */
@@ -487,9 +519,12 @@ export class CloudflareStateTracker {
     );
   }
 
-  /** Register a page target → CDP session mapping. */
+  /** Register a page target → CDP session mapping. Creates a cleanup scope for scope-bound solvedCFTargetIds entries. */
   registerPage(targetId: TargetId, cdpSessionId: CdpSessionId): void {
     this.knownPages.set(targetId, cdpSessionId);
+    if (!this.pageCleanupScopes.has(targetId)) {
+      this.pageCleanupScopes.set(targetId, Scope.makeUnsafe());
+    }
   }
 
   /**
@@ -514,7 +549,16 @@ export class CloudflareStateTracker {
       tracker.solvedPages.delete(targetId);
       tracker.pendingIframes.delete(targetId);
       tracker.pendingRechallengeCount.delete(targetId);
+      tracker.widgetReloadCount.delete(targetId);
       tracker.summaryPhases.delete(targetId);
+
+      // Close the page's cleanup scope — atomically fires all finalizers
+      // that remove this page's entries from solvedCFTargetIds.
+      const cleanupScope = tracker.pageCleanupScopes.get(targetId);
+      if (cleanupScope) {
+        yield* Scope.close(cleanupScope, Exit.void);
+        tracker.pageCleanupScopes.delete(targetId);
+      }
     })();
   }
 
@@ -554,9 +598,18 @@ export class CloudflareStateTracker {
       this.iframeToPage.clear();
       this.knownPages.clear();
       this.bindingSolvedTargets.clear();
+
+      // Close all remaining page cleanup scopes before clearing solvedCFTargetIds.
+      // Finalizers fire first (deleting entries), then clear() sweeps any stragglers.
+      for (const scope of this.pageCleanupScopes.values()) {
+        yield* Scope.close(scope, Exit.void);
+      }
+      this.pageCleanupScopes.clear();
+
       this.solvedCFTargetIds.clear();
       this.solvedPages.clear();
       this.pendingIframes.clear();
+      this.widgetReloadCount.clear();
       this.summaryPhases.clear();
     }).bind(this));
   }

@@ -897,7 +897,7 @@ export class CloudflareDetector {
           );
           if (postSolveSnapshot._tag === 'detected') {
             for (const t of postSolveSnapshot.targets) {
-              self.state.solvedCFTargetIds.add(t.targetId);
+              yield* self.state.addSolvedCFTarget(t.targetId, targetId);
             }
           }
         })(),
@@ -989,9 +989,9 @@ export class CloudflareDetector {
               break;
           }
 
-          // Common cleanup
+          // Common cleanup — scope-bound so entries are removed when page is destroyed
           for (const t of filteredDetection.targets) {
-            self.state.solvedCFTargetIds.add(t.targetId);
+            yield* self.state.addSolvedCFTarget(t.targetId, targetId);
           }
           return;
         }
