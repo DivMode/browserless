@@ -94,8 +94,12 @@ export class DetectionRegistry {
           // Orphaned detection — abort + settle Resolution + emit session_close fallback
           DetectionContext.setAborted(active);
           const duration = Date.now() - active.startTime;
-          yield* active.resolution.fail('session_close', duration);
-          self.emitFallback(active, 'session_close');
+          const reason = active.verificationEvidence ? 'verified_session_close' : 'session_close';
+          yield* active.resolution.fail(reason, duration);
+          // Only emit fallback if onSettle didn't already handle it
+          if (!active.resolution.markerEmitted) {
+            self.emitFallback(active, reason);
+          }
         }
       }));
 
@@ -121,10 +125,14 @@ export class DetectionRegistry {
       if (!context.resolved) {
         const mutable = context.mutableActive;
         const duration = Date.now() - mutable.startTime;
+        const reason = mutable.verificationEvidence ? 'verified_session_close' : 'session_close';
         if (!mutable.resolution.isDone) {
-          yield* mutable.resolution.fail('session_close', duration);
+          yield* mutable.resolution.fail(reason, duration);
         }
-        self.emitFallback(context.active, 'session_close');
+        // Only emit fallback if onSettle didn't already handle it
+        if (!mutable.resolution.markerEmitted) {
+          self.emitFallback(context.active, reason);
+        }
         context.resolved = true;
       }
       yield* Scope.close(context.scope, Exit.void);

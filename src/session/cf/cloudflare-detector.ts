@@ -370,6 +370,7 @@ export class CloudflareDetector {
             // Set one-shot flag so the NEXT targetInfoChanged (title update or real nav)
             // falls through to InterstitialSolved instead of being swallowed here again.
             active.cosmeticNavSeen = true;
+            active.verificationEvidence = 'cosmetic_nav';
             self.events.marker(targetId, 'cf.cosmetic_url_change', {
               title: outcome.title.substring(0, 50), url: outcome.url.substring(0, 200),
             });
@@ -674,20 +675,24 @@ export class CloudflareDetector {
           const label = self.state.buildCompoundLabel(targetId);
           self.events.emitSolved(active, resolved.result, label, { skipMarker: active.resolution.markerEmitted });
         } else {
+          const cfVerified = resolved.reason === 'verified_session_close';
           yield* Effect.annotateCurrentSpan({
             'cf.resolution_outcome': 'failed',
             'cf.fail_reason': resolved.reason,
             'cf.elapsed_ms': resolved.duration_ms,
+            'cf.verified': cfVerified,
           });
           yield* Effect.logWarning('CF lifecycle: resolution_result').pipe(
-            Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, result: 'failed', reason: resolved.reason, elapsed_ms: resolved.duration_ms }),
+            Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, result: 'failed', reason: resolved.reason, elapsed_ms: resolved.duration_ms, cf_verified: cfVerified }),
           );
           if (!active.resolution.markerEmitted) {
-            const phase_label = resolved.phase_label ?? `✗ ${resolved.reason}`;
+            const phase_label = cfVerified ? '⊘' : (resolved.phase_label ?? `✗ ${resolved.reason}`);
             self.state.pushPhase(targetId, active.info.type, phase_label);
           }
           const label = self.state.buildCompoundLabel(targetId);
-          self.events.emitFailed(active, resolved.reason, resolved.duration_ms, resolved.phase_label, label, { skipMarker: active.resolution.markerEmitted });
+          self.events.emitFailed(active, resolved.reason, resolved.duration_ms,
+            cfVerified ? '⊘' : resolved.phase_label, label,
+            { skipMarker: active.resolution.markerEmitted, cf_verified: cfVerified });
         }
       } else {
         // Timeout — zombie detection caught. Settle and emit.
@@ -780,10 +785,14 @@ export class CloudflareDetector {
               phase_label: outcome.result.phase_label, signal: outcome.result.signal,
             });
           } else {
-            const phase_label = outcome.phase_label ?? `✗ ${outcome.reason}`;
+            const cfVerified = outcome.reason === 'verified_session_close';
+            const phase_label = cfVerified
+              ? '⊘'
+              : (outcome.phase_label ?? `✗ ${outcome.reason}`);
             self.state.pushPhase(targetId, active.info.type, phase_label);
             self.events.marker(targetId, 'cf.failed', {
               reason: outcome.reason, duration_ms: outcome.duration_ms, phase_label,
+              cf_verified: cfVerified,
             });
           }
         }),

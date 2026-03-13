@@ -37,7 +37,8 @@ export type SendCommand = (method: string, params?: object, cdpSessionId?: CdpSe
 // └──────────────┴──────────────────┴──────────────┴───────┘
 
 export type SolveSignal = 'page_navigated' | 'beacon_push' | 'token_poll' | 'activity_poll'
-  | 'bridge_solved' | 'state_change' | 'callback_binding' | 'session_close' | 'cdp_dom_walk';
+  | 'bridge_solved' | 'state_change' | 'callback_binding' | 'session_close' | 'cdp_dom_walk'
+  | 'verified_session_close';
 
 export function deriveSolveAttribution(signal: SolveSignal, clickDelivered: boolean) {
   // Interstitials: page navigated away from CF challenge page
@@ -55,6 +56,7 @@ export function deriveSolveAttribution(signal: SolveSignal, clickDelivered: bool
 }
 
 export function deriveFailLabel(reason: string) {
+  if (reason === 'verified_session_close') return { label: '⊘' };
   return { label: `✗ ${reason}` };
 }
 
@@ -113,15 +115,24 @@ export class CloudflareStateTracker {
   ) {
     this.registry = new DetectionRegistry((active, signal) => {
       const duration = Date.now() - active.startTime;
-      const attr = deriveSolveAttribution(signal, !!active.clickDelivered);
-      runForkInServer(Effect.logInfo(`Scope finalizer fallback: emitting solved for orphaned detection on ${active.pageTargetId}`));
-      this.pushPhase(active.pageTargetId, active.info.type, attr.label);
-      const label = this.buildCompoundLabel(active.pageTargetId);
-      this.events.emitSolved(active, {
-        solved: true, type: active.info.type, method: attr.method,
-        duration_ms: duration, attempts: 0, auto_resolved: attr.autoResolved,
-        signal, token_length: 0, phase_label: attr.label,
-      }, label);
+
+      if (signal === 'verified_session_close') {
+        // CF verified but session closed before navigation completed
+        const phaseLabel = '⊘';
+        runForkInServer(Effect.logInfo(`Scope finalizer fallback: verified_session_close for ${active.pageTargetId}`));
+        this.pushPhase(active.pageTargetId, active.info.type, phaseLabel);
+        const compoundLabel = this.buildCompoundLabel(active.pageTargetId);
+        this.events.emitFailed(active, 'verified_session_close', duration, phaseLabel, compoundLabel,
+          { cf_verified: true });
+        return;
+      }
+
+      // Genuine session_close — emit as failure (session closed before resolution)
+      const failLabel = `✗ ${signal}`;
+      runForkInServer(Effect.logInfo(`Scope finalizer fallback: emitting failed for orphaned detection on ${active.pageTargetId}`));
+      this.pushPhase(active.pageTargetId, active.info.type, failLabel);
+      const compoundLabel = this.buildCompoundLabel(active.pageTargetId);
+      this.events.emitFailed(active, signal, duration, failLabel, compoundLabel);
     });
   }
 
@@ -148,6 +159,7 @@ export class CloudflareStateTracker {
         // CF hasn't redirected yet. Resolving here would close the browser too early → rechallenge.
         // Let the page_navigated signal handle interstitial resolution.
         if (isInterstitialType(active.info.type)) {
+          active.verificationEvidence = 'oopif_success';
           yield* Effect.logInfo(`OOPIF success for interstitial ${pageTargetId} — waiting for page navigation`);
           tracker.events.marker(active.pageTargetId, 'cf.oopif_success_interstitial', {
             waiting_for: 'page_navigated',

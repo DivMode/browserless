@@ -67,6 +67,8 @@ export interface TurnstileSummary {
   durationMs?: number;
   /** Whether a rechallenge was detected */
   rechallenge: boolean;
+  /** Whether CF verification passed before session closed (⊘ label) */
+  cf_verified?: boolean;
 }
 
 // ── Phase-walking internals ──────────────────────────────────────────
@@ -162,6 +164,11 @@ export function buildSummaryFromMarkers(markers: ReplayMarker[]): TurnstileSumma
   const rechallenge = markers.some(m => m.tag === 'cf.rechallenge');
   const lastSolved = [...phases].reverse().find(p => p.method);
 
+  // Check for verified_session_close in any failed marker
+  const cfVerified = sorted.some(m =>
+    m.tag === 'cf.failed' && m.payload.cf_verified === true
+  );
+
   return {
     label,
     type: phases[0].type,
@@ -169,6 +176,7 @@ export function buildSummaryFromMarkers(markers: ReplayMarker[]): TurnstileSumma
     signal: lastSolved?.signal,
     durationMs: lastSolved?.durationMs,
     rechallenge,
+    cf_verified: cfVerified || undefined,
   };
 }
 

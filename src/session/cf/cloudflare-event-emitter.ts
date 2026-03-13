@@ -180,6 +180,13 @@ export interface ActiveDetection {
   /** Parsed metadata from the Turnstile OOPIF URL (sitekey, rechallenge, mode). */
   oopifMeta?: TurnstileOOPIFMeta;
   /**
+   * Evidence that CF verification passed, independent of session lifecycle.
+   *   'cosmetic_nav' — CF stripped __cf_chl_rt_tk from URL (interstitial verification underway/complete)
+   *   'oopif_success' — OOPIF iframe reported state='success' (turnstile widget solved inside interstitial)
+   * undefined = no evidence of verification.
+   */
+  verificationEvidence?: 'cosmetic_nav' | 'oopif_success';
+  /**
    * Resolution gateway — exactly-once emission for CF solve/fail outcomes.
    * Multiple concurrent fibers race to complete it via Deferred.succeed (idempotent).
    * The single consumer (handleEmbeddedDetection / triggerSolveFromUrl) awaits
@@ -285,8 +292,9 @@ export function createCFEvents(
       }
     },
 
-    emitFailed(active: ReadonlyActiveDetection, reason: string, duration: number, phaseLabel?: string, cf_summary_label?: string, options?: { skipMarker?: boolean }): void {
+    emitFailed(active: ReadonlyActiveDetection, reason: string, duration: number, phaseLabel?: string, cf_summary_label?: string, options?: { skipMarker?: boolean; cf_verified?: boolean }): void {
       const phase_label = phaseLabel ?? `✗ ${reason}`;
+      const cfVerified = options?.cf_verified ?? false;
       const snap = active.tracker.snapshot();
       const isRechallenge = (active.rechallengeCount ?? 0) > 0;
       const diag = snap.widget_diag;
@@ -294,7 +302,7 @@ export function createCFEvents(
       const timingStr = snap.checkbox_to_click_ms != null
         ? ` checkbox_to_click_ms=${snap.checkbox_to_click_ms} phase4_ms=${snap.phase4_duration_ms}`
         : '';
-      runForkInServer(Effect.logWarning(`CF failed: session=${sessionId.slice(0,8)} reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'} rechallenge=${isRechallenge} widget_error_count=${snap.widget_error_count} widget_error_type=${snap.widget_error_type ?? 'none'} click_count=${snap.click_count} false_positives=${snap.false_positive_count}${diagStr}${timingStr}`));
+      runForkInServer(Effect.logWarning(`CF failed: session=${sessionId.slice(0,8)} reason=${reason} type=${active.info.type} method=${active.info.detectionMethod} target=${active.pageTargetId.slice(0, 8)} duration=${duration}ms attempts=${active.attempt} oopif_url=${active.info.url || 'none'} rechallenge=${isRechallenge} cf_verified=${cfVerified} widget_error_count=${snap.widget_error_count} widget_error_type=${snap.widget_error_type ?? 'none'} click_count=${snap.click_count} false_positives=${snap.false_positive_count}${diagStr}${timingStr}`));
       emitClientEvent('Browserless.cloudflareFailed', {
         reason, type: active.info.type, duration_ms: duration, attempts: active.attempt,
         targetId: active.pageTargetId,
@@ -302,9 +310,10 @@ export function createCFEvents(
         summary: snap,
         phase_label,
         cf_summary_label,
+        cf_verified: cfVerified,
       }).catch((e) => runForkInServer(Effect.logDebug(`emitFailed failed: ${e instanceof Error ? e.message : String(e)}`)));
       if (!options?.skipMarker) {
-        marker(active.pageTargetId, 'cf.failed', { reason, duration_ms: duration, phase_label, oopif_url: active.info.url, rechallenge: isRechallenge });
+        marker(active.pageTargetId, 'cf.failed', { reason, duration_ms: duration, phase_label, oopif_url: active.info.url, rechallenge: isRechallenge, cf_verified: cfVerified });
       }
     },
 
