@@ -39,7 +39,11 @@ async function killPort(port: number): Promise<void> {
     for (const pid of pids) {
       process.kill(Number(pid), 'SIGTERM');
     }
-    await new Promise((r) => setTimeout(r, 500));
+    // Wait for graceful shutdown, then SIGKILL survivors
+    await new Promise((r) => setTimeout(r, 1000));
+    for (const pid of pids) {
+      try { process.kill(Number(pid), 'SIGKILL'); } catch { /* already dead */ }
+    }
   } catch {
     // No process on port — nothing to kill
   }
@@ -69,7 +73,11 @@ async function killByName(): Promise<void> {
     for (const pid of toKill) {
       try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
     }
-    await new Promise((r) => setTimeout(r, 500));
+    // Wait for graceful shutdown, then SIGKILL survivors
+    await new Promise((r) => setTimeout(r, 1000));
+    for (const pid of toKill) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already dead */ }
+    }
   } catch {
     // pgrep returns exit code 1 when no processes match — expected
   }
