@@ -90,7 +90,25 @@ const REPLAY_HTTP = process.env.REPLAY_INGEST_URL;
 if (!REPLAY_HTTP) {
   throw new Error('REPLAY_INGEST_URL env var required — set in .env.dev or .env.prod');
 }
-const BROWSERLESS_DIR = path.resolve(import.meta.dirname);
+// Worktree-aware: if real npm dependencies don't exist here (git worktree),
+// resolve to the main repo root. Check for a real package (effect) instead of
+// just node_modules/ — vitest creates node_modules/.vite cache in the CWD,
+// which would fool a bare existsSync('node_modules') check.
+function resolveBrowserlessDir(): string {
+  const dir = path.resolve(import.meta.dirname);
+  if (existsSync(path.join(dir, 'node_modules', 'effect'))) return dir;
+  try {
+    const output = execFileSync('git', ['worktree', 'list', '--porcelain'],
+      { cwd: dir, encoding: 'utf8' });
+    const match = output.match(/^worktree (.+)$/m);
+    if (match && existsSync(path.join(match[1], 'node_modules', 'effect'))) {
+      console.log(`[globalSetup] Worktree detected — using main repo: ${match[1]}`);
+      return match[1];
+    }
+  } catch { /* not a git repo */ }
+  return dir;
+}
+const BROWSERLESS_DIR = resolveBrowserlessDir();
 const MAX_WAIT_MS = 30_000;
 const POLL_INTERVAL_MS = 500;
 const RESULTS_FILE = path.join(tmpdir(), 'cf-integration-results.jsonl');

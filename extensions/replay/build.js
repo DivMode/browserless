@@ -18,6 +18,11 @@ import { build, transform } from 'esbuild';
 import fs from 'fs/promises';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'node:module';
+
+// Node-native resolution — walks up directories to find node_modules.
+// Works in git worktrees (finds main repo's node_modules automatically).
+const require = createRequire(import.meta.url);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..', '..');
@@ -44,7 +49,7 @@ async function compileContentScript(filename) {
 
   // 1. Bundle @divmode/rrweb as IIFE
   await build({
-    entryPoints: [join(rootDir, 'node_modules/@divmode/rrweb/dist/rrweb.js')],
+    entryPoints: [join(dirname(require.resolve('@divmode/rrweb')), 'rrweb.js')],
     bundle: true,
     format: 'iife',
     globalName: 'rrweb',
@@ -56,7 +61,7 @@ async function compileContentScript(filename) {
 
   // 2. Bundle @divmode/rrweb-plugin-console-record as IIFE
   await build({
-    entryPoints: [join(rootDir, 'node_modules/@divmode/rrweb-plugin-console-record/dist/rrweb-plugin-console-record.js')],
+    entryPoints: [join(dirname(require.resolve('@divmode/rrweb-plugin-console-record')), 'rrweb-plugin-console-record.js')],
     bundle: true,
     format: 'iife',
     globalName: 'rrwebConsolePlugin',

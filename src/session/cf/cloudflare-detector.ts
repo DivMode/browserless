@@ -964,12 +964,26 @@ export class CloudflareDetector {
       // Resolve page's root frameId once — used by TabDetector for parent frame filtering.
       // Page.getFrameTree is a read-only CDP command — no V8 evaluation, safe for all page types.
       const cdp = yield* CdpSender;
-      const pageFrameId: string | null = yield* cdp.send(
+      const frameTreeResult: { id: string | null; url: string | null } = yield* cdp.send(
         'Page.getFrameTree', {}, cdpSessionId,
       ).pipe(
-        Effect.map((r: any) => (r?.frameTree?.frame?.id as string) ?? null),
-        Effect.orElseSucceed(() => null as string | null),
+        Effect.map((r: any) => ({
+          id: (r?.frameTree?.frame?.id as string) ?? null,
+          url: (r?.frameTree?.frame?.url as string) ?? null,
+        })),
+        Effect.orElseSucceed(() => ({ id: null as string | null, url: null as string | null })),
       );
+      const pageFrameId = frameTreeResult.id;
+
+      // Defense-in-depth: skip detection on about:blank tabs (keepalive tabs).
+      // Primary guard is the two-phase lifecycle in cdp-session.ts (Phase 2 never activates
+      // for about:blank tabs). This catches the enable() path which iterates knownPages
+      // and could start detection on unactivated tabs.
+      if (!frameTreeResult.url || frameTreeResult.url.startsWith('about:')) {
+        yield* Effect.annotateCurrentSpan({ 'cf.detect.skipped': 'about_blank' });
+        return;
+      }
+
       // Set on tab runtime so TabDetector's baked-in filter uses the correct pageFrameId
       tabCtx.setPageFrameId(pageFrameId);
       yield* Effect.annotateCurrentSpan({
