@@ -4,8 +4,7 @@ build/
 metrics.json
 extensions/ublocklite
 
-# Generated rrweb bundles (created by scripts/bundle-rrweb*.js)
-src/generated/
+# Generated rrweb extension (rebuilt by extensions/replay/build.js)
 extensions/replay/rrweb-recorder.js
 
 # npm pack

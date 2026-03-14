@@ -48,12 +48,20 @@ const REPLAY_INGEST_URL = process.env.REPLAY_INGEST_URL;
 type CdpSessionState = 'INITIALIZING' | 'ACTIVE' | 'DRAINING' | 'DESTROYED';
 
 /** Per-tab state — created atomically in handleAttachedToTargetEffect, destroyed by LIFO scope finalizer.
- *  Single struct makes it IMPOSSIBLE to have a FiberMap without a span context. */
+ *  Single struct makes it IMPOSSIBLE to have a FiberMap without a span context.
+ *
+ *  Two-phase lifecycle:
+ *  - Phase 1 (attach): Scope, span, CDP enables, CF page registration — lightweight
+ *  - Phase 2 (activate): Replay pipeline, screencast, pageWs, injections — heavy resources
+ *  Keepalive tabs (about:blank) never navigate → never activate → zero heavy resource waste.
+ */
 interface TabState {
   readonly scope: Scope.Closeable;
   readonly span: Tracer.Span;
   readonly context: Tracer.ExternalSpan;
   readonly fibers: FiberMap.FiberMap<string>;
+  /** Phase 2 activation flag — set once on first non-about:blank navigation. */
+  activated: boolean;
 }
 
 /** Service union — the R channel of the single session runtime. */
@@ -1268,27 +1276,31 @@ export class CdpSession {
         // FINALIZER 4 (registered 2nd = runs 5th): callback + video + target removal
         yield* Scope.addFinalizer(tabScope, Effect.gen(function*() {
           const target = session.targets.getByTarget(targetId);
-          if (session.onTabReplayComplete && target) {
-            const tabReplayId = `${session.sessionId}--tab-${target.targetId}`;
-            try {
-              session.onTabReplayComplete({
-                sessionId: session.sessionId,
-                targetId: target.targetId,
-                duration: Date.now() - target.startTime,
-                eventCount: session.eventCounts.get(target.targetId) ?? 0,
-                frameCount: 0,
-                encodingStatus: 'none',
-                replayUrl: `${session.replayBaseUrl}/replay/${tabReplayId}`,
-                videoUrl: undefined,
-              });
-            } catch (e) {
-              yield* Effect.logWarning('onTabReplayComplete callback failed').pipe(
-                Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e), session_id: session.sessionId, target_id: targetId }),
-              );
+          const tab = session.tabs.get(targetId);
+          // Replay callback + video cleanup only if Phase 2 was entered
+          if (tab?.activated) {
+            if (session.onTabReplayComplete && target) {
+              const tabReplayId = `${session.sessionId}--tab-${target.targetId}`;
+              try {
+                session.onTabReplayComplete({
+                  sessionId: session.sessionId,
+                  targetId: target.targetId,
+                  duration: Date.now() - target.startTime,
+                  eventCount: session.eventCounts.get(target.targetId) ?? 0,
+                  frameCount: 0,
+                  encodingStatus: 'none',
+                  replayUrl: `${session.replayBaseUrl}/replay/${tabReplayId}`,
+                  videoUrl: undefined,
+                });
+              } catch (e) {
+                yield* Effect.logWarning('onTabReplayComplete callback failed').pipe(
+                  Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e), session_id: session.sessionId, target_id: targetId }),
+                );
+              }
             }
-          }
-          if (target) {
-            session.videoHooks?.onTargetDestroyed(session.sessionId, target.cdpSessionId);
+            if (target) {
+              session.videoHooks?.onTargetDestroyed(session.sessionId, target.cdpSessionId);
+            }
           }
           session.targets.remove(targetId);
           session.targets.removeIframeTarget(targetId);
@@ -1296,6 +1308,8 @@ export class CdpSession {
 
         // FINALIZER 3 (registered 3rd = runs 4th): queue end + consumer drain
         yield* Scope.addFinalizer(tabScope, Effect.gen(function*() {
+          const tab = session.tabs.get(targetId);
+          if (!tab?.activated) return;  // No queue was created — skip drain
           const tabQueue = session.tabQueues.get(targetId);
           if (tabQueue) {
             Queue.endUnsafe(tabQueue);
@@ -1327,7 +1341,7 @@ export class CdpSession {
         );
 
         // Atomic TabState creation — one struct, one Map.set, zero partial state.
-        const tabState: TabState = { scope: tabScope, span: tabSpan, context: tabContext, fibers: tabEventFibers };
+        const tabState: TabState = { scope: tabScope, span: tabSpan, context: tabContext, fibers: tabEventFibers, activated: false };
         session.tabs.set(targetId, tabState);
 
         // Notify CF solver — tracked fiber
@@ -1336,79 +1350,11 @@ export class CdpSession {
             session.cloudflareHooks.onPageAttached(targetId, cdpSessionId, targetInfo.url).pipe(Effect.ignore));
         }
 
-        // Start per-tab replay pipeline — Queue creation + Map.set is atomic (no race)
-        if (!session.tabQueues.has(targetId) && session.runtime) {
-          const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
-          session.tabQueues.set(targetId, queue);
-
-          const sessionIdBranded = SessionId.makeUnsafe(session.sessionId);
-          if (session._fiberMap) {
-            // Fork via runtime.runFork — tabConsumer requires ReplayWriter/ReplayMetrics in R
-            // Parent under per-tab span so replay.tab appears in the tab's trace tree
-            forkTracedFiber(session.runtime, session._fiberMap, `tab:${targetId}`, tabConsumer(queue, sessionIdBranded, targetId), tabContext);
-          }
-
-          // Diagnostic probe: check rrweb state 2s after target resumes
-          if (session._fiberMap) {
-            const probeEffect = Effect.gen(function*() {
-              yield* Effect.sleep('2 seconds');
-              const result = yield* session.send('Runtime.evaluate', {
-                expression: `JSON.stringify({
-                  recording: typeof window.__browserlessRecording,
-                  recValue: window.__browserlessRecording === true ? 'true(iframe)' : (window.__browserlessRecording ? 'object' : 'falsy'),
-                  stopFn: typeof window.__browserlessStopRecording,
-                  rrweb: typeof window.rrweb,
-                  rrwebRecord: typeof (window.rrweb && window.rrweb.record),
-                  error: (window.__browserlessRecording && window.__browserlessRecording._rrwebError) || null,
-                  eventCount: window.__browserlessRecording?.events?.length ?? -1,
-                  bufCount: window.__browserlessRecording?._buf?.length ?? -1,
-                  body: !!document.body,
-                  readyState: document.readyState,
-                })`,
-                returnByValue: true,
-              }, cdpSessionId).pipe(Effect.orElseSucceed(() => null));
-              if (result) yield* Effect.logInfo('[rrweb-diag]').pipe(
-                Effect.annotateLogs({ target_id: targetId, value: result?.result?.value, session_id: session.sessionId }),
-              );
-            }).pipe(Effect.ignore);
-            // Parent under per-tab span so probe appears in the tab's trace tree
-            forkTracedFiber(session.runtime, session._fiberMap, `probe:${targetId}`, probeEffect, tabContext);
-          }
-        }
-
-        // CDP domain enables — Effect-native
+        // ── Phase 1: Lightweight CDP enables (all tabs, including about:blank keepalive) ──
         yield* session.send('Runtime.addBinding', { name: '__rrwebPush' }, cdpSessionId).pipe(Effect.ignore);
         yield* session.send('Page.enable', {}, cdpSessionId).pipe(Effect.ignore);
         yield* session.send('Runtime.enable', {}, cdpSessionId).pipe(Effect.ignore);
         yield* session.send('Network.enable', {}, cdpSessionId).pipe(Effect.ignore);
-
-        // Pre-inject CF bridge — runs on every page load, no-op on CF challenge pages
-        // (two-phase guard: URL check + deferred _cf_chl_opt check).
-        // Eliminates per-detection Runtime.evaluate overhead (~1-2s saved per detection).
-        // runImmediately: also inject on the current document (not just future navigations).
-        yield* session.send('Page.addScriptToEvaluateOnNewDocument', {
-          source: CF_BRIDGE_JS,
-          runImmediately: true,
-        }, cdpSessionId).pipe(Effect.ignore);
-
-        // Antibot detection — lazy import + inject BEFORE page scripts
-        if (session.antibot) {
-          const { ANTIBOT_DETECT_JS } = yield* Effect.promise(() => import('../generated/antibot-detect.js'));
-          yield* session.send('Page.addScriptToEvaluateOnNewDocument', {
-            source: ANTIBOT_DETECT_JS,
-          }, cdpSessionId).pipe(Effect.ignore);
-          yield* Effect.logDebug('Antibot detection injected').pipe(
-            Effect.annotateLogs({ target_id: targetId, session_id: session.sessionId }),
-          );
-        }
-
-        // Set session ID for extension
-        yield* session.send('Runtime.evaluate', {
-          expression: `if(window.__browserlessRecording && typeof window.__browserlessRecording === 'object') window.__browserlessRecording.sessionId = '${session.sessionId}';`,
-          returnByValue: true,
-        }, cdpSessionId).pipe(Effect.ignore);
-        const target = session.targets.getByTarget(targetId);
-        if (target) target.injected = true;
 
         yield* session.send('Target.setAutoAttach', {
           autoAttach: true,
@@ -1421,23 +1367,12 @@ export class CdpSession {
           yield* session.send('Runtime.runIfWaitingForDebugger', {}, cdpSessionId).pipe(Effect.ignore);
         }
 
-        // Start screencast — fully decoupled via VideoHooks
-        // Parent under per-tab span so screencast.target appears in the tab's trace tree
-        if (session.video && session.videoHooks && session._fiberMap) {
-          yield* FiberMap.run(session._fiberMap, `screencast:${targetId}`,
-            withSessionSpan(
-              session.videoHooks.onTargetAttached(session.sessionId, session.sendCommand.bind(session) as any, cdpSessionId, targetId).pipe(
-                Effect.ignore,
-              ),
-              tabContext,
-            ),
-          );
-        }
-
-        // Open per-page WebSocket for zero-contention
-        // Parent under per-tab span so cdp.openPageWs appears in the tab's trace tree
-        if (session._fiberMap) {
-          yield* FiberMap.run(session._fiberMap, `pageWs:${targetId}`, withSessionSpan(session.openPageWs(targetId), tabContext));
+        // ── Phase 2: Activate immediately if URL is not about:blank ──
+        // Keepalive tabs stay at about:blank forever → never activate → zero heavy resources.
+        // Real scrape tabs navigate immediately after creation → activate via this path
+        // or via handleTargetInfoChangedEffect (whichever fires first).
+        if (targetInfo.url && !targetInfo.url.startsWith('about:')) {
+          yield* session.activateTabEffect(targetId, cdpSessionId);
         }
       }
 
@@ -1461,6 +1396,106 @@ export class CdpSession {
               session.cloudflareHooks.onIframeAttached(targetId, cdpSessionId, targetInfo.url, parentTargetId).pipe(Effect.ignore));
           }
         }
+      }
+    })();
+  }
+
+  /**
+   * Phase 2 activation — provisions heavy resources for a tab on first real navigation.
+   * Idempotent: no-ops if tab is already activated or doesn't exist.
+   * Called from handleAttachedToTargetEffect (if URL is already non-about:blank)
+   * or handleTargetInfoChangedEffect (on first navigation away from about:blank).
+   */
+  private activateTabEffect(targetId: TargetId, cdpSessionId?: CdpSessionId): Effect.Effect<void> {
+    const session = this;
+    return Effect.fn('tab.activate')(function*() {
+      const tab = session.tabs.get(targetId);
+      if (!tab || tab.activated) return;  // Idempotent
+      tab.activated = true;
+
+      // Resolve cdpSessionId if not provided (called from handleTargetInfoChangedEffect)
+      const resolvedCdpSessionId = cdpSessionId ?? session.targets.getByTarget(targetId)?.cdpSessionId;
+      if (!resolvedCdpSessionId) return;
+
+      yield* Effect.annotateCurrentSpan({ 'tab.target_id': targetId });
+
+      // ── Replay pipeline ──
+      if (!session.tabQueues.has(targetId) && session.runtime) {
+        const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
+        session.tabQueues.set(targetId, queue);
+
+        const sessionIdBranded = SessionId.makeUnsafe(session.sessionId);
+        if (session._fiberMap) {
+          forkTracedFiber(session.runtime, session._fiberMap, `tab:${targetId}`, tabConsumer(queue, sessionIdBranded, targetId), tab.context);
+        }
+
+        // Diagnostic probe: check rrweb state 2s after activation
+        if (session._fiberMap) {
+          const probeEffect = Effect.gen(function*() {
+            yield* Effect.sleep('2 seconds');
+            const result = yield* session.send('Runtime.evaluate', {
+              expression: `JSON.stringify({
+                recording: typeof window.__browserlessRecording,
+                recValue: window.__browserlessRecording === true ? 'true(iframe)' : (window.__browserlessRecording ? 'object' : 'falsy'),
+                stopFn: typeof window.__browserlessStopRecording,
+                rrweb: typeof window.rrweb,
+                rrwebRecord: typeof (window.rrweb && window.rrweb.record),
+                error: (window.__browserlessRecording && window.__browserlessRecording._rrwebError) || null,
+                eventCount: window.__browserlessRecording?.events?.length ?? -1,
+                bufCount: window.__browserlessRecording?._buf?.length ?? -1,
+                body: !!document.body,
+                readyState: document.readyState,
+              })`,
+              returnByValue: true,
+            }, resolvedCdpSessionId).pipe(Effect.orElseSucceed(() => null));
+            if (result) yield* Effect.logInfo('[rrweb-diag]').pipe(
+              Effect.annotateLogs({ target_id: targetId, value: result?.result?.value, session_id: session.sessionId }),
+            );
+          }).pipe(Effect.ignore);
+          forkTracedFiber(session.runtime, session._fiberMap, `probe:${targetId}`, probeEffect, tab.context);
+        }
+      }
+
+      // ── CF bridge injection ──
+      yield* session.send('Page.addScriptToEvaluateOnNewDocument', {
+        source: CF_BRIDGE_JS,
+        runImmediately: true,
+      }, resolvedCdpSessionId).pipe(Effect.ignore);
+
+      // ── Antibot detection ──
+      if (session.antibot) {
+        const { ANTIBOT_DETECT_JS } = yield* Effect.promise(() => import('../generated/antibot-detect.js'));
+        yield* session.send('Page.addScriptToEvaluateOnNewDocument', {
+          source: ANTIBOT_DETECT_JS,
+        }, resolvedCdpSessionId).pipe(Effect.ignore);
+        yield* Effect.logDebug('Antibot detection injected').pipe(
+          Effect.annotateLogs({ target_id: targetId, session_id: session.sessionId }),
+        );
+      }
+
+      // ── rrweb session ID ──
+      yield* session.send('Runtime.evaluate', {
+        expression: `if(window.__browserlessRecording && typeof window.__browserlessRecording === 'object') window.__browserlessRecording.sessionId = '${session.sessionId}';`,
+        returnByValue: true,
+      }, resolvedCdpSessionId).pipe(Effect.ignore);
+      const target = session.targets.getByTarget(targetId);
+      if (target) target.injected = true;
+
+      // ── Screencast ──
+      if (session.video && session.videoHooks && session._fiberMap) {
+        yield* FiberMap.run(session._fiberMap, `screencast:${targetId}`,
+          withSessionSpan(
+            session.videoHooks.onTargetAttached(session.sessionId, session.sendCommand.bind(session) as any, resolvedCdpSessionId, targetId).pipe(
+              Effect.ignore,
+            ),
+            tab.context,
+          ),
+        );
+      }
+
+      // ── Page WebSocket ──
+      if (session._fiberMap) {
+        yield* FiberMap.run(session._fiberMap, `pageWs:${targetId}`, withSessionSpan(session.openPageWs(targetId), tab.context));
       }
     })();
   }
@@ -1539,6 +1574,12 @@ export class CdpSession {
         const tab = session.tabs.get(changedTargetId);
         if (tab && targetInfo.url) {
           tab.span.attribute('tab.url', targetInfo.url.substring(0, 200));
+        }
+
+        // Phase 2 activation: first non-about:blank navigation provisions heavy resources.
+        // Keepalive tabs never navigate away from about:blank → never activate.
+        if (tab && !tab.activated && targetInfo.url && !targetInfo.url.startsWith('about:')) {
+          yield* session.activateTabEffect(changedTargetId);
         }
 
         const target = session.targets.getByTarget(changedTargetId);

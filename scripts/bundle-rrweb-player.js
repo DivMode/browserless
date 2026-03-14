@@ -7,6 +7,11 @@ import { build } from 'esbuild';
 import fs from 'fs/promises';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'node:module';
+
+// Node-native resolution — walks up directories to find node_modules.
+// Works in git worktrees (finds main repo's node_modules automatically).
+const require = createRequire(import.meta.url);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
@@ -21,7 +26,7 @@ const generatedFile = join(generatedDir, 'rrweb-player.ts');
 
   // Bundle @posthog/rrweb-player as IIFE for browser
   await build({
-    entryPoints: [join(rootDir, 'node_modules/@posthog/rrweb-player/dist/rrweb-player.js')],
+    entryPoints: [join(dirname(require.resolve('@posthog/rrweb-player')), 'rrweb-player.js')],
     bundle: true,
     format: 'iife',
     globalName: 'rrwebPlayer',
@@ -34,7 +39,7 @@ const generatedFile = join(generatedDir, 'rrweb-player.ts');
   const playerJS = await fs.readFile(outfile, 'utf-8');
 
   // Read the CSS file
-  const cssPath = join(rootDir, 'node_modules/@posthog/rrweb-player/dist/style.css');
+  const cssPath = join(dirname(require.resolve('@posthog/rrweb-player')), 'style.css');
   const playerCSS = await fs.readFile(cssPath, 'utf-8');
 
   // Generate TypeScript file with the bundled code
