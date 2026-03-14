@@ -953,6 +953,13 @@ export class CloudflareDetector {
           // Use iframeToPage ownership map to keep only our OOPIFs.
           const ownedTargets = filterOwnedTargets(detection.targets, targetId, self.state.iframeToPage);
 
+          // Ownership breakdown — visible in Tempo traces so cross-tab filtering
+          // is unambiguous without needing to cross-reference replay markers.
+          yield* Effect.annotateCurrentSpan({
+            'cf.detect.fresh_owned': ownedTargets.length,
+            'cf.detect.fresh_cross_tab': detection.targets.length - ownedTargets.length,
+          });
+
           if (ownedTargets.length === 0) {
             // All detected targets belong to other pages — not our challenge
             self.events.marker(targetId, 'cf.cross_tab_filtered', {
