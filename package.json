@@ -40,7 +40,7 @@
     "test:unit": "vitest run --project=unit",
     "test:integration": "vitest run --project=integration",
     "coverage": "npm run build:ts && c8 --reporter=text --reporter=html --reporter=lcov cross-env DEBUG=quiet mocha",
-    "start": "env-cmd -f .env bun build",
+    "start": "env-cmd -f .env bun build"
   },
   "files": [
     "assets/*",
