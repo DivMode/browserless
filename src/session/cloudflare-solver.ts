@@ -10,13 +10,17 @@ import type { SendCommand } from './cf/cloudflare-state-tracker.js';
 import {
   CdpSender, SolverEvents, SolveDeps,
   SolveDispatcher, DetectionLoopStarter, OOPIFChecker, SolverConfig,
+  TabSolverContext, TabDetector,
 } from './cf/cf-services.js';
+import { filterOwnedTargets } from './cf/cloudflare-detector.js';
 import { CdpSessionGone } from './cf/cf-errors.js';
 import { solveDetection as solveDetectionEffect } from './cf/cloudflare-solver.effect.js';
 import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
 import { SharedTracerLayer } from '../otel-runtime.js';
 import { WS_SCOPE_BUDGET } from './cf/cf-ws-resource.js';
 import { withSessionSpan, forkTracedFiber, bridgeRuntime } from './trace-helpers.js';
+import { makeTabRuntime } from './cf/cf-tab-runtime.js';
+import type { TabRuntime } from './cf/cf-tab-runtime.js';
 
 import { incCounter, wsLifecycle, wsScopeBudgetExceeded } from '../effect-metrics.js';
 import type { CdpConnection } from '../shared/cdp-rpc.js';
@@ -68,6 +72,8 @@ export class CloudflareSolver {
   private _setRealEmit: (fn: EmitClientEvent) => void;
   /** Per-tab spans — detection fibers are parented under the tab's trace for per-tab isolation. */
   private readonly tabContexts = new Map<string, Tracer.AnySpan>();
+  /** Per-tab state containers — scalar fields, GC'd on tab close. */
+  private readonly tabRuntimes = new Map<TargetId, TabRuntime>();
 
   // ── Eager scope + scope-bound FiberMap (CDPProxy pattern) ──────────
   // Never null, never late-initialized. Scope.close() drains all fibers
@@ -358,9 +364,9 @@ export class CloudflareSolver {
   stopTargetDetection(targetId: TargetId): Effect.Effect<void> {
     // Synchronous guard — prevents startDetectionFiber from forking a ghost
     // when onPageNavigatedEffect's 500ms sleep completes after FiberMap.remove.
-    // Must be synchronous (not inside Effect) because startDetectionFiber reads
-    // it from a different runtime. JS single-threadedness makes this safe.
     this.destroyedTargets.add(targetId);
+    // Clean up per-tab state — GC handles the rest
+    this.tabRuntimes.delete(targetId);
 
     // Hoist: determine owning page for scope-based cleanup
     const parentCtx = this.stateTracker.registry.findByIframeTarget(targetId);
@@ -402,6 +408,11 @@ export class CloudflareSolver {
     );
   }
 
+  /** Get the TabRuntime for a target — used by detector for per-tab state access. */
+  getTabRuntime(targetId: TargetId): TabRuntime | undefined {
+    return this.tabRuntimes.get(targetId);
+  }
+
   private startDetectionFiber(targetId: TargetId, cdpSessionId: CdpSessionId): void {
     // Guard: tab was destroyed while onPageNavigatedEffect slept 500ms across
     // the runtime boundary. The solver runtime doesn't see the session's interrupt.
@@ -417,11 +428,53 @@ export class CloudflareSolver {
       return;
     }
 
+    // Create per-tab state container — scalar fields, GC'd when entry is deleted.
+    // pageFrameId is resolved later inside detectTurnstileWidgetEffect via CdpSender.
+    if (!this.tabRuntimes.has(targetId)) {
+      this.tabRuntimes.set(targetId, makeTabRuntime({
+        targetId, cdpSessionId, pageFrameId: null,
+      }));
+    }
+
     // FiberMap.run auto-interrupts existing fiber for same key.
     // The detection effect is wrapped in catchCause to prevent silent fiber
     // death — without this, defects (NPE in emitClientEvent, etc.) kill the fiber
     // and pydoll never receives cf.solved/cf.failed (the "events=1" failure mode).
+    const tab = this.tabRuntimes.get(targetId)!;
+    const stateTracker = this.stateTracker;
+    const strategies = this.strategies;
     const guarded = this.detector.detectTurnstileWidgetEffect(targetId, cdpSessionId).pipe(
+      // Provide per-tab services — baked-in filtering, impossible to bypass
+      Effect.provideServiceEffect(TabDetector, Effect.gen(function*() {
+        const cdpSender = yield* CdpSender;
+        return TabDetector.of({
+          detect: (excludeIds) => strategies.detectTurnstileViaCDP(
+            tab.cdpSessionId, excludeIds,
+          ).pipe(
+            Effect.provideService(CdpSender, cdpSender),
+            Effect.map((detection) => {
+              if (detection._tag !== 'detected') return detection;
+              // STRUCTURAL FILTER: baked in, impossible to bypass
+              const owned = filterOwnedTargets(
+                detection.targets, tab.targetId, stateTracker.iframeToPage,
+              );
+              const filtered = tab.pageFrameId
+                ? owned.filter(t => !t.parentFrameId || t.parentFrameId === tab.pageFrameId)
+                : owned;
+              return filtered.length === 0
+                ? { _tag: 'not_detected' as const }
+                : { ...detection, targets: filtered };
+            }),
+            Effect.orElseSucceed(() => ({ _tag: 'not_detected' as const })),
+          ),
+        });
+      })),
+      Effect.provideService(TabSolverContext, TabSolverContext.of({
+        targetId: tab.targetId,
+        cdpSessionId: tab.cdpSessionId,
+        state: tab.state,
+        setPageFrameId: (id) => { tab.pageFrameId = id; },
+      })),
       Effect.catchCause((cause) =>
         Effect.fn('cf.detectionFiberGuard')({ self: this }, function*() {
           // Interrupt = normal shutdown (target destroyed / FiberMap.remove).
@@ -522,11 +575,13 @@ export class CloudflareSolver {
     return Effect.fn('cf.solver.destroy')({ self: this }, function*() {
       yield* Effect.logDebug('cf.solver.destroy.start');
 
+      // Clean up all per-tab state containers
+      this.tabRuntimes.clear();
+
       // Close the solver scope — this atomically:
       // 1. Drains ALL detection fibers (FiberMap is scope-bound)
       // 2. Runs stateTracker.destroy() (registered as scope finalizer)
       // 3. Registry scope finalizers settle resolution + emit fallback
-      // No manual FiberMap.clear() needed — scope close handles it.
       const fiberCount = yield* FiberMap.size(this.detectionFibers);
       yield* Scope.close(this.solverScope, Exit.void).pipe(
         Effect.timeout('10 seconds'),
