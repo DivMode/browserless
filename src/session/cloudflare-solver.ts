@@ -1,11 +1,12 @@
-import { Cause, Effect, Exit, FiberMap, Layer, ManagedRuntime, Scope, Semaphore, type Tracer } from 'effect';
+import { Cause, Effect, Exit, FiberMap, Layer, ManagedRuntime, Queue, Scope, Semaphore, type Tracer } from 'effect';
 import { CdpSessionId } from '../shared/cloudflare-detection.js';
 import type { TargetId, CloudflareConfig } from '../shared/cloudflare-detection.js';
 import { CloudflareDetector } from './cf/cloudflare-detector.js';
 import { CloudflareSolveStrategies, SolveOutcome } from './cf/cloudflare-solve-strategies.js';
 import { CloudflareStateTracker } from './cf/cloudflare-state-tracker.js';
-import { createCFEvents } from './cf/cloudflare-event-emitter.js';
-import type { ActiveDetection, CFEvents, EmitClientEvent, InjectMarker } from './cf/cloudflare-event-emitter.js';
+import type { ActiveDetection, EmitClientEvent, InjectMarker } from './cf/cloudflare-event-emitter.js';
+import { CFEvent } from './cf/cf-event-types.js';
+import { makeCFEventPipeline } from './cf/cf-event-queue.js';
 import type { SendCommand } from './cf/cloudflare-state-tracker.js';
 import {
   CdpSender, SolverEvents, SolveDeps,
@@ -64,12 +65,13 @@ export class CloudflareSolver {
   private detector: CloudflareDetector;
   private strategies: CloudflareSolveStrategies;
   private stateTracker: CloudflareStateTracker;
-  private events: CFEvents;
+  private readonly cfQueue: Queue.Queue<CFEvent>;
+  private readonly cfPublish: (event: CFEvent) => void;
   private sendCommand: SendCommand;
   private sendViaProxy: SendCommand | null = null;
   private createIsolatedConn: (() => IsolatedConnection) | null = null;
   private createIsolatedConnScoped: (() => IsolatedConnectionScoped) | null = null;
-  private _setRealEmit: (fn: EmitClientEvent) => void;
+  private _realEmit: EmitClientEvent = async () => {};
   /** Per-tab spans — detection fibers are parented under the tab's trace for per-tab isolation. */
   private readonly tabContexts = new Map<string, Tracer.AnySpan>();
   /** Per-tab state containers — scalar fields, GC'd on tab close. */
@@ -102,28 +104,38 @@ export class CloudflareSolver {
   constructor(sendCommand: SendCommand, injectMarker: InjectMarker, chromePort?: string, sessionId?: string) {
     this.sessionId = sessionId ?? '';
     this.sendCommand = sendCommand;
-    // Mutable closure: emitClientEvent is set after construction by session-coordinator.ts
-    let realEmit: EmitClientEvent = async () => {};
-    this.events = createCFEvents(
+
+    // Queue-based event pipeline — replaces createCFEvents frozen closure.
+    // emitClientEvent uses a thunk so setEmitClientEvent can late-bind.
+    const pipeline = makeCFEventPipeline({
       injectMarker,
-      (...args) => realEmit(...args),
-      sessionId ?? '',
-      () => this.stateTracker.config.recordingMarkers,
-    );
-    this._setRealEmit = (fn) => { realEmit = fn; };
+      emitClientEvent: () => this._realEmit,
+      sessionId: sessionId ?? '',
+      shouldRecordMarkers: () => this.stateTracker.config.recordingMarkers,
+    });
+    this.cfQueue = pipeline.queue;
+    this.cfPublish = (event) => Queue.offerUnsafe(this.cfQueue, event);
+
     this.strategies = new CloudflareSolveStrategies(chromePort);
-    this.stateTracker = new CloudflareStateTracker(this.events);
+    this.stateTracker = new CloudflareStateTracker(this.cfPublish);
     this.detector = new CloudflareDetector(
-      this.events, this.stateTracker, this.strategies, sessionId ?? '',
+      this.cfPublish, this.stateTracker, this.strategies, sessionId ?? '',
     );
 
-    // Register upfront finalizer — stateTracker cleanup runs when solverScope closes.
-    // Same pattern as CDPProxy: register finalizer even before any work begins.
+    // Register upfront finalizer — stateTracker cleanup + queue shutdown.
+    // Queue.shutdown signals the consumer fiber to exit cleanly.
     Effect.runSync(Scope.addFinalizer(this.solverScope,
       Effect.fn('cf.solver.scope.finalizer')({ self: this }, function*() {
         yield* this.stateTracker.destroy();
+        yield* Queue.shutdown(this.cfQueue);
       })(),
     ));
+
+    // Fork the queue consumer as a detached fiber in the solver scope.
+    // It drains until Queue.shutdown is called in the scope finalizer.
+    Effect.runSync(
+      Effect.forkIn(pipeline.consumer, this.solverScope),
+    );
 
     // Build the Effect runtime with service layers
     this.runtime = ManagedRuntime.make(this.buildLayer());
@@ -137,7 +149,7 @@ export class CloudflareSolver {
   private buildLayer(): Layer.Layer<SolverR> {
     const sendCommand = this.sendCommand;
     const stateTracker = this.stateTracker;
-    const events = this.events;
+    const cfPublish = this.cfPublish;
     const strategies = this.strategies;
     const self = this;
 
@@ -173,12 +185,12 @@ export class CloudflareSolver {
     }));
 
     const solverEventsLayer = Layer.succeed(SolverEvents, SolverEvents.of({
-      emitDetected: (active) => Effect.sync(() => events.emitDetected(active)),
-      emitProgress: (active, state, extra) => Effect.sync(() => events.emitProgress(active, state, extra)),
-      emitSolved: (active, result) => Effect.sync(() => events.emitSolved(active, result)),
+      emitDetected: (active) => Effect.sync(() => cfPublish(CFEvent.Detected({ active }))),
+      emitProgress: (active, state, extra) => Effect.sync(() => cfPublish(CFEvent.Progress({ active, state, extra }))),
+      emitSolved: (active, result) => Effect.sync(() => cfPublish(CFEvent.Solved({ active, result }))),
       emitFailed: (active, reason, duration, phaseLabel) =>
-        Effect.sync(() => events.emitFailed(active, reason, duration, phaseLabel)),
-      marker: (targetId, tag, payload) => Effect.sync(() => events.marker(targetId, tag, payload)),
+        Effect.sync(() => cfPublish(CFEvent.Failed({ active, reason, duration: duration, phaseLabel }))),
+      marker: (targetId, tag, payload) => Effect.sync(() => cfPublish(CFEvent.Marker({ targetId, tag, payload }))),
     }));
 
     // SolveDeps needs OOPIFChecker for activity loops and CdpSender/SolverEvents
@@ -348,7 +360,7 @@ export class CloudflareSolver {
   }
 
   setEmitClientEvent(fn: EmitClientEvent): void {
-    this._setRealEmit(fn);
+    this._realEmit = fn;
   }
 
   setSessionSpan(_span: Tracer.AnySpan): void {
@@ -490,7 +502,7 @@ export class CloudflareSolver {
           if (crashCtx && !crashCtx.aborted) {
             const duration = Date.now() - crashCtx.active.startTime;
             yield* crashCtx.abort();
-            this.events.emitFailed(crashCtx.active, 'fiber_crash', duration);
+            this.cfPublish(CFEvent.Failed({ active: crashCtx.active, reason: 'fiber_crash', duration }));
           }
         })(),
       ),
