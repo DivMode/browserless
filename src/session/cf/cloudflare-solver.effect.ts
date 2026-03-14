@@ -41,6 +41,7 @@ type SolveDepsI = typeof SolveDeps.Service;
 import {
   CLICK_RETRY_DELAY,
   MAX_CLICK_ATTEMPTS,
+  MAX_NO_CHECKBOX_BEFORE_BAILOUT,
 } from './cf-schedules.js';
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -176,6 +177,7 @@ const solveByClicking = (
     if (active.aborted) return false;
 
     const events = yield* SolverEvents;
+    let consecutiveNoCheckbox = 0;
     for (let attempt = 0; attempt < MAX_CLICK_ATTEMPTS; attempt++) {
       if (active.aborted) return false;
 
@@ -192,10 +194,11 @@ const solveByClicking = (
         Match.tag('Verified', (r) =>
           deps.setClickDelivered(r.clickDeliveredAt).pipe(
             Effect.andThen(events.emitProgress(active, 'cdp_click_complete', { success: true, attempt })),
-            Effect.map((): boolean | null => true),
+            Effect.map((): boolean | null => { consecutiveNoCheckbox = 0; return true; }),
           ),
         ),
         Match.tag('NotVerified', (r) => {
+          consecutiveNoCheckbox = 0;
           if (r.reason === 'oopif_gone') {
             // OOPIF dead — break loop, fall through to waitForAutoNav
             return events.marker(active.pageTargetId, 'cf.oopif_dead_interstitial', { attempt }).pipe(
@@ -204,7 +207,21 @@ const solveByClicking = (
           }
           return Effect.succeed(null as boolean | null);
         }),
-        Match.tags({ NoCheckbox: () => Effect.succeed(null as boolean | null), ClickFailed: () => Effect.succeed(null as boolean | null) }),
+        Match.tags({
+          NoCheckbox: () => {
+            consecutiveNoCheckbox++;
+            // Bail out early after consecutive NoCheckbox — managed interstitials may
+            // auto-solve without a checkbox. Burning all 6 attempts wastes ~19s and
+            // can push past the 45s WS scope budget.
+            if (consecutiveNoCheckbox >= MAX_NO_CHECKBOX_BEFORE_BAILOUT) {
+              return events.marker(active.pageTargetId, 'cf.no_checkbox_bailout', {
+                attempts: attempt + 1, consecutive: consecutiveNoCheckbox,
+              }).pipe(Effect.map((): boolean | null => false));
+            }
+            return Effect.succeed(null as boolean | null);
+          },
+          ClickFailed: () => { consecutiveNoCheckbox = 0; return Effect.succeed(null as boolean | null); },
+        }),
         Match.exhaustive,
       );
       if (exit !== null) return exit;

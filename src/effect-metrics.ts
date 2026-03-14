@@ -64,6 +64,10 @@ export const cfResolutionTimeouts = Metric.counter('browserless_cf_resolution_ti
   description: 'CF detection resolution timeouts (zombie detections caught by timeout)',
 });
 
+export const cfManagedClickNoNav = Metric.counter('browserless_cf_managed_click_no_nav_total', {
+  description: 'Managed/interstitial CF: click delivered but page never navigated (resolution timeout)',
+});
+
 export const replayEventsTotal = Metric.counter('browserless_replay_events_total', {
   description: 'Total rrweb replay events captured across all sessions',
 });

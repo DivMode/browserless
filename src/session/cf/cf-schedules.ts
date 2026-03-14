@@ -50,6 +50,12 @@ export const NAV_WAIT_MS = 3_000;
 /** Max click attempts in solveByClicking / solveTurnstile loops. */
 export const MAX_CLICK_ATTEMPTS = 6;
 
+/** Max consecutive NoCheckbox results before bailing out of the click loop early.
+ * Managed interstitials may auto-solve without rendering a checkbox — burning all 6
+ * attempts (6 × 3.2s = 19.2s) wastes time and can push past the 45s WS scope budget.
+ * 2 attempts (6.4s) gives the widget enough time to render while leaving headroom. */
+export const MAX_NO_CHECKBOX_BEFORE_BAILOUT = 2;
+
 /** Max page reloads when Turnstile widget fails to render (no checkbox found).
  * After solver exhausts click attempts with NoCheckbox, reload the page to give
  * CF a fresh chance to render the widget. Prevents 60s dead waits. */

@@ -3,7 +3,7 @@ import { runForkInServer } from '../../otel-runtime.js';
 import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareInfo, CloudflareType, EmbeddedInfo, InterstitialCFType } from '../../shared/cloudflare-detection.js';
 import { isInterstitialType, isCFInterstitialTitle } from '../../shared/cloudflare-detection.js';
 import { DETECTION_POLL_DELAY, EMBEDDED_RESOLUTION_TIMEOUT, INTERSTITIAL_RESOLUTION_TIMEOUT, MAX_RECHALLENGES, MAX_WIDGET_RELOADS, RECHALLENGE_DELAY_MS, WIDGET_RELOAD_GRACE } from './cf-schedules.js';
-import { incCounter, cfResolutionTimeouts } from '../../effect-metrics.js';
+import { incCounter, cfResolutionTimeouts, cfManagedClickNoNav } from '../../effect-metrics.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
 import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection } from './cloudflare-event-emitter.js';
 import { CFEvent } from './cf-event-types.js';
@@ -766,8 +766,25 @@ export class CloudflareDetector {
             had_click: !!active.clickDelivered,
             iframe_bound: !!active.iframeCdpSessionId,
             detection_age_ms: Date.now() - active.startTime,
+            cosmetic_nav_seen: !!active.cosmeticNavSeen,
+            verification_evidence: active.verificationEvidence ?? 'none',
+            ...(active.clickDeliveredAt ? { click_to_timeout_ms: Date.now() - active.clickDeliveredAt } : {}),
           }),
         );
+        // Track managed/interstitial click-delivered-but-no-nav specifically
+        if (active.clickDelivered && isInterstitialType(active.info.type)) {
+          yield* incCounter(cfManagedClickNoNav, { type: active.info.type });
+          yield* Effect.logWarning('CF lifecycle: managed_click_no_nav').pipe(
+            Effect.annotateLogs({
+              session_id: self.sid,
+              target_id: targetId.slice(0, 8),
+              cf_type: active.info.type,
+              cosmetic_nav_seen: !!active.cosmeticNavSeen,
+              verification_evidence: active.verificationEvidence ?? 'none',
+              click_to_timeout_ms: active.clickDeliveredAt ? Date.now() - active.clickDeliveredAt : -1,
+            }),
+          );
+        }
         const timeoutReason = opts.timeoutReason ?? 'resolution_timeout';
         yield* incCounter(cfResolutionTimeouts, { type: opts.counterLabel });
         const duration = Date.now() - active.startTime;
