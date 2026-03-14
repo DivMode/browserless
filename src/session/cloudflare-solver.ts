@@ -452,8 +452,8 @@ export class CloudflareSolver {
             tab.cdpSessionId, excludeIds,
           ).pipe(
             Effect.provideService(CdpSender, cdpSender),
-            Effect.map((detection) => {
-              if (detection._tag !== 'detected') return detection;
+            Effect.flatMap((detection) => {
+              if (detection._tag !== 'detected') return Effect.succeed(detection);
               // STRUCTURAL FILTER: baked in, impossible to bypass
               const owned = filterOwnedTargets(
                 detection.targets, tab.targetId, stateTracker.iframeToPage,
@@ -461,9 +461,15 @@ export class CloudflareSolver {
               const filtered = tab.pageFrameId
                 ? owned.filter(t => !t.parentFrameId || t.parentFrameId === tab.pageFrameId)
                 : owned;
-              return filtered.length === 0
+              const result = filtered.length === 0
                 ? { _tag: 'not_detected' as const }
                 : { ...detection, targets: filtered };
+              // Ownership breakdown — visible in Tempo so cross-tab filtering
+              // is unambiguous without cross-referencing replay markers.
+              return Effect.annotateCurrentSpan({
+                'cf.detect.fresh_owned': filtered.length,
+                'cf.detect.fresh_cross_tab': detection.targets.length - filtered.length,
+              }).pipe(Effect.map(() => result));
             }),
             Effect.orElseSucceed(() => ({ _tag: 'not_detected' as const })),
           ),
