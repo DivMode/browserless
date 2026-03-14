@@ -121,3 +121,61 @@ export const OOPIFChecker = ServiceMap.Service<{
 // ═══════════════════════════════════════════════════════════════════════
 
 export const SolverConfig = ServiceMap.Service<Required<CloudflareConfig>>('SolverConfig');
+
+// ═══════════════════════════════════════════════════════════════════════
+// SessionSolverContext — session-level shared state (provided once)
+//
+// Exposes the session-level Maps/Sets that detectors need for cross-tab
+// guards, OOPIF ownership tracking, and compound label accumulation.
+// ═══════════════════════════════════════════════════════════════════════
+
+export const SessionSolverContext = ServiceMap.Service<{
+  readonly iframeToPage: ReadonlyMap<TargetId, TargetId>;
+  readonly solvedCFTargetIds: ReadonlySet<string>;
+  readonly solvedPages: ReadonlySet<TargetId>;
+  readonly knownPages: ReadonlyMap<TargetId, CdpSessionId>;
+  readonly config: Required<CloudflareConfig>;
+  readonly destroyed: boolean;
+  readonly registerPage: (targetId: TargetId, cdpSessionId: CdpSessionId) => void;
+  readonly addSolvedCFTarget: (oopifId: string, pageTargetId: TargetId) => Effect.Effect<void>;
+  readonly addSolvedCFTargetSync: (oopifId: string, pageTargetId: TargetId) => void;
+  readonly pushPhase: (targetId: TargetId, type: string, label: string) => void;
+  readonly buildCompoundLabel: (targetId: TargetId) => string;
+}>('SessionSolverContext');
+
+// ═══════════════════════════════════════════════════════════════════════
+// TabSolverContext — per-tab isolated state (provided per tab runtime)
+//
+// Scalar fields, NOT Maps. Cross-tab contamination is structurally
+// impossible because there are no targetId keys to mix up.
+// ═══════════════════════════════════════════════════════════════════════
+
+import type { TabSolverState } from './cf-tab-state.js';
+
+export const TabSolverContext = ServiceMap.Service<{
+  readonly targetId: TargetId;
+  readonly cdpSessionId: CdpSessionId;
+  readonly state: TabSolverState;
+  /** Set the resolved pageFrameId — called once at detection start. */
+  readonly setPageFrameId: (id: string | null) => void;
+}>('TabSolverContext');
+
+// ═══════════════════════════════════════════════════════════════════════
+// TabDetector — per-tab filtered detection (structural cross-tab guard)
+//
+// The filtering is baked into the service implementation — impossible to
+// bypass. Replaces the 3-step manual filter chain:
+//   1. detectTurnstileViaCDP(cdpSessionId, solvedCFTargetIds)
+//   2. filterOwnedTargets(detection.targets, targetId, iframeToPage)
+//   3. pageFrameId ? filter by parentFrameId : keep all
+// with a single yield* call.
+// ═══════════════════════════════════════════════════════════════════════
+
+import type { CFDetected } from './cloudflare-solve-strategies.js';
+
+export const TabDetector = ServiceMap.Service<{
+  /** Returns ONLY OOPIFs belonging to this tab. Cross-tab OOPIFs are filtered by construction. */
+  readonly detect: (excludeTargetIds?: ReadonlySet<string>) => Effect.Effect<
+    CFDetected | { _tag: 'not_detected' }
+  >;
+}>('TabDetector');

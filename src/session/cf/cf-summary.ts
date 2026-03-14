@@ -1,12 +1,43 @@
 /**
- * Pure summary functions for CF replay markers.
+ * Pure summary functions for CF replay markers and solve attribution.
  *
- * Extracted from integration-helpers.ts so unit tests can import
- * without triggering env var validation (REPLAY_INGEST_URL, etc.).
+ * Extracted from integration-helpers.ts and cloudflare-state-tracker.ts
+ * so unit tests can import without triggering env var validation.
  */
 
 import { isInterstitialType } from '../../shared/cloudflare-detection.js';
 import type { CloudflareType } from '../../shared/cloudflare-detection.js';
+
+// ── Solve Attribution (moved from cloudflare-state-tracker.ts) ─────
+
+export type SolveSignal = 'page_navigated' | 'beacon_push' | 'token_poll' | 'activity_poll'
+  | 'bridge_solved' | 'state_change' | 'callback_binding' | 'session_close' | 'cdp_dom_walk'
+  | 'verified_session_close';
+
+// ┌──────────────┬──────────────────┬──────────────┬───────┐
+// │ Signal       │ clickDelivered?  │ Method       │ Label │
+// ├──────────────┼──────────────────┼──────────────┼───────┤
+// │ page_nav     │ true             │ click_nav    │  ✓    │
+// │ page_nav     │ false            │ auto_nav     │  →    │
+// │ any other    │ true             │ click_solve  │  ✓    │
+// │ any other    │ false            │ auto_solve   │  →    │
+// └──────────────┴──────────────────┴──────────────┴───────┘
+
+export function deriveSolveAttribution(signal: SolveSignal, clickDelivered: boolean) {
+  if (signal === 'page_navigated') {
+    return clickDelivered
+      ? { method: 'click_navigation' as const, autoResolved: false, label: '✓' }
+      : { method: 'auto_navigation' as const, autoResolved: true, label: '→' };
+  }
+  return clickDelivered
+    ? { method: 'click_solve' as const, autoResolved: false, label: '✓' }
+    : { method: 'auto_solve' as const, autoResolved: true, label: '→' };
+}
+
+export function deriveFailLabel(reason: string) {
+  if (reason === 'verified_session_close') return { label: '⊘' };
+  return { label: `✗ ${reason}` };
+}
 
 // ── CF Markers Reference ─────────────────────────────────────────────
 

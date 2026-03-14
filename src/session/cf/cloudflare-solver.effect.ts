@@ -17,13 +17,6 @@ import { SolverEvents, SolveDeps } from './cf-services.js';
 
 const SO = SolveOutcome;
 
-/** Narrowing helpers — switch narrows active.info.type but TS can't prove nested discriminant. */
-function narrowInterstitial(a: SolverActiveDetection): SolverInterstitialDetection {
-  return a as SolverInterstitialDetection;
-}
-function narrowEmbedded(a: SolverActiveDetection): SolverEmbeddedDetection {
-  return a as SolverEmbeddedDetection;
-}
 
 /** Annotate the current span with ActiveDetection context for Tempo filtering. */
 const annotateActive = (active: ReadonlyActiveDetection) => {
@@ -51,6 +44,25 @@ import {
 } from './cf-schedules.js';
 
 // ═══════════════════════════════════════════════════════════════════════
+// startActivityLoop — deduplicated from 3 call sites
+// ═══════════════════════════════════════════════════════════════════════
+
+/** Start the activity loop if not already started. Idempotent — second+ calls are no-ops. */
+const startActivityLoop = (
+  active: SolverActiveDetection,
+  deps: SolveDepsI,
+  variant: 'interstitial' | 'embedded',
+): Effect.Effect<void> => {
+  if (active.activityLoopStarted) return Effect.void;
+  const loop = variant === 'interstitial'
+    ? deps.startActivityLoopInterstitial(active as SolverInterstitialDetection)
+    : deps.startActivityLoopEmbedded(active as SolverEmbeddedDetection);
+  return Effect.all([deps.markActivityLoopStarted(), loop.pipe(Effect.forkChild)]).pipe(
+    Effect.asVoid,
+  );
+};
+
+// ═══════════════════════════════════════════════════════════════════════
 // solveDetection — top-level dispatcher
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -76,12 +88,8 @@ export const solveDetection = (
     return yield* Match.value(active.info.type).pipe(
       Match.whenOr('managed', 'interstitial', () =>
         Effect.fn('cf.solveInterstitial')(function*() {
-          const interstitial = narrowInterstitial(active);
           // Interstitial activity loop — NO Runtime.evaluate (page IS the CF challenge)
-          if (!active.activityLoopStarted) {
-            yield* deps.markActivityLoopStarted();
-            yield* deps.startActivityLoopInterstitial(interstitial).pipe(Effect.forkChild);
-          }
+          yield* startActivityLoop(active, deps, 'interstitial');
 
           // Race click attempts against auto-solve detection.
           // Managed interstitials may auto-solve without a clickable checkbox —
@@ -105,12 +113,8 @@ export const solveDetection = (
       ),
       Match.when('turnstile', () =>
         Effect.fn('cf.solveTurnstileDispatch')(function*() {
-          const embedded = narrowEmbedded(active);
           // Embedded activity loop — Runtime.evaluate is safe (page is embedding site)
-          if (!active.activityLoopStarted) {
-            yield* deps.markActivityLoopStarted();
-            yield* deps.startActivityLoopEmbedded(embedded).pipe(Effect.forkChild);
-          }
+          yield* startActivityLoop(active, deps, 'embedded');
 
           // No outer timeout. All paths wait for push signal or session close:
           // - Clicked: pure push, no timeout (session close is structural bound)
@@ -123,12 +127,8 @@ export const solveDetection = (
       ),
       Match.whenOr('non_interactive', 'invisible', () =>
         Effect.fn('cf.solveAutoDispatch')(function*() {
-          const embedded = narrowEmbedded(active);
           // Embedded activity loop — Runtime.evaluate is safe (page is embedding site)
-          if (!active.activityLoopStarted) {
-            yield* deps.markActivityLoopStarted();
-            yield* deps.startActivityLoopEmbedded(embedded).pipe(Effect.forkChild);
-          }
+          yield* startActivityLoop(active, deps, 'embedded');
 
           yield* solveAutomatic(active, deps);
           return (active.aborted ? SO.Aborted() : SO.AutoHandled()) as SolveDetectionResult;

@@ -6,17 +6,20 @@ import { DETECTION_POLL_DELAY, EMBEDDED_RESOLUTION_TIMEOUT, INTERSTITIAL_RESOLUT
 import { incCounter, cfResolutionTimeouts } from '../../effect-metrics.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
 import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection, CFEvents } from './cloudflare-event-emitter.js';
-import { deriveSolveAttribution } from './cloudflare-state-tracker.js';
+import { deriveSolveAttribution } from './cf-summary.js';
 import type { CloudflareStateTracker } from './cloudflare-state-tracker.js';
 import { SolveOutcome } from './cloudflare-solve-strategies.js';
 import type { CloudflareSolveStrategies, CFDetected, CFTargetMatch, TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
-import { SolveDispatcher, DetectionLoopStarter, CdpSender } from './cf-services.js';
+import { SolveDispatcher, DetectionLoopStarter, CdpSender, TabSolverContext, TabDetector } from './cf-services.js';
 import { Resolution } from './cf-resolution.js';
 import { DetectionContext } from './cf-detection-context.js';
 import type { SolveDetectionResult } from './cloudflare-solver.effect.js';
 
-/** R channel requirements for detector methods that yield services. */
-type DetectorR = typeof SolveDispatcher.Identifier | typeof DetectionLoopStarter.Identifier | typeof CdpSender.Identifier;
+/** Base R channel for detector methods (no tab services). */
+type BaseDetectorR = typeof SolveDispatcher.Identifier | typeof DetectionLoopStarter.Identifier | typeof CdpSender.Identifier;
+
+/** Full R channel for methods that use per-tab services (detectTurnstileWidgetEffect). */
+type DetectorR = BaseDetectorR | typeof TabSolverContext.Identifier | typeof TabDetector.Identifier;
 
 /**
  * Filter detection targets to only those owned by the given page.
@@ -301,6 +304,21 @@ export class CloudflareDetector {
   /** Short session ID for log lines. */
   private get sid(): string { return this.sessionId.slice(0, 8); }
 
+  /** Atomic take-and-delete for pending rechallenge count. */
+  private takePendingRechallengeCount(targetId: TargetId): number {
+    const count = this.state.pendingRechallengeCount.get(targetId) || 0;
+    this.state.pendingRechallengeCount.delete(targetId);
+    return count;
+  }
+
+  /** Bind pending OOPIF if it exists, then delete from pending map. */
+  private bindPendingOOPIF(ctx: DetectionContext, targetId: TargetId): Effect.Effect<void> {
+    const pending = this.state.pendingIframes.get(targetId);
+    if (!pending) return Effect.void;
+    this.state.pendingIframes.delete(targetId);
+    return ctx.bindOOPIF(pending.iframeTargetId, pending.iframeCdpSessionId);
+  }
+
   /**
    * Enable CF detection. Called from sync context (browsers.cdp.ts).
    * startDetectionFiber is injected by the bridge — it calls the bridge's
@@ -330,8 +348,8 @@ export class CloudflareDetector {
     return this.enabled;
   }
 
-  /** Called when a new page target is attached. Returns Effect<void, never, DetectorR>. */
-  onPageAttachedEffect(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void, never, DetectorR> {
+  /** Called when a new page target is attached. */
+  onPageAttachedEffect(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void, never, BaseDetectorR> {
     const self = this;
     return Effect.fn('cf.detector.onPageAttached')(function*() {
       yield* Effect.annotateCurrentSpan({
@@ -360,7 +378,7 @@ export class CloudflareDetector {
    * Key fix: CosmeticUrlChange does NOT abort the solver — CF stripping
    * __cf_chl_rt_tk from the URL via history.replaceState is not a real navigation.
    */
-  onPageNavigatedEffect(targetId: TargetId, cdpSessionId: CdpSessionId, url: string, title: string): Effect.Effect<void, never, DetectorR> {
+  onPageNavigatedEffect(targetId: TargetId, cdpSessionId: CdpSessionId, url: string, title: string): Effect.Effect<void, never, BaseDetectorR> {
     const self = this;
     return Effect.fn('cf.detector.onPageNavigated')(function*() {
       yield* Effect.annotateCurrentSpan({
@@ -768,7 +786,7 @@ export class CloudflareDetector {
   private triggerSolveFromUrlEffect(
     targetId: TargetId, cdpSessionId: CdpSessionId,
     url: string, cfType: CloudflareType,
-  ): Effect.Effect<void, never, DetectorR> {
+  ): Effect.Effect<void, never, BaseDetectorR> {
     const self = this;
     return Effect.fn('cf.triggerSolveFromUrl')(function*() {
       yield* Effect.annotateCurrentSpan({
@@ -792,8 +810,7 @@ export class CloudflareDetector {
         detectionMethod: 'url_pattern',
       };
 
-      const rechallengeCount = self.state.pendingRechallengeCount.get(targetId) || 0;
-      self.state.pendingRechallengeCount.delete(targetId);
+      const rechallengeCount = self.takePendingRechallengeCount(targetId);
 
       const active: ActiveDetection = {
         info,
@@ -831,11 +848,7 @@ export class CloudflareDetector {
       };
 
       const ctx = yield* self.state.registry.register(targetId, active);
-      const pending = self.state.pendingIframes.get(targetId);
-      if (pending) {
-        yield* ctx.bindOOPIF(pending.iframeTargetId, pending.iframeCdpSessionId);
-        self.state.pendingIframes.delete(targetId);
-      }
+      yield* self.bindPendingOOPIF(ctx, targetId);
       self.events.emitDetected(active);
       self.events.marker(targetId, 'cf.detected', { type: cfType, method: 'url_pattern' });
 
@@ -945,8 +958,10 @@ export class CloudflareDetector {
       }
 
       const startTime = Date.now();
+      const tabDetect = yield* TabDetector;
+      const tabCtx = yield* TabSolverContext;
 
-      // Resolve page's root frameId once (reused across all polls).
+      // Resolve page's root frameId once — used by TabDetector for parent frame filtering.
       // Page.getFrameTree is a read-only CDP command — no V8 evaluation, safe for all page types.
       const cdp = yield* CdpSender;
       const pageFrameId: string | null = yield* cdp.send(
@@ -955,6 +970,8 @@ export class CloudflareDetector {
         Effect.map((r: any) => (r?.frameTree?.frame?.id as string) ?? null),
         Effect.orElseSucceed(() => null as string | null),
       );
+      // Set on tab runtime so TabDetector's baked-in filter uses the correct pageFrameId
+      tabCtx.setPageFrameId(pageFrameId);
       yield* Effect.annotateCurrentSpan({
         'cf.detect.page_frame_id': pageFrameId?.substring(0, 16) ?? 'null',
       });
@@ -967,58 +984,17 @@ export class CloudflareDetector {
         // onPageNavigatedEffect while this loop is polling.
         if (self.state.solvedPages.has(targetId)) return;
 
-        // detectTurnstileViaCDP returns tagged union — pattern match on _tag
-        // Pass solvedCFTargetIds to filter out stale OOPIFs from prior solves
-        const detection = yield* self.strategies.detectTurnstileViaCDP(cdpSessionId, self.state.solvedCFTargetIds).pipe(
-          Effect.orElseSucceed(() => ({ _tag: 'not_detected' as const })),
-        );
+        // TabDetector.detect handles:
+        // 1. detectTurnstileViaCDP(cdpSessionId, solvedCFTargetIds)
+        // 2. filterOwnedTargets — cross-tab OOPIF ownership filter
+        // 3. parentFrameId filter — catches OOPIFs missed by iframeToPage
+        // All baked into the service — impossible to bypass.
+        const detection = yield* tabDetect.detect(self.state.solvedCFTargetIds);
 
         if (detection._tag === 'detected') {
-          // CROSS-TAB GUARD: Filter out OOPIFs owned by other pages.
-          // Target.getTargets is browser-global — returns OOPIFs from ALL tabs.
-          // Use iframeToPage ownership map to keep only our OOPIFs.
-          const ownedTargets = filterOwnedTargets(detection.targets, targetId, self.state.iframeToPage);
-
-          if (ownedTargets.length === 0) {
-            // All detected targets belong to other pages — not our challenge
-            self.events.marker(targetId, 'cf.cross_tab_filtered', {
-              page: targetId.slice(0, 8),
-              filtered: detection.targets.map(t => ({
-                id: t.targetId.slice(0, 8),
-                owner: self.state.iframeToPage.get(t.targetId as TargetId)?.slice(0, 8) ?? 'unknown',
-              })),
-            });
-            yield* Effect.sleep(DETECTION_POLL_DELAY);
-            continue;
-          }
-
-          // PARENT FILTER: Use parentFrameId from Target.getTargets to catch
-          // cross-tab OOPIFs that iframeToPage missed (race condition where
-          // onIframeAttached callback hasn't fired yet).
-          // Keep targets with: matching parentFrameId, OR unknown parent (conservative).
-          const parentFiltered = pageFrameId
-            ? ownedTargets.filter(t => !t.parentFrameId || t.parentFrameId === pageFrameId)
-            : ownedTargets;
-
-          if (parentFiltered.length === 0) {
-            // All targets belong to other pages (parentFrameId mismatch)
-            self.events.marker(targetId, 'cf.cross_tab_parent_filtered', {
-              page: targetId.slice(0, 8),
-              page_frame_id: pageFrameId?.substring(0, 16) ?? 'null',
-              targets: ownedTargets.map(t => ({
-                id: t.targetId.slice(0, 8),
-                parent: t.parentFrameId?.substring(0, 16) ?? 'unknown',
-              })),
-            });
-            yield* Effect.sleep(DETECTION_POLL_DELAY);
-            continue;
-          }
-
-          const filteredDetection = { ...detection, targets: parentFiltered };
-
           // Classify using all signals BEFORE dispatching to handler
           const pageInfo = self.strategies.getPageInfo(targetId as string);
-          const classified = classifyOOPIFDetection(filteredDetection, pageInfo);
+          const classified = classifyOOPIFDetection(detection, pageInfo);
 
           yield* pipe(Match.value(classified),
             Match.tag('EmbeddedTurnstile', (c) =>
@@ -1036,10 +1012,10 @@ export class CloudflareDetector {
               return self.triggerSolveFromUrlEffect(targetId, cdpSessionId, c.pageUrl, 'managed');
             }),
             Match.exhaustive,
-          ) as Effect.Effect<void, never, DetectorR>;
+          ) as Effect.Effect<void, never, BaseDetectorR>;
 
           // Common cleanup — scope-bound so entries are removed when page is destroyed
-          for (const t of filteredDetection.targets) {
+          for (const t of detection.targets) {
             yield* self.state.addSolvedCFTarget(t.targetId, targetId);
           }
           return;
@@ -1063,7 +1039,7 @@ export class CloudflareDetector {
     meta: TurnstileOOPIFMeta | undefined,
     startTime: number,
     pageUrl?: string,
-  ): Effect.Effect<void, never, DetectorR> {
+  ): Effect.Effect<void, never, BaseDetectorR> {
     const self = this;
     return Effect.fn('cf.handleEmbeddedDetection')(function*() {
       yield* Effect.annotateCurrentSpan({
@@ -1075,8 +1051,7 @@ export class CloudflareDetector {
         'cf.detect.sitekey': meta?.sitekey ?? 'none',
         'cf.detect.target_count': detection.targets.length,
       });
-      const rechallengeCount = self.state.pendingRechallengeCount.get(targetId) || 0;
-      self.state.pendingRechallengeCount.delete(targetId);
+      const rechallengeCount = self.takePendingRechallengeCount(targetId);
 
       // Classification already verified this is a genuine embedded Turnstile.
       // No runtime title check needed — classifyOOPIFDetection handles it.
@@ -1129,13 +1104,9 @@ export class CloudflareDetector {
       // auto-solve via the push-based binding mechanism.
 
       const ctx = yield* self.state.registry.register(targetId, active);
-      const pending = self.state.pendingIframes.get(targetId);
-      if (pending) {
-        yield* ctx.bindOOPIF(pending.iframeTargetId, pending.iframeCdpSessionId);
-        self.state.pendingIframes.delete(targetId);
-      }
+      yield* self.bindPendingOOPIF(ctx, targetId);
       yield* Effect.logInfo('CF lifecycle: registered').pipe(
-        Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, pending_oopif: !!pending }),
+        Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, pending_oopif: !!ctx.oopif }),
       );
       self.events.emitDetected(active);
       self.events.marker(targetId, 'cf.detected', {
