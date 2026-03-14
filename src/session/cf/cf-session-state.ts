@@ -10,7 +10,7 @@ import { Effect, Exit, Scope } from 'effect';
 import { runForkInServer } from '../../otel-runtime.js';
 import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareType } from '../../shared/cloudflare-detection.js';
 import { isInterstitialType } from '../../shared/cloudflare-detection.js';
-import type { CFEvents } from './cloudflare-event-emitter.js';
+import { CFEvent } from './cf-event-types.js';
 import { DetectionRegistry } from './cf-detection-registry.js';
 
 export class SessionSolverState {
@@ -37,7 +37,7 @@ export class SessionSolverState {
   /** Per-page accumulator of solved/failed phases for compound summary labels. */
   private readonly summaryPhases = new Map<TargetId, { type: string; label: string }[]>();
 
-  constructor(protected events: CFEvents) {
+  constructor(protected cfPublish: (event: CFEvent) => void) {
     this.registry = new DetectionRegistry((active, signal) => {
       const duration = Date.now() - active.startTime;
 
@@ -46,8 +46,10 @@ export class SessionSolverState {
         runForkInServer(Effect.logInfo(`Scope finalizer fallback: verified_session_close for ${active.pageTargetId}`));
         this.pushPhase(active.pageTargetId, active.info.type, phaseLabel);
         const compoundLabel = this.buildCompoundLabel(active.pageTargetId);
-        this.events.emitFailed(active, 'verified_session_close', duration, phaseLabel, compoundLabel,
-          { cf_verified: true });
+        this.cfPublish(CFEvent.Failed({
+          active, reason: 'verified_session_close', duration, phaseLabel, cf_summary_label: compoundLabel,
+          cf_verified: true,
+        }));
         return;
       }
 
@@ -55,7 +57,9 @@ export class SessionSolverState {
       runForkInServer(Effect.logInfo(`Scope finalizer fallback: emitting failed for orphaned detection on ${active.pageTargetId}`));
       this.pushPhase(active.pageTargetId, active.info.type, failLabel);
       const compoundLabel = this.buildCompoundLabel(active.pageTargetId);
-      this.events.emitFailed(active, signal, duration, failLabel, compoundLabel);
+      this.cfPublish(CFEvent.Failed({
+        active, reason: signal, duration, phaseLabel: failLabel, cf_summary_label: compoundLabel,
+      }));
     });
   }
 

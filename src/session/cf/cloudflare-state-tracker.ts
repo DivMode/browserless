@@ -5,7 +5,8 @@ import {
 } from './cf-schedules.js';
 import type { CdpSessionId, TargetId } from '../../shared/cloudflare-detection.js';
 import { isInterstitialType } from '../../shared/cloudflare-detection.js';
-import type { ReadonlyActiveDetection, ReadonlyEmbeddedDetection, ReadonlyInterstitialDetection, EmbeddedDetection, CFEvents } from './cloudflare-event-emitter.js';
+import type { ReadonlyActiveDetection, ReadonlyEmbeddedDetection, ReadonlyInterstitialDetection, EmbeddedDetection } from './cloudflare-event-emitter.js';
+import { CFEvent } from './cf-event-types.js';
 import { OOPIFChecker } from './cf-services.js';
 import { classifyBridgeDetected } from './cloudflare-detector.js';
 import { SessionSolverState } from './cf-session-state.js';
@@ -29,8 +30,8 @@ export type SendCommand = (method: string, params?: object, cdpSessionId?: CdpSe
  * Phase 6 — behavioral methods move to appropriate modules.
  */
 export class CloudflareStateTracker extends SessionSolverState {
-  constructor(events: CFEvents) {
-    super(events);
+  constructor(cfPublish: (event: CFEvent) => void) {
+    super(cfPublish);
   }
 
   /**
@@ -47,7 +48,7 @@ export class CloudflareStateTracker extends SessionSolverState {
       if (!active || active.aborted) return;
 
       yield* Effect.logInfo(`Turnstile state change: ${state} for page ${pageTargetId}`);
-      tracker.events.emitProgress(active, state);
+      tracker.cfPublish(CFEvent.Progress({ active, state }));
 
       if (state === 'success') {
         // Interstitials solve via page navigation (CF redirects away from challenge page).
@@ -56,9 +57,9 @@ export class CloudflareStateTracker extends SessionSolverState {
         if (isInterstitialType(active.info.type)) {
           active.verificationEvidence = 'oopif_success';
           yield* Effect.logInfo(`OOPIF success for interstitial ${pageTargetId} — waiting for page navigation`);
-          tracker.events.marker(active.pageTargetId, 'cf.oopif_success_interstitial', {
+          tracker.cfPublish(CFEvent.Marker({ targetId: active.pageTargetId, tag: 'cf.oopif_success_interstitial', payload: {
             waiting_for: 'page_navigated',
-          });
+          } }));
           return;
         }
 
@@ -123,7 +124,7 @@ export class CloudflareStateTracker extends SessionSolverState {
 
             if (!tracker.bindingSolvedTargets.has(pageTargetId)) {
               yield* Effect.annotateCurrentSpan({ 'cf.token_length': tokenLength });
-              tracker.events.emitStandaloneAutoSolved(pageTargetId, 'bridge_solved', tokenLength, tracker.knownPages.get(pageTargetId));
+              tracker.cfPublish(CFEvent.StandaloneAutoSolved({ targetId: pageTargetId, signal: 'bridge_solved', tokenLength, cdpSessionId: tracker.knownPages.get(pageTargetId) }));
               tracker.bindingSolvedTargets.add(pageTargetId);
             }
           })(),
@@ -131,30 +132,30 @@ export class CloudflareStateTracker extends SessionSolverState {
         Match.when('error', () => {
           const active = tracker.registry.get(pageTargetId);
           if (active && !active.aborted) {
-            tracker.events.marker(pageTargetId, 'cf.bridge.widget_error', {
+            tracker.cfPublish(CFEvent.Marker({ targetId: pageTargetId, tag: 'cf.bridge.widget_error', payload: {
               error_type: parsed.errorType, has_token: parsed.hasToken,
-            });
-            tracker.events.emitProgress(active, 'widget_error', {
+            } }));
+            tracker.cfPublish(CFEvent.Progress({ active, state: 'widget_error', extra: {
               error_type: parsed.errorType, has_token: parsed.hasToken,
-            });
+            } }));
           }
           return Effect.void;
         }),
         Match.when('timing', () => {
           const timingEvent = parsed.event as string;
           const browserTs = parsed.ts as number;
-          tracker.events.marker(pageTargetId, `cf.browser.${timingEvent}`, {
+          tracker.cfPublish(CFEvent.Marker({ targetId: pageTargetId, tag: `cf.browser.${timingEvent}`, payload: {
             browser_ts: browserTs,
             server_ts: Date.now(),
             delta_ms: Date.now() - browserTs,
-          });
+          } }));
           return Effect.void;
         }),
         Match.when('detected', () =>
           Effect.fn('cf.bridge.detected')(function*() {
-            tracker.events.marker(pageTargetId, 'cf.bridge.detected', {
+            tracker.cfPublish(CFEvent.Marker({ targetId: pageTargetId, tag: 'cf.bridge.detected', payload: {
               method: parsed.method,
-            });
+            } }));
             const active = tracker.registry.getActive(pageTargetId);
             const outcome = classifyBridgeDetected(active, parsed.method as string);
 
@@ -218,7 +219,7 @@ export class CloudflareStateTracker extends SessionSolverState {
 
       if (!tracker.bindingSolvedTargets.has(targetId)) {
         const cdpSessionId = tracker.knownPages.get(targetId);
-        tracker.events.emitStandaloneAutoSolved(targetId, 'beacon_push', tokenLength, cdpSessionId);
+        tracker.cfPublish(CFEvent.StandaloneAutoSolved({ targetId, signal: 'beacon_push', tokenLength, cdpSessionId }));
         tracker.bindingSolvedTargets.add(targetId);
       }
     })();
@@ -250,7 +251,7 @@ export class CloudflareStateTracker extends SessionSolverState {
       const won = yield* active.resolution.solve(result);
       if (won) {
         if (autoCtx) yield* autoCtx.abort();
-        tracker.events.marker(active.pageTargetId, 'cf.auto_solved', { signal, method: attr.method });
+        tracker.cfPublish(CFEvent.Marker({ targetId: active.pageTargetId, tag: 'cf.auto_solved', payload: { signal, method: attr.method } }));
       }
       tracker.bindingSolvedTargets.add(active.pageTargetId);
     })();
@@ -281,7 +282,7 @@ export class CloudflareStateTracker extends SessionSolverState {
 
     const activityIteration = (loopIter: number) =>
       Effect.gen(function*() {
-        tracker.events.emitProgress(active, 'activity_poll', { iteration: loopIter });
+        tracker.cfPublish(CFEvent.Progress({ active, state: 'activity_poll', extra: { iteration: loopIter } }));
         const oopifResult = yield* tracker.checkOOPIFStateIteration(active);
         if (oopifResult === 'aborted') return 'aborted' as const;
         return 'continue' as const;
@@ -311,7 +312,7 @@ export class CloudflareStateTracker extends SessionSolverState {
 
     const activityIteration = (loopIter: number) =>
       Effect.gen(function*() {
-        tracker.events.emitProgress(active, 'activity_poll', { iteration: loopIter });
+        tracker.cfPublish(CFEvent.Progress({ active, state: 'activity_poll', extra: { iteration: loopIter } }));
         const oopifResult = yield* tracker.checkOOPIFStateIteration(active);
         if (oopifResult === 'aborted') return 'aborted' as const;
         return 'continue' as const;

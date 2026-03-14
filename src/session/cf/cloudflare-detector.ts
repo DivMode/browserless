@@ -5,7 +5,8 @@ import { isInterstitialType, isCFInterstitialTitle } from '../../shared/cloudfla
 import { DETECTION_POLL_DELAY, EMBEDDED_RESOLUTION_TIMEOUT, INTERSTITIAL_RESOLUTION_TIMEOUT, MAX_RECHALLENGES, MAX_WIDGET_RELOADS, RECHALLENGE_DELAY_MS, WIDGET_RELOAD_GRACE } from './cf-schedules.js';
 import { incCounter, cfResolutionTimeouts } from '../../effect-metrics.js';
 import { CloudflareTracker } from './cloudflare-event-emitter.js';
-import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection, CFEvents } from './cloudflare-event-emitter.js';
+import type { ActiveDetection, ReadonlyActiveDetection, EmbeddedDetection } from './cloudflare-event-emitter.js';
+import { CFEvent } from './cf-event-types.js';
 import { deriveSolveAttribution } from './cf-summary.js';
 import type { CloudflareStateTracker } from './cloudflare-state-tracker.js';
 import { SolveOutcome } from './cloudflare-solve-strategies.js';
@@ -295,7 +296,7 @@ export class CloudflareDetector {
   private enabled = false;
 
   constructor(
-    private events: CFEvents,
+    private cfPublish: (event: CFEvent) => void,
     private state: CloudflareStateTracker,
     private strategies: CloudflareSolveStrategies,
     private sessionId: string = '',
@@ -412,9 +413,9 @@ export class CloudflareDetector {
             // InterstitialSolved. If CF doesn't solve, session_close is correct.
             active.cosmeticNavSeen = true;
             active.verificationEvidence = 'cosmetic_nav';
-            self.events.marker(targetId, 'cf.cosmetic_url_change', {
+            self.cfPublish(CFEvent.Marker({ targetId, tag: 'cf.cosmetic_url_change', payload: {
               title: o.title.substring(0, 50), url: o.url.substring(0, 200),
-            });
+            } }));
             return Effect.succeed(false);
           }),
           Match.tag('TurnstileToCF', () =>
@@ -442,9 +443,9 @@ export class CloudflareDetector {
               };
               yield* active.resolution.solve(result);
               if (attr.method === 'click_navigation' && o.clickDeliveredAt) {
-                self.events.marker(targetId, 'cf.click_to_nav', {
+                self.cfPublish(CFEvent.Marker({ targetId, tag: 'cf.click_to_nav', payload: {
                   click_to_nav_ms: Date.now() - o.clickDeliveredAt, type: 'turnstile',
-                });
+                } }));
               }
               return false;
             })(),
@@ -452,11 +453,11 @@ export class CloudflareDetector {
           Match.tag('Rechallenge', (o) =>
             Effect.fn('cf.nav.rechallenge')(function*() {
               yield* abortAndResolve();
-              self.events.marker(targetId, 'cf.rechallenge', {
+              self.cfPublish(CFEvent.Marker({ targetId, tag: 'cf.rechallenge', payload: {
                 type: active.info.type, duration_ms: o.duration,
                 click_delivered: o.clickDelivered,
                 rechallenge_count: o.rechallengeCount,
-              });
+              } }));
               const rechallengeLabel = o.clickDelivered ? '✓' : '→';
               yield* active.resolution.fail('rechallenge', o.duration, rechallengeLabel);
               yield* Effect.logInfo('Navigation landed on another CF challenge — suppressing cf.solved').pipe(
@@ -493,7 +494,7 @@ export class CloudflareDetector {
               };
               self.state.pushPhase(targetId, o.emitType, attr.label);
               const label = self.state.buildCompoundLabel(targetId);
-              self.events.emitSolved(active, result, label);
+              self.cfPublish(CFEvent.Solved({ active, result, cf_summary_label: label }));
               active.resolution.markerEmitted = true;
 
               yield* abortAndResolve();
@@ -504,9 +505,9 @@ export class CloudflareDetector {
               // (Int→Emb) flows — a P0 regression proven in production 2026-03-02.
               yield* active.resolution.solve(result);
               if (attr.method === 'click_navigation' && o.clickDeliveredAt) {
-                self.events.marker(targetId, 'cf.click_to_nav', {
+                self.cfPublish(CFEvent.Marker({ targetId, tag: 'cf.click_to_nav', payload: {
                   click_to_nav_ms: Date.now() - o.clickDeliveredAt, type: o.emitType,
-                });
+                } }));
               }
               return false;
             })(),
@@ -723,7 +724,7 @@ export class CloudflareDetector {
             self.state.pushPhase(targetId, resolved.result.type, resolved.result.phase_label || '→');
           }
           const label = self.state.buildCompoundLabel(targetId);
-          self.events.emitSolved(active, resolved.result, label, { skipMarker: active.resolution.markerEmitted });
+          self.cfPublish(CFEvent.Solved({ active, result: resolved.result, cf_summary_label: label, skipMarker: active.resolution.markerEmitted }));
         } else {
           const cfVerified = resolved.reason === 'verified_session_close';
           yield* Effect.annotateCurrentSpan({
@@ -740,9 +741,11 @@ export class CloudflareDetector {
             self.state.pushPhase(targetId, active.info.type, phase_label);
           }
           const label = self.state.buildCompoundLabel(targetId);
-          self.events.emitFailed(active, resolved.reason, resolved.duration_ms,
-            cfVerified ? '⊘' : resolved.phase_label, label,
-            { skipMarker: active.resolution.markerEmitted, cf_verified: cfVerified });
+          self.cfPublish(CFEvent.Failed({
+            active, reason: resolved.reason, duration: resolved.duration_ms,
+            phaseLabel: cfVerified ? '⊘' : resolved.phase_label, cf_summary_label: label,
+            skipMarker: active.resolution.markerEmitted, cf_verified: cfVerified,
+          }));
         }
       } else {
         // Timeout — zombie detection caught. Settle and emit.
@@ -771,7 +774,7 @@ export class CloudflareDetector {
         yield* active.resolution.fail(timeoutReason, duration);
         self.state.pushPhase(targetId, active.info.type, `✗ ${timeoutReason}`);
         const label = self.state.buildCompoundLabel(targetId);
-        self.events.emitFailed(active, timeoutReason, duration, undefined, label);
+        self.cfPublish(CFEvent.Failed({ active, reason: timeoutReason, duration, cf_summary_label: label }));
       }
       // Identity-safe by construction — ctx.resolve() operates on THIS detection only.
       // Cannot accidentally resolve a rechallenge's NEW detection for the same targetId.
@@ -828,29 +831,29 @@ export class CloudflareDetector {
           if (active.aborted) return;
           if (outcome._tag === 'solved') {
             self.state.pushPhase(targetId, outcome.result.type, outcome.result.phase_label || '→');
-            self.events.marker(targetId, 'cf.solved', {
+            self.cfPublish(CFEvent.Marker({ targetId, tag: 'cf.solved', payload: {
               type: outcome.result.type, method: outcome.result.method,
               duration_ms: outcome.result.duration_ms,
               phase_label: outcome.result.phase_label, signal: outcome.result.signal,
-            });
+            } }));
           } else {
             const cfVerified = outcome.reason === 'verified_session_close';
             const phase_label = cfVerified
               ? '⊘'
               : (outcome.phase_label ?? `✗ ${outcome.reason}`);
             self.state.pushPhase(targetId, active.info.type, phase_label);
-            self.events.marker(targetId, 'cf.failed', {
+            self.cfPublish(CFEvent.Marker({ targetId, tag: 'cf.failed', payload: {
               reason: outcome.reason, duration_ms: outcome.duration_ms, phase_label,
               cf_verified: cfVerified,
-            });
+            } }));
           }
         }),
       };
 
       const ctx = yield* self.state.registry.register(targetId, active);
       yield* self.bindPendingOOPIF(ctx, targetId);
-      self.events.emitDetected(active);
-      self.events.marker(targetId, 'cf.detected', { type: cfType, method: 'url_pattern' });
+      self.cfPublish(CFEvent.Detected({ active }));
+      self.cfPublish(CFEvent.Marker({ targetId, tag: 'cf.detected', payload: { type: cfType, method: 'url_pattern' } }));
 
       // Fork solver dispatch as a daemon fiber so it survives handler interruption.
       // FiberMap dispatches targetInfoChanged handlers with the same key — a second
@@ -1003,12 +1006,12 @@ export class CloudflareDetector {
               ),
             ),
             Match.tag('InlineInterstitial', (c) => {
-              self.events.marker(targetId, 'cf.inline_interstitial_detected', {
+              self.cfPublish(CFEvent.Marker({ targetId, tag: 'cf.inline_interstitial_detected', payload: {
                 title: c.pageTitle.substring(0, 50),
                 page_url: c.pageUrl.substring(0, 100),
                 oopif_url: c.oopifUrl?.substring(0, 100),
                 sitekey: c.meta?.sitekey ?? null,
-              });
+              } }));
               return self.triggerSolveFromUrlEffect(targetId, cdpSessionId, c.pageUrl, 'managed');
             }),
             Match.exhaustive,
@@ -1079,17 +1082,17 @@ export class CloudflareDetector {
             // OOPIFs could trigger a false detection.
             self.state.solvedPages.add(targetId);
             self.state.pushPhase(targetId, outcome.result.type, outcome.result.phase_label || '→');
-            self.events.marker(targetId, 'cf.solved', {
+            self.cfPublish(CFEvent.Marker({ targetId, tag: 'cf.solved', payload: {
               type: outcome.result.type, method: outcome.result.method,
               duration_ms: outcome.result.duration_ms,
               phase_label: outcome.result.phase_label, signal: outcome.result.signal,
-            });
+            } }));
           } else {
             const phase_label = outcome.phase_label ?? `✗ ${outcome.reason}`;
             self.state.pushPhase(targetId, active.info.type, phase_label);
-            self.events.marker(targetId, 'cf.failed', {
+            self.cfPublish(CFEvent.Marker({ targetId, tag: 'cf.failed', payload: {
               reason: outcome.reason, duration_ms: outcome.duration_ms, phase_label,
-            });
+            } }));
           }
         }),
       };
@@ -1108,8 +1111,8 @@ export class CloudflareDetector {
       yield* Effect.logInfo('CF lifecycle: registered').pipe(
         Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, pending_oopif: !!ctx.oopif }),
       );
-      self.events.emitDetected(active);
-      self.events.marker(targetId, 'cf.detected', {
+      self.cfPublish(CFEvent.Detected({ active }));
+      self.cfPublish(CFEvent.Marker({ targetId, tag: 'cf.detected', payload: {
         type: 'turnstile', method: 'cdp_dom_walk',
         oopif_count: detection.targets.length,
         oopif_urls: detection.targets.map(t => t.url).join(' | '),
@@ -1117,7 +1120,7 @@ export class CloudflareDetector {
         solved_set_size: self.state.solvedCFTargetIds.size,
         sitekey: meta?.sitekey ?? null,
         oopif_mode: meta?.mode ?? null,
-      });
+      } }));
       yield* Effect.logInfo('CF lifecycle: detected').pipe(
         Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid, sitekey: meta?.sitekey ?? 'none' }),
       );
@@ -1127,11 +1130,11 @@ export class CloudflareDetector {
       // Rechallenges are futile: CF invalidated the token, the widget won't
       // auto-resolve, and the initial solve already extracted the data.
       if (rechallengeCount > 0) {
-        self.events.marker(targetId, 'cf.rechallenge_skipped', {
+        self.cfPublish(CFEvent.Marker({ targetId, tag: 'cf.rechallenge_skipped', payload: {
           sitekey: meta?.sitekey ?? null,
           rechallenge_count: rechallengeCount,
           oopif_url: firstTarget?.url,
-        });
+        } }));
         yield* self.emitSolveFailure(active, targetId, 'rechallenge_skipped');
         return;
       }
@@ -1189,10 +1192,10 @@ export class CloudflareDetector {
                 elapsed_ms: duration,
               }),
             );
-            self.events.marker(targetId, 'cf.widget_reload', {
+            self.cfPublish(CFEvent.Marker({ targetId, tag: 'cf.widget_reload', payload: {
               reload_count: reloadCount + 1, max_reloads: MAX_WIDGET_RELOADS,
               elapsed_ms: duration,
-            });
+            } }));
 
             // Settle current detection — phase label ↻ (reload) instead of ✗
             yield* active.resolution.fail('widget_reload', duration, '↻');
