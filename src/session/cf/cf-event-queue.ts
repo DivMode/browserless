@@ -10,8 +10,12 @@
 import { Effect, Latch, Match, Queue, Stream } from "effect";
 
 import { runForkInServer } from "../../otel-runtime.js";
-import { CdpSessionId } from "../../shared/cloudflare-detection.js";
-import type { TargetId, CloudflareResult } from "../../shared/cloudflare-detection.js";
+import { CdpSessionId, isInterstitialType } from "../../shared/cloudflare-detection.js";
+import type {
+  TargetId,
+  CloudflareResult,
+  CloudflareType,
+} from "../../shared/cloudflare-detection.js";
 import { CloudflareTracker } from "./cloudflare-event-emitter.js";
 import type { ActiveDetection, EmitClientEvent, InjectMarker } from "./cloudflare-event-emitter.js";
 import { Resolution } from "./cf-resolution.js";
@@ -111,6 +115,9 @@ export function makeCFEventPipeline(deps: CFEventPipelineDeps): CFEventPipeline 
               targetId: active.pageTargetId,
               summary: active.tracker.snapshot(),
               cf_summary_label: cf_summary_label ?? "",
+              phase_role: isInterstitialType(result.type as CloudflareType)
+                ? "interstitial"
+                : "embedded",
             })
             .catch((e) =>
               runForkInServer(
@@ -124,6 +131,8 @@ export function makeCFEventPipeline(deps: CFEventPipelineDeps): CFEventPipeline 
               duration_ms: result.duration_ms,
               phase_label: result.phase_label,
               signal: result.signal,
+              had_click: !!active.clickDelivered,
+              tracker_clicked: !!snap.clicked,
             });
           }
         }),
@@ -160,6 +169,9 @@ export function makeCFEventPipeline(deps: CFEventPipelineDeps): CFEventPipeline 
                 phase_label,
                 cf_summary_label,
                 cf_verified: cfVerified,
+                phase_role: isInterstitialType(active.info.type as CloudflareType)
+                  ? "interstitial"
+                  : "embedded",
               })
               .catch((e) =>
                 runForkInServer(
@@ -251,6 +263,7 @@ export function makeCFEventPipeline(deps: CFEventPipelineDeps): CFEventPipeline 
               targetId: active.pageTargetId,
               summary: active.tracker.snapshot(),
               cf_summary_label: "Emb→",
+              phase_role: "embedded",
             })
             .catch((e) =>
               runForkInServer(
