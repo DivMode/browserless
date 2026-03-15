@@ -11,7 +11,7 @@
  *   - Browserless auto-started if not already running
  *
  * Run:
- *   LOCAL_MOBILE_PROXY=$(op read "op://Catchseo.com/Proxies/local_mobile_proxy") \
+ *   \
  *     npx vitest run --config vitest.integration.config.ts
  *
  * These tests are SLOW (15-20s total) and hit real external sites.

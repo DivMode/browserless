@@ -318,50 +318,73 @@ export class CloudflareSolver {
             if (self.createIsolatedConnScoped) {
               const solveId = ++_solveIdCounter;
               const tid = active.pageTargetId.slice(0, 8);
-              return self.createIsolatedConnScoped().pipe(
-                Effect.flatMap((isolated) =>
-                  provideServices(
-                    active,
-                    CdpSender.of({
-                      send: originalSender.send,
-                      sendViaProxy: (method, params, sessionId, timeoutMs) =>
-                        isolated.send(method, params, sessionId, timeoutMs),
-                      sendViaBrowser: originalSender.sendViaProxy,
+              const dispatchStartMs = Date.now();
+              return Effect.annotateCurrentSpan({
+                "cf.dispatch.solveId": solveId,
+                "cf.dispatch.tid": tid,
+                "cf.dispatch.type": active.info.type,
+                "cf.dispatch.startMs": dispatchStartMs,
+              }).pipe(
+                Effect.andThen(
+                  self.createIsolatedConnScoped().pipe(
+                    Effect.flatMap((isolated) =>
+                      provideServices(
+                        active,
+                        CdpSender.of({
+                          send: originalSender.send,
+                          sendViaProxy: (method, params, sessionId, timeoutMs) =>
+                            isolated.send(method, params, sessionId, timeoutMs),
+                          sendViaBrowser: originalSender.sendViaProxy,
+                        }),
+                      ),
+                    ),
+                    Effect.scoped,
+                    // Catch WS open errors — connection refused, handshake timeout, etc.
+                    Effect.catch((err: unknown) => {
+                      return Effect.logError("ws.debug.solver_isolated.error").pipe(
+                        Effect.annotateLogs({ solveId, tid, error: String(err) }),
+                        Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
+                      );
+                    }),
+                    // Structural kill switch: even if future code introduces blocking
+                    // inside the scoped region, the budget timeout kills the scope.
+                    // Prevents Bug #1 (blocking inside scoped region) structurally.
+                    Effect.timeout(`${WS_SCOPE_BUDGET} millis`),
+                    // Catch timeout error — budget exceeded returns 'aborted' + logs for Grafana
+                    Effect.catch(() => {
+                      let domain = "unknown";
+                      try {
+                        if (active.info.url) domain = new URL(active.info.url).hostname;
+                      } catch {
+                        /* malformed URL */
+                      }
+                      return incCounter(wsScopeBudgetExceeded, { type: "solver_isolated" }).pipe(
+                        Effect.andThen(
+                          Effect.sync(() => {
+                            runForkInServer(
+                              Effect.logWarning("ws.scope_budget_exceeded").pipe(
+                                Effect.annotateLogs({
+                                  label: "solver_isolated",
+                                  budget_ms: WS_SCOPE_BUDGET,
+                                  solveId,
+                                  tid,
+                                  session_id: self.sessionId,
+                                  cf_type: active.info.type,
+                                  domain,
+                                  detection_id: active.detectionId ?? "unknown",
+                                  elapsed_since_detection_ms: Date.now() - active.startTime,
+                                  click_delivered: !!active.clickDelivered,
+                                  aborted: active.aborted,
+                                }),
+                              ),
+                            );
+                          }),
+                        ),
+                        Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
+                      );
                     }),
                   ),
                 ),
-                Effect.scoped,
-                // Catch WS open errors — connection refused, handshake timeout, etc.
-                Effect.catch((err: unknown) => {
-                  return Effect.logError("ws.debug.solver_isolated.error").pipe(
-                    Effect.annotateLogs({ solveId, tid, error: String(err) }),
-                    Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
-                  );
-                }),
-                // Structural kill switch: even if future code introduces blocking
-                // inside the scoped region, the budget timeout kills the scope.
-                // Prevents Bug #1 (blocking inside scoped region) structurally.
-                Effect.timeout(`${WS_SCOPE_BUDGET} millis`),
-                // Catch timeout error — budget exceeded returns 'aborted' + logs for Grafana
-                Effect.catch(() => {
-                  return incCounter(wsScopeBudgetExceeded, { type: "solver_isolated" }).pipe(
-                    Effect.andThen(
-                      Effect.sync(() => {
-                        runForkInServer(
-                          Effect.logWarning("ws.scope_budget_exceeded").pipe(
-                            Effect.annotateLogs({
-                              label: "solver_isolated",
-                              budget_ms: WS_SCOPE_BUDGET,
-                              solveId,
-                              tid,
-                            }),
-                          ),
-                        );
-                      }),
-                    ),
-                    Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
-                  );
-                }),
               );
             }
 

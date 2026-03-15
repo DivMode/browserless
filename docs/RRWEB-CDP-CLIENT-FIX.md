@@ -441,7 +441,7 @@ bunx sst deploy
 
 ```bash
 cd /Users/peter/Developer/catchseo/packages/pydoll-scraper
-LOCAL_MOBILE_PROXY=$(op read "op://Catchseo.com/Proxies/local_mobile_proxy") \
+\
   uv run pydoll ahrefs example.com --chrome-endpoint=browserless
 
 # Check recording created with events
@@ -454,7 +454,7 @@ curl -s http://192.168.4.200:3000/recordings | jq '.[0] | {id, eventCount, durat
 ```bash
 # Run 5 scrapers in parallel
 for i in {1..5}; do
-  LOCAL_MOBILE_PROXY=$(op read "op://Catchseo.com/Proxies/local_mobile_proxy") \
+  \
     uv run pydoll ahrefs domain$i.com --chrome-endpoint=browserless &
 done
 wait

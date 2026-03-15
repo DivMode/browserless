@@ -88,7 +88,6 @@ export const solveDetection = (active: SolverActiveDetection) =>
     yield* annotateActive(active);
     if (active.aborted) return SO.Aborted();
 
-    const events = yield* SolverEvents;
     const deps = yield* SolveDeps;
 
     return yield* Match.value(active.info.type).pipe(
@@ -108,13 +107,12 @@ export const solveDetection = (active: SolverActiveDetection) =>
           if (active.aborted) return SO.Aborted() as SolveDetectionResult;
           if (clicked) return SO.ClickDispatched() as SolveDetectionResult;
 
-          yield* events.marker(active.pageTargetId, "cf.waiting_auto_nav", {
-            type: active.info.type,
-            attempts_exhausted: true,
-          });
-
-          yield* waitForAutoNav(active);
-          return (active.aborted ? SO.Aborted() : SO.NoClick()) as SolveDetectionResult;
+          // Return NoCheckbox immediately — do NOT block on waitForAutoNav here.
+          // The detector's awaitResolutionRace handles the wait OUTSIDE the dispatch
+          // scope, which releases the solver_isolated WS connection immediately.
+          // Before this fix, waitForAutoNav blocked 25-30s inside the scope after
+          // clicks failed, hitting the 45s WS scope budget on every interstitial.
+          return SO.NoCheckbox() as SolveDetectionResult;
         })(),
       ),
       Match.when("turnstile", () =>
@@ -210,7 +208,7 @@ const solveByClicking = (active: SolverActiveDetection, deps: SolveDepsI) =>
         Match.tag("NotVerified", (r) => {
           consecutiveNoCheckbox = 0;
           if (r.reason === "oopif_gone") {
-            // OOPIF dead — break loop, fall through to waitForAutoNav
+            // OOPIF dead — break loop, return NoCheckbox to detector
             return events
               .marker(active.pageTargetId, "cf.oopif_dead_interstitial", { attempt })
               .pipe(Effect.map((): boolean | null => false));
@@ -421,21 +419,6 @@ const solveTurnstile = (active: SolverActiveDetection, deps: SolveDepsI) =>
 
     // Clicked — return immediately, detection awaits push signals.
     return raceResult;
-  })();
-
-// ═══════════════════════════════════════════════════════════════════════
-// waitForAutoNav — wait up to 30s for page navigation
-//
-// Latch-based blocking (zero CPU). Now that abortLatch is required,
-// there's only one code path — no polling fallback needed.
-// ═══════════════════════════════════════════════════════════════════════
-
-const waitForAutoNav = (active: SolverActiveDetection) =>
-  Effect.fn("cf.waitForAutoNav")(function* () {
-    yield* annotateActive(active);
-    if (active.aborted) return;
-
-    yield* active.abortLatch.await.pipe(Effect.timeout("30 seconds"), Effect.ignore);
   })();
 
 // ═══════════════════════════════════════════════════════════════════════

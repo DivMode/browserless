@@ -61,7 +61,7 @@ npm run install:browsers
 Vitest has TWO configs:
 
 1. `npx vitest run` — unit tests (`*.test.ts`, excludes integration). Fast, no browser.
-2. `LOCAL_MOBILE_PROXY=$(op read "op://Catchseo.com/Proxies/local_mobile_proxy") npx vitest run --config vitest.integration.config.ts` — integration tests (`*.integration.test.ts`). Launches real server, hits real CF sites, runs pydoll subprocess tests (ahrefs-fast, cf-stress, pytest). 60s timeout.
+2. `npx vitest run --config vitest.integration.config.ts` — integration tests (`*.integration.test.ts`). Launches real server, hits real CF sites, runs pydoll subprocess tests (ahrefs-fast, cf-stress, pytest). 60s timeout.
 
 `npx vitest run` alone only runs unit tests — ALWAYS run both.
 

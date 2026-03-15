@@ -192,7 +192,7 @@ export async function setup() {
   if (!process.env.LOCAL_MOBILE_PROXY) {
     throw new Error(
       "LOCAL_MOBILE_PROXY env var required. Run with:\n" +
-        '  LOCAL_MOBILE_PROXY=$(op read "op://Catchseo.com/Proxies/local_mobile_proxy") npx vitest run --config vitest.integration.config.ts',
+        "  npx vitest run --config vitest.integration.config.ts",
     );
   }
 

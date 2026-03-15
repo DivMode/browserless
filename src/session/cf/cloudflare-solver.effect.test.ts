@@ -12,9 +12,11 @@
  *   2. Bridge push resolution (3 tests)
  *   3. Pure push wait (3 tests)
  *   4. Race condition regressions (5 tests)
+ *   7. Interstitial solve paths (4 tests)
  */
 import { describe, expect, it } from "@effect/vitest";
-import { Duration, Effect, Fiber, Latch, Layer } from "effect";
+import type { Duration} from "effect";
+import { Effect, Fiber, Latch, Layer } from "effect";
 import * as TestClock from "effect/testing/TestClock";
 import { CdpSessionId, TargetId } from "../../shared/cloudflare-detection.js";
 import type { CloudflareInfo, CloudflareResult } from "../../shared/cloudflare-detection.js";
@@ -749,6 +751,86 @@ describe("Click latency tracking", () => {
         original: MAX_CLICK_ATTEMPTS,
         reduced_to: 2,
       });
+    }),
+  );
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// Group 7: Interstitial solve paths
+//
+// Interstitial/managed types must return NoCheckbox immediately after
+// click attempts exhaust — NOT block on waitForAutoNav inside the
+// dispatch scope. The detector's awaitResolutionRace handles the wait
+// OUTSIDE the scope.
+// ═══════════════════════════════════════════════════════════════════════
+
+describe("Interstitial solve paths", () => {
+  it.effect("26. managed type — no click, returns NoCheckbox immediately (not NoClick)", () =>
+    Effect.gen(function* () {
+      const { solveDetection } = yield* Effect.promise(importSolver);
+      const { layer } = makeTestLayer({ clickSuccess: false });
+      const active = makeActive({
+        info: { type: "managed", url: "https://example.com", detectionMethod: "cdp_dom_walk" },
+      });
+
+      const fiber = yield* solveDetection(active).pipe(Effect.provide(layer), Effect.forkChild);
+      // Should return NoCheckbox immediately — NOT block for 30s on waitForAutoNav.
+      yield* TestClock.adjust("5 seconds");
+      const outcome = yield* Fiber.join(fiber);
+
+      expect(tag(outcome)).toBe("NoCheckbox");
+    }),
+  );
+
+  it.effect("27. interstitial type — no click, returns NoCheckbox immediately", () =>
+    Effect.gen(function* () {
+      const { solveDetection } = yield* Effect.promise(importSolver);
+      const { layer } = makeTestLayer({ clickSuccess: false });
+      const active = makeActive({
+        info: { type: "interstitial", url: "https://example.com", detectionMethod: "cdp_dom_walk" },
+      });
+
+      const fiber = yield* solveDetection(active).pipe(Effect.provide(layer), Effect.forkChild);
+      yield* TestClock.adjust("5 seconds");
+      const outcome = yield* Fiber.join(fiber);
+
+      expect(tag(outcome)).toBe("NoCheckbox");
+    }),
+  );
+
+  it.effect("28. managed type — click succeeds, returns ClickDispatched", () =>
+    Effect.gen(function* () {
+      const { solveDetection } = yield* Effect.promise(importSolver);
+      const { layer, captures } = makeTestLayer({ clickSuccessOnAttempt: 1 });
+      const active = makeActive({
+        info: { type: "managed", url: "https://example.com", detectionMethod: "cdp_dom_walk" },
+      });
+
+      const fiber = yield* solveDetection(active).pipe(Effect.provide(layer), Effect.forkChild);
+      yield* TestClock.adjust("5 seconds");
+      const outcome = yield* Fiber.join(fiber);
+
+      expect(tag(outcome)).toBe("ClickDispatched");
+      expect(captures.clickAttempts).toBe(1);
+    }),
+  );
+
+  it.effect("29. managed type — abort during click loop, returns Aborted", () =>
+    Effect.gen(function* () {
+      const { solveDetection } = yield* Effect.promise(importSolver);
+      const { layer } = makeTestLayer({ clickSuccess: false });
+      const active = makeActive({
+        info: { type: "managed", url: "https://example.com", detectionMethod: "cdp_dom_walk" },
+      });
+
+      const fiber = yield* solveDetection(active).pipe(Effect.provide(layer), Effect.forkChild);
+      // Bridge push at 200ms — during click loop
+      yield* simulateBridgePush(active, "200 millis").pipe(Effect.forkChild);
+      yield* TestClock.adjust("5 seconds");
+      const outcome = yield* Fiber.join(fiber);
+
+      expect(tag(outcome)).toBe("Aborted");
+      expect(active.resolution.isDone).toBe(true);
     }),
   );
 });
