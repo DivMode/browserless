@@ -7,9 +7,9 @@ import {
   Request,
   contentTypes,
   jsonResponse,
-} from '@browserless.io/browserless';
-import { ServerResponse } from 'http';
-import { Effect } from 'effect';
+} from "@browserless.io/browserless";
+import { ServerResponse } from "http";
+import { Effect } from "effect";
 
 export interface ResponseSchema {
   allowCORS: boolean;
@@ -48,7 +48,7 @@ export default class ConfigGetRoute extends HTTPRoute {
   async handler(_req: Request, res: ServerResponse): Promise<void> {
     const route = this;
     return Effect.runPromise(
-      Effect.fn('route.config.get')(function* () {
+      Effect.fn("route.config.get")(function* () {
         const config = route.config();
 
         const response: ResponseSchema = {

@@ -1,11 +1,8 @@
-import { Browser, Page } from 'puppeteer-core';
-import { BrowserWebSocketTransport } from 'puppeteer-core/lib/esm/puppeteer/common/BrowserWebSocketTransport.js';
-import { _connectToCdpBrowser as connect } from 'puppeteer-core/lib/esm/puppeteer/cdp/BrowserConnector.js';
+import { Browser, Page } from "puppeteer-core";
+import { BrowserWebSocketTransport } from "puppeteer-core/lib/esm/puppeteer/common/BrowserWebSocketTransport.js";
+import { _connectToCdpBrowser as connect } from "puppeteer-core/lib/esm/puppeteer/cdp/BrowserConnector.js";
 
-type codeHandler = (params: {
-  context: unknown;
-  page: Page;
-}) => Promise<unknown>;
+type codeHandler = (params: { context: unknown; page: Page }) => Promise<unknown>;
 
 export class FunctionRunner {
   protected browser?: Browser;
@@ -26,11 +23,10 @@ export class FunctionRunner {
   }) {
     console.log(`/function.js: Got endpoint: "${data.browserWSEndpoint}"`);
     const { browserWSEndpoint, code, context, options } = data;
-    const connectionTransport =
-      await BrowserWebSocketTransport.create(browserWSEndpoint);
+    const connectionTransport = await BrowserWebSocketTransport.create(browserWSEndpoint);
     const cdpOptions = {
       headers: {
-        Host: '127.0.0.1',
+        Host: "127.0.0.1",
       },
       protocolTimeout: options.protocolTimeout,
     };
@@ -40,7 +36,7 @@ export class FunctionRunner {
       browserWSEndpoint,
       cdpOptions,
     )) as unknown as Browser;
-    this.browser.once('disconnected', () => this.stop());
+    this.browser.once("disconnected", () => this.stop());
     this.page = await this.browser.newPage();
 
     if (options.downloadPath) {
@@ -49,8 +45,8 @@ export class FunctionRunner {
       );
       // @ts-ignore
       const client = this.page._client.call(this.page);
-      await client.send('Page.setDownloadBehavior', {
-        behavior: 'allow',
+      await client.send("Page.setDownloadBehavior", {
+        behavior: "allow",
         downloadPath: options.downloadPath,
       });
     }
@@ -60,34 +56,32 @@ export class FunctionRunner {
       this.browser?.disconnect();
       throw e;
     });
-    console.debug(
-      `_browserless_function_client_: Code is finished executing, closing page.`,
-    );
+    console.debug(`_browserless_function_client_: Code is finished executing, closing page.`);
     this.page.close().catch(this.log);
 
     if (response instanceof Uint8Array) {
       return {
-        contentType: 'uint8array',
+        contentType: "uint8array",
         payload: Array.from(response),
       };
     }
 
-    if (typeof response === 'string') {
+    if (typeof response === "string") {
       return {
-        contentType: response.startsWith('<') ? 'text/html' : 'text/plain',
+        contentType: response.startsWith("<") ? "text/html" : "text/plain",
         payload: response,
       };
     }
 
-    if (typeof response === 'object') {
+    if (typeof response === "object") {
       return {
-        contentType: 'application/json',
-        payload: JSON.stringify(response, null, '  '),
+        contentType: "application/json",
+        payload: JSON.stringify(response, null, "  "),
       };
     }
 
     return {
-      contentType: 'text/plain',
+      contentType: "text/plain",
       payload: response,
     };
   }
@@ -99,7 +93,7 @@ export class FunctionRunner {
 
 // Set this as an immutable property on window so our handler's
 // can call it downstream
-Object.defineProperty(window, 'BrowserlessFunctionRunner', {
+Object.defineProperty(window, "BrowserlessFunctionRunner", {
   configurable: false,
   enumerable: false,
   value: FunctionRunner,

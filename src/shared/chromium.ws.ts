@@ -7,8 +7,8 @@ import {
   Request,
   SystemQueryParameters,
   WebsocketRoutes,
-} from '@browserless.io/browserless';
-import { Duplex } from 'stream';
+} from "@browserless.io/browserless";
+import { Duplex } from "stream";
 
 export interface QuerySchema extends SystemQueryParameters {
   launch?: CDPLaunchOptions | string;
@@ -20,14 +20,9 @@ export default class ChromiumCDPWebSocketRoute extends BrowserWebsocketRoute {
   browser = ChromiumCDP;
   concurrency = true;
   description = `Launch and connect to Chromium with a library like puppeteer or others that work over chrome-devtools-protocol.`;
-  path = [WebsocketRoutes.chromium, WebsocketRoutes['/']];
+  path = [WebsocketRoutes.chromium, WebsocketRoutes["/"]];
   tags = [APITags.browserWS];
-  async handler(
-    req: Request,
-    socket: Duplex,
-    head: Buffer,
-    browser: ChromiumCDP,
-  ): Promise<void> {
+  async handler(req: Request, socket: Duplex, head: Buffer, browser: ChromiumCDP): Promise<void> {
     return browser.proxyWebSocket(req, socket, head);
   }
 }

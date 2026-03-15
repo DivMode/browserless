@@ -9,9 +9,9 @@ import {
   SystemQueryParameters,
   contentTypes,
   writeResponse,
-} from '@browserless.io/browserless';
-import { ServerResponse } from 'http';
-import { Effect } from 'effect';
+} from "@browserless.io/browserless";
+import { ServerResponse } from "http";
+import { Effect } from "effect";
 
 export interface QuerySchema extends SystemQueryParameters {
   token?: string;
@@ -39,41 +39,34 @@ export default class VideoGetRoute extends HTTPRoute {
   async handler(req: Request, res: ServerResponse): Promise<void> {
     const route = this;
     return Effect.runPromise(
-      Effect.fn('route.video.get')(function* () {
+      Effect.fn("route.video.get")(function* () {
         const video = route.videoManager();
         if (!video) {
-          return writeResponse(res, 503, 'Video manager is not enabled');
+          return writeResponse(res, 503, "Video manager is not enabled");
         }
 
         // Extract replay ID from path: /video/:id
-        const pathParts = req.parsed.pathname.split('/');
-        const videoIndex = pathParts.indexOf('video');
+        const pathParts = req.parsed.pathname.split("/");
+        const videoIndex = pathParts.indexOf("video");
         const id =
-          videoIndex >= 0 && videoIndex + 1 < pathParts.length
-            ? pathParts[videoIndex + 1]
-            : null;
+          videoIndex >= 0 && videoIndex + 1 < pathParts.length ? pathParts[videoIndex + 1] : null;
 
         if (!id) {
-          throw new NotFound('Replay ID is required');
+          throw new NotFound("Replay ID is required");
         }
 
         // Pass auth token through to sub-resource URLs (video, HLS, status)
-        const token = req.parsed.searchParams.get('token') ?? '';
+        const token = req.parsed.searchParams.get("token") ?? "";
 
         // Check in-memory encoder for encoding status
         const encoder = video.getVideoEncoder();
         const progress = encoder?.getProgress(id) ?? null;
-        const encodingStatus = progress?.status ?? 'none';
+        const encodingStatus = progress?.status ?? "none";
         const frameCount = progress?.totalFrames ?? 0;
 
-        const html = route.generatePlayerHTML(
-          id,
-          encodingStatus,
-          frameCount,
-          token,
-        );
+        const html = route.generatePlayerHTML(id, encodingStatus, frameCount, token);
 
-        res.setHeader('Content-Type', 'text/html');
+        res.setHeader("Content-Type", "text/html");
         res.writeHead(200);
         res.end(html);
       })(),
@@ -86,13 +79,16 @@ export default class VideoGetRoute extends HTTPRoute {
     frameCount: number,
     token: string,
   ): string {
-    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : "";
     const hlsUrl = `/video/${id}/hls/playlist.m3u8${tokenParam}`;
     const statusUrl = `/video/${id}/status${tokenParam}`;
-    const isReady = encodingStatus === 'completed';
-    const isEncoding = encodingStatus === 'deferred' || encodingStatus === 'pending' || encodingStatus === 'encoding';
-    const hasFailed = encodingStatus === 'failed';
-    const noVideo = encodingStatus === 'none' && frameCount === 0;
+    const isReady = encodingStatus === "completed";
+    const isEncoding =
+      encodingStatus === "deferred" ||
+      encodingStatus === "pending" ||
+      encodingStatus === "encoding";
+    const hasFailed = encodingStatus === "failed";
+    const noVideo = encodingStatus === "none" && frameCount === 0;
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -100,10 +96,14 @@ export default class VideoGetRoute extends HTTPRoute {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Video Replay - ${id}</title>
-  ${isReady || isEncoding ? `
+  ${
+    isReady || isEncoding
+      ? `
   <script type="module" src="https://cdn.jsdelivr.net/npm/hls-video-element@1.2/+esm"></script>
   <script type="module" src="https://cdn.jsdelivr.net/npm/media-chrome@4/+esm"></script>
-  ` : ''}
+  `
+      : ""
+  }
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -163,27 +163,39 @@ export default class VideoGetRoute extends HTTPRoute {
 </head>
 <body>
   <div class="container">
-    ${isReady ? this.renderCompletedPlayer(hlsUrl, frameCount) : ''}
-    ${isEncoding ? this.renderEncodingPlayer(hlsUrl, statusUrl) : ''}
-    ${hasFailed ? `
+    ${isReady ? this.renderCompletedPlayer(hlsUrl, frameCount) : ""}
+    ${isEncoding ? this.renderEncodingPlayer(hlsUrl, statusUrl) : ""}
+    ${
+      hasFailed
+        ? `
     <div class="status">
       <h2>Encoding failed</h2>
       <p>${frameCount} frames were captured but encoding did not complete.</p>
     </div>
-    ` : ''}
-    ${noVideo ? `
+    `
+        : ""
+    }
+    ${
+      noVideo
+        ? `
     <div class="status">
       <h2>No video available</h2>
       <p>This replay does not have a video component.</p>
       <p class="meta"><a href="/replay/${id}${tokenParam}" style="color:#0af">View DOM replay instead</a></p>
     </div>
-    ` : ''}
-    ${!isReady && !isEncoding && !hasFailed && !noVideo ? `
+    `
+        : ""
+    }
+    ${
+      !isReady && !isEncoding && !hasFailed && !noVideo
+        ? `
     <div class="status">
       <h2>Video not available</h2>
       <p>Status: ${encodingStatus}</p>
     </div>
-    ` : ''}
+    `
+        : ""
+    }
   </div>
 </body>
 </html>`;

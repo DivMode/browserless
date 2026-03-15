@@ -8,7 +8,7 @@ import {
   Response,
   contentTypes,
   jsonResponse,
-} from '@browserless.io/browserless';
+} from "@browserless.io/browserless";
 
 export type ResponseSchema = object;
 

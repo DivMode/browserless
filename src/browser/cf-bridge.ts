@@ -9,10 +9,10 @@
  * Push-based: monitors turnstile state and pushes events to server
  * multiplexed through the existing __rrwebPush binding.
  */
-import { detectCF } from './cf-detection';
-import { setupTurnstileHooks } from './turnstile-hooks';
-import { setupErrorMonitor } from './turnstile-error';
-import type { BridgeEvent } from './types';
+import { detectCF } from "./cf-detection";
+import { setupTurnstileHooks } from "./turnstile-hooks";
+import { setupErrorMonitor } from "./turnstile-error";
+import type { BridgeEvent } from "./types";
 
 // ── Buffered emit ─────────────────────────────────────────────────────
 // Runtime.addBinding is async — on navigation, the bridge script fires BEFORE
@@ -25,7 +25,9 @@ let flushTimer: ReturnType<typeof setInterval> | null = null;
 
 function flushPending(): void {
   while (pendingEvents.length > 0) {
-    try { window.__rrwebPush!(pendingEvents.shift()!); } catch (_) {}
+    try {
+      window.__rrwebPush!(pendingEvents.shift()!);
+    } catch (_) {}
   }
   if (flushTimer) {
     clearInterval(flushTimer);
@@ -35,18 +37,23 @@ function flushPending(): void {
 
 function emit(event: BridgeEvent): void {
   const payload = JSON.stringify(event);
-  if (typeof window.__rrwebPush === 'function') {
+  if (typeof window.__rrwebPush === "function") {
     if (pendingEvents.length > 0) flushPending();
-    try { window.__rrwebPush(payload); } catch (_) {}
+    try {
+      window.__rrwebPush(payload);
+    } catch (_) {}
   } else {
     pendingEvents.push(payload);
     if (!flushTimer) {
       flushTimer = setInterval(() => {
-        if (typeof window.__rrwebPush === 'function') flushPending();
+        if (typeof window.__rrwebPush === "function") flushPending();
       }, 50);
       // Stop after 10s — binding should appear within milliseconds
       setTimeout(() => {
-        if (flushTimer) { clearInterval(flushTimer); flushTimer = null; }
+        if (flushTimer) {
+          clearInterval(flushTimer);
+          flushTimer = null;
+        }
       }, 10000);
     }
   }
@@ -57,7 +64,7 @@ function init(): void {
   const detection = detectCF();
   if (detection.detected) {
     emit({
-      type: 'detected',
+      type: "detected",
       method: detection.method!,
       cType: detection.cType,
       cRay: detection.cRay,
@@ -78,8 +85,8 @@ function init(): void {
 //
 // On challenge pages: no hooks, no intervals, no MutationObservers.
 // On embedding pages: full bridge (turnstile hooks, detection, error monitor).
-const isChallengeUrl = location.href.includes('__cf_chl') ||
-  location.hostname === 'challenges.cloudflare.com';
+const isChallengeUrl =
+  location.href.includes("__cf_chl") || location.hostname === "challenges.cloudflare.com";
 
 if (!isChallengeUrl) {
   // Start turnstile polling IMMEDIATELY — before DOMContentLoaded.
@@ -93,12 +100,12 @@ if (!isChallengeUrl) {
   // DOMContentLoaded, so by the time this fires, we can detect challenge pages
   // that slipped past the URL guard.
   function initIfSafe(): void {
-    if (typeof window._cf_chl_opt !== 'undefined') return;
+    if (typeof window._cf_chl_opt !== "undefined") return;
     init();
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initIfSafe, { once: true });
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initIfSafe, { once: true });
   } else {
     initIfSafe();
   }

@@ -39,7 +39,7 @@ const browser = await puppeteer.launch();
 
 ```js
 const browser = await puppeteer.connect({
-  browserWSEndpoint: 'ws://localhost:3000',
+  browserWSEndpoint: "ws://localhost:3000",
 });
 ```
 
@@ -50,7 +50,7 @@ We support running with playwright via their browser's remote connection protoco
 **Before**
 
 ```js
-import pw from 'playwright';
+import pw from "playwright";
 const browser = await pw.firefox.launch();
 ```
 
@@ -62,11 +62,9 @@ docker run -p 3000:3000 ghcr.io/browserless/firefox
 ```
 
 ```js
-import pw from 'playwright-core';
+import pw from "playwright-core";
 
-const browser = await pw.firefox.connect(
-  'ws://localhost:3000/firefox/playwright',
-);
+const browser = await pw.firefox.connect("ws://localhost:3000/firefox/playwright");
 ```
 
 After that, the rest of your code remains the same with no other changes required.

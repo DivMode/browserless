@@ -7,7 +7,7 @@
  *
  * Used at JSON.parse boundaries in cdp-proxy.ts and cdp-session.ts.
  */
-import { Schema } from 'effect';
+import { Schema } from "effect";
 
 // ═══════════════════════════════════════════════════════════════════════
 // CDP Message Envelopes
@@ -65,8 +65,10 @@ export type RrwebEventBatch = typeof RrwebEventBatch.Type;
 // Pre-built decoders (avoid re-creating per message)
 // ═══════════════════════════════════════════════════════════════════════
 
-const _opts = { onExcessProperty: 'ignore' as const };
+const _opts = { onExcessProperty: "ignore" as const };
 export const decodeCDPCommand = (u: unknown) => Schema.decodeUnknownExit(CDPCommand)(u, _opts);
 export const decodeCDPMessage = (u: unknown) => Schema.decodeUnknownExit(CDPMessage)(u, _opts);
-export const decodeAddReplayMarkerParams = (u: unknown) => Schema.decodeUnknownExit(AddReplayMarkerParams)(u, _opts);
-export const decodeRrwebEventBatch = (u: unknown) => Schema.decodeUnknownExit(RrwebEventBatch)(u, _opts);
+export const decodeAddReplayMarkerParams = (u: unknown) =>
+  Schema.decodeUnknownExit(AddReplayMarkerParams)(u, _opts);
+export const decodeRrwebEventBatch = (u: unknown) =>
+  Schema.decodeUnknownExit(RrwebEventBatch)(u, _opts);

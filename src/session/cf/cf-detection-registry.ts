@@ -15,11 +15,11 @@
  * Resolution is identity-safe via DetectionContext.resolve() — no targetId-based resolve.
  */
 
-import { Effect, Exit, Option, Scope, Tracer } from 'effect';
-import type { TargetId } from '../../shared/cloudflare-detection.js';
-import type { ActiveDetection, ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
-import type { SolveSignal } from './cloudflare-state-tracker.js';
-import { DetectionContext } from './cf-detection-context.js';
+import { Effect, Exit, Option, Scope, Tracer } from "effect";
+import type { TargetId } from "../../shared/cloudflare-detection.js";
+import type { ActiveDetection, ReadonlyActiveDetection } from "./cloudflare-event-emitter.js";
+import type { SolveSignal } from "./cloudflare-state-tracker.js";
+import { DetectionContext } from "./cf-detection-context.js";
 
 /** Callback to emit a session_close fallback for an orphaned detection. */
 export type EmitFallback = (active: ReadonlyActiveDetection, signal: SolveSignal) => void;
@@ -44,67 +44,81 @@ export class DetectionRegistry {
     // this gives us the parent span (e.g. cf.handleEmbeddedDetection) so that
     // onBeaconSolved can join the same trace as a sibling of cf.solveDetection.
     return Effect.flatMap(
-      Effect.withFiber((fiber) => Effect.succeed(
-        fiber.currentSpan ? Option.some(fiber.currentSpan) : Option.none() as Option.Option<Tracer.AnySpan>,
-      )),
-      (callerSpan) => Effect.fn('cf.registry.register')(function*() {
-      // Extract domain from page URL for Tempo filtering
-      let domain = 'unknown';
-      try {
-        if (active.info.url) {
-          const hostname = new URL(active.info.url).hostname;
-          domain = hostname || 'unknown';
-        }
-      } catch { /* malformed URL */ }
-
-      // Assign detectionId — groups all solve spans for this challenge
-      const detectionId = crypto.randomUUID();
-      active.detectionId = detectionId;
-
-      yield* Effect.annotateCurrentSpan({
-        'cf.target_id': targetId,
-        'cf.type': active.info.type,
-        'cf.detection_method': active.info.detectionMethod ?? 'unknown',
-        'cf.domain': domain,
-        'cf.detection_id': detectionId,
-        ...(active.sessionId ? { 'session.id': active.sessionId } : {}),
-      });
-      // If a detection already exists for this target, close its scope first
-      const existing = self.entries.get(targetId);
-      if (existing) {
-        yield* Scope.close(existing.scope, Exit.void);
-      }
-
-      const scope = yield* Scope.make();
-      const context = new DetectionContext(
-        active, scope,
-        Option.isSome(callerSpan) ? callerSpan.value : undefined,
-      );
-      self.entries.set(targetId, context);
-
-      // Register the finalizer — runs when scope closes.
-      // Handles session close: non-aborted orphaned detections get session_close
-      // fallback. Aborted detections (OOPIF destroyed) are left unsettled — the
-      // handler fiber waits for bridge push or 60s timeout (the zombie fix).
-      yield* Scope.addFinalizer(scope, Effect.gen(function*() {
-        // Remove from map (idempotent — may already be gone if destroyAll iterates)
-        self.entries.delete(targetId);
-
-        if (!context.resolved && !active.aborted) {
-          // Orphaned detection — abort + settle Resolution + emit session_close fallback
-          DetectionContext.setAborted(active);
-          const duration = Date.now() - active.startTime;
-          const reason = active.verificationEvidence ? 'verified_session_close' : 'session_close';
-          yield* active.resolution.fail(reason, duration);
-          // Only emit fallback if onSettle didn't already handle it
-          if (!active.resolution.markerEmitted) {
-            self.emitFallback(active, reason);
+      Effect.withFiber((fiber) =>
+        Effect.succeed(
+          fiber.currentSpan
+            ? Option.some(fiber.currentSpan)
+            : (Option.none() as Option.Option<Tracer.AnySpan>),
+        ),
+      ),
+      (callerSpan) =>
+        Effect.fn("cf.registry.register")(function* () {
+          // Extract domain from page URL for Tempo filtering
+          let domain = "unknown";
+          try {
+            if (active.info.url) {
+              const hostname = new URL(active.info.url).hostname;
+              domain = hostname || "unknown";
+            }
+          } catch {
+            /* malformed URL */
           }
-        }
-      }));
 
-      return context;
-    })());
+          // Assign detectionId — groups all solve spans for this challenge
+          const detectionId = crypto.randomUUID();
+          active.detectionId = detectionId;
+
+          yield* Effect.annotateCurrentSpan({
+            "cf.target_id": targetId,
+            "cf.type": active.info.type,
+            "cf.detection_method": active.info.detectionMethod ?? "unknown",
+            "cf.domain": domain,
+            "cf.detection_id": detectionId,
+            ...(active.sessionId ? { "session.id": active.sessionId } : {}),
+          });
+          // If a detection already exists for this target, close its scope first
+          const existing = self.entries.get(targetId);
+          if (existing) {
+            yield* Scope.close(existing.scope, Exit.void);
+          }
+
+          const scope = yield* Scope.make();
+          const context = new DetectionContext(
+            active,
+            scope,
+            Option.isSome(callerSpan) ? callerSpan.value : undefined,
+          );
+          self.entries.set(targetId, context);
+
+          // Register the finalizer — runs when scope closes.
+          // Handles session close: non-aborted orphaned detections get session_close
+          // fallback. Aborted detections (OOPIF destroyed) are left unsettled — the
+          // handler fiber waits for bridge push or 60s timeout (the zombie fix).
+          yield* Scope.addFinalizer(
+            scope,
+            Effect.gen(function* () {
+              // Remove from map (idempotent — may already be gone if destroyAll iterates)
+              self.entries.delete(targetId);
+
+              if (!context.resolved && !active.aborted) {
+                // Orphaned detection — abort + settle Resolution + emit session_close fallback
+                DetectionContext.setAborted(active);
+                const duration = Date.now() - active.startTime;
+                const reason = active.verificationEvidence
+                  ? "verified_session_close"
+                  : "session_close";
+                yield* active.resolution.fail(reason, duration);
+                // Only emit fallback if onSettle didn't already handle it
+                if (!active.resolution.markerEmitted) {
+                  self.emitFallback(active, reason);
+                }
+              }
+            }),
+          );
+
+          return context;
+        })(),
+    );
   }
 
   /**
@@ -120,12 +134,12 @@ export class DetectionRegistry {
     if (!context) return Effect.void;
 
     const self = this;
-    return Effect.gen(function*() {
+    return Effect.gen(function* () {
       // Emit fallback if unresolved — even if aborted (abort doesn't emit markers)
       if (!context.resolved) {
         const mutable = context.mutableActive;
         const duration = Date.now() - mutable.startTime;
-        const reason = mutable.verificationEvidence ? 'verified_session_close' : 'session_close';
+        const reason = mutable.verificationEvidence ? "verified_session_close" : "session_close";
         if (!mutable.resolution.isDone) {
           yield* mutable.resolution.fail(reason, duration);
         }
@@ -147,8 +161,8 @@ export class DetectionRegistry {
     // Snapshot entries before iteration — finalizers delete from map
     const entries = [...this.entries.values()];
     const count = entries.length;
-    return Effect.fn('cf.registry.destroyAll')(function*() {
-      yield* Effect.annotateCurrentSpan({ 'cf.count': count });
+    return Effect.fn("cf.registry.destroyAll")(function* () {
+      yield* Effect.annotateCurrentSpan({ "cf.count": count });
       for (const context of entries) {
         yield* Scope.close(context.scope, Exit.void);
       }

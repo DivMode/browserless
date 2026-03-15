@@ -7,9 +7,9 @@ import {
   Monitoring,
   WebHooks,
   sleep,
-} from '@browserless.io/browserless';
-import Sinon, { spy } from 'sinon';
-import { expect } from 'chai';
+} from "@browserless.io/browserless";
+import Sinon, { spy } from "sinon";
+import { expect } from "chai";
 
 const asyncNoop = () => Promise.resolve(undefined);
 const noop = () => undefined;
@@ -30,10 +30,10 @@ describe(`Limiter`, () => {
     hooks.page.resetHistory();
   });
 
-  it('limits and queues function calls, calls hooks, and calls queue alert urls', async () => {
+  it("limits and queues function calls, calls hooks, and calls queue alert urls", async () => {
     return new Promise((resolve, reject) => {
       const config = new Config();
-      config.setQueueAlertURL('https://one.one.one.one');
+      config.setQueueAlertURL("https://one.one.one.one");
 
       const monitoring = new Monitoring(config);
       const metrics = new Metrics();
@@ -51,7 +51,7 @@ describe(`Limiter`, () => {
 
       expect(handler.calledOnce).to.be.true;
 
-      limiter.addEventListener('end', () => {
+      limiter.addEventListener("end", () => {
         try {
           expect(hooks.after.called).to.be.true;
           expect(handler.calledTwice).to.be.true;
@@ -67,9 +67,9 @@ describe(`Limiter`, () => {
     });
   });
 
-  it('passes through arguments', () =>
+  it("passes through arguments", () =>
     new Promise((resolve, reject) => {
-      const args = ['one', 'two', 'three'];
+      const args = ["one", "two", "three"];
       const config = new Config();
       const metrics = new Metrics();
       const monitoring = new Monitoring(config);
@@ -84,13 +84,10 @@ describe(`Limiter`, () => {
       job(...args);
       expect(handler.args[0]).to.eql(args);
 
-      limiter.addEventListener('end', () => {
+      limiter.addEventListener("end", () => {
         try {
-          expect(hooks.after.args[0][0]).to.have.property('start');
-          expect(hooks.after.args[0][0]).to.have.property(
-            'status',
-            'successful',
-          );
+          expect(hooks.after.args[0][0]).to.have.property("start");
+          expect(hooks.after.args[0][0]).to.have.property("status", "successful");
         } catch (e) {
           return reject(e);
         }
@@ -98,7 +95,7 @@ describe(`Limiter`, () => {
       });
     }));
 
-  it('waits to run jobs until the first are done', async () => {
+  it("waits to run jobs until the first are done", async () => {
     const config = new Config();
     const monitoring = new Monitoring(config);
     const metrics = new Metrics();
@@ -121,7 +118,7 @@ describe(`Limiter`, () => {
     expect(handlerTwo.calledOnce).to.be.true;
   });
 
-  it('continues to process jobs even if an earlier job errors', (d) => {
+  it("continues to process jobs even if an earlier job errors", (d) => {
     const config = new Config();
     const monitoring = new Monitoring(config);
     const metrics = new Metrics();
@@ -131,8 +128,7 @@ describe(`Limiter`, () => {
     config.setTimeout(-1);
 
     const limiter = new Limiter(config, metrics, monitoring, webHooks, hooks);
-    const errorJob = () =>
-      Promise.reject(new Error('Danger, danger. High voltage!'));
+    const errorJob = () => Promise.reject(new Error("Danger, danger. High voltage!"));
     const okJob = spy();
 
     const jobOne = limiter.limit(errorJob, asyncNoop, asyncNoop, noop);
@@ -141,17 +137,17 @@ describe(`Limiter`, () => {
     jobOne();
     jobTwo();
 
-    limiter.addEventListener('end', () => {
+    limiter.addEventListener("end", () => {
       expect(okJob.calledOnce).to.be.true;
       d(undefined);
     });
   });
 
-  it('bubbles up errors', async () => {
+  it("bubbles up errors", async () => {
     const config = new Config();
     const monitoring = new Monitoring(config);
     const metrics = new Metrics();
-    const error = new Error('WOW');
+    const error = new Error("WOW");
 
     config.setConcurrent(1);
     config.setQueued(1);
@@ -163,23 +159,21 @@ describe(`Limiter`, () => {
     const job = limiter.limit(spy, asyncNoop, asyncNoop, noop);
     await job().catch(noop);
 
-    limiter.addEventListener('error', (res) => {
+    limiter.addEventListener("error", (res) => {
       // 'end' callback fires before the failed callback hooks do, so nextTick to wait
       process.nextTick(() => {
         expect(res.detail.error).to.eql(error);
         expect(metrics.get().successful).to.eql(0);
         expect(metrics.get().error).to.eql(1);
-        expect(webHooks.callErrorAlertURL.getCalls()[0].firstArg).to.include(
-          error,
-        );
+        expect(webHooks.callErrorAlertURL.getCalls()[0].firstArg).to.include(error);
         expect(webHooks.callErrorAlertURL.calledOnce).to.be.true;
-        expect(hooks.after.args[0][0]).to.have.property('status', 'error');
+        expect(hooks.after.args[0][0]).to.have.property("status", "error");
       });
     });
   });
 
-  it('calls an error handler with arguments if there are too many function calls', () => {
-    const args = ['one', 'two', 'three'];
+  it("calls an error handler with arguments if there are too many function calls", () => {
+    const args = ["one", "two", "three"];
     const config = new Config();
     const monitoring = new Monitoring(config);
     const metrics = new Metrics();
@@ -203,9 +197,9 @@ describe(`Limiter`, () => {
     expect(onError.args[0]).to.eql(args);
   });
 
-  it('calls a timeout handler with arguments if a job takes too long', () =>
+  it("calls a timeout handler with arguments if a job takes too long", () =>
     new Promise((resolve, reject) => {
-      const args = ['one', 'two', 'three'];
+      const args = ["one", "two", "three"];
       const config = new Config();
       const metrics = new Metrics();
       const monitoring = new Monitoring(config);
@@ -215,8 +209,7 @@ describe(`Limiter`, () => {
 
       let timer: NodeJS.Timer;
       const limiter = new Limiter(config, metrics, monitoring, webHooks, hooks);
-      const handler = () =>
-        new Promise((d) => (timer = global.setTimeout(d, 1000)));
+      const handler = () => new Promise((d) => (timer = global.setTimeout(d, 1000)));
 
       const onTimeout = (...calledArgs: unknown[]) => {
         clearTimeout(timer as unknown as number);
@@ -229,9 +222,9 @@ describe(`Limiter`, () => {
       // @ts-ignore
       job(...args);
 
-      limiter.addEventListener('end', () => {
+      limiter.addEventListener("end", () => {
         try {
-          expect(hooks.after.args[0][0]).to.have.property('status', 'timedout');
+          expect(hooks.after.args[0][0]).to.have.property("status", "timedout");
         } catch (e) {
           return reject(e);
         }
@@ -239,7 +232,7 @@ describe(`Limiter`, () => {
       });
     }));
 
-  it('allows overriding the timeouts', async () => {
+  it("allows overriding the timeouts", async () => {
     const config = new Config();
     const metrics = new Metrics();
     const monitoring = new Monitoring(config);
@@ -299,7 +292,7 @@ describe(`Limiter`, () => {
 
       expect(limiter.length).to.equal(1);
 
-      limiter.addEventListener('end', () => {
+      limiter.addEventListener("end", () => {
         expect(limiter.length).to.equal(0);
         expect(handler.calledOnce).to.be.true;
         expect(webHooks.callRejectAlertURL.calledOnce).to.be.true;
@@ -353,7 +346,7 @@ describe(`Limiter`, () => {
 
       job();
 
-      limiter.addEventListener('end', () => {
+      limiter.addEventListener("end", () => {
         expect(limiter.length).to.equal(0);
         expect(handler.calledOnce).to.be.true;
         expect(webHooks.callFailedHealthURL.calledOnce).to.be.false;

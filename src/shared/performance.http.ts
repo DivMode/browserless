@@ -11,11 +11,11 @@ import {
   SystemQueryParameters,
   contentTypes,
   jsonResponse,
-} from '@browserless.io/browserless';
-import { Effect } from 'effect';
-import { ServerResponse } from 'http';
+} from "@browserless.io/browserless";
+import { Effect } from "effect";
+import { ServerResponse } from "http";
 
-import main from './utils/performance/main.js';
+import main from "./utils/performance/main.js";
 
 export interface BodySchema {
   budgets?: Array<object>;
@@ -45,14 +45,10 @@ export default class PerformancePost extends BrowserHTTPRoute {
   method = Methods.post;
   path = [HTTPRoutes.chromiumPerformance, HTTPRoutes.performance];
   tags = [APITags.browserAPI];
-  async handler(
-    req: Request,
-    res: ServerResponse,
-    browser: BrowserInstance,
-  ): Promise<void> {
+  async handler(req: Request, res: ServerResponse, browser: BrowserInstance): Promise<void> {
     const config = this.config();
     return Effect.runPromise(
-      Effect.fn('route.performance.post')(function* () {
+      Effect.fn("route.performance.post")(function* () {
         const response = yield* Effect.promise(() =>
           main({
             browser,

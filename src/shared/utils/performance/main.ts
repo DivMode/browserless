@@ -1,26 +1,22 @@
-import { Message, mainOptions } from './types.js';
-import { Effect } from 'effect';
-import { fork } from 'child_process';
-import { runForkInServer } from '../../../otel-runtime.js';
-import path from 'path';
+import { Message, mainOptions } from "./types.js";
+import { Effect } from "effect";
+import { fork } from "child_process";
+import { runForkInServer } from "../../../otel-runtime.js";
+import path from "path";
 
 const __dirname = import.meta.dirname;
 const DEFAULT_AUDIT_CONFIG = {
-  extends: 'lighthouse:default',
+  extends: "lighthouse:default",
 };
 
-export default async ({
-  browser,
-  context,
-  timeout,
-}: mainOptions): Promise<unknown> => {
+export default async ({ browser, context, timeout }: mainOptions): Promise<unknown> => {
   return new Promise((resolve, reject) => {
-    const childPath = path.join(__dirname, 'child.js');
+    const childPath = path.join(__dirname, "child.js");
 
     runForkInServer(Effect.logDebug(`Starting up child at ${childPath}`));
 
     const child = fork(childPath);
-    const port = new URL(browser.wsEndpoint() || '').port;
+    const port = new URL(browser.wsEndpoint() || "").port;
 
     let closed = false;
     let timeoutId =
@@ -32,7 +28,7 @@ export default async ({
 
     const close = (pid?: number) => {
       if (closed) return;
-      if (pid) process.kill(pid, 'SIGINT');
+      if (pid) process.kill(pid, "SIGINT");
       if (timeoutId) clearTimeout(timeoutId);
       closed = true;
       timeoutId = null;
@@ -42,40 +38,40 @@ export default async ({
 
     const options = {
       budgets,
-      logLevel: 'info',
-      output: 'json',
+      logLevel: "info",
+      output: "json",
       port,
     };
 
-    child.on('error', (err) => {
+    child.on("error", (err) => {
       runForkInServer(Effect.logError(`Error in child process: ` + String(err)));
-      reject('Performance run error: ' + err.message);
+      reject("Performance run error: " + err.message);
       close(child.pid);
     });
 
-    child.on('message', (payload: Message) => {
-      if (payload.event === 'created') {
+    child.on("message", (payload: Message) => {
+      if (payload.event === "created") {
         runForkInServer(Effect.logInfo(`Child process is up, sending performance request`));
         return child.send({
           config,
-          event: 'start',
+          event: "start",
           options,
           url,
         });
       }
 
-      if (payload.event === 'complete') {
+      if (payload.event === "complete") {
         runForkInServer(Effect.logInfo(`Performance gathered, closing and resolving request`));
         close(child.pid);
         return resolve({
           data: payload.data,
-          type: 'json',
+          type: "json",
         });
       }
 
-      if (payload.event === 'error') {
+      if (payload.event === "error") {
         close(child.pid);
-        reject(new Error('Error running performance metrics ' + payload.error));
+        reject(new Error("Error running performance metrics " + payload.error));
       }
     });
   });

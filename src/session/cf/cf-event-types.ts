@@ -8,11 +8,11 @@
  * Queue.offerUnsafe is synchronous — safe from Resolution callbacks,
  * scope finalizers, and any other sync context.
  */
-import { Data } from 'effect';
+import { Data } from "effect";
 
-import type { TargetId, CloudflareResult } from '../../shared/cloudflare-detection.js';
-import type { CdpSessionId } from '../../shared/cloudflare-detection.js';
-import type { ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
+import type { TargetId, CloudflareResult } from "../../shared/cloudflare-detection.js";
+import type { CdpSessionId } from "../../shared/cloudflare-detection.js";
+import type { ReadonlyActiveDetection } from "./cloudflare-event-emitter.js";
 
 export type CFEvent = Data.TaggedEnum<{
   /** CF challenge detected on a page. */

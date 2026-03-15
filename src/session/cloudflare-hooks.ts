@@ -14,14 +14,28 @@
  * interruption via FiberMap.remove or Scope.close on detection scopes), it
  * must encapsulate the boundary crossing internally (see `runInSolver`).
  */
-import type { Effect, Tracer } from 'effect';
-import type { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
+import type { Effect, Tracer } from "effect";
+import type { CdpSessionId, TargetId } from "../shared/cloudflare-detection.js";
 
 export interface CloudflareHooks {
   onPageAttached(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void>;
-  onPageNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string, title: string): Effect.Effect<void>;
-  onIframeAttached(targetId: TargetId, cdpSessionId: CdpSessionId, url: string, parentTargetId: TargetId): Effect.Effect<void>;
-  onIframeNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string): Effect.Effect<void>;
+  onPageNavigated(
+    targetId: TargetId,
+    cdpSessionId: CdpSessionId,
+    url: string,
+    title: string,
+  ): Effect.Effect<void>;
+  onIframeAttached(
+    targetId: TargetId,
+    cdpSessionId: CdpSessionId,
+    url: string,
+    parentTargetId: TargetId,
+  ): Effect.Effect<void>;
+  onIframeNavigated(
+    targetId: TargetId,
+    cdpSessionId: CdpSessionId,
+    url: string,
+  ): Effect.Effect<void>;
   onBridgeEvent(targetId: TargetId, event: unknown): Effect.Effect<void>;
   /** Awaited — ensures detection fiber is interrupted before target cleanup. */
   onTargetDestroyed(targetId: TargetId): Effect.Effect<void>;

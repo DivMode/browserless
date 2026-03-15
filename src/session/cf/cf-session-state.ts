@@ -5,13 +5,18 @@
  * Individual tabs reference this state through their tab runtimes.
  * The session-level state outlives any individual tab.
  */
-import { Effect, Exit, Scope } from 'effect';
+import { Effect, Exit, Scope } from "effect";
 
-import { runForkInServer } from '../../otel-runtime.js';
-import type { CdpSessionId, TargetId, CloudflareConfig, CloudflareType } from '../../shared/cloudflare-detection.js';
-import { isInterstitialType } from '../../shared/cloudflare-detection.js';
-import { CFEvent } from './cf-event-types.js';
-import { DetectionRegistry } from './cf-detection-registry.js';
+import { runForkInServer } from "../../otel-runtime.js";
+import type {
+  CdpSessionId,
+  TargetId,
+  CloudflareConfig,
+  CloudflareType,
+} from "../../shared/cloudflare-detection.js";
+import { isInterstitialType } from "../../shared/cloudflare-detection.js";
+import { CFEvent } from "./cf-event-types.js";
+import { DetectionRegistry } from "./cf-detection-registry.js";
 
 export class SessionSolverState {
   readonly registry: DetectionRegistry;
@@ -26,13 +31,20 @@ export class SessionSolverState {
    * DO NOT ADD INTERSTITIAL SOLVES — multi-phase (Int→Emb) flows will break.
    */
   readonly solvedPages = new Set<TargetId>();
-  readonly pendingIframes = new Map<TargetId, { iframeCdpSessionId: CdpSessionId; iframeTargetId: TargetId }>();
+  readonly pendingIframes = new Map<
+    TargetId,
+    { iframeCdpSessionId: CdpSessionId; iframeTargetId: TargetId }
+  >();
   readonly pendingRechallengeCount = new Map<TargetId, number>();
   /** Per-page reload count for widget-not-rendered recovery. Reset on solve. */
   readonly widgetReloadCount = new Map<TargetId, number>();
   /** Per-page cleanup scopes — finalizers remove solvedCFTargetIds entries when page is destroyed. */
   private readonly pageCleanupScopes = new Map<TargetId, Scope.Closeable>();
-  config: Required<CloudflareConfig> = { maxAttempts: 3, attemptTimeout: 30000, recordingMarkers: true };
+  config: Required<CloudflareConfig> = {
+    maxAttempts: 3,
+    attemptTimeout: 30000,
+    recordingMarkers: true,
+  };
   destroyed = false;
   /** Per-page accumulator of solved/failed phases for compound summary labels. */
   private readonly summaryPhases = new Map<TargetId, { type: string; label: string }[]>();
@@ -41,25 +53,45 @@ export class SessionSolverState {
     this.registry = new DetectionRegistry((active, signal) => {
       const duration = Date.now() - active.startTime;
 
-      if (signal === 'verified_session_close') {
-        const phaseLabel = '⊘';
-        runForkInServer(Effect.logInfo(`Scope finalizer fallback: verified_session_close for ${active.pageTargetId}`));
+      if (signal === "verified_session_close") {
+        const phaseLabel = "⊘";
+        runForkInServer(
+          Effect.logInfo(
+            `Scope finalizer fallback: verified_session_close for ${active.pageTargetId}`,
+          ),
+        );
         this.pushPhase(active.pageTargetId, active.info.type, phaseLabel);
         const compoundLabel = this.buildCompoundLabel(active.pageTargetId);
-        this.cfPublish(CFEvent.Failed({
-          active, reason: 'verified_session_close', duration, phaseLabel, cf_summary_label: compoundLabel,
-          cf_verified: true,
-        }));
+        this.cfPublish(
+          CFEvent.Failed({
+            active,
+            reason: "verified_session_close",
+            duration,
+            phaseLabel,
+            cf_summary_label: compoundLabel,
+            cf_verified: true,
+          }),
+        );
         return;
       }
 
       const failLabel = `✗ ${signal}`;
-      runForkInServer(Effect.logInfo(`Scope finalizer fallback: emitting failed for orphaned detection on ${active.pageTargetId}`));
+      runForkInServer(
+        Effect.logInfo(
+          `Scope finalizer fallback: emitting failed for orphaned detection on ${active.pageTargetId}`,
+        ),
+      );
       this.pushPhase(active.pageTargetId, active.info.type, failLabel);
       const compoundLabel = this.buildCompoundLabel(active.pageTargetId);
-      this.cfPublish(CFEvent.Failed({
-        active, reason: signal, duration, phaseLabel: failLabel, cf_summary_label: compoundLabel,
-      }));
+      this.cfPublish(
+        CFEvent.Failed({
+          active,
+          reason: signal,
+          duration,
+          phaseLabel: failLabel,
+          cf_summary_label: compoundLabel,
+        }),
+      );
     });
   }
 
@@ -77,9 +109,12 @@ export class SessionSolverState {
       const scope = this.pageCleanupScopes.get(pageTargetId);
       if (!scope) return Effect.void;
       this.solvedCFTargetIds.add(oopifId);
-      return Scope.addFinalizer(scope, Effect.sync(() => {
-        this.solvedCFTargetIds.delete(oopifId);
-      }));
+      return Scope.addFinalizer(
+        scope,
+        Effect.sync(() => {
+          this.solvedCFTargetIds.delete(oopifId);
+        }),
+      );
     });
   }
 
@@ -88,9 +123,14 @@ export class SessionSolverState {
     const scope = this.pageCleanupScopes.get(pageTargetId);
     if (!scope) return;
     this.solvedCFTargetIds.add(oopifId);
-    Effect.runSync(Scope.addFinalizer(scope, Effect.sync(() => {
-      this.solvedCFTargetIds.delete(oopifId);
-    })));
+    Effect.runSync(
+      Scope.addFinalizer(
+        scope,
+        Effect.sync(() => {
+          this.solvedCFTargetIds.delete(oopifId);
+        }),
+      ),
+    );
   }
 
   /** Look up page target by iframe CDP session. */
@@ -111,15 +151,15 @@ export class SessionSolverState {
   buildCompoundLabel(targetId: TargetId): string {
     const phases = this.summaryPhases.get(targetId) || [];
     const intParts = phases
-      .filter(p => isInterstitialType(p.type as CloudflareType))
-      .map(p => `Int${p.label}`);
+      .filter((p) => isInterstitialType(p.type as CloudflareType))
+      .map((p) => `Int${p.label}`);
     const embParts = phases
-      .filter(p => !isInterstitialType(p.type as CloudflareType))
-      .map(p => `Emb${p.label}`);
+      .filter((p) => !isInterstitialType(p.type as CloudflareType))
+      .map((p) => `Emb${p.label}`);
     const parts: string[] = [];
-    if (intParts.length) parts.push(intParts.join(''));
-    if (embParts.length) parts.push(embParts.join(''));
-    return parts.join(' ');
+    if (intParts.length) parts.push(intParts.join(""));
+    if (embParts.length) parts.push(embParts.join(""));
+    return parts.join(" ");
   }
 
   /**
@@ -129,8 +169,8 @@ export class SessionSolverState {
    */
   unregisterPage(targetId: TargetId): Effect.Effect<void> {
     const self = this;
-    return Effect.fn('cf.state.unregisterPage')(function*() {
-      yield* Effect.annotateCurrentSpan({ 'cf.target_id': targetId });
+    return Effect.fn("cf.state.unregisterPage")(function* () {
+      yield* Effect.annotateCurrentSpan({ "cf.target_id": targetId });
       yield* self.registry.unregister(targetId);
 
       self.knownPages.delete(targetId);
@@ -156,22 +196,24 @@ export class SessionSolverState {
   /** Emit cf.failed for orphaned detections and clean up all state. */
   destroy(): Effect.Effect<void> {
     this.destroyed = true;
-    return Effect.gen((function*(this: SessionSolverState) {
-      yield* this.registry.destroyAll();
-      this.iframeToPage.clear();
-      this.knownPages.clear();
-      this.bindingSolvedTargets.clear();
+    return Effect.gen(
+      function* (this: SessionSolverState) {
+        yield* this.registry.destroyAll();
+        this.iframeToPage.clear();
+        this.knownPages.clear();
+        this.bindingSolvedTargets.clear();
 
-      for (const scope of this.pageCleanupScopes.values()) {
-        yield* Scope.close(scope, Exit.void);
-      }
-      this.pageCleanupScopes.clear();
+        for (const scope of this.pageCleanupScopes.values()) {
+          yield* Scope.close(scope, Exit.void);
+        }
+        this.pageCleanupScopes.clear();
 
-      this.solvedCFTargetIds.clear();
-      this.solvedPages.clear();
-      this.pendingIframes.clear();
-      this.widgetReloadCount.clear();
-      this.summaryPhases.clear();
-    }).bind(this));
+        this.solvedCFTargetIds.clear();
+        this.solvedPages.clear();
+        this.pendingIframes.clear();
+        this.widgetReloadCount.clear();
+        this.summaryPhases.clear();
+      }.bind(this),
+    );
   }
 }

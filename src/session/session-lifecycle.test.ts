@@ -1,9 +1,9 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { describe as effectDescribe, it as effectIt } from '@effect/vitest';
-import { Effect, Scope } from 'effect';
-import type { BrowserInstance, BrowserlessSession } from '@browserless.io/browserless';
-import { SessionRegistry } from './session-registry.js';
-import { SessionLifecycleManager } from './session-lifecycle-manager.js';
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe as effectDescribe, it as effectIt } from "@effect/vitest";
+import { Effect, Scope } from "effect";
+import type { BrowserInstance, BrowserlessSession } from "@browserless.io/browserless";
+import { SessionRegistry } from "./session-registry.js";
+import { SessionLifecycleManager } from "./session-lifecycle-manager.js";
 
 const makeBrowser = (id: string, overrides?: Partial<Record<string, unknown>>): BrowserInstance =>
   ({
@@ -11,25 +11,25 @@ const makeBrowser = (id: string, overrides?: Partial<Record<string, unknown>>): 
     close: vi.fn().mockResolvedValue(undefined),
     isRunning: () => true,
     keepUntil: () => 0,
-    constructor: { name: 'ChromiumCDP' },
+    constructor: { name: "ChromiumCDP" },
     ...overrides,
   }) as unknown as BrowserInstance;
 
 const makeSession = (id: string, overrides?: Partial<BrowserlessSession>): BrowserlessSession => ({
   id,
-  initialConnectURL: '',
+  initialConnectURL: "",
   isTempDataDir: false,
   launchOptions: {},
   numbConnected: 0,
   resolver: vi.fn(),
-  routePath: '/chrome',
+  routePath: "/chrome",
   startedOn: Date.now(),
   ttl: 0,
   userDataDir: null,
   ...overrides,
 });
 
-describe('SessionLifecycleManager', () => {
+describe("SessionLifecycleManager", () => {
   let registry: SessionRegistry;
   let lifecycle: SessionLifecycleManager;
 
@@ -38,9 +38,9 @@ describe('SessionLifecycleManager', () => {
     lifecycle = new SessionLifecycleManager(registry);
   });
 
-  it('close(force=true) removes session from registry', async () => {
-    const browser = makeBrowser('b1');
-    const session = makeSession('s1');
+  it("close(force=true) removes session from registry", async () => {
+    const browser = makeBrowser("b1");
+    const session = makeSession("s1");
     registry.register(browser, session);
 
     expect(registry.size()).toBe(1);
@@ -51,11 +51,11 @@ describe('SessionLifecycleManager', () => {
     expect(registry.get(browser)).toBeUndefined();
   });
 
-  it('close() with browser.close() failure still removes from registry', async () => {
-    const browser = makeBrowser('b1', {
-      close: vi.fn().mockRejectedValue(new Error('browser crash')),
+  it("close() with browser.close() failure still removes from registry", async () => {
+    const browser = makeBrowser("b1", {
+      close: vi.fn().mockRejectedValue(new Error("browser crash")),
     });
-    const session = makeSession('s1');
+    const session = makeSession("s1");
     registry.register(browser, session);
 
     await lifecycle.close(browser, session, true);
@@ -64,9 +64,9 @@ describe('SessionLifecycleManager', () => {
     expect(registry.get(browser)).toBeUndefined();
   });
 
-  it('complete() → close() chain removes from registry', async () => {
-    const browser = makeBrowser('b1');
-    const session = makeSession('s1', { numbConnected: 1 });
+  it("complete() → close() chain removes from registry", async () => {
+    const browser = makeBrowser("b1");
+    const session = makeSession("s1", { numbConnected: 1 });
     registry.register(browser, session);
 
     await lifecycle.complete(browser);
@@ -74,8 +74,8 @@ describe('SessionLifecycleManager', () => {
     expect(registry.size()).toBe(0);
   });
 
-  it('complete() on unknown browser does not throw', async () => {
-    const browser = makeBrowser('b-unknown', {
+  it("complete() on unknown browser does not throw", async () => {
+    const browser = makeBrowser("b-unknown", {
       close: vi.fn().mockResolvedValue(undefined),
     });
 
@@ -83,9 +83,9 @@ describe('SessionLifecycleManager', () => {
     await lifecycle.complete(browser);
   });
 
-  it('concurrent close() calls do not leak (double-close is safe)', async () => {
-    const browser = makeBrowser('b1');
-    const session = makeSession('s1');
+  it("concurrent close() calls do not leak (double-close is safe)", async () => {
+    const browser = makeBrowser("b1");
+    const session = makeSession("s1");
     registry.register(browser, session);
 
     // Call close twice concurrently
@@ -97,12 +97,12 @@ describe('SessionLifecycleManager', () => {
     expect(registry.size()).toBe(0);
   });
 
-  it('close() does not remove session when keep-alive is active', async () => {
+  it("close() does not remove session when keep-alive is active", async () => {
     const keepUntil = Date.now() + 60_000;
-    const browser = makeBrowser('b1', {
+    const browser = makeBrowser("b1", {
       keepUntil: () => keepUntil,
     });
-    const session = makeSession('s1', { numbConnected: 0 });
+    const session = makeSession("s1", { numbConnected: 0 });
     registry.register(browser, session);
 
     await lifecycle.close(browser, session, false);
@@ -114,12 +114,12 @@ describe('SessionLifecycleManager', () => {
     lifecycle.clearTimers();
   });
 
-  it('close(force=true) overrides keep-alive', async () => {
+  it("close(force=true) overrides keep-alive", async () => {
     const keepUntil = Date.now() + 60_000;
-    const browser = makeBrowser('b1', {
+    const browser = makeBrowser("b1", {
       keepUntil: () => keepUntil,
     });
-    const session = makeSession('s1', { numbConnected: 0 });
+    const session = makeSession("s1", { numbConnected: 0 });
     registry.register(browser, session);
 
     await lifecycle.close(browser, session, true);
@@ -128,88 +128,94 @@ describe('SessionLifecycleManager', () => {
   });
 
   it('killSessions("all") removes all sessions', async () => {
-    const b1 = makeBrowser('b1');
-    const b2 = makeBrowser('b2');
-    registry.register(b1, makeSession('s1'));
-    registry.register(b2, makeSession('s2'));
+    const b1 = makeBrowser("b1");
+    const b2 = makeBrowser("b2");
+    registry.register(b1, makeSession("s1"));
+    registry.register(b2, makeSession("s2"));
 
-    await lifecycle.killSessions('all');
+    await lifecycle.killSessions("all");
 
     expect(registry.size()).toBe(0);
   });
 
-  it('killSessions by sessionId removes only matching session', async () => {
-    const b1 = makeBrowser('b1');
-    const b2 = makeBrowser('b2');
-    registry.register(b1, makeSession('s1'));
-    registry.register(b2, makeSession('s2'));
+  it("killSessions by sessionId removes only matching session", async () => {
+    const b1 = makeBrowser("b1");
+    const b2 = makeBrowser("b2");
+    registry.register(b1, makeSession("s1"));
+    registry.register(b2, makeSession("s2"));
 
-    await lifecycle.killSessions('s1');
+    await lifecycle.killSessions("s1");
 
     expect(registry.size()).toBe(1);
-    expect(registry.findById('s2')).not.toBeNull();
+    expect(registry.findById("s2")).not.toBeNull();
   });
 
-  it('keep-alive timer is set when session has keepUntil', async () => {
+  it("keep-alive timer is set when session has keepUntil", async () => {
     const keepUntil = Date.now() + 60_000;
-    const browser = makeBrowser('b1', {
+    const browser = makeBrowser("b1", {
       keepUntil: () => keepUntil,
     });
-    const session = makeSession('s1');
+    const session = makeSession("s1");
     registry.register(browser, session);
 
     await lifecycle.close(browser, session, false);
 
     // Timer should be set for keep-alive
     expect(lifecycle.getTimerCount()).toBe(1);
-    expect(lifecycle.hasTimer('s1')).toBe(true);
+    expect(lifecycle.hasTimer("s1")).toBe(true);
 
     // Cleanup
     lifecycle.clearTimers();
   });
 
-  it('clearTimers() removes all timer fibers', () => {
+  it("clearTimers() removes all timer fibers", () => {
     // clearTimers is the explicit cleanup path
     expect(lifecycle.getTimerCount()).toBe(0);
     lifecycle.clearTimers();
     expect(lifecycle.getTimerCount()).toBe(0);
   });
 
-  it('close(force=true) removes temp data directory', async () => {
-    const removeDirSpy = vi.spyOn(lifecycle as any, 'removeUserDataDir').mockResolvedValue(undefined);
-    const browser = makeBrowser('b1');
-    const session = makeSession('s1', {
+  it("close(force=true) removes temp data directory", async () => {
+    const removeDirSpy = vi
+      .spyOn(lifecycle as any, "removeUserDataDir")
+      .mockResolvedValue(undefined);
+    const browser = makeBrowser("b1");
+    const session = makeSession("s1", {
       isTempDataDir: true,
-      userDataDir: '/tmp/test-dir',
+      userDataDir: "/tmp/test-dir",
     });
     registry.register(browser, session);
 
     await lifecycle.close(browser, session, true);
 
-    expect(removeDirSpy).toHaveBeenCalledWith('/tmp/test-dir');
+    expect(removeDirSpy).toHaveBeenCalledWith("/tmp/test-dir");
   });
 
-  it('data dir cleanup runs even when browser.close() fails', async () => {
-    const removeDirSpy = vi.spyOn(lifecycle as any, 'removeUserDataDir').mockResolvedValue(undefined);
-    const browser = makeBrowser('b1', {
-      close: vi.fn().mockRejectedValue(new Error('hang')),
+  it("data dir cleanup runs even when browser.close() fails", async () => {
+    const removeDirSpy = vi
+      .spyOn(lifecycle as any, "removeUserDataDir")
+      .mockResolvedValue(undefined);
+    const browser = makeBrowser("b1", {
+      close: vi.fn().mockRejectedValue(new Error("hang")),
     });
-    const session = makeSession('s1', {
+    const session = makeSession("s1", {
       isTempDataDir: true,
-      userDataDir: '/tmp/test-dir',
+      userDataDir: "/tmp/test-dir",
     });
     registry.register(browser, session);
 
     await lifecycle.close(browser, session, true);
 
     expect(registry.size()).toBe(0);
-    expect(removeDirSpy).toHaveBeenCalledWith('/tmp/test-dir');
+    expect(removeDirSpy).toHaveBeenCalledWith("/tmp/test-dir");
   });
 
-  it('close(force=true) skips data dir for non-temp sessions', async () => {
-    const removeDirSpy = vi.spyOn(lifecycle as any, 'removeUserDataDir').mockResolvedValue(undefined);
-    const browser = makeBrowser('b1');
-    const session = makeSession('s1', { isTempDataDir: false });
+  it("close(force=true) skips data dir for non-temp sessions", async () => {
+    const removeDirSpy = vi
+      .spyOn(lifecycle as any, "removeUserDataDir")
+      .mockResolvedValue(undefined);
+    const browser = makeBrowser("b1");
+    const session = makeSession("s1", { isTempDataDir: false });
     registry.register(browser, session);
 
     await lifecycle.close(browser, session, true);
@@ -218,7 +224,7 @@ describe('SessionLifecycleManager', () => {
   });
 });
 
-describe('watchdog per-session TTL', () => {
+describe("watchdog per-session TTL", () => {
   let registry: SessionRegistry;
   let lifecycle: SessionLifecycleManager;
 
@@ -227,10 +233,10 @@ describe('watchdog per-session TTL', () => {
     lifecycle = new SessionLifecycleManager(registry);
   });
 
-  it('watchdog respects per-session TTL over global default', async () => {
-    const browser = makeBrowser('b1');
+  it("watchdog respects per-session TTL over global default", async () => {
+    const browser = makeBrowser("b1");
     // Session with ttl=3600000 (1 hour), 400s old — past global default but within TTL
-    const session = makeSession('s1', {
+    const session = makeSession("s1", {
       ttl: 3_600_000,
       startedOn: Date.now() - 400_000,
     });
@@ -250,10 +256,10 @@ describe('watchdog per-session TTL', () => {
     await lifecycle.shutdown();
   });
 
-  it('watchdog kills session with no TTL using global default', async () => {
-    const browser = makeBrowser('b1');
+  it("watchdog kills session with no TTL using global default", async () => {
+    const browser = makeBrowser("b1");
     // Session with ttl=0 (no per-session TTL), 400s old — past global 360s default
-    const session = makeSession('s1', {
+    const session = makeSession("s1", {
       ttl: 0,
       startedOn: Date.now() - 400_000,
     });
@@ -270,10 +276,10 @@ describe('watchdog per-session TTL', () => {
     lifecycle.clearTimers();
   });
 
-  it('watchdog kills session that exceeds its own TTL', async () => {
-    const browser = makeBrowser('b1');
+  it("watchdog kills session that exceeds its own TTL", async () => {
+    const browser = makeBrowser("b1");
     // Session with ttl=300000 (5 min), but 400s old (past ttl + 60s buffer = 360s)
-    const session = makeSession('s1', {
+    const session = makeSession("s1", {
       ttl: 300_000,
       startedOn: Date.now() - 400_000,
     });
@@ -292,19 +298,19 @@ describe('watchdog per-session TTL', () => {
   });
 });
 
-effectDescribe('acquireSession', () => {
-  effectIt.effect('registers on acquire, removes on scope close', () =>
-    Effect.gen(function*() {
+effectDescribe("acquireSession", () => {
+  effectIt.effect("registers on acquire, removes on scope close", () =>
+    Effect.gen(function* () {
       const registry = new SessionRegistry();
       const lifecycle = new SessionLifecycleManager(registry);
-      const browser = makeBrowser('b1');
-      const session = makeSession('s1');
+      const browser = makeBrowser("b1");
+      const session = makeSession("s1");
 
       const scope = yield* Scope.make();
 
-      yield* lifecycle.acquireSession(browser, session).pipe(
-        Effect.provideService(Scope.Scope, scope),
-      );
+      yield* lifecycle
+        .acquireSession(browser, session)
+        .pipe(Effect.provideService(Scope.Scope, scope));
 
       // After acquire, session should be registered
       expect(registry.size()).toBe(1);
@@ -315,22 +321,23 @@ effectDescribe('acquireSession', () => {
 
       // After release, session should be removed
       expect(registry.size()).toBe(0);
-    }));
+    }),
+  );
 
-  effectIt.effect('cleanup runs even when browser.close() fails', () =>
-    Effect.gen(function*() {
+  effectIt.effect("cleanup runs even when browser.close() fails", () =>
+    Effect.gen(function* () {
       const registry = new SessionRegistry();
       const lifecycle = new SessionLifecycleManager(registry);
-      const browser = makeBrowser('b1', {
-        close: vi.fn().mockRejectedValue(new Error('crash')),
+      const browser = makeBrowser("b1", {
+        close: vi.fn().mockRejectedValue(new Error("crash")),
       });
-      const session = makeSession('s1');
+      const session = makeSession("s1");
 
       const scope = yield* Scope.make();
 
-      yield* lifecycle.acquireSession(browser, session).pipe(
-        Effect.provideService(Scope.Scope, scope),
-      );
+      yield* lifecycle
+        .acquireSession(browser, session)
+        .pipe(Effect.provideService(Scope.Scope, scope));
 
       expect(registry.size()).toBe(1);
 
@@ -338,14 +345,15 @@ effectDescribe('acquireSession', () => {
 
       // Must still be cleaned up despite browser.close() failure
       expect(registry.size()).toBe(0);
-    }));
+    }),
+  );
 
-  effectIt.effect('scoped usage auto-cleans on completion', () =>
-    Effect.gen(function*() {
+  effectIt.effect("scoped usage auto-cleans on completion", () =>
+    Effect.gen(function* () {
       const registry = new SessionRegistry();
       const lifecycle = new SessionLifecycleManager(registry);
-      const browser = makeBrowser('b1');
-      const session = makeSession('s1');
+      const browser = makeBrowser("b1");
+      const session = makeSession("s1");
 
       yield* Effect.scoped(
         lifecycle.acquireSession(browser, session).pipe(
@@ -360,5 +368,6 @@ effectDescribe('acquireSession', () => {
 
       // After Effect.scoped completes, release has run
       expect(registry.size()).toBe(0);
-    }));
+    }),
+  );
 });

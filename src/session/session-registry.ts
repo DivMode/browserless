@@ -1,7 +1,4 @@
-import {
-  BrowserInstance,
-  BrowserlessSession,
-} from '@browserless.io/browserless';
+import { BrowserInstance, BrowserlessSession } from "@browserless.io/browserless";
 
 /**
  * SessionRegistry manages browser session bookkeeping.
@@ -123,7 +120,7 @@ export class SessionRegistry {
    * Filter sessions by predicate.
    */
   filter(
-    predicate: (browser: BrowserInstance, session: BrowserlessSession) => boolean
+    predicate: (browser: BrowserInstance, session: BrowserlessSession) => boolean,
   ): Array<[BrowserInstance, BrowserlessSession]> {
     return this.toArray().filter(([b, s]) => predicate(b, s));
   }
@@ -131,9 +128,7 @@ export class SessionRegistry {
   /**
    * Apply a function to each session and return results.
    */
-  map<T>(
-    fn: (browser: BrowserInstance, session: BrowserlessSession) => T
-  ): T[] {
+  map<T>(fn: (browser: BrowserInstance, session: BrowserlessSession) => T): T[] {
     return this.toArray().map(([b, s]) => fn(b, s));
   }
 

@@ -2,8 +2,10 @@
   "name": "",
   "version": "1.0.0",
   "description": "A browserless.io extension project!",
-  "main": "index.js",
+  "license": "",
+  "author": "",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "build": "DEBUG=browserless* browserless build",
     "clean": "rm -r build",
@@ -14,8 +16,6 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "install:browsers": "DEBUG=browserless*,-**:verbose browserless install-browsers"
   },
-  "author": "",
-  "license": "",
   "dependencies": {
     "@browserless.io/browserless": "^${BROWSERLESS_VERSION}"
   }

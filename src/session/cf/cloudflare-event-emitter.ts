@@ -1,10 +1,16 @@
-import { Latch, Match } from 'effect';
+import { Latch, Match } from "effect";
 
-import type { CdpSessionId } from '../../shared/cloudflare-detection.js';
-import type { TargetId, CloudflareInfo, CloudflareSnapshot, InterstitialInfo, EmbeddedInfo } from '../../shared/cloudflare-detection.js';
-import type { TurnstileOOPIFMeta } from './cloudflare-solve-strategies.js';
-import { Resolution } from './cf-resolution.js';
-import type { ReadonlyResolution } from './cf-resolution.js';
+import type { CdpSessionId } from "../../shared/cloudflare-detection.js";
+import type {
+  TargetId,
+  CloudflareInfo,
+  CloudflareSnapshot,
+  InterstitialInfo,
+  EmbeddedInfo,
+} from "../../shared/cloudflare-detection.js";
+import type { TurnstileOOPIFMeta } from "./cloudflare-solve-strategies.js";
+import { Resolution } from "./cf-resolution.js";
+import type { ReadonlyResolution } from "./cf-resolution.js";
 
 export type EmitClientEvent = (method: string, params: object) => Promise<void>;
 export type InjectMarker = (targetId: TargetId, tag: string, payload?: object) => void;
@@ -48,7 +54,7 @@ export class CloudflareTracker {
 
   onProgress(state: string, extra?: Record<string, any>): void {
     Match.value(state).pipe(
-      Match.when('widget_found', () => {
+      Match.when("widget_found", () => {
         this.widgetFound = true;
         if (extra?.method) {
           this.widgetFindMethods.push(extra.method);
@@ -58,23 +64,30 @@ export class CloudflareTracker {
         if (extra?.y != null) this.widgetY = extra.y;
         if (extra?.debug) this.widgetFindDebug = extra.debug;
       }),
-      Match.when('clicked', () => {
+      Match.when("clicked", () => {
         this.clicked = true;
         this.clickCount++;
         if (extra?.x != null) this.clickX = extra.x;
         if (extra?.y != null) this.clickY = extra.y;
-        if (extra?.checkbox_to_click_ms != null) this.checkboxToClickMs = extra.checkbox_to_click_ms;
+        if (extra?.checkbox_to_click_ms != null)
+          this.checkboxToClickMs = extra.checkbox_to_click_ms;
         if (extra?.phase4_duration_ms != null) this.phase4DurationMs = extra.phase4_duration_ms;
       }),
-      Match.when('presence_complete', () => {
+      Match.when("presence_complete", () => {
         this.presencePhases++;
         if (extra?.presence_duration_ms != null)
           this.presenceDurationMs = extra.presence_duration_ms;
       }),
-      Match.when('approach_complete', () => { this.approachPhases++; }),
-      Match.when('activity_poll', () => { this.activityPollCount++; }),
-      Match.when('false_positive', () => { this.falsePositiveCount++; }),
-      Match.when('widget_error', () => {
+      Match.when("approach_complete", () => {
+        this.approachPhases++;
+      }),
+      Match.when("activity_poll", () => {
+        this.activityPollCount++;
+      }),
+      Match.when("false_positive", () => {
+        this.falsePositiveCount++;
+      }),
+      Match.when("widget_error", () => {
         this.widgetErrorCount++;
         if (extra?.error_type) this.lastErrorType = extra.error_type;
         if (extra?.diag_alive != null) {
@@ -87,7 +100,7 @@ export class CloudflareTracker {
           };
         }
       }),
-      Match.whenOr('success', 'verifying', 'fail', 'expired', 'timeout', (s) => {
+      Match.whenOr("success", "verifying", "fail", "expired", "timeout", (s) => {
         this.iframeStates.push(s);
       }),
       Match.orElse(() => {}),
@@ -175,7 +188,7 @@ export interface ActiveDetection {
    *   'oopif_success' — OOPIF iframe reported state='success' (turnstile widget solved inside interstitial)
    * undefined = no evidence of verification.
    */
-  verificationEvidence?: 'cosmetic_nav' | 'oopif_success';
+  verificationEvidence?: "cosmetic_nav" | "oopif_success";
   /**
    * Resolution gateway — exactly-once emission for CF solve/fail outcomes.
    * Multiple concurrent fibers race to complete it via Deferred.succeed (idempotent).
@@ -200,26 +213,27 @@ export interface ActiveDetection {
  *   - bindOOPIF() / clearOOPIF() — iframe fields
  *   - resetForRetry() — attempt + aborted
  */
-export type ReadonlyActiveDetection = Omit<Readonly<ActiveDetection>, 'resolution'> & {
+export type ReadonlyActiveDetection = Omit<Readonly<ActiveDetection>, "resolution"> & {
   readonly resolution: ReadonlyResolution;
 };
 
 /** Narrowed detection variants — methods that only apply to one category use these. */
 export type InterstitialDetection = ActiveDetection & { readonly info: InterstitialInfo };
 export type EmbeddedDetection = ActiveDetection & { readonly info: EmbeddedInfo };
-export type ReadonlyInterstitialDetection = Omit<Readonly<InterstitialDetection>, 'resolution'> & {
+export type ReadonlyInterstitialDetection = Omit<Readonly<InterstitialDetection>, "resolution"> & {
   readonly resolution: ReadonlyResolution;
 };
-export type ReadonlyEmbeddedDetection = Omit<Readonly<EmbeddedDetection>, 'resolution'> & {
+export type ReadonlyEmbeddedDetection = Omit<Readonly<EmbeddedDetection>, "resolution"> & {
   readonly resolution: ReadonlyResolution;
 };
 
 /** Solver-visible view. Resolution is read-only — solver cannot settle. */
-export type SolverActiveDetection = Omit<Readonly<ActiveDetection>, 'resolution'> & {
+export type SolverActiveDetection = Omit<Readonly<ActiveDetection>, "resolution"> & {
   readonly resolution: ReadonlyResolution;
 };
 
 /** Solver-visible narrowed variants. */
-export type SolverInterstitialDetection = SolverActiveDetection & { readonly info: InterstitialInfo };
+export type SolverInterstitialDetection = SolverActiveDetection & {
+  readonly info: InterstitialInfo;
+};
 export type SolverEmbeddedDetection = SolverActiveDetection & { readonly info: EmbeddedInfo };
-

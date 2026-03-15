@@ -5,14 +5,22 @@
  * so unit tests can import without triggering env var validation.
  */
 
-import { isInterstitialType } from '../../shared/cloudflare-detection.js';
-import type { CloudflareType } from '../../shared/cloudflare-detection.js';
+import { isInterstitialType } from "../../shared/cloudflare-detection.js";
+import type { CloudflareType } from "../../shared/cloudflare-detection.js";
 
 // ── Solve Attribution (moved from cloudflare-state-tracker.ts) ─────
 
-export type SolveSignal = 'page_navigated' | 'beacon_push' | 'token_poll' | 'activity_poll'
-  | 'bridge_solved' | 'state_change' | 'callback_binding' | 'session_close' | 'cdp_dom_walk'
-  | 'verified_session_close';
+export type SolveSignal =
+  | "page_navigated"
+  | "beacon_push"
+  | "token_poll"
+  | "activity_poll"
+  | "bridge_solved"
+  | "state_change"
+  | "callback_binding"
+  | "session_close"
+  | "cdp_dom_walk"
+  | "verified_session_close";
 
 // ┌──────────────┬──────────────────┬──────────────┬───────┐
 // │ Signal       │ clickDelivered?  │ Method       │ Label │
@@ -24,18 +32,18 @@ export type SolveSignal = 'page_navigated' | 'beacon_push' | 'token_poll' | 'act
 // └──────────────┴──────────────────┴──────────────┴───────┘
 
 export function deriveSolveAttribution(signal: SolveSignal, clickDelivered: boolean) {
-  if (signal === 'page_navigated') {
+  if (signal === "page_navigated") {
     return clickDelivered
-      ? { method: 'click_navigation' as const, autoResolved: false, label: '✓' }
-      : { method: 'auto_navigation' as const, autoResolved: true, label: '→' };
+      ? { method: "click_navigation" as const, autoResolved: false, label: "✓" }
+      : { method: "auto_navigation" as const, autoResolved: true, label: "→" };
   }
   return clickDelivered
-    ? { method: 'click_solve' as const, autoResolved: false, label: '✓' }
-    : { method: 'auto_solve' as const, autoResolved: true, label: '→' };
+    ? { method: "click_solve" as const, autoResolved: false, label: "✓" }
+    : { method: "auto_solve" as const, autoResolved: true, label: "→" };
 }
 
 export function deriveFailLabel(reason: string) {
-  if (reason === 'verified_session_close') return { label: '⊘' };
+  if (reason === "verified_session_close") return { label: "⊘" };
   return { label: `✗ ${reason}` };
 }
 
@@ -50,37 +58,37 @@ export interface ReplayMarker {
 /** All CF marker tags emitted by the browserless solver. */
 export const CF_MARKERS = {
   /** CF challenge found (payload: type, method) */
-  DETECTED: 'cf.detected',
+  DETECTED: "cf.detected",
   /** Progress update (payload: state = widget_found | clicked | verifying | success | fail | expired) */
-  STATE_CHANGE: 'cf.state_change',
+  STATE_CHANGE: "cf.state_change",
   /** Phase 1 DOM walk found iframe (payload: attempt, phase1_ms) */
-  PAGE_TRAVERSAL: 'cf.page_traversal',
+  PAGE_TRAVERSAL: "cf.page_traversal",
   /** Found OOPIF target for iframe click (payload: method) */
-  OOPIF_DISCOVERED: 'cf.oopif_discovered',
+  OOPIF_DISCOVERED: "cf.oopif_discovered",
   /** Entered iframe DOM session (payload: using_iframe, isolated_world) */
-  CDP_DOM_SESSION: 'cf.cdp_dom_session',
+  CDP_DOM_SESSION: "cf.cdp_dom_session",
   /** Checkbox not found after N polls (payload: polls) */
-  CDP_NO_CHECKBOX: 'cf.cdp_no_checkbox',
+  CDP_NO_CHECKBOX: "cf.cdp_no_checkbox",
   /** Checkbox found in iframe (payload: polls, checkbox_found_ms, method) */
-  CDP_CHECKBOX_FOUND: 'cf.cdp_checkbox_found',
+  CDP_CHECKBOX_FOUND: "cf.cdp_checkbox_found",
   /** Click dispatched to OOPIF iframe (payload: ok, method, x, y, hold_ms) */
-  OOPIF_CLICK: 'cf.oopif_click',
+  OOPIF_CLICK: "cf.oopif_click",
   /** turnstile.getResponse() returned a token (payload: token_length) */
-  TOKEN_POLLED: 'cf.token_polled',
+  TOKEN_POLLED: "cf.token_polled",
   /** Timing: ms between click dispatch and page navigation */
-  CLICK_TO_NAV: 'cf.click_to_nav',
+  CLICK_TO_NAV: "cf.click_to_nav",
   /** Challenge solved (payload: type, method, signal, duration_ms) */
-  SOLVED: 'cf.solved',
+  SOLVED: "cf.solved",
   /** Auto-solved via token poll or beacon (payload: signal, method) */
-  AUTO_SOLVED: 'cf.auto_solved',
+  AUTO_SOLVED: "cf.auto_solved",
   /** Turnstile state said "success" but still detected + no token */
-  FALSE_POSITIVE: 'cf.false_positive',
+  FALSE_POSITIVE: "cf.false_positive",
   /** Challenge failed (payload: reason, duration_ms) */
-  FAILED: 'cf.failed',
+  FAILED: "cf.failed",
   /** CF re-served challenge after navigation (payload: rechallenge_count, click_delivered) */
-  RECHALLENGE: 'cf.rechallenge',
+  RECHALLENGE: "cf.rechallenge",
   /** Turnstile widget in error/expired state */
-  WIDGET_ERROR: 'cf.widget_error_detected',
+  WIDGET_ERROR: "cf.widget_error_detected",
 } as const;
 
 // ── Turnstile Summary ────────────────────────────────────────────────
@@ -118,7 +126,7 @@ function derivePhaseLabel(
   failed: ReplayMarker | null,
 ): Phase {
   const type = detected.payload.type as string;
-  const prefix = isInterstitialType(type as CloudflareType) ? 'Int' : 'Emb';
+  const prefix = isInterstitialType(type as CloudflareType) ? "Int" : "Emb";
 
   let suffix: string;
   let method: string | undefined;
@@ -134,7 +142,7 @@ function derivePhaseLabel(
       suffix = phaseLabel;
     } else {
       // Backward compat for old replays without phase_label
-      suffix = (method === 'click_navigation' || method === 'click_solve') ? '✓' : '→';
+      suffix = method === "click_navigation" || method === "click_solve" ? "✓" : "→";
     }
   } else if (failed) {
     durationMs = failed.payload.duration_ms as number | undefined;
@@ -145,7 +153,7 @@ function derivePhaseLabel(
       suffix = `✗ ${failed.payload.reason}`;
     }
   } else {
-    suffix = '?';
+    suffix = "?";
   }
 
   return { type, label: `${prefix}${suffix}`, method, signal, durationMs };
@@ -167,16 +175,16 @@ export function buildSummaryFromMarkers(markers: ReplayMarker[]): TurnstileSumma
   let currentDetected: ReplayMarker | null = null;
 
   for (const m of sorted) {
-    if (m.tag === 'cf.detected') {
+    if (m.tag === "cf.detected") {
       if (currentDetected) {
         // Previous detected never resolved → "?"
         phases.push(derivePhaseLabel(currentDetected, null, null));
       }
       currentDetected = m;
-    } else if (m.tag === 'cf.solved' && currentDetected) {
+    } else if (m.tag === "cf.solved" && currentDetected) {
       phases.push(derivePhaseLabel(currentDetected, m, null));
       currentDetected = null;
-    } else if (m.tag === 'cf.failed' && currentDetected) {
+    } else if (m.tag === "cf.failed" && currentDetected) {
       phases.push(derivePhaseLabel(currentDetected, null, m));
       currentDetected = null;
     }
@@ -185,25 +193,27 @@ export function buildSummaryFromMarkers(markers: ReplayMarker[]): TurnstileSumma
   if (phases.length === 0) return null;
 
   // Build compound label
-  const intParts = phases.filter(p => isInterstitialType(p.type as CloudflareType)).map(p => p.label);
-  const embParts = phases.filter(p => !isInterstitialType(p.type as CloudflareType)).map(p => p.label);
+  const intParts = phases
+    .filter((p) => isInterstitialType(p.type as CloudflareType))
+    .map((p) => p.label);
+  const embParts = phases
+    .filter((p) => !isInterstitialType(p.type as CloudflareType))
+    .map((p) => p.label);
   const parts: string[] = [];
-  if (intParts.length) parts.push(intParts.join(''));  // No space: Int✓Int→
-  if (embParts.length) parts.push(embParts.join(''));
-  const label = parts.join(' ');  // Space between groups: Int✓Int→ Emb→
+  if (intParts.length) parts.push(intParts.join("")); // No space: Int✓Int→
+  if (embParts.length) parts.push(embParts.join(""));
+  const label = parts.join(" "); // Space between groups: Int✓Int→ Emb→
 
-  const rechallenge = markers.some(m => m.tag === 'cf.rechallenge');
-  const lastSolved = [...phases].reverse().find(p => p.method);
+  const rechallenge = markers.some((m) => m.tag === "cf.rechallenge");
+  const lastSolved = [...phases].reverse().find((p) => p.method);
 
   // Check for verified_session_close in any failed marker
-  const cfVerified = sorted.some(m =>
-    m.tag === 'cf.failed' && m.payload.cf_verified === true
-  );
+  const cfVerified = sorted.some((m) => m.tag === "cf.failed" && m.payload.cf_verified === true);
 
   return {
     label,
     type: phases[0].type,
-    method: lastSolved?.method || '',
+    method: lastSolved?.method || "",
     signal: lastSolved?.signal,
     durationMs: lastSolved?.durationMs,
     rechallenge,
@@ -214,10 +224,16 @@ export function buildSummaryFromMarkers(markers: ReplayMarker[]): TurnstileSumma
 // ── Summary-to-Replay Cross-Reference ────────────────────────────────
 
 const SUMMARY_METHOD_MAP: Record<string, { methods: string[]; signals: string[] }> = {
-  'Int✓': { methods: ['click_navigation'], signals: ['page_navigated'] },
-  'Int→': { methods: ['auto_navigation'], signals: ['page_navigated'] },
-  'Emb✓': { methods: ['click_solve', 'click_navigation'], signals: ['bridge_solved', 'beacon_push', 'token_poll', 'activity_poll', 'page_navigated'] },
-  'Emb→': { methods: ['auto_solve', 'auto_navigation'], signals: ['bridge_solved', 'beacon_push', 'token_poll', 'activity_poll', 'page_navigated'] },
+  "Int✓": { methods: ["click_navigation"], signals: ["page_navigated"] },
+  "Int→": { methods: ["auto_navigation"], signals: ["page_navigated"] },
+  "Emb✓": {
+    methods: ["click_solve", "click_navigation"],
+    signals: ["bridge_solved", "beacon_push", "token_poll", "activity_poll", "page_navigated"],
+  },
+  "Emb→": {
+    methods: ["auto_solve", "auto_navigation"],
+    signals: ["bridge_solved", "beacon_push", "token_poll", "activity_poll", "page_navigated"],
+  },
 };
 
 /**
@@ -241,8 +257,10 @@ export function assertSummaryConsistency(
   }
 
   // Click labels must have a click marker
-  if ((summary.label === 'Int✓' || summary.label === 'Emb✓') &&
-      !markers.some((m) => m.tag === CF_MARKERS.OOPIF_CLICK && m.payload.ok)) {
+  if (
+    (summary.label === "Int✓" || summary.label === "Emb✓") &&
+    !markers.some((m) => m.tag === CF_MARKERS.OOPIF_CLICK && m.payload.ok)
+  ) {
     return `Summary '${summary.label}' claims click-solve but no cf.oopif_click marker with ok=true`;
   }
 
@@ -263,10 +281,12 @@ export function assertSummaryConsistency(
   }
 
   // Orphaned detection: cf.detected without cf.solved or cf.failed
-  const hasSolved = markers.some((m) => m.tag === CF_MARKERS.SOLVED || m.tag === CF_MARKERS.AUTO_SOLVED);
+  const hasSolved = markers.some(
+    (m) => m.tag === CF_MARKERS.SOLVED || m.tag === CF_MARKERS.AUTO_SOLVED,
+  );
   const hasFailed = markers.some((m) => m.tag === CF_MARKERS.FAILED);
   if (detected.length > 0 && !hasSolved && !hasFailed) {
-    return 'Orphaned detection: cf.detected without cf.solved or cf.failed';
+    return "Orphaned detection: cf.detected without cf.solved or cf.failed";
   }
 
   return null;

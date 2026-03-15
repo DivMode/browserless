@@ -5,6 +5,7 @@
 > **Problem:** CDP events are unreliable — Cloudflare solver events not reaching clients, data not flowing, commands timing out under tab contention.
 >
 > **What's been done (2026-02-19):**
+>
 > - Main WS ping/pong removed (root cause of replay URL disappearance)
 > - Per-page WS keepalive changed to 30s non-destructive (was 5s destructive)
 > - 9 Maps/Sets consolidated into `TargetRegistry` (atomic cleanup)
@@ -118,7 +119,7 @@ If `Network.enable` or `Runtime.enable` throws during iframe attachment (e.g., t
 
 ```typescript
 if (msg.sessionId && iframeSessions.has(msg.sessionId)) {
-  handleIframeCDPEvent(msg);  // Never reached if mapping failed
+  handleIframeCDPEvent(msg); // Never reached if mapping failed
 }
 ```
 
@@ -134,11 +135,11 @@ Client disconnect triggers `handleClose()` which nulls `clientWs`. If `SessionLi
 
 Three competing `Runtime.evaluate` sources flood each per-page WebSocket:
 
-| Source | Frequency | What it does |
-|--------|-----------|-------------|
-| `collectEvents` (replay-session.ts:472) | Every 500ms, **sequential** across tabs | Drains `__browserlessRecording.events` buffer |
-| `handleIframeCDPEvent` (replay-session.ts:588-634) | Every iframe `Network.requestWillBeSent` + `Network.responseReceived` (~20-60 calls per tab per CF challenge) | Pushes events into recording buffer |
-| CF solver markers (replay-coordinator.ts:121-130) | Every detection/click/presence event | Pushes custom marker events into recording buffer |
+| Source                                             | Frequency                                                                                                     | What it does                                      |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| `collectEvents` (replay-session.ts:472)            | Every 500ms, **sequential** across tabs                                                                       | Drains `__browserlessRecording.events` buffer     |
+| `handleIframeCDPEvent` (replay-session.ts:588-634) | Every iframe `Network.requestWillBeSent` + `Network.responseReceived` (~20-60 calls per tab per CF challenge) | Pushes events into recording buffer               |
+| CF solver markers (replay-coordinator.ts:121-130)  | Every detection/click/presence event                                                                          | Pushes custom marker events into recording buffer |
 
 **The positive feedback loop:**
 
@@ -189,19 +190,19 @@ This is the Phase 2 contention issue made concrete — the abstract "15+ tabs sh
 
 Searched every CDP library, wrapper, and automation framework. The result:
 
-| Library | Language | Event Buffering | Session Multiplexing | Reconnection | Stealth |
-|---|---|---|---|---|---|
-| chrome-remote-interface | Node.js | No | No | No | No |
-| Puppeteer CDPSession | Node.js | No | Yes (flatten) | No | Via plugins |
-| Playwright | Node.js | No | Yes | No | Via Patchright |
-| vscode-cdp | Node.js | No | Yes | No | No |
-| simple-cdp | JS/TS | No | Partial | No | No |
-| **mafredri/cdp** | **Go** | **Yes** | Yes | No | No |
-| **chromedp** | **Go** | **Yes** | Yes | No | No |
-| Pydoll | Python | No | Per-tab WS | No | Yes |
-| Nodriver/Zendriver | Python | No | Unknown | No | Yes |
-| cdp-use | Python | No | Partial | No | No |
-| WebDriver BiDi | Standard | Context-scoped | N/A | N/A | N/A |
+| Library                 | Language | Event Buffering | Session Multiplexing | Reconnection | Stealth        |
+| ----------------------- | -------- | --------------- | -------------------- | ------------ | -------------- |
+| chrome-remote-interface | Node.js  | No              | No                   | No           | No             |
+| Puppeteer CDPSession    | Node.js  | No              | Yes (flatten)        | No           | Via plugins    |
+| Playwright              | Node.js  | No              | Yes                  | No           | Via Patchright |
+| vscode-cdp              | Node.js  | No              | Yes                  | No           | No             |
+| simple-cdp              | JS/TS    | No              | Partial              | No           | No             |
+| **mafredri/cdp**        | **Go**   | **Yes**         | Yes                  | No           | No             |
+| **chromedp**            | **Go**   | **Yes**         | Yes                  | No           | No             |
+| Pydoll                  | Python   | No              | Per-tab WS           | No           | Yes            |
+| Nodriver/Zendriver      | Python   | No              | Unknown              | No           | Yes            |
+| cdp-use                 | Python   | No              | Partial              | No           | No             |
+| WebDriver BiDi          | Standard | Context-scoped  | N/A                  | N/A          | N/A            |
 
 **Key findings:**
 
@@ -216,6 +217,7 @@ Searched every CDP library, wrapper, and automation framework. The result:
 ### Relevant Patterns from Other Libraries
 
 **mafredri/cdp (Go) — Buffered Event Streams:**
+
 ```go
 // Create event stream BEFORE enabling domain — events buffer from creation
 domContent, _ := page.DOMContentEventFired(ctx)
@@ -225,6 +227,7 @@ event, _ := domContent.Recv()
 ```
 
 **browser-use — Stateless State Derivation:**
+
 ```python
 # Don't trust events. Query the browser for current truth.
 # Periodic health check: evaluate 1+1 on each target to detect crashes.
@@ -232,12 +235,13 @@ event, _ := domContent.Recv()
 ```
 
 **Puppeteer — waitForDebuggerOnStart Pattern:**
+
 ```javascript
 // Pause new targets until event listeners are ready
-await cdp.send('Target.setAutoAttach', {
+await cdp.send("Target.setAutoAttach", {
   autoAttach: true,
   flatten: true,
-  waitForDebuggerOnStart: true  // Target pauses until Runtime.runIfWaitingForDebugger
+  waitForDebuggerOnStart: true, // Target pauses until Runtime.runIfWaitingForDebugger
 });
 // Window to register listeners before target executes
 ```
@@ -252,6 +256,7 @@ workerd achieves reliability through in-process V8 API bindings — no network b
 ### Core Shift: Poll-Driven with Event Acceleration
 
 **Current (event-driven):**
+
 ```
 CDP Event fires → Handler called → State updated → Action taken
      ↓ (if event lost)
@@ -259,6 +264,7 @@ CDP Event fires → Handler called → State updated → Action taken
 ```
 
 **Proposed (poll-driven + event-accelerated):**
+
 ```
 Poll loop (every N ms) → Query browser state → Diff against known state → Act
 CDP Event fires → Immediately trigger poll → Faster response
@@ -306,10 +312,10 @@ Replaces the current raw WebSocket handling scattered across `replay-coordinator
 ```typescript
 class CDPConnection {
   private browserWs: WebSocket;
-  private pageWsMap = new Map<string, WebSocket>();  // targetId → per-page WS
-  private pendingCommands = new Map<number, { resolve, reject, timer }>();
+  private pageWsMap = new Map<string, WebSocket>(); // targetId → per-page WS
+  private pendingCommands = new Map<number, { resolve; reject; timer }>();
   private eventSubscribers = new Map<string, Set<EventCallback>>();
-  private eventBuffers = new Map<string, CDPEvent[]>();  // buffered until consumed
+  private eventBuffers = new Map<string, CDPEvent[]>(); // buffered until consumed
   private msgId = 0;
 
   /**
@@ -327,11 +333,15 @@ class CDPConnection {
    * Uses per-page WS if available and open; falls back to browser WS.
    * Rejects after timeout (default 30s). Never hangs.
    */
-  async send(method: string, params?: object, opts?: {
-    sessionId?: string;
-    targetId?: string;
-    timeout?: number;
-  }): Promise<any> {
+  async send(
+    method: string,
+    params?: object,
+    opts?: {
+      sessionId?: string;
+      targetId?: string;
+      timeout?: number;
+    },
+  ): Promise<any> {
     const ws = this.selectWebSocket(opts?.targetId);
     const id = ++this.msgId;
     const payload: any = { id, method, params };
@@ -358,7 +368,7 @@ class CDPConnection {
     const pageWs = new WebSocket(`ws://127.0.0.1:${this.port}/devtools/page/${targetId}`);
     this.pageWsMap.set(targetId, pageWs);
 
-    pageWs.on('message', (raw: Buffer) => {
+    pageWs.on("message", (raw: Buffer) => {
       const msg = JSON.parse(raw.toString());
       if (msg.id) {
         // Command response
@@ -380,7 +390,7 @@ class CDPConnection {
    * Prevents promises from hanging indefinitely.
    */
   private handleWsClose(ws: WebSocket) {
-    const error = new Error('CDP WebSocket closed');
+    const error = new Error("CDP WebSocket closed");
     for (const [id, pending] of this.pendingCommands) {
       clearTimeout(pending.timer);
       pending.reject(error);
@@ -416,7 +426,7 @@ Fixes the CDPProxy connection gap (Failure Point #1). Events emitted before the 
 class ClientEventQueue {
   private queue: Array<{ method: string; params: object }> = [];
   private clientWs: WebSocket | null = null;
-  private log = new Logger('client-event-queue');
+  private log = new Logger("client-event-queue");
 
   /**
    * Called when CDPProxy finishes connecting the client.
@@ -471,7 +481,7 @@ Replaces the chain of 5+ separate `Runtime.evaluate` calls with a single unified
 interface PageState {
   url: string;
   hasCfChallenge: boolean;
-  cfType: 'managed' | 'turnstile' | 'interstitial' | null;
+  cfType: "managed" | "turnstile" | "interstitial" | null;
   cfCtype: string | null;
   cfCray: string | null;
   hasWidget: boolean;
@@ -519,7 +529,7 @@ const UNIFIED_STATE_JS = `(() => {
 class StatePoller {
   private knownState = new Map<string, PageState>();
   private pollTimers = new Map<string, NodeJS.Timeout>();
-  private log = new Logger('state-poller');
+  private log = new Logger("state-poller");
 
   constructor(private cdp: CDPConnection) {}
 
@@ -527,7 +537,11 @@ class StatePoller {
    * Start polling a page. Returns an async iterable of state changes.
    * CDP events can call triggerPoll() for immediate check.
    */
-  startPolling(targetId: string, cdpSessionId: string, intervalMs = 500): AsyncIterable<StateChange> {
+  startPolling(
+    targetId: string,
+    cdpSessionId: string,
+    intervalMs = 500,
+  ): AsyncIterable<StateChange> {
     // Returns async generator that yields diffs
   }
 
@@ -535,11 +549,15 @@ class StatePoller {
    * Single poll: evaluate unified JS, diff against known state, return changes.
    */
   async poll(targetId: string, cdpSessionId: string): Promise<StateChange[]> {
-    const result = await this.cdp.send('Runtime.evaluate', {
-      expression: UNIFIED_STATE_JS,
-      returnByValue: true,
-      allowUnsafeEvalBlockedByCSP: true,
-    }, { sessionId: cdpSessionId, targetId, timeout: 5000 });
+    const result = await this.cdp.send(
+      "Runtime.evaluate",
+      {
+        expression: UNIFIED_STATE_JS,
+        returnByValue: true,
+        allowUnsafeEvalBlockedByCSP: true,
+      },
+      { sessionId: cdpSessionId, targetId, timeout: 5000 },
+    );
 
     const newState: PageState = result.result?.value;
     if (!newState) return [];
@@ -566,25 +584,21 @@ class StatePoller {
   private diff(old: PageState, now: PageState): StateChange[] {
     const changes: StateChange[] = [];
     if (!old.hasCfChallenge && now.hasCfChallenge)
-      changes.push({ type: 'cf_detected', state: now });
+      changes.push({ type: "cf_detected", state: now });
     if (old.hasCfChallenge && !now.hasCfChallenge && now.solved)
-      changes.push({ type: 'cf_solved', state: now });
-    if (!old.hasWidget && now.hasWidget)
-      changes.push({ type: 'widget_appeared', state: now });
-    if (!old.hasError && now.hasError)
-      changes.push({ type: 'widget_error', state: now });
-    if (old.url !== now.url)
-      changes.push({ type: 'navigation', state: now });
-    if (!old.solved && now.solved)
-      changes.push({ type: 'token_available', state: now });
+      changes.push({ type: "cf_solved", state: now });
+    if (!old.hasWidget && now.hasWidget) changes.push({ type: "widget_appeared", state: now });
+    if (!old.hasError && now.hasError) changes.push({ type: "widget_error", state: now });
+    if (old.url !== now.url) changes.push({ type: "navigation", state: now });
+    if (!old.solved && now.solved) changes.push({ type: "token_available", state: now });
     return changes;
   }
 
   private stateToChanges(state: PageState): StateChange[] {
     const changes: StateChange[] = [];
-    if (state.hasCfChallenge) changes.push({ type: 'cf_detected', state });
-    if (state.hasWidget) changes.push({ type: 'widget_appeared', state });
-    if (state.solved) changes.push({ type: 'token_available', state });
+    if (state.hasCfChallenge) changes.push({ type: "cf_detected", state });
+    if (state.hasWidget) changes.push({ type: "widget_appeared", state });
+    if (state.solved) changes.push({ type: "token_available", state });
     return changes;
   }
 
@@ -597,8 +611,13 @@ class StatePoller {
 }
 
 interface StateChange {
-  type: 'cf_detected' | 'cf_solved' | 'widget_appeared' | 'widget_error'
-       | 'navigation' | 'token_available';
+  type:
+    | "cf_detected"
+    | "cf_solved"
+    | "widget_appeared"
+    | "widget_error"
+    | "navigation"
+    | "token_available";
   state: PageState;
 }
 ```
@@ -657,19 +676,19 @@ class CloudflareSolverV2 {
     // Start polling (self-healing — doesn't depend on events)
     for await (const change of this.statePoller.startPolling(targetId, cdpSessionId)) {
       switch (change.type) {
-        case 'cf_detected':
+        case "cf_detected":
           await this.handleDetection(targetId, cdpSessionId, change.state);
           break;
-        case 'cf_solved':
+        case "cf_solved":
           await this.handleSolved(targetId, change.state);
           break;
-        case 'widget_appeared':
+        case "widget_appeared":
           await this.handleWidget(targetId, cdpSessionId, change.state);
           break;
-        case 'widget_error':
+        case "widget_error":
           await this.handleError(targetId, cdpSessionId);
           break;
-        case 'token_available':
+        case "token_available":
           await this.handleToken(targetId, change.state);
           break;
       }
@@ -730,6 +749,7 @@ This endpoint is callable at any time during or after the scrape. Since it reads
 - Uses `aiohttp` (already a pydoll-scraper dependency)
 
 **Integration points** — insert between `await_resolution()` and `get_metrics()`:
+
 - `ahrefs_fast.py` ~line 869 (finally block)
 - `ahrefs_scraper.py` ~line 558 (backlinks)
 - `ahrefs_scraper.py` ~line 833 (traffic)
@@ -763,37 +783,37 @@ Phase 3: Poll-based solver ──► Phase 0 becomes verification layer
 
 Independent of all other phases. Can be implemented immediately.
 
-| Fix | Effort | Impact | Files |
-|---|---|---|---|
+| Fix                                                                  | Effort       | Impact                                                       | Files                                                                                       |
+| -------------------------------------------------------------------- | ------------ | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
 | HTTP fallback — `GET /sessions/:id/cf-summary` + pydoll always-fetch | Small-Medium | Defense-in-depth: CF data never lost regardless of CDP state | `cloudflare-solver.ts`, new `cf-summary.get.ts`, `http.ts`, pydoll `cloudflare_listener.py` |
 
 ### Phase 1: Immediate Fixes (stops events from dropping)
 
 These fix the most critical failures without requiring architectural changes.
 
-| Fix | Effort | Impact | Files |
-|---|---|---|---|
-| `ClientEventQueue` — buffer pre-connection events | Small | Fixes silent event loss during CDPProxy gap | `cloudflare-solver.ts`, `browsers.cdp.ts` |
-| Route per-page WS events to main handler | Small | Fixes events dropped on page-level WS | `replay-coordinator.ts` |
-| Fix iframe parent mapping (remove `.pop()`) | Small | Fixes wrong-tab CF events with multi-tab | `replay-coordinator.ts` |
-| Log dropped events (replace `.catch(() => {})`) | Small | Makes failures visible instead of silent | `cloudflare-solver.ts` |
+| Fix                                               | Effort | Impact                                      | Files                                     |
+| ------------------------------------------------- | ------ | ------------------------------------------- | ----------------------------------------- |
+| `ClientEventQueue` — buffer pre-connection events | Small  | Fixes silent event loss during CDPProxy gap | `cloudflare-solver.ts`, `browsers.cdp.ts` |
+| Route per-page WS events to main handler          | Small  | Fixes events dropped on page-level WS       | `replay-coordinator.ts`                   |
+| Fix iframe parent mapping (remove `.pop()`)       | Small  | Fixes wrong-tab CF events with multi-tab    | `replay-coordinator.ts`                   |
+| Log dropped events (replace `.catch(() => {})`)   | Small  | Makes failures visible instead of silent    | `cloudflare-solver.ts`                    |
 
 ### Phase 2: Reduce Contention (eliminates timeouts)
 
-| Fix | Effort | Impact | Files |
-|---|---|---|---|
-| Unified state JS (1 evaluate instead of 5) | Medium | 5x fewer CDP round-trips under contention | `cloudflare-solver.ts`, `cloudflare-detection.ts` |
-| `CDPConnection` class with routing + timeouts | Medium | Clean WS management, no hanging promises | New file: `cdp-connection.ts` |
-| Proper per-page WS lifecycle (open early, close on destroy) | Medium | Per-tab isolation for all operations | `replay-coordinator.ts` |
+| Fix                                                         | Effort | Impact                                    | Files                                             |
+| ----------------------------------------------------------- | ------ | ----------------------------------------- | ------------------------------------------------- |
+| Unified state JS (1 evaluate instead of 5)                  | Medium | 5x fewer CDP round-trips under contention | `cloudflare-solver.ts`, `cloudflare-detection.ts` |
+| `CDPConnection` class with routing + timeouts               | Medium | Clean WS management, no hanging promises  | New file: `cdp-connection.ts`                     |
+| Proper per-page WS lifecycle (open early, close on destroy) | Medium | Per-tab isolation for all operations      | `replay-coordinator.ts`                           |
 
 ### Phase 3: Architecture Shift (self-healing system)
 
-| Fix | Effort | Impact | Files |
-|---|---|---|---|
-| `StatePoller` with diff-based detection | Large | System works even when events are dropped | New file: `state-poller.ts` |
-| Event acceleration (CDP events trigger polls) | Medium | Best of both worlds: fast + reliable | `replay-coordinator.ts`, `cloudflare-solver.ts` |
-| Reject pending commands on WS close | Small | No more hanging promises | `cdp-connection.ts` |
-| Buffered event subscriptions | Large | mafredri/cdp-style reliability in Node.js | `cdp-connection.ts` |
+| Fix                                           | Effort | Impact                                    | Files                                           |
+| --------------------------------------------- | ------ | ----------------------------------------- | ----------------------------------------------- |
+| `StatePoller` with diff-based detection       | Large  | System works even when events are dropped | New file: `state-poller.ts`                     |
+| Event acceleration (CDP events trigger polls) | Medium | Best of both worlds: fast + reliable      | `replay-coordinator.ts`, `cloudflare-solver.ts` |
+| Reject pending commands on WS close           | Small  | No more hanging promises                  | `cdp-connection.ts`                             |
+| Buffered event subscriptions                  | Large  | mafredri/cdp-style reliability in Node.js | `cdp-connection.ts`                             |
 
 ### Migration Path
 
@@ -824,13 +844,13 @@ Replaced 9 Maps/Sets (`trackedTargets`, `targetSessions`, `tabStartTimes`, `inje
 
 Split 1275-line monolithic `cloudflare-solver.ts` into 4 focused modules + thin delegator:
 
-| File | Lines | Responsibility |
-|------|-------|----------------|
-| `src/session/cf/cloudflare-detector.ts` | 335 | Detection lifecycle |
-| `src/session/cf/cloudflare-solve-strategies.ts` | 302 | Solve execution (click, presence, etc.) |
-| `src/session/cf/cloudflare-state-tracker.ts` | 332 | Active detection state, activity loops |
-| `src/session/cf/cloudflare-event-emitter.ts` | 217 | CDP event emission + recording markers |
-| `src/session/cloudflare-solver.ts` | 94 | Thin delegator (public API unchanged) |
+| File                                            | Lines | Responsibility                          |
+| ----------------------------------------------- | ----- | --------------------------------------- |
+| `src/session/cf/cloudflare-detector.ts`         | 335   | Detection lifecycle                     |
+| `src/session/cf/cloudflare-solve-strategies.ts` | 302   | Solve execution (click, presence, etc.) |
+| `src/session/cf/cloudflare-state-tracker.ts`    | 332   | Active detection state, activity loops  |
+| `src/session/cf/cloudflare-event-emitter.ts`    | 217   | CDP event emission + recording markers  |
+| `src/session/cloudflare-solver.ts`              | 94    | Thin delegator (public API unchanged)   |
 
 #### 4. Main WS Ping/Pong Removed (deployed)
 

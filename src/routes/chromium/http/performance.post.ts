@@ -3,4 +3,4 @@ export {
   QuerySchema,
   ResponseSchema,
   default,
-} from '../../../shared/performance.http.js';
+} from "../../../shared/performance.http.js";

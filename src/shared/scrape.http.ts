@@ -33,31 +33,31 @@ import {
   sleep,
   waitForEvent as waitForEvt,
   waitForFunction as waitForFn,
-} from '@browserless.io/browserless';
-import { Cookie, Page } from 'puppeteer-core';
-import { Effect } from 'effect';
-import { ServerResponse } from 'http';
-import { runForkInServer } from '../otel-runtime.js';
+} from "@browserless.io/browserless";
+import { Cookie, Page } from "puppeteer-core";
+import { Effect } from "effect";
+import { ServerResponse } from "http";
+import { runForkInServer } from "../otel-runtime.js";
 
 export interface BodySchema {
-  addScriptTag?: Array<Parameters<Page['addScriptTag']>[0]>;
-  addStyleTag?: Array<Parameters<Page['addStyleTag']>[0]>;
-  authenticate?: Parameters<Page['authenticate']>[0];
+  addScriptTag?: Array<Parameters<Page["addScriptTag"]>[0]>;
+  addStyleTag?: Array<Parameters<Page["addStyleTag"]>[0]>;
+  authenticate?: Parameters<Page["authenticate"]>[0];
   bestAttempt?: bestAttempt;
-  cookies?: Array<Parameters<Page['setCookie']>[0]>;
+  cookies?: Array<Parameters<Page["setCookie"]>[0]>;
   debugOpts?: ScrapeDebugOptions;
   elements: Array<ScrapeElementSelector>;
-  emulateMediaType?: Parameters<Page['emulateMediaType']>[0];
-  gotoOptions?: Parameters<Page['goto']>[1];
-  html?: Parameters<Page['setContent']>[0];
+  emulateMediaType?: Parameters<Page["emulateMediaType"]>[0];
+  gotoOptions?: Parameters<Page["goto"]>[1];
+  html?: Parameters<Page["setContent"]>[0];
   rejectRequestPattern?: rejectRequestPattern[];
   rejectResourceTypes?: rejectResourceTypes[];
   requestInterceptors?: Array<requestInterceptors>;
-  setExtraHTTPHeaders?: Parameters<Page['setExtraHTTPHeaders']>[0];
+  setExtraHTTPHeaders?: Parameters<Page["setExtraHTTPHeaders"]>[0];
   setJavaScriptEnabled?: boolean;
-  url?: Parameters<Page['goto']>[0];
-  userAgent?: Parameters<Page['setUserAgent']>[0];
-  viewport?: Parameters<Page['setViewport']>[0];
+  url?: Parameters<Page["goto"]>[0];
+  userAgent?: Parameters<Page["setUserAgent"]>[0];
+  viewport?: Parameters<Page["setViewport"]>[0];
   waitForEvent?: WaitForEventOptions;
   waitForFunction?: WaitForFunctionOptions;
   waitForSelector?: WaitForSelectorOptions;
@@ -158,10 +158,7 @@ export interface ResponseSchema {
   } | null;
 }
 
-const scrape = async (
-  elements: ScrapeElementSelector[],
-  bestAttempt = false,
-) => {
+const scrape = async (elements: ScrapeElementSelector[], bestAttempt = false) => {
   const wait = (selector: string, timeout = 30000) => {
     return new Promise<void>((resolve, reject) => {
       const timeoutId = setTimeout(() => {
@@ -185,16 +182,12 @@ const scrape = async (
     );
 
     results.forEach((result, index) => {
-      if (result.status === 'rejected') {
-        console.warn(
-          `Selector "${elements[index].selector}" failed: ${result.reason.message}`,
-        );
+      if (result.status === "rejected") {
+        console.warn(`Selector "${elements[index].selector}" failed: ${result.reason.message}`);
       }
     });
   } else {
-    await Promise.all(
-      elements.map(({ selector, timeout }) => wait(selector, timeout)),
-    );
+    await Promise.all(elements.map(({ selector, timeout }) => wait(selector, timeout)));
   }
 
   return elements.map(({ selector }) => {
@@ -235,16 +228,12 @@ export default class ChromiumScrapePostRoute extends BrowserHTTPRoute {
   method = Methods.post;
   path = [HTTPRoutes.chromiumScrape, HTTPRoutes.scrape];
   tags = [APITags.browserAPI];
-  async handler(
-    req: Request,
-    res: ServerResponse,
-    browser: BrowserInstance,
-  ) {
+  async handler(req: Request, res: ServerResponse, browser: BrowserInstance) {
     return Effect.runPromise(
-      Effect.fn('route.scrape.post')(function* () {
-        yield* Effect.logInfo('Scrape API invoked with body: ' + JSON.stringify(req.body));
+      Effect.fn("route.scrape.post")(function* () {
+        yield* Effect.logInfo("Scrape API invoked with body: " + JSON.stringify(req.body));
         const contentType =
-          !req.headers.accept || req.headers.accept?.includes('*')
+          !req.headers.accept || req.headers.accept?.includes("*")
             ? contentTypes.html
             : req.headers.accept;
 
@@ -252,7 +241,7 @@ export default class ChromiumScrapePostRoute extends BrowserHTTPRoute {
           throw new BadRequest(`Couldn't parse JSON body`);
         }
 
-        res.setHeader('Content-Type', contentType);
+        res.setHeader("Content-Type", contentType);
 
         const {
           bestAttempt = false,
@@ -287,20 +276,20 @@ export default class ChromiumScrapePostRoute extends BrowserHTTPRoute {
 
         const page = (yield* Effect.promise(() =>
           Promise.resolve(browser.newPage()),
-        )) as UnwrapPromise<ReturnType<ChromiumCDP['newPage']>>;
+        )) as UnwrapPromise<ReturnType<ChromiumCDP["newPage"]>>;
         const gotoCall = url ? page.goto.bind(page) : page.setContent.bind(page);
         const messages: string[] = [];
         const outbound: OutBoundRequest[] = [];
         const inbound: InBoundRequest[] = [];
 
         if (debugOpts?.console) {
-          page.on('console', (msg) => messages.push(msg.text()));
+          page.on("console", (msg) => messages.push(msg.text()));
         }
 
         if (debugOpts?.network) {
           page.setRequestInterception(true);
 
-          page.on('request', (req) => {
+          page.on("request", (req) => {
             outbound.push({
               headers: req.headers(),
               method: req.method(),
@@ -317,7 +306,7 @@ export default class ChromiumScrapePostRoute extends BrowserHTTPRoute {
             }
           });
 
-          page.on('response', (res) => {
+          page.on("response", (res) => {
             inbound.push({
               headers: res.headers(),
               status: res.status(),
@@ -361,7 +350,7 @@ export default class ChromiumScrapePostRoute extends BrowserHTTPRoute {
         ) {
           yield* Effect.promise(() => page.setRequestInterception(true));
 
-          page.on('request', (req) => {
+          page.on("request", (req) => {
             if (
               rejectResourceTypes.includes(req.resourceType()) ||
               !!rejectRequestPattern.find((pattern) => req.url().match(pattern))
@@ -369,15 +358,13 @@ export default class ChromiumScrapePostRoute extends BrowserHTTPRoute {
               runForkInServer(Effect.logDebug(`Aborting request ${req.method()}: ${req.url()}`));
               return req.abort();
             }
-            const interceptor = requestInterceptors.find((r) =>
-              req.url().match(r.pattern),
-            );
+            const interceptor = requestInterceptors.find((r) => req.url().match(r.pattern));
             if (interceptor) {
               return req.respond({
                 ...interceptor.response,
                 body: interceptor.response.body
                   ? isBase64Encoded(interceptor.response.body as string)
-                    ? Buffer.from(interceptor.response.body, 'base64')
+                    ? Buffer.from(interceptor.response.body, "base64")
                     : interceptor.response.body
                   : undefined,
               });
@@ -403,9 +390,7 @@ export default class ChromiumScrapePostRoute extends BrowserHTTPRoute {
         }
 
         if (waitForTimeout) {
-          yield* Effect.promise(() =>
-            sleep(waitForTimeout).catch(bestAttemptCatch(bestAttempt)),
-          );
+          yield* Effect.promise(() => sleep(waitForTimeout).catch(bestAttemptCatch(bestAttempt)));
         }
 
         if (waitForFunction) {
@@ -430,11 +415,11 @@ export default class ChromiumScrapePostRoute extends BrowserHTTPRoute {
         }
 
         const headers = {
-          'X-Response-Code': gotoResponse?.status(),
-          'X-Response-IP': gotoResponse?.remoteAddress().ip,
-          'X-Response-Port': gotoResponse?.remoteAddress().port,
-          'X-Response-Status': gotoResponse?.statusText(),
-          'X-Response-URL': gotoResponse?.url().substring(0, 1000),
+          "X-Response-Code": gotoResponse?.status(),
+          "X-Response-IP": gotoResponse?.remoteAddress().ip,
+          "X-Response-Port": gotoResponse?.remoteAddress().port,
+          "X-Response-Status": gotoResponse?.statusText(),
+          "X-Response-URL": gotoResponse?.url().substring(0, 1000),
         };
 
         for (const [key, value] of Object.entries(headers)) {
@@ -444,14 +429,12 @@ export default class ChromiumScrapePostRoute extends BrowserHTTPRoute {
         }
 
         const data = yield* Effect.promise(() =>
-          page
-            .evaluate(scrape, elements, bestAttempt)
-            .catch((e) => {
-              if (e.message.includes('Timed out')) {
-                throw new Timeout(e);
-              }
-              throw e;
-            }),
+          page.evaluate(scrape, elements, bestAttempt).catch((e) => {
+            if (e.message.includes("Timed out")) {
+              throw new Timeout(e);
+            }
+            throw e;
+          }),
         );
 
         const [debugHTML, screenshot, pageCookies] = yield* Effect.promise(() =>
@@ -484,7 +467,7 @@ export default class ChromiumScrapePostRoute extends BrowserHTTPRoute {
 
         page.close().catch(noop);
 
-        yield* Effect.logDebug('Scrape API request completed');
+        yield* Effect.logDebug("Scrape API request completed");
 
         return jsonResponse(res, 200, response, false);
       })(),

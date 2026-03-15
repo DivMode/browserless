@@ -1,6 +1,6 @@
-import type { Vector } from './math.js';
-import { calculatePointsInCurve } from './bezier-calculator.js';
-import { type TweeningFunction, easeOutQuad } from './tweening.js';
+import type { Vector } from "./math.js";
+import { calculatePointsInCurve } from "./bezier-calculator.js";
+import { type TweeningFunction, easeOutQuad } from "./tweening.js";
 
 export interface HumanCurveOptions {
   offsetBoundaryX?: number;
@@ -26,11 +26,7 @@ export class HumanizeMouseTrajectory {
   toPoint: Vector;
   points: Vector[];
 
-  constructor(
-    fromPoint: Vector,
-    toPoint: Vector,
-    options?: HumanCurveOptions,
-  ) {
+  constructor(fromPoint: Vector, toPoint: Vector, options?: HumanCurveOptions) {
     this.fromPoint = fromPoint;
     this.toPoint = toPoint;
     this.points = this.generateCurve(options);
@@ -40,17 +36,13 @@ export class HumanizeMouseTrajectory {
     const offsetBoundaryX = options?.offsetBoundaryX ?? 80;
     const offsetBoundaryY = options?.offsetBoundaryY ?? 80;
     const leftBoundary =
-      options?.leftBoundary ??
-      Math.min(this.fromPoint.x, this.toPoint.x) - offsetBoundaryX;
+      options?.leftBoundary ?? Math.min(this.fromPoint.x, this.toPoint.x) - offsetBoundaryX;
     const rightBoundary =
-      options?.rightBoundary ??
-      Math.max(this.fromPoint.x, this.toPoint.x) + offsetBoundaryX;
+      options?.rightBoundary ?? Math.max(this.fromPoint.x, this.toPoint.x) + offsetBoundaryX;
     const downBoundary =
-      options?.downBoundary ??
-      Math.min(this.fromPoint.y, this.toPoint.y) - offsetBoundaryY;
+      options?.downBoundary ?? Math.min(this.fromPoint.y, this.toPoint.y) - offsetBoundaryY;
     const upBoundary =
-      options?.upBoundary ??
-      Math.max(this.fromPoint.y, this.toPoint.y) + offsetBoundaryY;
+      options?.upBoundary ?? Math.max(this.fromPoint.y, this.toPoint.y) + offsetBoundaryY;
     const knotsCount = options?.knotsCount ?? 2;
     const distortionMean = options?.distortionMean ?? 1;
     const distortionStDev = options?.distortionStDev ?? 1;
@@ -67,12 +59,7 @@ export class HumanizeMouseTrajectory {
     );
 
     let points = this.generatePoints(internalKnots);
-    points = this.distortPoints(
-      points,
-      distortionMean,
-      distortionStDev,
-      distortionFrequency,
-    );
+    points = this.distortPoints(points, distortionMean, distortionStDev, distortionFrequency);
     points = this.tweenPoints(points, tween, targetPoints);
 
     return points;
@@ -91,7 +78,7 @@ export class HumanizeMouseTrajectory {
       !this.checkIfNumeric(dBoundary) ||
       !this.checkIfNumeric(uBoundary)
     ) {
-      throw new Error('Boundaries must be numeric values');
+      throw new Error("Boundaries must be numeric values");
     }
 
     if (!Number.isInteger(knotsCount) || knotsCount < 0) {
@@ -99,23 +86,17 @@ export class HumanizeMouseTrajectory {
     }
 
     if (lBoundary > rBoundary) {
-      throw new Error(
-        'left_boundary must be less than or equal to right_boundary',
-      );
+      throw new Error("left_boundary must be less than or equal to right_boundary");
     }
 
     if (dBoundary > uBoundary) {
-      throw new Error(
-        'down_boundary must be less than or equal to upper_boundary',
-      );
+      throw new Error("down_boundary must be less than or equal to upper_boundary");
     }
 
     const knots: Vector[] = [];
     for (let i = 0; i < knotsCount; i++) {
-      const x =
-        Math.floor(Math.random() * (rBoundary - lBoundary + 1)) + lBoundary;
-      const y =
-        Math.floor(Math.random() * (uBoundary - dBoundary + 1)) + dBoundary;
+      const x = Math.floor(Math.random() * (rBoundary - lBoundary + 1)) + lBoundary;
+      const y = Math.floor(Math.random() * (uBoundary - dBoundary + 1)) + dBoundary;
       knots.push({ x, y });
     }
 
@@ -124,7 +105,7 @@ export class HumanizeMouseTrajectory {
 
   private generatePoints(knots: Vector[]): Vector[] {
     if (!this.checkIfListOfPoints(knots)) {
-      throw new Error('knots must be valid list of points');
+      throw new Error("knots must be valid list of points");
     }
 
     const distance = Math.sqrt(
@@ -150,15 +131,15 @@ export class HumanizeMouseTrajectory {
       !this.checkIfNumeric(distortionStDev) ||
       !this.checkIfNumeric(distortionFrequency)
     ) {
-      throw new Error('Distortions must be numeric');
+      throw new Error("Distortions must be numeric");
     }
 
     if (!this.checkIfListOfPoints(points)) {
-      throw new Error('points must be valid list of points');
+      throw new Error("points must be valid list of points");
     }
 
     if (distortionFrequency < 0 || distortionFrequency > 1) {
-      throw new Error('distortion_frequency must be in range [0,1]');
+      throw new Error("distortion_frequency must be in range [0,1]");
     }
 
     const distorted: Vector[] = [points[0]];
@@ -176,19 +157,13 @@ export class HumanizeMouseTrajectory {
     return distorted;
   }
 
-  private tweenPoints(
-    points: Vector[],
-    tween: TweeningFunction,
-    targetPoints: number,
-  ): Vector[] {
+  private tweenPoints(points: Vector[], tween: TweeningFunction, targetPoints: number): Vector[] {
     if (!this.checkIfListOfPoints(points)) {
-      throw new Error('List of points not valid');
+      throw new Error("List of points not valid");
     }
 
     if (!Number.isInteger(targetPoints) || targetPoints < 2) {
-      throw new Error(
-        'target_points must be an integer greater or equal to 2',
-      );
+      throw new Error("target_points must be an integer greater or equal to 2");
     }
 
     if (points.length <= targetPoints) {
@@ -231,14 +206,13 @@ export class HumanizeMouseTrajectory {
     // Box-Muller transform
     const u1 = Math.random();
     const u2 = Math.random();
-    const z0 =
-      Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+    const z0 = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
     return z0 * stdDev + mean;
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private checkIfNumeric(val: any): boolean {
-    return typeof val === 'number' && !isNaN(val);
+    return typeof val === "number" && !isNaN(val);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -252,9 +226,9 @@ export class HumanizeMouseTrajectory {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (p: any) =>
           p != null &&
-          typeof p === 'object' &&
-          'x' in p &&
-          'y' in p &&
+          typeof p === "object" &&
+          "x" in p &&
+          "y" in p &&
           this.checkIfNumeric(p.x) &&
           this.checkIfNumeric(p.y),
       );

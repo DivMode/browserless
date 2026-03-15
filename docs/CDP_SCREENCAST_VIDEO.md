@@ -55,7 +55,7 @@ When a target is destroyed, `handleTargetDestroyed()` removes it from the active
 
 Encoding is **lazy** — frames sit on disk with status `deferred` until someone visits the video player page. The player route detects `deferred` status, updates it to `pending`, and queues encoding. This saves CPU for scrapers since most sessions (~92%) are never replayed.
 
-When encoding is triggered, frames are encoded to **HLS MPEG-TS segments** in a background queue. The key design (inspired by [Browserbase's approach](../docs/This%20week%20we%20fixed%20the%20worst%20part%20of%20Browserbase%20(1).md)): the playlist is **pre-generated before encoding starts**, so the player can load immediately and see the full duration.
+When encoding is triggered, frames are encoded to **HLS MPEG-TS segments** in a background queue. The key design (inspired by [Browserbase's approach](<../docs/This%20week%20we%20fixed%20the%20worst%20part%20of%20Browserbase%20(1).md>)): the playlist is **pre-generated before encoding starts**, so the player can load immediately and see the full duration.
 
 **Step 1 — Generate concat file** (variable framerate from frame timestamps):
 
@@ -134,12 +134,14 @@ Browserbase uses fMP4 segments (`.m4s` + `init.mp4`) for their HLS. We tried thi
 3. **Removed `-movflags`, added `-bf 0` (disable B-frames) + `-hls_flags independent_segments`** — Controls came back, duration showed correctly, but video was still black. `-bf 0` eliminated edit lists (`edts/elst`) in the init segment which we thought was the cause. ffprobe confirmed no edit lists, valid codec params, correct file sizes. Still black.
 
 **What we verified wasn't the problem:**
+
 - Init segment structure: no edit lists, correct `avcC` box, proper codec parameters
 - File serving: 200 status, correct content types (`video/mp4`), correct file sizes
 - Playlist format: valid `#EXT-X-VERSION:7`, `#EXT-X-MAP:URI="init.mp4"`, `#EXT-X-ENDLIST`
 - Encoding output: ffmpeg exited 0, all segments present on disk
 
 **Actual root cause: unknown.** The files were structurally valid according to ffprobe but Chrome MSE rendered black. We stopped debugging after 3 failed deploys and switched to MPEG-TS which worked immediately on the first try. Suspected causes we didn't have time to verify:
+
 - hls.js version bundled in `hls-video-element@1.2` may have fMP4 bugs
 - Variable framerate from the concat demuxer may produce timing metadata that MSE can't handle in fMP4 passthrough mode (TS transmuxing normalizes this)
 - Something specific to ffmpeg 8.0.1's HLS fMP4 muxer that Chrome rejects but Safari accepts
@@ -149,18 +151,19 @@ Browserbase uses fMP4 segments (`.m4s` + `init.mp4`) for their HLS. We tried thi
 
 **What fMP4 would have given us (and why it doesn't matter):**
 
-| fMP4 advantage | Reality for our use case |
-|----------------|------------------------|
+| fMP4 advantage                                            | Reality for our use case                                                                      |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | ~10-15% smaller segments (no 188-byte TS packet overhead) | Our segments are 70-370KB. Saving ~30KB per segment is irrelevant for single-viewer playback. |
-| No client-side transmuxing (fMP4 passes directly to MSE) | hls.js transmuxes TS→fMP4 in <1ms per segment on any modern machine. Invisible. |
-| Better seeking precision (`sidx` index boxes in fMP4) | Doesn't matter for 10-60 second screencast recordings. |
-| CMAF compatibility (same segments for HLS + DASH) | We only use HLS. No DASH clients. |
+| No client-side transmuxing (fMP4 passes directly to MSE)  | hls.js transmuxes TS→fMP4 in <1ms per segment on any modern machine. Invisible.               |
+| Better seeking precision (`sidx` index boxes in fMP4)     | Doesn't matter for 10-60 second screencast recordings.                                        |
+| CMAF compatibility (same segments for HLS + DASH)         | We only use HLS. No DASH clients.                                                             |
 
 These benefits would matter at scale (thousands of concurrent viewers, multi-hour recordings, dual HLS+DASH delivery). Browserbase needs fMP4 because they serve at scale with parallel encoding. We encode one video at a time for one viewer.
 
 **Bottom line:** MPEG-TS works in every browser with zero compatibility issues. The tradeoffs are negligible for our use case. Don't try fMP4 again unless you control the muxer at the byte level (custom binary patching of `base_media_decode_time` like Browserbase does, not ffmpeg's built-in HLS muxer).
 
 **References:**
+
 - [Bitmovin: fMP4 HLS works in Safari but not Chrome/Edge](https://community.bitmovin.com/t/playback-issue-with-ffmpeg-generated-hls-stream-using-fmp4-segments-on-chrome-edge/3053)
 - [hls.js #7142: incomplete avcC box causes TypeError](https://github.com/video-dev/hls.js/issues/7142)
 - [ffmpeg HLS muxer internal movflags conflict](https://ffmpeg.org/ffmpeg-formats.html)
@@ -181,11 +184,11 @@ These benefits would matter at scale (thousands of concurrent viewers, multi-hou
 
 SQLite schema additions:
 
-| Column | Type | Purpose |
-|--------|------|---------|
-| `frameCount` | INTEGER | Number of screencast frames captured |
-| `videoPath` | TEXT | Path to HLS playlist file |
-| `encodingStatus` | TEXT | `none` \| `deferred` → `pending` → `encoding` → `completed` \| `failed` |
+| Column           | Type    | Purpose                                                                 |
+| ---------------- | ------- | ----------------------------------------------------------------------- |
+| `frameCount`     | INTEGER | Number of screencast frames captured                                    |
+| `videoPath`      | TEXT    | Path to HLS playlist file                                               |
+| `encodingStatus` | TEXT    | `none` \| `deferred` → `pending` → `encoding` → `completed` \| `failed` |
 
 Migration is automatic — `ALTER TABLE ADD COLUMN` with error catch for "column already exists".
 
@@ -197,15 +200,16 @@ Migration is automatic — `ALTER TABLE ADD COLUMN` with error catch for "column
 
 **`/recordings/{id}/video/player`** — HLS video player page using `hls-video-element` + `media-chrome`. For both encoding-in-progress and completed states, the player loads the HLS playlist immediately:
 
-| `encodingStatus` | Player shows |
-|------------------|-------------|
-| `completed` | HLS player with autoplay at 4× speed |
-| `deferred` | Triggers encoding, then shows HLS player + progress text (transitions to `pending`) |
+| `encodingStatus`       | Player shows                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------- |
+| `completed`            | HLS player with autoplay at 4× speed                                                  |
+| `deferred`             | Triggers encoding, then shows HLS player + progress text (transitions to `pending`)   |
 | `pending` / `encoding` | HLS player loads pre-generated playlist (full duration visible) + progress text below |
-| `failed` | Error message with frame count |
-| `none` (0 frames) | "No video available" + link to DOM replay |
+| `failed`               | Error message with frame count                                                        |
+| `none` (0 frames)      | "No video available" + link to DOM replay                                             |
 
 **Mid-encoding playback flow:**
+
 1. Player page renders with `src` pointing to `playlist.m3u8` (already on disk, pre-generated VOD)
 2. hls.js loads playlist → sees `#EXT-X-ENDLIST` → shows full duration in seek bar
 3. hls.js requests `seg000.ts` → file doesn't exist yet → HLS route holds connection open
@@ -224,14 +228,14 @@ When a session ends, Browserless injects a custom CDP event into the client's We
 
 ```typescript
 {
-  id: string;              // session ID
-  trackingId: string;      // unique session tracking ID
-  duration: number;        // recording duration (ms)
-  eventCount: number;      // rrweb events captured
-  frameCount: number;      // screencast frames captured
-  encodingStatus: string;  // 'deferred' | 'none'
-  playerUrl: string;       // rrweb player URL
-  videoPlayerUrl: string;  // video player URL
+  id: string; // session ID
+  trackingId: string; // unique session tracking ID
+  duration: number; // recording duration (ms)
+  eventCount: number; // rrweb events captured
+  frameCount: number; // screencast frames captured
+  encodingStatus: string; // 'deferred' | 'none'
+  playerUrl: string; // rrweb player URL
+  videoPlayerUrl: string; // video player URL
 }
 ```
 
@@ -249,6 +253,7 @@ COPY --from=mwader/static-ffmpeg:8.0.1 /ffprobe /usr/bin/ffprobe
 ```
 
 This replaced a `wget` download from johnvansickle.com:
+
 - **Pinned version** (7.1) — reproducible builds
 - **No external download** — build doesn't fail if johnvansickle.com is down
 - **Docker layer caching** — the `mwader/static-ffmpeg:8.0.1` image is pulled once and cached
@@ -277,6 +282,7 @@ Session ends (frameCount = 0):
 ### On-Demand Trigger
 
 The video player route (`recording-video-player.get.ts`) detects `deferred` status and:
+
 1. Updates status to `pending` in SQLite
 2. Calls `encoder.queueEncode()` to start background encoding
 3. Renders the HLS player page with `src` already set (playlist is pre-generated before ffmpeg starts)
@@ -302,17 +308,17 @@ A duplicate guard in `queueEncode()` prevents double-encoding when two viewers r
 
 ## File Map
 
-| File | Role |
-|------|------|
-| `src/session/screencast-capture.ts` | CDP screencast frame capture + fallback screenshots |
-| `src/video/encoder.ts` | Background ffmpeg encoding queue |
-| `src/session/recording-coordinator.ts` | Orchestrates rrweb + screencast per session |
-| `src/session-replay.ts` | Recording lifecycle + metadata |
-| `src/recording-store.ts` | SQLite storage with video columns |
-| `src/interfaces/recording-store.interface.ts` | `RecordingMetadata` type with video fields |
-| `src/cdp-proxy.ts` | `RecordingCompleteParams` interface + event emission |
-| `src/session/session-lifecycle-manager.ts` | Constructs + sends CDP event on session close |
-| `src/routes/.../recording-video-hls.get.ts` | HLS playlist + segment serving with fs.watch blocking response |
-| `src/routes/.../recording-video-player.get.ts` | HLS video player page (media-chrome + hls-video-element) |
-| `src/routes/.../recording-video-status.get.ts` | Encoding progress JSON endpoint |
-| `docker/base/Dockerfile` | ffmpeg binary via `COPY --from` |
+| File                                           | Role                                                           |
+| ---------------------------------------------- | -------------------------------------------------------------- |
+| `src/session/screencast-capture.ts`            | CDP screencast frame capture + fallback screenshots            |
+| `src/video/encoder.ts`                         | Background ffmpeg encoding queue                               |
+| `src/session/recording-coordinator.ts`         | Orchestrates rrweb + screencast per session                    |
+| `src/session-replay.ts`                        | Recording lifecycle + metadata                                 |
+| `src/recording-store.ts`                       | SQLite storage with video columns                              |
+| `src/interfaces/recording-store.interface.ts`  | `RecordingMetadata` type with video fields                     |
+| `src/cdp-proxy.ts`                             | `RecordingCompleteParams` interface + event emission           |
+| `src/session/session-lifecycle-manager.ts`     | Constructs + sends CDP event on session close                  |
+| `src/routes/.../recording-video-hls.get.ts`    | HLS playlist + segment serving with fs.watch blocking response |
+| `src/routes/.../recording-video-player.get.ts` | HLS video player page (media-chrome + hls-video-element)       |
+| `src/routes/.../recording-video-status.get.ts` | Encoding progress JSON endpoint                                |
+| `docker/base/Dockerfile`                       | ffmpeg binary via `COPY --from`                                |

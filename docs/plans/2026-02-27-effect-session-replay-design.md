@@ -62,13 +62,13 @@ File: `src/shared/replay-schemas.ts`
 Reuse branded IDs from CF solver (`CdpSessionId`, `TargetId`). Add:
 
 ```typescript
-export const SessionId = Schema.String.pipe(Schema.brand("SessionId"))
+export const SessionId = Schema.String.pipe(Schema.brand("SessionId"));
 
 export const ReplayEvent = Schema.Struct({
   type: Schema.Number,
   timestamp: Schema.Number,
   data: Schema.Unknown,
-})
+});
 
 export const ReplayMetadata = Schema.Struct({
   id: Schema.String,
@@ -83,25 +83,27 @@ export const ReplayMetadata = Schema.Struct({
   duration: Schema.Number,
   eventCount: Schema.Number,
   frameCount: Schema.Number,
-  encodingStatus: Schema.Literal('none', 'pending', 'encoding', 'completed', 'failed'),
+  encodingStatus: Schema.Literal("none", "pending", "encoding", "completed", "failed"),
   userAgent: Schema.optionalKey(Schema.String),
-})
+});
 
 export const TabEvent = Schema.Struct({
   sessionId: SessionId,
   targetId: TargetId,
   event: ReplayEvent,
-})
+});
 
-export const RrwebEventBatch = Schema.Array(ReplayEvent)
+export const RrwebEventBatch = Schema.Array(ReplayEvent);
 
 export class ReplayStoreError extends Schema.TaggedErrorClass<ReplayStoreError>()(
-  'ReplayStoreError', { message: Schema.String }
+  "ReplayStoreError",
+  { message: Schema.String },
 ) {}
 
-export class TabFlushError extends Schema.TaggedErrorClass<TabFlushError>()(
-  'TabFlushError', { targetId: TargetId, reason: Schema.String }
-) {}
+export class TabFlushError extends Schema.TaggedErrorClass<TabFlushError>()("TabFlushError", {
+  targetId: TargetId,
+  reason: Schema.String,
+}) {}
 ```
 
 Schema validation at JSON boundaries only — `Runtime.bindingCalled` payloads and file reads. Internal pipeline uses typed values without re-validation.
@@ -114,27 +116,34 @@ File: `src/session/replay-services.ts`
 
 ```typescript
 export const ReplayWriter = ServiceMap.Service<{
-  readonly writeTabReplay: (tabReplayId: string, events: ReplayEvent[], metadata: ReplayMetadata)
-    => Effect.Effect<string, ReplayStoreError>
-  readonly writeMetadata: (metadata: ReplayMetadata)
-    => Effect.Effect<void, ReplayStoreError>
-}>('ReplayWriter')
+  readonly writeTabReplay: (
+    tabReplayId: string,
+    events: ReplayEvent[],
+    metadata: ReplayMetadata,
+  ) => Effect.Effect<string, ReplayStoreError>;
+  readonly writeMetadata: (metadata: ReplayMetadata) => Effect.Effect<void, ReplayStoreError>;
+}>("ReplayWriter");
 
 export const ReplayMetrics = ServiceMap.Service<{
-  readonly incEvents: (count: number) => Effect.Effect<void>
-  readonly observeTabDuration: (seconds: number) => Effect.Effect<void>
-  readonly registerSession: (state: SessionGaugeState) => Effect.Effect<() => void>
-}>('ReplayMetrics')
+  readonly incEvents: (count: number) => Effect.Effect<void>;
+  readonly observeTabDuration: (seconds: number) => Effect.Effect<void>;
+  readonly registerSession: (state: SessionGaugeState) => Effect.Effect<() => void>;
+}>("ReplayMetrics");
 
 export const ScreencastService = ServiceMap.Service<{
-  readonly addTarget: (sessionId: string, cdpSessionId: CdpSessionId, targetId: TargetId)
-    => Effect.Effect<void>
-  readonly handleFrame: (sessionId: string, cdpSessionId: string, params: FrameParams)
-    => Effect.Effect<void>
-  readonly stopTarget: (sessionId: string, cdpSessionId: string)
-    => Effect.Effect<number>
-  readonly stopAll: (sessionId: string) => Effect.Effect<number>
-}>('ScreencastService')
+  readonly addTarget: (
+    sessionId: string,
+    cdpSessionId: CdpSessionId,
+    targetId: TargetId,
+  ) => Effect.Effect<void>;
+  readonly handleFrame: (
+    sessionId: string,
+    cdpSessionId: string,
+    params: FrameParams,
+  ) => Effect.Effect<void>;
+  readonly stopTarget: (sessionId: string, cdpSessionId: string) => Effect.Effect<number>;
+  readonly stopAll: (sessionId: string) => Effect.Effect<number>;
+}>("ScreencastService");
 ```
 
 ---
@@ -146,45 +155,42 @@ File: `src/session/replay-pipeline.ts`
 Each session forks this as a root fiber inside its ManagedRuntime:
 
 ```typescript
-const replayPipeline = (
-  queue: Queue.Queue<TabEvent, Cause.Done>,
-  sessionId: SessionId,
-) => Effect.fn('replay.pipeline')(function*() {
-  const writer = yield* ReplayWriter
-  const metrics = yield* ReplayMetrics
+const replayPipeline = (queue: Queue.Queue<TabEvent, Cause.Done>, sessionId: SessionId) =>
+  Effect.fn("replay.pipeline")(function* () {
+    const writer = yield* ReplayWriter;
+    const metrics = yield* ReplayMetrics;
 
-  yield* Stream.fromQueue(queue).pipe(
-    Stream.groupByKey(
-      (event) => event.targetId,
-      { idleTimeToLive: "30 seconds" }
-    ),
-    Stream.mapEffect(
-      ([targetId, tabStream]) =>
-        Effect.fn('replay.tab')(function*() {
-          const startedAt = Date.now()
-          const accumulated: ReplayEvent[] = []
+    yield* Stream.fromQueue(queue).pipe(
+      Stream.groupByKey((event) => event.targetId, { idleTimeToLive: "30 seconds" }),
+      Stream.mapEffect(
+        ([targetId, tabStream]) =>
+          Effect.fn("replay.tab")(function* () {
+            const startedAt = Date.now();
+            const accumulated: ReplayEvent[] = [];
 
-          yield* tabStream.pipe(
-            Stream.map((tabEvent) => tabEvent.event),
-            Stream.groupedWithin(500, "5 seconds"),
-            Stream.runForEach((batch) =>
-              Effect.fn('replay.batch')(function*() {
-                accumulated.push(...batch)
-                yield* metrics.incEvents(batch.length)
-              })()
-            ),
-          )
+            yield* tabStream.pipe(
+              Stream.map((tabEvent) => tabEvent.event),
+              Stream.groupedWithin(500, "5 seconds"),
+              Stream.runForEach((batch) =>
+                Effect.fn("replay.batch")(function* () {
+                  accumulated.push(...batch);
+                  yield* metrics.incEvents(batch.length);
+                })(),
+              ),
+            );
 
-          // Sub-stream ended — write final replay file
-          const tabReplayId = `${sessionId}--tab-${targetId}`
-          const metadata = { /* construct from accumulated */ }
-          yield* writer.writeTabReplay(tabReplayId, accumulated, metadata)
-        })(),
-      { concurrency: "unbounded" }
-    ),
-    Stream.runDrain,
-  )
-})()
+            // Sub-stream ended — write final replay file
+            const tabReplayId = `${sessionId}--tab-${targetId}`;
+            const metadata = {
+              /* construct from accumulated */
+            };
+            yield* writer.writeTabReplay(tabReplayId, accumulated, metadata);
+          })(),
+        { concurrency: "unbounded" },
+      ),
+      Stream.runDrain,
+    );
+  })();
 ```
 
 ---
@@ -200,6 +206,7 @@ The per-session WS handler refactored:
 5. **All Map-based event state removed** — events tracked by stream pipeline
 
 The Layer provides concrete implementations:
+
 - `ReplayWriter` → `SessionReplay.store` (SQLite) + `writeFile`
 - `ReplayMetrics` → `prom-metrics.ts` functions
 - `ScreencastService` → refactored `ScreencastCapture` with `acquireRelease` for timers
@@ -209,16 +216,16 @@ The Layer provides concrete implementations:
 
 ## File Changes
 
-| File | Change |
-|------|--------|
-| `src/shared/replay-schemas.ts` | **NEW** — Schema definitions |
-| `src/session/replay-services.ts` | **NEW** — Service definitions |
-| `src/session/replay-pipeline.ts` | **NEW** — Stream pipeline |
-| `src/session/replay-session.ts` | **REFACTORED** — ManagedRuntime, Queue bridge |
-| `src/session/replay-coordinator.ts` | **REFACTORED** — Creates runtime + Layer per session |
-| `src/session-replay.ts` | **SIMPLIFIED** — Thin wrapper: store + session registry |
-| `src/session/screencast-capture.ts` | **REFACTORED** — acquireRelease for timers |
-| `src/video/encoder.ts` | **UNCHANGED** — Already Effect-native |
+| File                                | Change                                                  |
+| ----------------------------------- | ------------------------------------------------------- |
+| `src/shared/replay-schemas.ts`      | **NEW** — Schema definitions                            |
+| `src/session/replay-services.ts`    | **NEW** — Service definitions                           |
+| `src/session/replay-pipeline.ts`    | **NEW** — Stream pipeline                               |
+| `src/session/replay-session.ts`     | **REFACTORED** — ManagedRuntime, Queue bridge           |
+| `src/session/replay-coordinator.ts` | **REFACTORED** — Creates runtime + Layer per session    |
+| `src/session-replay.ts`             | **SIMPLIFIED** — Thin wrapper: store + session registry |
+| `src/session/screencast-capture.ts` | **REFACTORED** — acquireRelease for timers              |
+| `src/video/encoder.ts`              | **UNCHANGED** — Already Effect-native                   |
 
 ---
 

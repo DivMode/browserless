@@ -132,7 +132,7 @@ import {
   Methods,
   contentTypes,
   writeResponse,
-} from '@browserless.io/browserless';
+} from "@browserless.io/browserless";
 
 // Response schemas must be typed "ResponseSchema" and are documented for you and
 // shown in the built-in documentation site.
@@ -141,7 +141,7 @@ export type ResponseSchema = string;
 // Similar to React and other ecosystems, extend our basic HTTPRoute
 export default class HelloWorldRoute extends HTTPRoute {
   // Must have a unique name for things like disabling to work if desired
-  name = 'PDFToS3Route';
+  name = "PDFToS3Route";
 
   // Detail any content-types that this route should except. "contentTypes.any" here means any content-type.
   // If the content-type does not match then a 404 will be sent back
@@ -167,7 +167,7 @@ export default class HelloWorldRoute extends HTTPRoute {
   method = Methods.get;
 
   // The path that this route will listen on requests for.
-  path = ['/hello'];
+  path = ["/hello"];
 
   // A list of arbitrary tags to group similar APIs with in the documentation site.
   tags = [APITags.management];
@@ -176,7 +176,7 @@ export default class HelloWorldRoute extends HTTPRoute {
   // core logic behind this route. Use utilities like writeResponse or writeJSONResponse to help
   // return the appropriate response.
   async handler(_req, res, _logger: Logger): Promise<void> {
-    const response: ResponseSchema = 'Hello World!';
+    const response: ResponseSchema = "Hello World!";
     return writeResponse(res, 200, ResponseSchema, contentTypes.text);
   }
 }
@@ -194,8 +194,8 @@ import {
   Request,
   SystemQueryParameters,
   WebsocketRoutes,
-} from '@browserless.io/browserless';
-import { Duplex } from 'stream';
+} from "@browserless.io/browserless";
+import { Duplex } from "stream";
 
 // Use "QuerySchema" here to define what query-parameters are allowed
 // which get parsed into the documentation site.
@@ -205,7 +205,7 @@ export interface QuerySchema extends SystemQueryParameters {
 
 export default class ChromiumWebSocketRoute extends BrowserWebsocketRoute {
   // Must have a unique name for things like disabling to work if desired
-  name = 'ChromiumWebSocketRoute';
+  name = "ChromiumWebSocketRoute";
 
   // This route requires a valid authorization token.
   auth = true;
@@ -220,7 +220,7 @@ export default class ChromiumWebSocketRoute extends BrowserWebsocketRoute {
   description = `Launch and connect to Chromium with a library like puppeteer or others that work over chrome-devtools-protocol.`;
 
   // This route is available on the '/' route
-  path = [WebsocketRoutes['/']];
+  path = [WebsocketRoutes["/"]];
 
   // This is a browser-based WebSocket route so we tag it as such
   tags = [APITags.browserWS];
@@ -280,14 +280,14 @@ The easiest module to extend is the Configuration module, as it's usage is prett
 
 ```ts
 // src/config.ts
-import { Config } from '@browserless.io/browserless';
+import { Config } from "@browserless.io/browserless";
 
 // Your config class must be the default export
 // and you can export the Class or an instance of it.
 export default class MyConfig extends Config {
   public getS3Bucket(): string {
     // Load from environment variables or default to some other named bucket.
-    return process.env.S3_BUCKET ?? 'my-fun-s3-bucket';
+    return process.env.S3_BUCKET ?? "my-fun-s3-bucket";
   }
 }
 ```
@@ -296,8 +296,8 @@ Then, later, in your route you can define some functionality and load the config
 
 ```ts
 // src/pdf.http.ts
-import { BrowserHTTPRoute, Logger } from '@browserless.io/browserless';
-import MyConfig from './config';
+import { BrowserHTTPRoute, Logger } from "@browserless.io/browserless";
+import MyConfig from "./config";
 
 // Export the BodySchema for documentation site to parse, plus
 // browserless creates runtime validation with this as well!
@@ -311,7 +311,7 @@ export interface BodySchema {
 
 export default class PDFToS3Route extends BrowserHTTPRoute {
   // Must have a unique name for things like disabling to work if desired
-  name = 'PDFToS3Route';
+  name = "PDFToS3Route";
 
   // Our route only accepts JSON content-types, and the rest 404
   accepts = [contentTypes.json];
@@ -339,7 +339,7 @@ export default class PDFToS3Route extends BrowserHTTPRoute {
 
   // This route exists on the '/pdf-to-s3' route
   // routes can have several paths, or just one.
-  path = ['/pdf-to-s3'];
+  path = ["/pdf-to-s3"];
 
   // This a browser-based API so we tag it as such for documentation handling
   tags = [APITags.browserAPI];
@@ -368,7 +368,7 @@ You can disable access to core routes by specifying the route names you want to 
 For example, if you want to disable all metrics, config, and session information your `src/disabled-routes.ts` file would look like this:
 
 ```ts
-import { BrowserlessRoutes } from '@browserless.io/browserless';
+import { BrowserlessRoutes } from "@browserless.io/browserless";
 
 export default [
   BrowserlessRoutes.ConfigGetRoute,
@@ -436,9 +436,9 @@ import {
   FirefoxPlaywright,
   ChromiumPlaywright,
   WebkitPlaywright,
-} from '@browserless.io/browserless';
-import * as stream from 'stream';
-import puppeteer from 'puppeteer-core';
+} from "@browserless.io/browserless";
+import * as stream from "stream";
+import puppeteer from "puppeteer-core";
 
 export class Hooks extends EventEmitter {
   constructor() {
@@ -468,7 +468,7 @@ export class Hooks extends EventEmitter {
   // session and a "start" time (Date.now()) of when the session started to run.
   // No return value or type required.
   after(args: {
-    status: 'successful' | 'error' | 'timedout';
+    status: "successful" | "error" | "timedout";
     start: number;
     req: Request;
   }): Promise<void> {
@@ -490,11 +490,7 @@ export class Hooks extends EventEmitter {
   // "meta" property is a parsed URL of the original incoming request.
   // No return value or type required.
   browser(args: {
-    browser:
-      | ChromiumCDP
-      | FirefoxPlaywright
-      | ChromiumPlaywright
-      | WebkitPlaywright;
+    browser: ChromiumCDP | FirefoxPlaywright | ChromiumPlaywright | WebkitPlaywright;
     meta: URL;
   }): Promise<unknown> {
     return Promise.resolve(undefined);

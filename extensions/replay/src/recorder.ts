@@ -12,37 +12,44 @@ if (window.__browserlessRecording) {
   if (isIframe) {
     window.__browserlessRecording = true;
     const recordFn = window.rrweb && window.rrweb.record;
-    if (typeof recordFn === 'function') {
+    if (typeof recordFn === "function") {
       recordFn({
         emit() {},
         recordCrossOriginIframes: true,
-        recordAfter: 'DOMContentLoaded',
+        recordAfter: "DOMContentLoaded",
         recordCanvas: true,
         collectFonts: true,
         inlineImages: false,
-        sampling: { mousemove: true, mouseInteraction: true, scroll: 150, media: 800, input: 'last', canvas: 2 },
-        dataURLOptions: { type: 'image/webp', quality: 0.6, maxBase64ImageLength: 2097152 },
+        sampling: {
+          mousemove: true,
+          mouseInteraction: true,
+          scroll: 150,
+          media: 800,
+          input: "last",
+          canvas: 2,
+        },
+        dataURLOptions: { type: "image/webp", quality: 0.6, maxBase64ImageLength: 2097152 },
       });
     }
   } else {
     // -- Main frame: full recording ----------------------------------------
-    const rec: BrowserlessRecording = { events: [], sessionId: '' };
+    const rec: BrowserlessRecording = { events: [], sessionId: "" };
     window.__browserlessRecording = rec;
 
     // Diagnostic: log pre-init state to help debug empty replays
     console.log(
-      '[browserless-ext] pre-init:',
-      'rrweb=' + typeof window.rrweb,
-      'record=' + typeof (window.rrweb && window.rrweb.record),
-      'readyState=' + document.readyState,
-      'body=' + !!document.body,
-      'docEl=' + !!document.documentElement,
+      "[browserless-ext] pre-init:",
+      "rrweb=" + typeof window.rrweb,
+      "record=" + typeof (window.rrweb && window.rrweb.record),
+      "readyState=" + document.readyState,
+      "body=" + !!document.body,
+      "docEl=" + !!document.documentElement,
     );
 
     const consolePlugin =
       window.rrwebConsolePlugin && window.rrwebConsolePlugin.getRecordConsolePlugin
         ? window.rrwebConsolePlugin.getRecordConsolePlugin({
-            level: ['error', 'warn', 'info', 'log', 'debug'],
+            level: ["error", "warn", "info", "log", "debug"],
             lengthThreshold: 500,
           })
         : null;
@@ -73,18 +80,27 @@ if (window.__browserlessRecording) {
             rec.events.push(event);
           }
         },
-        sampling: { mousemove: true, mouseInteraction: true, scroll: 150, media: 800, input: 'last', canvas: 2 },
+        sampling: {
+          mousemove: true,
+          mouseInteraction: true,
+          scroll: 150,
+          media: 800,
+          input: "last",
+          canvas: 2,
+        },
         recordCanvas: true,
         collectFonts: true,
         recordCrossOriginIframes: true,
-        recordAfter: 'DOMContentLoaded',
+        recordAfter: "DOMContentLoaded",
         inlineImages: false,
-        dataURLOptions: { type: 'image/webp', quality: 0.6, maxBase64ImageLength: 2097152 },
+        dataURLOptions: { type: "image/webp", quality: 0.6, maxBase64ImageLength: 2097152 },
         plugins: consolePlugin ? [consolePlugin] : [],
       });
-      console.log('[browserless-ext] rrweb started, stopFn=' + typeof window.__browserlessStopRecording);
+      console.log(
+        "[browserless-ext] rrweb started, stopFn=" + typeof window.__browserlessStopRecording,
+      );
     } catch (e: any) {
-      console.error('[browserless-ext] rrweb.record() FAILED:', e.message, e.stack);
+      console.error("[browserless-ext] rrweb.record() FAILED:", e.message, e.stack);
       rec._rrwebError = e.message;
     }
   }

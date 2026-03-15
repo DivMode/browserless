@@ -4,7 +4,7 @@
  * Provides span tree building, filtering, and assertion utilities
  * that work with the /debug/spans endpoint from span-collector.ts.
  */
-import type { CollectedSpan } from '../../testing/span-collector.js';
+import type { CollectedSpan } from "../../testing/span-collector.js";
 
 export type { CollectedSpan };
 
@@ -30,7 +30,7 @@ export async function fetchSpans(port: number, traceId?: string): Promise<Collec
  * Clear all collected spans on the test server.
  */
 export async function clearSpans(port: number): Promise<void> {
-  const res = await fetch(`http://localhost:${port}/debug/spans`, { method: 'DELETE' });
+  const res = await fetch(`http://localhost:${port}/debug/spans`, { method: "DELETE" });
   if (!res.ok) throw new Error(`clearSpans failed: ${res.status}`);
 }
 
@@ -74,9 +74,7 @@ export function findSpansByPrefix(spans: CollectedSpan[], prefix: string): Colle
  */
 export function findOrphans(spans: CollectedSpan[]): CollectedSpan[] {
   const spanIds = new Set(spans.map((s) => s.spanId));
-  return spans.filter(
-    (s) => s.parentSpanId !== undefined && !spanIds.has(s.parentSpanId),
-  );
+  return spans.filter((s) => s.parentSpanId !== undefined && !spanIds.has(s.parentSpanId));
 }
 
 /**

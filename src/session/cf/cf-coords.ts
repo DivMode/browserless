@@ -4,13 +4,13 @@
  * Extracted from cloudflare-solve-strategies.ts for maintainability.
  * Handles iframe-to-page coordinate transformation and box model center calculation.
  */
-import { Effect, Scope } from 'effect';
-import type { TargetId } from '../../shared/cloudflare-detection.js';
-import { CdpSessionId } from '../../shared/cloudflare-detection.js';
-import { CdpConnection } from '../../shared/cdp-rpc.js';
-import { CdpSessionGone } from './cf-errors.js';
-import { CLEAN_WS_OPEN_TIMEOUT_MS, CLEAN_WS_CMD_TIMEOUT_MS } from './cf-schedules.js';
-import { openScopedWs } from './cf-ws-resource.js';
+import { Effect, Scope } from "effect";
+import type { TargetId } from "../../shared/cloudflare-detection.js";
+import { CdpSessionId } from "../../shared/cloudflare-detection.js";
+import { CdpConnection } from "../../shared/cdp-rpc.js";
+import { CdpSessionGone } from "./cf-errors.js";
+import { CLEAN_WS_OPEN_TIMEOUT_MS, CLEAN_WS_CMD_TIMEOUT_MS } from "./cf-schedules.js";
+import { openScopedWs } from "./cf-ws-resource.js";
 
 /**
  * Get iframe page-space coordinates for translating iframe-relative
@@ -21,17 +21,19 @@ export function getIframePageCoords(
   iframeBackendNodeId: number,
   chromePort: string,
 ): Effect.Effect<{ x: number | null; y: number | null }> {
-  return Effect.fn('cf.getIframePageCoords')(function*() {
-    yield* Effect.annotateCurrentSpan({ 'cf.target_id': pageTargetId });
+  return Effect.fn("cf.getIframePageCoords")(function* () {
+    yield* Effect.annotateCurrentSpan({ "cf.target_id": pageTargetId });
     // acquireRelease guarantees WS cleanup even on fiber interruption
     const conn = yield* openCleanPageWsScoped(pageTargetId, chromePort).pipe(
-      Effect.catchTag('CdpSessionGone', () => Effect.succeed(null)),
+      Effect.catchTag("CdpSessionGone", () => Effect.succeed(null)),
     );
     if (!conn) return { x: null, y: null };
 
-    const iframeBox = yield* conn.send('DOM.getBoxModel', {
-      backendNodeId: iframeBackendNodeId,
-    }).pipe(Effect.orElseSucceed(() => null));
+    const iframeBox = yield* conn
+      .send("DOM.getBoxModel", {
+        backendNodeId: iframeBackendNodeId,
+      })
+      .pipe(Effect.orElseSucceed(() => null));
     if (iframeBox?.model?.content) {
       const q = iframeBox.model.content;
       // content quad: [x0,y0, x1,y1, x2,y2, x3,y3] — top-left origin is q[0],q[1]
@@ -59,14 +61,17 @@ export function openCleanPageWsScoped(
   chromePort: string,
 ): Effect.Effect<CdpConnection, CdpSessionGone, Scope.Scope> {
   const pageWsUrl = `ws://127.0.0.1:${chromePort}/devtools/page/${targetId}`;
-  return openScopedWs('clean_page', pageWsUrl, {
+  return openScopedWs("clean_page", pageWsUrl, {
     startId: 500_000,
     defaultTimeout: CLEAN_WS_CMD_TIMEOUT_MS,
     openTimeoutMs: CLEAN_WS_OPEN_TIMEOUT_MS,
   }).pipe(
-    Effect.mapError(() => new CdpSessionGone({
-      sessionId: CdpSessionId.makeUnsafe(''),
-      method: 'openCleanPageWs',
-    })),
+    Effect.mapError(
+      () =>
+        new CdpSessionGone({
+          sessionId: CdpSessionId.makeUnsafe(""),
+          method: "openCleanPageWs",
+        }),
+    ),
   );
 }

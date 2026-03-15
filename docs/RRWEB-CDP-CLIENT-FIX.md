@@ -4,14 +4,14 @@
 
 Multiple issues were fixed to make rrweb session recordings work with CDP clients like Pydoll:
 
-| Issue | Root Cause | Fix | File |
-|-------|-----------|-----|------|
-| **Recording not starting** | Pydoll uses existing tabs, not `newPage()` | Connect internal Puppeteer to browser, set up recording for all tabs | `src/browsers/index.ts` |
-| **Events lost on navigation** | 1-second polling + page unload destroys in-memory events | Collect events on `Page.frameStartedLoading` BEFORE navigation | `src/browsers/index.ts` |
-| **CDP session isolation** | `addScriptToEvaluateOnNewDocument` may not fire for navigations from other CDP sessions | Re-inject on `Page.frameNavigated`, `Page.loadEventFired`, `Page.domContentEventFired` | `src/browsers/index.ts` |
-| **Self-healing too slow** | 1-second check interval | Reduced to 200ms polling | `src/browsers/index.ts` |
-| **Concurrent scraper cleanup race** | `get_browser_id()` returned newest session, not calling scraper's session | Use `trackingId` param to identify own session | `pydoll-scraper/src/evasion/browser.py` |
-| **Session state desync** | Recording setup blocked session registration for 180s | Add `protocolTimeout: 10000` to internal Puppeteer connection | `src/browsers/index.ts` |
+| Issue                               | Root Cause                                                                              | Fix                                                                                    | File                                    |
+| ----------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | --------------------------------------- |
+| **Recording not starting**          | Pydoll uses existing tabs, not `newPage()`                                              | Connect internal Puppeteer to browser, set up recording for all tabs                   | `src/browsers/index.ts`                 |
+| **Events lost on navigation**       | 1-second polling + page unload destroys in-memory events                                | Collect events on `Page.frameStartedLoading` BEFORE navigation                         | `src/browsers/index.ts`                 |
+| **CDP session isolation**           | `addScriptToEvaluateOnNewDocument` may not fire for navigations from other CDP sessions | Re-inject on `Page.frameNavigated`, `Page.loadEventFired`, `Page.domContentEventFired` | `src/browsers/index.ts`                 |
+| **Self-healing too slow**           | 1-second check interval                                                                 | Reduced to 200ms polling                                                               | `src/browsers/index.ts`                 |
+| **Concurrent scraper cleanup race** | `get_browser_id()` returned newest session, not calling scraper's session               | Use `trackingId` param to identify own session                                         | `pydoll-scraper/src/evasion/browser.py` |
+| **Session state desync**            | Recording setup blocked session registration for 180s                                   | Add `protocolTimeout: 10000` to internal Puppeteer connection                          | `src/browsers/index.ts`                 |
 
 ---
 
@@ -23,10 +23,10 @@ Multiple issues were fixed to make rrweb session recordings work with CDP client
 
 **Why it happens:**
 
-| Client | How it works | Recording setup |
-|--------|--------------|-----------------|
-| Puppeteer | Calls `browser.newPage()` through Browserless wrapper | Browserless intercepts, emits `newPage` event, calls `setupPageRecording()` |
-| Pydoll (CDP) | Connects directly to Chrome via CDP, uses `get_opened_tabs()[0]` (existing tab) | `newPage` event never fires, recording never set up |
+| Client       | How it works                                                                    | Recording setup                                                             |
+| ------------ | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Puppeteer    | Calls `browser.newPage()` through Browserless wrapper                           | Browserless intercepts, emits `newPage` event, calls `setupPageRecording()` |
+| Pydoll (CDP) | Connects directly to Chrome via CDP, uses `get_opened_tabs()[0]` (existing tab) | `newPage` event never fires, recording never set up                         |
 
 ### The Fix
 
@@ -36,23 +36,23 @@ Multiple issues were fixed to make rrweb session recordings work with CDP client
 
 ```typescript
 // Connect to browser (not page) WebSocket endpoint
-const puppeteer = await import('puppeteer-core');
+const puppeteer = await import("puppeteer-core");
 const pptr = await puppeteer.default.connect({
-  browserWSEndpoint: wsEndpoint,  // Browser-level, not page-level
+  browserWSEndpoint: wsEndpoint, // Browser-level, not page-level
   defaultViewport: null,
 });
 
 // Listen for NEW tabs created after this point
-pptr.on('targetcreated', async (target) => {
-  if (target.type() !== 'page') return;
+pptr.on("targetcreated", async (target) => {
+  if (target.type() !== "page") return;
   const page = await target.page();
-  if (page) await setupRecordingForPage(page, 'new');
+  if (page) await setupRecordingForPage(page, "new");
 });
 
 // Set up recording for EXISTING tabs (including the one Pydoll will use)
 const pages = await pptr.pages();
 for (const page of pages) {
-  await setupRecordingForPage(page, 'existing');
+  await setupRecordingForPage(page, "existing");
 }
 ```
 
@@ -85,15 +85,15 @@ Timeline (OLD - 1 second polling):
 
 ```typescript
 // Page.frameStartedLoading fires when navigation begins, BEFORE old document unloads
-emitter.on('Page.frameStartedLoading', async () => {
-  await collectEvents();  // Save events before they're destroyed
+emitter.on("Page.frameStartedLoading", async () => {
+  await collectEvents(); // Save events before they're destroyed
 });
 ```
 
 **Solution 2:** Reduce polling interval from 1000ms to 200ms as backup.
 
 ```typescript
-const intervalId = setInterval(collectEvents, 200);  // Was 1000ms
+const intervalId = setInterval(collectEvents, 200); // Was 1000ms
 ```
 
 ```
@@ -133,11 +133,11 @@ Browserless Internal Session          Pydoll's Session
 
 ```typescript
 const injectAfterNavigation = async (source: string) => {
-  await new Promise((r) => setTimeout(r, 50));  // Let page initialize
+  await new Promise((r) => setTimeout(r, 50)); // Let page initialize
   try {
     if (page.isClosed()) return;
-    await cdp.send('Runtime.evaluate', {
-      expression: script,  // Full rrweb script
+    await cdp.send("Runtime.evaluate", {
+      expression: script, // Full rrweb script
       returnByValue: true,
     });
   } catch {
@@ -146,9 +146,9 @@ const injectAfterNavigation = async (source: string) => {
 };
 
 // Listen for multiple navigation events for redundancy
-emitter.on('Page.frameNavigated', () => injectAfterNavigation('frameNavigated'));
-emitter.on('Page.loadEventFired', () => injectAfterNavigation('loadEventFired'));
-emitter.on('Page.domContentEventFired', () => injectAfterNavigation('domContentEventFired'));
+emitter.on("Page.frameNavigated", () => injectAfterNavigation("frameNavigated"));
+emitter.on("Page.loadEventFired", () => injectAfterNavigation("loadEventFired"));
+emitter.on("Page.domContentEventFired", () => injectAfterNavigation("domContentEventFired"));
 ```
 
 **Why multiple events?** Different pages emit these at different times. Listening to all three ensures we inject as early as possible.
@@ -160,6 +160,7 @@ emitter.on('Page.domContentEventFired', () => injectAfterNavigation('domContentE
 ### The Problem
 
 **Symptom:** When running multiple Pydoll scrapers concurrently:
+
 - Sessions accumulate and never get cleaned up
 - Hit Browserless concurrent session limit (e.g., 20)
 - No recordings created (sessions don't end properly)
@@ -178,6 +179,7 @@ async def get_browser_id(http_endpoint: str) -> str | None:
 ```
 
 With concurrent scrapers:
+
 ```
 Scraper A starts → Session A created (startedOn: 1000)
 Scraper B starts → Session B created (startedOn: 1001)
@@ -225,6 +227,7 @@ async def get_browser_id(http_endpoint: str, tracking_id: str) -> str | None:
 ```
 
 **Browserless `trackingId` rules** (from `src/browsers/index.ts`):
+
 - Max 32 characters
 - Alphanumeric + dash + underscore only: `+([0-9a-zA-Z-_])`
 - Cannot be reserved word `"all"`
@@ -280,7 +283,7 @@ The critical issue is that `this.browsers.set(browser, session)` at line 1025 is
 
 ```typescript
 // Connect to browser with short timeout for CDP operations
-const puppeteer = await import('puppeteer-core');
+const puppeteer = await import("puppeteer-core");
 const pptr = await puppeteer.default.connect({
   browserWSEndpoint: wsEndpoint,
   defaultViewport: null,
@@ -319,6 +322,7 @@ Result:
 ```
 
 **Why 10 seconds?**
+
 - Long enough for normal CDP operations on healthy browsers
 - Short enough to fail fast when browser is overloaded
 - Recording setup is "nice to have" - session creation is critical path
@@ -405,15 +409,15 @@ Result:
 
 ### Browserless (`/Users/peter/Developer/browserless`)
 
-| File | Changes |
-|------|---------|
+| File                    | Changes                                                                                                                                                                                                                 |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/browsers/index.ts` | Added `setupRecordingForAllTabs()` with `protocolTimeout: 10000`, CDP event listeners (`Page.frameStartedLoading`, `Page.frameNavigated`, `Page.loadEventFired`, `Page.domContentEventFired`), reduced polling to 200ms |
-| `src/session-replay.ts` | Added `finalCollectors`, `cleanupFns` to `SessionRecordingState`, `registerFinalCollector()`, `registerCleanupFn()` methods |
+| `src/session-replay.ts` | Added `finalCollectors`, `cleanupFns` to `SessionRecordingState`, `registerFinalCollector()`, `registerCleanupFn()` methods                                                                                             |
 
 ### Pydoll Scraper (`/Users/peter/Developer/catchseo/packages/pydoll-scraper`)
 
-| File | Changes |
-|------|---------|
+| File                     | Changes                                                                                                                          |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
 | `src/evasion/browser.py` | `get_websocket_url()` now returns `(url, tracking_id)` tuple, `get_browser_id()` finds session by `trackingId` instead of newest |
 
 ---
@@ -421,17 +425,20 @@ Result:
 ## Testing & Verification
 
 ### Build Browserless
+
 ```bash
 cd /Users/peter/Developer/browserless
 npm run build
 ```
 
 ### Deploy
+
 ```bash
 bunx sst deploy
 ```
 
 ### Test Single Scraper
+
 ```bash
 cd /Users/peter/Developer/catchseo/packages/pydoll-scraper
 LOCAL_MOBILE_PROXY=$(op read "op://Catchseo.com/Proxies/local_mobile_proxy") \
@@ -443,6 +450,7 @@ curl -s http://192.168.4.200:3000/recordings | jq '.[0] | {id, eventCount, durat
 ```
 
 ### Test Concurrent Scrapers (Session Cleanup)
+
 ```bash
 # Run 5 scrapers in parallel
 for i in {1..5}; do
@@ -461,6 +469,7 @@ curl -s http://192.168.4.200:3000/recordings | jq 'length'
 ```
 
 ### Debug Recording Issues
+
 ```bash
 # Check if rrweb is active in page
 curl -s http://192.168.4.200:3000/sessions | jq '.[0]'
@@ -475,15 +484,15 @@ curl -s http://192.168.4.200:3000/sessions | jq '.[0]'
 
 ## Diagnostic Guide
 
-| Symptom | Likely Cause | Solution |
-|---------|--------------|----------|
-| `eventCount: 0` | Recording never started | Check `setupRecordingForAllTabs()` is being called, verify `?replay=true` in WebSocket URL |
-| Events missing after navigation | `Page.frameStartedLoading` not firing | Check Page.enable was called, verify CDP connection is alive |
-| Recording works first page, not after navigate | CDP session isolation | Check `Page.frameNavigated` listener is attached and re-injecting |
-| Sessions accumulating | `trackingId` not being used | Verify `get_browser_id()` is filtering by `trackingId` |
-| Recording file empty | `stopRecording()` called before events collected | Check `finalCollectors` are registered and running |
-| `running: N` but `sessions: []` | Recording setup blocking session registration | Check `protocolTimeout` is set in `setupRecordingForAllTabs()` puppeteer.connect() |
-| WebSocket handshake timeout | CDP operations timing out | Verify browser isn't overloaded, check proxy latency, confirm `protocolTimeout: 10000` is set |
+| Symptom                                        | Likely Cause                                     | Solution                                                                                      |
+| ---------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| `eventCount: 0`                                | Recording never started                          | Check `setupRecordingForAllTabs()` is being called, verify `?replay=true` in WebSocket URL    |
+| Events missing after navigation                | `Page.frameStartedLoading` not firing            | Check Page.enable was called, verify CDP connection is alive                                  |
+| Recording works first page, not after navigate | CDP session isolation                            | Check `Page.frameNavigated` listener is attached and re-injecting                             |
+| Sessions accumulating                          | `trackingId` not being used                      | Verify `get_browser_id()` is filtering by `trackingId`                                        |
+| Recording file empty                           | `stopRecording()` called before events collected | Check `finalCollectors` are registered and running                                            |
+| `running: N` but `sessions: []`                | Recording setup blocking session registration    | Check `protocolTimeout` is set in `setupRecordingForAllTabs()` puppeteer.connect()            |
+| WebSocket handshake timeout                    | CDP operations timing out                        | Verify browser isn't overloaded, check proxy latency, confirm `protocolTimeout: 10000` is set |
 
 ---
 

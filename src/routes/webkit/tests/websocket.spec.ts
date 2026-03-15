@@ -1,13 +1,8 @@
-import {
-  Browserless,
-  Config,
-  Metrics,
-  sleep,
-} from '@browserless.io/browserless';
-import { expect } from 'chai';
-import { webkit } from 'playwright-core';
+import { Browserless, Config, Metrics, sleep } from "@browserless.io/browserless";
+import { expect } from "chai";
+import { webkit } from "playwright-core";
 
-describe('Webkit Websocket API', function () {
+describe("Webkit Websocket API", function () {
   let browserless: Browserless;
 
   const start = ({
@@ -22,24 +17,22 @@ describe('Webkit Websocket API', function () {
     await browserless.stop();
   });
 
-  it('runs webkit websocket requests', async () => {
+  it("runs webkit websocket requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
-    const browser = await webkit.connect(
-      `ws://localhost:3000/playwright/webkit?token=browserless`,
-    );
+    const browser = await webkit.connect(`ws://localhost:3000/playwright/webkit?token=browserless`);
     const context = await browser.newContext();
     await context.newPage();
 
     await browser.close();
   });
 
-  it('runs multiple versions of playwright', async () => {
+  it("runs multiple versions of playwright", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -62,9 +55,9 @@ describe('Webkit Websocket API', function () {
     expect(results.queued).to.equal(0);
   });
 
-  it('rejects playwright requests', async () => {
+  it("rejects playwright requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -76,17 +69,15 @@ describe('Webkit Websocket API', function () {
     expect(didError).to.be.true;
   });
 
-  it('runs with job-based timeouts', async () => {
+  it("runs with job-based timeouts", async () => {
     const config = new Config();
     const metrics = new Metrics();
     config.setTimeout(-1); // No timeout
-    config.setToken('browserless');
+    config.setToken("browserless");
     await start({ config, metrics });
 
     const browser = await webkit
-      .connect(
-        `ws://localhost:3000/playwright/webkit?timeout=500&token=browserless`,
-      )
+      .connect(`ws://localhost:3000/playwright/webkit?timeout=500&token=browserless`)
       .catch(() => null);
 
     await sleep(750);
@@ -95,11 +86,11 @@ describe('Webkit Websocket API', function () {
     expect(metrics.get().successful).to.equal(0);
   });
 
-  it('queues requests', async () => {
+  it("queues requests", async () => {
     const config = new Config();
     const metrics = new Metrics();
     config.setConcurrent(1);
-    config.setToken('browserless');
+    config.setToken("browserless");
     await start({ config, metrics });
 
     const job = async () => {
@@ -121,11 +112,11 @@ describe('Webkit Websocket API', function () {
     expect(results.queued).to.equal(1);
   });
 
-  it('fails requests', async () => {
+  it("fails requests", async () => {
     const config = new Config();
     config.setConcurrent(0);
     config.setQueued(0);
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -140,29 +131,25 @@ describe('Webkit Websocket API', function () {
       });
   });
 
-  it('fails requests without tokens', async () => {
+  it("fails requests without tokens", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
-    return webkit
-      .connect(`ws://localhost:3000/playwright/webkit`)
-      .catch((error: Error) => {
-        const results = metrics.get();
-        expect(results.successful).to.equal(0);
-        expect(results.rejected).to.equal(0);
-        expect(results.queued).to.equal(0);
-        expect(error.message).to.contain(`401`);
-      });
+    return webkit.connect(`ws://localhost:3000/playwright/webkit`).catch((error: Error) => {
+      const results = metrics.get();
+      expect(results.successful).to.equal(0);
+      expect(results.rejected).to.equal(0);
+      expect(results.queued).to.equal(0);
+      expect(error.message).to.contain(`401`);
+    });
   });
 
-  it('allows requests without token when auth token is not set', async () => {
+  it("allows requests without token when auth token is not set", async () => {
     await start();
 
-    const browser = await webkit.connect(
-      `ws://localhost:3000/playwright/webkit`,
-    );
+    const browser = await webkit.connect(`ws://localhost:3000/playwright/webkit`);
 
     await browser.close();
   });

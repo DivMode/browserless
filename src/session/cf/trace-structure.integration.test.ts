@@ -11,13 +11,10 @@
  *
  * Run: npx vitest run (included in the integration project)
  */
-import { describe, expect, it } from '@effect/vitest';
-import { Effect } from 'effect';
-import puppeteer, { type Browser } from 'puppeteer-core';
-import {
-  PROXY,
-  buildWsUrl,
-} from './integration-helpers';
+import { describe, expect, it } from "@effect/vitest";
+import { Effect } from "effect";
+import puppeteer, { type Browser } from "puppeteer-core";
+import { PROXY, buildWsUrl } from "./integration-helpers";
 import {
   fetchSpans,
   clearSpans,
@@ -26,12 +23,12 @@ import {
   findOrphans,
   isDescendantOf,
   type CollectedSpan,
-} from './trace-test-helpers';
+} from "./trace-test-helpers";
 
 // ── Config ──────────────────────────────────────────────────────────
 
 const BROWSERLESS_WS = buildWsUrl();
-const NOPECHA_URL = 'https://nopecha.com/demo/cloudflare';
+const NOPECHA_URL = "https://nopecha.com/demo/cloudflare";
 const PORT = 3000;
 
 // ── Shared session state ────────────────────────────────────────────
@@ -41,11 +38,11 @@ let sessionTraceId: string | undefined;
 
 // ── Session lifecycle ──────────────────────────────────────────────
 
-describe('Trace structure', () => {
+describe("Trace structure", () => {
   let browser: Browser;
 
   // Run a single session: connect → navigate → wait for CF → close → collect spans
-  it.effect('setup: run session and collect spans', () =>
+  it.effect("setup: run session and collect spans", () =>
     it.flakyTest(
       Effect.promise(async () => {
         // Clear any leftover spans from previous test runs
@@ -66,21 +63,25 @@ describe('Trace structure', () => {
           });
         }
 
-        await page.goto(NOPECHA_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+        await page.goto(NOPECHA_URL, { waitUntil: "domcontentloaded", timeout: 30_000 });
 
         // Wait for CF challenge to complete (page navigates or token appears)
-        await page.waitForFunction(
-          () => {
-            const turnstile = (window as any).turnstile;
-            if (turnstile?.getResponse?.()) return true;
-            // Check if CF interstitial cleared (page content loaded)
-            return document.querySelector('#challenge-running') === null
-              && document.body?.innerText?.length > 100;
-          },
-          { timeout: 30_000 },
-        ).catch(() => {
-          // Not critical — we still get trace data even if CF doesn't fully solve
-        });
+        await page
+          .waitForFunction(
+            () => {
+              const turnstile = (window as any).turnstile;
+              if (turnstile?.getResponse?.()) return true;
+              // Check if CF interstitial cleared (page content loaded)
+              return (
+                document.querySelector("#challenge-running") === null &&
+                document.body?.innerText?.length > 100
+              );
+            },
+            { timeout: 30_000 },
+          )
+          .catch(() => {
+            // Not critical — we still get trace data even if CF doesn't fully solve
+          });
 
         // Small delay to let final spans flush
         await new Promise((r) => setTimeout(r, 2000));
@@ -99,9 +100,9 @@ describe('Trace structure', () => {
         // also create sessions on the same server. Pick the ENDED session span
         // (endTimeNano !== '0') since our browser.close() + 5s wait ensures
         // our session is fully destroyed, while other tests may still be running.
-        const sessionSpans = findSpans(spans, 'session');
+        const sessionSpans = findSpans(spans, "session");
         expect(sessionSpans.length).toBeGreaterThanOrEqual(1);
-        const endedSessions = sessionSpans.filter((s) => s.endTimeNano !== '0');
+        const endedSessions = sessionSpans.filter((s) => s.endTimeNano !== "0");
         const ourSession = endedSessions.length > 0 ? endedSessions[0] : sessionSpans[0];
         sessionTraceId = ourSession.traceId;
 
@@ -115,7 +116,7 @@ describe('Trace structure', () => {
 
   // ── Trace assertions ─────────────────────────────────────────────
 
-  it.effect('1. all spans share one traceId', () =>
+  it.effect("1. all spans share one traceId", () =>
     Effect.sync(() => {
       expect(spans.length).toBeGreaterThan(0);
       const traceIds = new Set(spans.map((s) => s.traceId));
@@ -124,18 +125,18 @@ describe('Trace structure', () => {
     }),
   );
 
-  it.effect('2. session root span exists with no parent', () =>
+  it.effect("2. session root span exists with no parent", () =>
     Effect.sync(() => {
-      const roots = findSpans(spans, 'session');
+      const roots = findSpans(spans, "session");
       expect(roots.length).toBe(1);
       expect(roots[0].parentSpanId).toBeUndefined();
     }),
   );
 
-  it.effect('3. detection spans are children of session', () =>
+  it.effect("3. detection spans are children of session", () =>
     Effect.sync(() => {
-      const sessionSpan = findSpans(spans, 'session')[0];
-      const detections = findSpans(spans, 'cf.detectTurnstileWidget');
+      const sessionSpan = findSpans(spans, "session")[0];
+      const detections = findSpans(spans, "cf.detectTurnstileWidget");
       // Detection might not fire if site doesn't have CF — skip if empty
       if (detections.length > 0) {
         for (const d of detections) {
@@ -145,10 +146,10 @@ describe('Trace structure', () => {
     }),
   );
 
-  it.effect('4. tab replay spans are children of session', () =>
+  it.effect("4. tab replay spans are children of session", () =>
     Effect.sync(() => {
-      const sessionSpan = findSpans(spans, 'session')[0];
-      const tabs = findSpans(spans, 'replay.tab');
+      const sessionSpan = findSpans(spans, "session")[0];
+      const tabs = findSpans(spans, "replay.tab");
       if (tabs.length > 0) {
         for (const t of tabs) {
           expect(isDescendantOf(spans, t.spanId, sessionSpan.spanId)).toBe(true);
@@ -157,10 +158,10 @@ describe('Trace structure', () => {
     }),
   );
 
-  it.effect('5. solve spans are descendants of session', () =>
+  it.effect("5. solve spans are descendants of session", () =>
     Effect.sync(() => {
-      const sessionSpan = findSpans(spans, 'session')[0];
-      const solves = findSpans(spans, 'cf.solveDetection');
+      const sessionSpan = findSpans(spans, "session")[0];
+      const solves = findSpans(spans, "cf.solveDetection");
       if (solves.length > 0) {
         for (const s of solves) {
           expect(isDescendantOf(spans, s.spanId, sessionSpan.spanId)).toBe(true);
@@ -169,36 +170,36 @@ describe('Trace structure', () => {
     }),
   );
 
-  it.effect('6. no orphan spans', () =>
+  it.effect("6. no orphan spans", () =>
     Effect.sync(() => {
       const orphans = findOrphans(spans);
       if (orphans.length > 0) {
-        const orphanNames = orphans.map((o) => `${o.name} (${o.spanId.slice(0, 8)})`).join(', ');
+        const orphanNames = orphans.map((o) => `${o.name} (${o.spanId.slice(0, 8)})`).join(", ");
         expect.fail(`Found ${orphans.length} orphan span(s): ${orphanNames}`);
       }
     }),
   );
 
-  it.effect('7. session root has session.id attribute', () =>
+  it.effect("7. session root has session.id attribute", () =>
     Effect.sync(() => {
-      const sessionSpan = findSpans(spans, 'session')[0];
-      expect(sessionSpan.attributes).toHaveProperty('session.id');
-      expect(sessionSpan.attributes['session.id']).toBeTruthy();
+      const sessionSpan = findSpans(spans, "session")[0];
+      expect(sessionSpan.attributes).toHaveProperty("session.id");
+      expect(sessionSpan.attributes["session.id"]).toBeTruthy();
     }),
   );
 
-  it.effect('8. no unnamed spans', () =>
+  it.effect("8. no unnamed spans", () =>
     Effect.sync(() => {
-      const unnamed = spans.filter((s) => !s.name || s.name.trim() === '');
+      const unnamed = spans.filter((s) => !s.name || s.name.trim() === "");
       if (unnamed.length > 0) {
         expect.fail(`Found ${unnamed.length} unnamed span(s)`);
       }
     }),
   );
 
-  it.effect('9. CDP handler spans share traceId', () =>
+  it.effect("9. CDP handler spans share traceId", () =>
     Effect.sync(() => {
-      const cdpSpans = findSpansByPrefix(spans, 'cdp.');
+      const cdpSpans = findSpansByPrefix(spans, "cdp.");
       if (cdpSpans.length > 0) {
         for (const s of cdpSpans) {
           expect(s.traceId).toBe(sessionTraceId);
@@ -207,9 +208,9 @@ describe('Trace structure', () => {
     }),
   );
 
-  it.effect('10. openPageWs spans share traceId (not orphaned)', () =>
+  it.effect("10. openPageWs spans share traceId (not orphaned)", () =>
     Effect.sync(() => {
-      const wsSpans = findSpans(spans, 'cdp.openPageWs');
+      const wsSpans = findSpans(spans, "cdp.openPageWs");
       if (wsSpans.length > 0) {
         for (const s of wsSpans) {
           expect(s.traceId).toBe(sessionTraceId);

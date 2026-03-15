@@ -9,9 +9,9 @@ import {
   dedent,
   jsonResponse,
   writeResponse,
-} from '@browserless.io/browserless';
-import { ServerResponse } from 'http';
-import { Effect } from 'effect';
+} from "@browserless.io/browserless";
+import { ServerResponse } from "http";
+import { Effect } from "effect";
 
 export type ResponseSchema = {
   pressure: {
@@ -58,7 +58,7 @@ export type ResponseSchema = {
     /**
      * A simple single-word reason as to why an instance may or may not be available.
      */
-    reason: 'full' | 'cpu' | 'memory' | '';
+    reason: "full" | "cpu" | "memory" | "";
 
     /**
      * The number of recent connections that were rejected due to the queue and concurrency
@@ -92,7 +92,7 @@ export default class PressureGetRoute extends HTTPRoute {
   async handler(req: Request, res: ServerResponse): Promise<void> {
     const route = this;
     return Effect.runPromise(
-      Effect.fn('route.pressure.get')(function* () {
+      Effect.fn("route.pressure.get")(function* () {
         const monitoring = route.monitoring();
         const config = route.config();
         const limiter = route.limiter();
@@ -114,20 +114,20 @@ export default class PressureGetRoute extends HTTPRoute {
         const maxQueued = config.getQueued();
 
         const reason = !hasCapacity
-          ? 'full'
+          ? "full"
           : cpuOverloaded
-            ? 'cpu'
+            ? "cpu"
             : memoryOverloaded
-              ? 'memory'
-              : '';
+              ? "memory"
+              : "";
 
         const message = !hasCapacity
-          ? 'Concurrency and queue are full'
+          ? "Concurrency and queue are full"
           : cpuOverloaded
-            ? 'CPU is over the configured maximum for cpu percent'
+            ? "CPU is over the configured maximum for cpu percent"
             : memoryOverloaded
-              ? 'Memory is over the configured maximum for memory percent'
-              : '';
+              ? "Memory is over the configured maximum for memory percent"
+              : "";
 
         const response: ResponseSchema = {
           pressure: {

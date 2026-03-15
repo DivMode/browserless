@@ -8,9 +8,9 @@ import {
   Request,
   SystemQueryParameters,
   WebsocketRoutes,
-} from '@browserless.io/browserless';
-import { Duplex } from 'stream';
-import { Effect } from 'effect';
+} from "@browserless.io/browserless";
+import { Duplex } from "stream";
+import { Effect } from "effect";
 
 export interface QuerySchema extends SystemQueryParameters {
   launch?: BrowserServerOptions | string;
@@ -22,10 +22,7 @@ export default class ChromiumPlaywrightWebSocketRoute extends BrowserWebsocketRo
   browser = ChromiumPlaywright;
   concurrency = true;
   description = `Connect to Chromium with any playwright style library.`;
-  path = [
-    WebsocketRoutes.chromiumPlaywright,
-    WebsocketRoutes.playwrightChromium,
-  ];
+  path = [WebsocketRoutes.chromiumPlaywright, WebsocketRoutes.playwrightChromium];
   tags = [APITags.browserWS];
   async handler(
     req: Request,
@@ -34,20 +31,14 @@ export default class ChromiumPlaywrightWebSocketRoute extends BrowserWebsocketRo
     browser: ChromiumPlaywright,
   ): Promise<void> {
     return Effect.runPromise(
-      Effect.fn('route.ws.chromium-playwright')(function* () {
-        const isPlaywright = req.headers['user-agent']
-          ?.toLowerCase()
-          .includes('playwright');
+      Effect.fn("route.ws.chromium-playwright")(function* () {
+        const isPlaywright = req.headers["user-agent"]?.toLowerCase().includes("playwright");
 
         if (!isPlaywright) {
-          throw new BadRequest(
-            `Only playwright is allowed to work with this route`,
-          );
+          throw new BadRequest(`Only playwright is allowed to work with this route`);
         }
 
-        return yield* Effect.promise(() =>
-          browser.proxyWebSocket(req, socket, head),
-        );
+        return yield* Effect.promise(() => browser.proxyWebSocket(req, socket, head));
       })(),
     );
   }

@@ -13,12 +13,12 @@ import {
   contentTypes,
   dedent,
   writeResponse,
-} from '@browserless.io/browserless';
-import { Effect } from 'effect';
-import { ServerResponse } from 'http';
-import Stream from 'stream';
-import { fileTypeFromBuffer } from 'file-type';
-import functionHandler from './utils/function/handler.js';
+} from "@browserless.io/browserless";
+import { Effect } from "effect";
+import { ServerResponse } from "http";
+import Stream from "stream";
+import { fileTypeFromBuffer } from "file-type";
+import functionHandler from "./utils/function/handler.js";
 
 interface JSONSchema {
   code: string;
@@ -55,27 +55,21 @@ export default class ChromiumFunctionPostRoute extends BrowserHTTPRoute {
   method = Methods.post;
   path = [HTTPRoutes.chromiumFunction, HTTPRoutes.function];
   tags = [APITags.browserAPI];
-  async handler(
-    req: Request,
-    res: ServerResponse,
-    browser: BrowserInstance,
-  ): Promise<void> {
+  async handler(req: Request, res: ServerResponse, browser: BrowserInstance): Promise<void> {
     const config = this.config();
     return Effect.runPromise(
-      Effect.fn('route.function.post')(function* () {
-        const timeout = req.parsed.searchParams.get('timeout');
+      Effect.fn("route.function.post")(function* () {
+        const timeout = req.parsed.searchParams.get("timeout");
         const handler = functionHandler(config, {
           protocolTimeout: timeout ? +timeout : undefined,
         });
-        const { contentType, payload, page } = yield* Effect.promise(() =>
-          handler(req, browser),
-        );
+        const { contentType, payload, page } = yield* Effect.promise(() => handler(req, browser));
 
         yield* Effect.logInfo(`Got function response of "${contentType}"`);
         page.close();
         page.removeAllListeners();
 
-        if (contentType === 'uint8array') {
+        if (contentType === "uint8array") {
           const response = new Uint8Array(payload as Buffer);
           const type = (
             (yield* Effect.promise(() => fileTypeFromBuffer(response))) || {
@@ -89,10 +83,8 @@ export default class ChromiumFunctionPostRoute extends BrowserHTTPRoute {
             yield* Effect.logInfo(`Sending file-type response of "${type}"`);
             const readStream = new Stream.PassThrough();
             readStream.end(response);
-            res.setHeader('Content-Type', type);
-            yield* Effect.promise(
-              () => new Promise((r) => readStream.pipe(res).once('close', r)),
-            );
+            res.setHeader("Content-Type", type);
+            yield* Effect.promise(() => new Promise((r) => readStream.pipe(res).once("close", r)));
           }
         } else {
           writeResponse(res, 200, payload as string, contentType as contentTypes);

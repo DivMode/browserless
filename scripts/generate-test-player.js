@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* eslint-disable no-undef */
 
-'use strict';
+"use strict";
 
 /**
  * Generate a standalone test page for the session replay player.
@@ -12,15 +12,15 @@
  * Navigate to: http://localhost:3000/test-player.html
  */
 
-import fs from 'fs/promises';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import fs from "fs/promises";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const rootDir = join(__dirname, '..');
+const rootDir = join(__dirname, "..");
 
-const generatedFile = join(rootDir, 'src/generated/rrweb-player.ts');
-const outputFile = join(rootDir, 'static/test-player.html');
+const generatedFile = join(rootDir, "src/generated/rrweb-player.ts");
+const outputFile = join(rootDir, "static/test-player.html");
 
 // Generate mock rrweb recording events
 function generateMockRecordingData() {
@@ -34,32 +34,30 @@ function generateMockRecordingData() {
     childNodes: [
       {
         type: 1, // DocumentType
-        name: 'html',
-        publicId: '',
-        systemId: '',
+        name: "html",
+        publicId: "",
+        systemId: "",
       },
       {
         type: 2, // Element
-        tagName: 'html',
-        attributes: { lang: 'en' },
+        tagName: "html",
+        attributes: { lang: "en" },
         childNodes: [
           {
             type: 2, // Element
-            tagName: 'head',
+            tagName: "head",
             attributes: {},
             childNodes: [
               {
                 type: 2,
-                tagName: 'title',
+                tagName: "title",
                 attributes: {},
-                childNodes: [
-                  { type: 3, textContent: 'Test Recording Page' },
-                ],
+                childNodes: [{ type: 3, textContent: "Test Recording Page" }],
                 id: 3,
               },
               {
                 type: 2,
-                tagName: 'style',
+                tagName: "style",
                 attributes: {},
                 childNodes: [
                   {
@@ -118,63 +116,62 @@ function generateMockRecordingData() {
           },
           {
             type: 2, // Element
-            tagName: 'body',
+            tagName: "body",
             attributes: {},
             childNodes: [
               {
                 type: 2,
-                tagName: 'div',
-                attributes: { class: 'container' },
+                tagName: "div",
+                attributes: { class: "container" },
                 childNodes: [
                   {
                     type: 2,
-                    tagName: 'h1',
+                    tagName: "h1",
                     attributes: {},
-                    childNodes: [{ type: 3, textContent: '🎬 Session Replay Test' }],
+                    childNodes: [{ type: 3, textContent: "🎬 Session Replay Test" }],
                     id: 7,
                   },
                   {
                     type: 2,
-                    tagName: 'p',
+                    tagName: "p",
                     attributes: {},
                     childNodes: [
                       {
                         type: 3,
-                        textContent:
-                          'This is a mock recording to test the player CSS fixes.',
+                        textContent: "This is a mock recording to test the player CSS fixes.",
                       },
                     ],
                     id: 8,
                   },
                   {
                     type: 2,
-                    tagName: 'a',
-                    attributes: { class: 'btn', href: '#' },
-                    childNodes: [{ type: 3, textContent: 'Get Started' }],
+                    tagName: "a",
+                    attributes: { class: "btn", href: "#" },
+                    childNodes: [{ type: 3, textContent: "Get Started" }],
                     id: 9,
                   },
                   {
                     type: 2,
-                    tagName: 'div',
-                    attributes: { class: 'stats' },
+                    tagName: "div",
+                    attributes: { class: "stats" },
                     childNodes: [
                       {
                         type: 2,
-                        tagName: 'div',
-                        attributes: { class: 'stat' },
+                        tagName: "div",
+                        attributes: { class: "stat" },
                         childNodes: [
                           {
                             type: 2,
-                            tagName: 'div',
-                            attributes: { class: 'stat-value' },
-                            childNodes: [{ type: 3, textContent: '1.2K' }],
+                            tagName: "div",
+                            attributes: { class: "stat-value" },
+                            childNodes: [{ type: 3, textContent: "1.2K" }],
                             id: 11,
                           },
                           {
                             type: 2,
-                            tagName: 'div',
-                            attributes: { class: 'stat-label' },
-                            childNodes: [{ type: 3, textContent: 'Sessions' }],
+                            tagName: "div",
+                            attributes: { class: "stat-label" },
+                            childNodes: [{ type: 3, textContent: "Sessions" }],
                             id: 12,
                           },
                         ],
@@ -182,21 +179,21 @@ function generateMockRecordingData() {
                       },
                       {
                         type: 2,
-                        tagName: 'div',
-                        attributes: { class: 'stat' },
+                        tagName: "div",
+                        attributes: { class: "stat" },
                         childNodes: [
                           {
                             type: 2,
-                            tagName: 'div',
-                            attributes: { class: 'stat-value' },
-                            childNodes: [{ type: 3, textContent: '45s' }],
+                            tagName: "div",
+                            attributes: { class: "stat-value" },
+                            childNodes: [{ type: 3, textContent: "45s" }],
                             id: 14,
                           },
                           {
                             type: 2,
-                            tagName: 'div',
-                            attributes: { class: 'stat-label' },
-                            childNodes: [{ type: 3, textContent: 'Avg Duration' }],
+                            tagName: "div",
+                            attributes: { class: "stat-label" },
+                            childNodes: [{ type: 3, textContent: "Avg Duration" }],
                             id: 15,
                           },
                         ],
@@ -204,21 +201,21 @@ function generateMockRecordingData() {
                       },
                       {
                         type: 2,
-                        tagName: 'div',
-                        attributes: { class: 'stat' },
+                        tagName: "div",
+                        attributes: { class: "stat" },
                         childNodes: [
                           {
                             type: 2,
-                            tagName: 'div',
-                            attributes: { class: 'stat-value' },
-                            childNodes: [{ type: 3, textContent: '98%' }],
+                            tagName: "div",
+                            attributes: { class: "stat-value" },
+                            childNodes: [{ type: 3, textContent: "98%" }],
                             id: 17,
                           },
                           {
                             type: 2,
-                            tagName: 'div',
-                            attributes: { class: 'stat-label' },
-                            childNodes: [{ type: 3, textContent: 'Success Rate' }],
+                            tagName: "div",
+                            attributes: { class: "stat-label" },
+                            childNodes: [{ type: 3, textContent: "Success Rate" }],
                             id: 18,
                           },
                         ],
@@ -245,7 +242,7 @@ function generateMockRecordingData() {
       type: 4,
       timestamp: startTime,
       data: {
-        href: 'http://localhost:3000/test-page',
+        href: "http://localhost:3000/test-page",
         width: viewportWidth,
         height: viewportHeight,
       },
@@ -313,13 +310,13 @@ function generateMockRecordingData() {
   events.sort((a, b) => a.timestamp - b.timestamp);
 
   const metadata = {
-    id: 'test-recording-' + Date.now().toString(36),
-    browserType: 'chromium',
+    id: "test-recording-" + Date.now().toString(36),
+    browserType: "chromium",
     duration: duration,
     startedAt: startTime,
     endedAt: startTime + duration,
     eventCount: events.length,
-    routePath: '/test-page',
+    routePath: "/test-page",
   };
 
   return { events, metadata };
@@ -330,7 +327,7 @@ function generateMockRecordingData() {
 async function extractPlayerAssets() {
   // Dynamic import of the generated TS file (bun handles TS natively)
   const { RRWEB_PLAYER_CSS, RRWEB_PLAYER_JS } = await import(generatedFile);
-  return { css: RRWEB_PLAYER_CSS || '', js: RRWEB_PLAYER_JS || '' };
+  return { css: RRWEB_PLAYER_CSS || "", js: RRWEB_PLAYER_JS || "" };
 }
 
 // Generate the test HTML
@@ -440,14 +437,14 @@ ${js}
 }
 
 (async () => {
-  console.log('Generating test player page...');
+  console.log("Generating test player page...");
 
   try {
     // Check if generated file exists
     try {
       await fs.access(generatedFile);
     } catch {
-      console.error('Error: src/generated/rrweb-player.ts not found.');
+      console.error("Error: src/generated/rrweb-player.ts not found.");
       console.error('Run "npm run bundle:rrweb" first to build the player.');
       process.exit(1);
     }
@@ -456,7 +453,7 @@ ${js}
     const { css, js } = await extractPlayerAssets();
 
     if (!js) {
-      console.error('Error: Could not extract player JS from generated file.');
+      console.error("Error: Could not extract player JS from generated file.");
       process.exit(1);
     }
 
@@ -470,19 +467,19 @@ ${js}
     // Write to static directory
     await fs.writeFile(outputFile, html);
     console.log(`Generated ${outputFile}`);
-    console.log('');
-    console.log('To test:');
-    console.log('  1. npm run dev (or npm start)');
-    console.log('  2. Navigate to: http://localhost:3000/test-player.html');
-    console.log('');
-    console.log('Verification checklist:');
-    console.log('  [ ] Video content is visible (see gradient page with stats)');
-    console.log('  [ ] Video is properly centered in the player frame');
-    console.log('  [ ] Click fullscreen - video fills entire screen');
-    console.log('  [ ] Exit fullscreen - returns to normal view');
-    console.log('  [ ] Playback controls work (play/pause, timeline, speed)');
+    console.log("");
+    console.log("To test:");
+    console.log("  1. npm run dev (or npm start)");
+    console.log("  2. Navigate to: http://localhost:3000/test-player.html");
+    console.log("");
+    console.log("Verification checklist:");
+    console.log("  [ ] Video content is visible (see gradient page with stats)");
+    console.log("  [ ] Video is properly centered in the player frame");
+    console.log("  [ ] Click fullscreen - video fills entire screen");
+    console.log("  [ ] Exit fullscreen - returns to normal view");
+    console.log("  [ ] Playback controls work (play/pause, timeline, speed)");
   } catch (error) {
-    console.error('Error generating test page:', error);
+    console.error("Error generating test page:", error);
     process.exit(1);
   }
 })();

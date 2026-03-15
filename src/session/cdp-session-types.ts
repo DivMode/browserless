@@ -4,9 +4,9 @@
  * These types are used by cdp-session.ts and session-coordinator.ts.
  * They live in a separate file to avoid circular imports.
  */
-import type { TabReplayCompleteParams } from '@browserless.io/browserless';
-import type { VideoHooks } from './video-services.js';
-import type { CloudflareHooks } from './cloudflare-hooks.js';
+import type { TabReplayCompleteParams } from "@browserless.io/browserless";
+import type { VideoHooks } from "./video-services.js";
+import type { CloudflareHooks } from "./cloudflare-hooks.js";
 
 /** Per-tab recording result returned by finalizeTab. */
 export interface StopTabRecordingResult {

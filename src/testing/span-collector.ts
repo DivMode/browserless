@@ -15,7 +15,7 @@
  * Usage: Set TEST_TRACE_COLLECT=1 env var → otel-layer.ts provides this tracer
  * instead of Layer.empty → /debug/spans endpoint exposes the buffer.
  */
-import { Layer, ServiceMap, Tracer } from 'effect';
+import { Layer, ServiceMap, Tracer } from "effect";
 
 export interface CollectedSpan {
   traceId: string;
@@ -38,8 +38,8 @@ export function clearCollectedSpans(): void {
 }
 
 const randomHex = (len: number): string => {
-  const chars = 'abcdef0123456789';
-  let result = '';
+  const chars = "abcdef0123456789";
+  let result = "";
   for (let i = 0; i < len; i++) {
     result += chars.charAt(Math.floor(Math.random() * chars.length));
   }
@@ -56,9 +56,7 @@ export function collectingTracerLayer(): Layer.Layer<never> {
     span(options) {
       const spanId = randomHex(16);
       const traceId = options.parent?.traceId ?? randomHex(32);
-      const parentSpanId = options.parent
-        ? options.parent.spanId
-        : undefined;
+      const parentSpanId = options.parent ? options.parent.spanId : undefined;
       const attributes = new Map<string, unknown>();
       const events: Array<[string, bigint, Record<string, unknown>]> = [];
 
@@ -73,12 +71,12 @@ export function collectingTracerLayer(): Layer.Layer<never> {
         name: options.name,
         attributes: {},
         startTimeNano: options.startTime.toString(),
-        endTimeNano: '0',
+        endTimeNano: "0",
       };
       buffer.push(record);
 
       return {
-        _tag: 'Span' as const,
+        _tag: "Span" as const,
         spanId,
         traceId,
         sampled: options.sampled,
@@ -89,14 +87,14 @@ export function collectingTracerLayer(): Layer.Layer<never> {
         startTime: options.startTime,
         kind: options.kind,
         status: {
-          _tag: 'Started' as const,
+          _tag: "Started" as const,
           startTime: options.startTime,
         } as any,
         attributes,
         events,
         end(endTime: bigint, _exit: unknown) {
           (this as any).status = {
-            _tag: 'Ended',
+            _tag: "Ended",
             endTime,
             startTime: options.startTime,
           };

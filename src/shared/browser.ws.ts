@@ -8,8 +8,8 @@ import {
   SystemQueryParameters,
   WebsocketRoutes,
   dedent,
-} from '@browserless.io/browserless';
-import { Duplex } from 'stream';
+} from "@browserless.io/browserless";
+import { Duplex } from "stream";
 
 export interface QuerySchema extends SystemQueryParameters {
   launch?: CDPLaunchOptions | string;
@@ -27,12 +27,7 @@ export default class ChromiumBrowserWebSocketRoute extends BrowserWebsocketRoute
   );
   path = WebsocketRoutes.browser;
   tags = [APITags.browserWS];
-  async handler(
-    req: Request,
-    socket: Duplex,
-    head: Buffer,
-    browser: ChromiumCDP,
-  ): Promise<void> {
+  async handler(req: Request, socket: Duplex, head: Buffer, browser: ChromiumCDP): Promise<void> {
     return browser.proxyWebSocket(req, socket, head);
   }
 }

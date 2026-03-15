@@ -8,13 +8,23 @@
  * The bridge pushes solved/error/detected events multiplexed through __rrwebPush,
  * eliminating all Runtime.evaluate polling.
  */
-import type { Effect } from 'effect';
-import { ServiceMap } from 'effect';
-import type { CdpSessionId, TargetId, CloudflareResult, CloudflareConfig } from '../../shared/cloudflare-detection.js';
-import type { CdpSessionGone, CdpTimeout } from './cf-errors.js';
-import type { ActiveDetection, ReadonlyActiveDetection, ReadonlyEmbeddedDetection, ReadonlyInterstitialDetection } from './cloudflare-event-emitter.js';
-import type { ClickResult } from './cloudflare-solve-strategies.js';
-import type { SolveDetectionResult } from './cloudflare-solver.effect.js';
+import type { Effect } from "effect";
+import { ServiceMap } from "effect";
+import type {
+  CdpSessionId,
+  TargetId,
+  CloudflareResult,
+  CloudflareConfig,
+} from "../../shared/cloudflare-detection.js";
+import type { CdpSessionGone, CdpTimeout } from "./cf-errors.js";
+import type {
+  ActiveDetection,
+  ReadonlyActiveDetection,
+  ReadonlyEmbeddedDetection,
+  ReadonlyInterstitialDetection,
+} from "./cloudflare-event-emitter.js";
+import type { ClickResult } from "./cloudflare-solve-strategies.js";
+import type { SolveDetectionResult } from "./cloudflare-solver.effect.js";
 
 // ═══════════════════════════════════════════════════════════════════════
 // CdpSender — send CDP commands to browser/page/OOPIF sessions
@@ -44,7 +54,7 @@ export const CdpSender = ServiceMap.Service<{
     sessionId?: CdpSessionId,
     timeoutMs?: number,
   ) => Effect.Effect<any, CdpSessionGone | CdpTimeout>;
-}>('CdpSender');
+}>("CdpSender");
 
 // ═══════════════════════════════════════════════════════════════════════
 // SolverEvents — emit detection/solve/fail events + recording markers
@@ -52,11 +62,23 @@ export const CdpSender = ServiceMap.Service<{
 
 export const SolverEvents = ServiceMap.Service<{
   readonly emitDetected: (active: ReadonlyActiveDetection) => Effect.Effect<void>;
-  readonly emitProgress: (active: ReadonlyActiveDetection, state: string, extra?: Record<string, any>) => Effect.Effect<void>;
-  readonly emitSolved: (active: ReadonlyActiveDetection, result: CloudflareResult) => Effect.Effect<void>;
-  readonly emitFailed: (active: ReadonlyActiveDetection, reason: string, duration: number, phaseLabel?: string) => Effect.Effect<void>;
+  readonly emitProgress: (
+    active: ReadonlyActiveDetection,
+    state: string,
+    extra?: Record<string, any>,
+  ) => Effect.Effect<void>;
+  readonly emitSolved: (
+    active: ReadonlyActiveDetection,
+    result: CloudflareResult,
+  ) => Effect.Effect<void>;
+  readonly emitFailed: (
+    active: ReadonlyActiveDetection,
+    reason: string,
+    duration: number,
+    phaseLabel?: string,
+  ) => Effect.Effect<void>;
   readonly marker: (targetId: TargetId, tag: string, payload?: object) => Effect.Effect<void>;
-}>('SolverEvents');
+}>("SolverEvents");
 
 // ═══════════════════════════════════════════════════════════════════════
 // SolveDeps — strategies + state tracker dependencies for solve functions
@@ -66,16 +88,21 @@ export const SolverEvents = ServiceMap.Service<{
 // ═══════════════════════════════════════════════════════════════════════
 
 export const SolveDeps = ServiceMap.Service<{
-  readonly findAndClickViaCDP: (active: ReadonlyActiveDetection, attempt: number) => Effect.Effect<ClickResult>;
+  readonly findAndClickViaCDP: (
+    active: ReadonlyActiveDetection,
+    attempt: number,
+  ) => Effect.Effect<ClickResult>;
   readonly simulatePresence: (active: ReadonlyActiveDetection) => Effect.Effect<void>;
   /** Activity loop for embedded types (turnstile/non_interactive/invisible). Runtime.evaluate is safe. */
   readonly startActivityLoopEmbedded: (active: ReadonlyEmbeddedDetection) => Effect.Effect<void>;
   /** Activity loop for interstitial/managed types. Runtime.evaluate is FORBIDDEN. */
-  readonly startActivityLoopInterstitial: (active: ReadonlyInterstitialDetection) => Effect.Effect<void>;
+  readonly startActivityLoopInterstitial: (
+    active: ReadonlyInterstitialDetection,
+  ) => Effect.Effect<void>;
   /** Controlled mutations — solver calls these instead of direct property assignment. */
   readonly setClickDelivered: (clickDeliveredAt: number) => Effect.Effect<void>;
   readonly markActivityLoopStarted: () => Effect.Effect<void>;
-}>('SolveDeps');
+}>("SolveDeps");
 
 // ═══════════════════════════════════════════════════════════════════════
 // SolveDispatcher — dispatches solve attempts through the Effect runtime
@@ -86,7 +113,7 @@ export const SolveDeps = ServiceMap.Service<{
 
 export const SolveDispatcher = ServiceMap.Service<{
   readonly dispatch: (active: ActiveDetection) => Effect.Effect<SolveDetectionResult>;
-}>('SolveDispatcher');
+}>("SolveDispatcher");
 
 // ═══════════════════════════════════════════════════════════════════════
 // DetectionLoopStarter — starts a fiber-based Turnstile detection loop
@@ -97,7 +124,7 @@ export const SolveDispatcher = ServiceMap.Service<{
 
 export const DetectionLoopStarter = ServiceMap.Service<{
   readonly start: (targetId: TargetId, cdpSessionId: CdpSessionId) => Effect.Effect<void>;
-}>('DetectionLoopStarter');
+}>("DetectionLoopStarter");
 
 // ═══════════════════════════════════════════════════════════════════════
 // OOPIFChecker — check OOPIF iframe widget state via CDP DOM walk
@@ -108,10 +135,10 @@ export const DetectionLoopStarter = ServiceMap.Service<{
 // ═══════════════════════════════════════════════════════════════════════
 
 export const OOPIFChecker = ServiceMap.Service<{
-  readonly check: (iframeCdpSessionId: CdpSessionId) => Effect.Effect<
-    'success' | 'fail' | 'expired' | 'timeout' | 'pending' | null
-  >;
-}>('OOPIFChecker');
+  readonly check: (
+    iframeCdpSessionId: CdpSessionId,
+  ) => Effect.Effect<"success" | "fail" | "expired" | "timeout" | "pending" | null>;
+}>("OOPIFChecker");
 
 // ═══════════════════════════════════════════════════════════════════════
 // SolverConfig — solver configuration with defaults
@@ -120,7 +147,7 @@ export const OOPIFChecker = ServiceMap.Service<{
 // instead of reading a mutable field on the state tracker.
 // ═══════════════════════════════════════════════════════════════════════
 
-export const SolverConfig = ServiceMap.Service<Required<CloudflareConfig>>('SolverConfig');
+export const SolverConfig = ServiceMap.Service<Required<CloudflareConfig>>("SolverConfig");
 
 // ═══════════════════════════════════════════════════════════════════════
 // SessionSolverContext — session-level shared state (provided once)
@@ -141,7 +168,7 @@ export const SessionSolverContext = ServiceMap.Service<{
   readonly addSolvedCFTargetSync: (oopifId: string, pageTargetId: TargetId) => void;
   readonly pushPhase: (targetId: TargetId, type: string, label: string) => void;
   readonly buildCompoundLabel: (targetId: TargetId) => string;
-}>('SessionSolverContext');
+}>("SessionSolverContext");
 
 // ═══════════════════════════════════════════════════════════════════════
 // TabSolverContext — per-tab isolated state (provided per tab runtime)
@@ -150,7 +177,7 @@ export const SessionSolverContext = ServiceMap.Service<{
 // impossible because there are no targetId keys to mix up.
 // ═══════════════════════════════════════════════════════════════════════
 
-import type { TabSolverState } from './cf-tab-state.js';
+import type { TabSolverState } from "./cf-tab-state.js";
 
 export const TabSolverContext = ServiceMap.Service<{
   readonly targetId: TargetId;
@@ -158,7 +185,7 @@ export const TabSolverContext = ServiceMap.Service<{
   readonly state: TabSolverState;
   /** Set the resolved pageFrameId — called once at detection start. */
   readonly setPageFrameId: (id: string | null) => void;
-}>('TabSolverContext');
+}>("TabSolverContext");
 
 // ═══════════════════════════════════════════════════════════════════════
 // TabDetector — per-tab filtered detection (structural cross-tab guard)
@@ -171,11 +198,11 @@ export const TabSolverContext = ServiceMap.Service<{
 // with a single yield* call.
 // ═══════════════════════════════════════════════════════════════════════
 
-import type { CFDetected } from './cloudflare-solve-strategies.js';
+import type { CFDetected } from "./cloudflare-solve-strategies.js";
 
 export const TabDetector = ServiceMap.Service<{
   /** Returns ONLY OOPIFs belonging to this tab. Cross-tab OOPIFs are filtered by construction. */
-  readonly detect: (excludeTargetIds?: ReadonlySet<string>) => Effect.Effect<
-    CFDetected | { _tag: 'not_detected' }
-  >;
-}>('TabDetector');
+  readonly detect: (
+    excludeTargetIds?: ReadonlySet<string>,
+  ) => Effect.Effect<CFDetected | { _tag: "not_detected" }>;
+}>("TabDetector");

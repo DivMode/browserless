@@ -1,12 +1,8 @@
-import {
-  BrowserlessRoutes,
-  EdgePlaywright,
-  WebsocketRoutes,
-} from '@browserless.io/browserless';
+import { BrowserlessRoutes, EdgePlaywright, WebsocketRoutes } from "@browserless.io/browserless";
 import {
   default as ChromiumPlaywrightWebSocketRoute,
   QuerySchema,
-} from '../../../shared/chromium.playwright.ws.js';
+} from "../../../shared/chromium.playwright.ws.js";
 
 export default class EdgePlaywrightWebSocketRoute extends ChromiumPlaywrightWebSocketRoute {
   name = BrowserlessRoutes.EdgePlaywrightWebSocketRoute;

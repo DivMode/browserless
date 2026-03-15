@@ -1,6 +1,1 @@
-export {
-  BodySchema,
-  QuerySchema,
-  ResponseSchema,
-  default,
-} from '../../../shared/content.http.js';
+export { BodySchema, QuerySchema, ResponseSchema, default } from "../../../shared/content.http.js";

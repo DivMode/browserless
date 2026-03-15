@@ -1,22 +1,17 @@
-import {
-  AfterResponse,
-  BeforeRequest,
-  BrowserHook,
-  PageHook,
-} from '@browserless.io/browserless';
-import { EventEmitter } from 'events';
+import { AfterResponse, BeforeRequest, BrowserHook, PageHook } from "@browserless.io/browserless";
+import { EventEmitter } from "events";
 
 // KEPT for backwards compatibility reasons since some downstream
 // docker images will override these files to inject their own hook
 // behaviors
 // @ts-ignore
-import { default as afterRequest } from '../external/after.js';
+import { default as afterRequest } from "../external/after.js";
 // @ts-ignore
-import { default as beforeRequest } from '../external/before.js';
+import { default as beforeRequest } from "../external/before.js";
 // @ts-ignore
-import { default as browserHook } from '../external/browser.js';
+import { default as browserHook } from "../external/browser.js";
 // @ts-ignore
-import { default as pageHook } from '../external/page.js';
+import { default as pageHook } from "../external/page.js";
 
 export class Hooks extends EventEmitter {
   before(args: BeforeRequest): Promise<boolean> {

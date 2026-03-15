@@ -1,5 +1,5 @@
-import type { Vector } from './math.js';
-import { type TweeningFunction, TWEEN_OPTIONS } from './tweening.js';
+import type { Vector } from "./math.js";
+import { type TweeningFunction, TWEEN_OPTIONS } from "./tweening.js";
 
 export interface RandomCurveParameters {
   offsetBoundaryX: number;
@@ -38,8 +38,7 @@ export function generateRandomCurveParameters(
   preOrigin: Vector,
   postDestination: Vector,
 ): RandomCurveParameters {
-  const tween =
-    TWEEN_OPTIONS[Math.floor(Math.random() * TWEEN_OPTIONS.length)];
+  const tween = TWEEN_OPTIONS[Math.floor(Math.random() * TWEEN_OPTIONS.length)];
 
   // Offset boundary X — heavily weighted towards 75-99 range (~94.65%)
   const offsetBoundaryXRanges = [
@@ -47,9 +46,7 @@ export function generateRandomCurveParameters(
     { min: 45, max: 74 },
     { min: 75, max: 99 },
   ];
-  const selectedXRange = weightedRandomChoice(offsetBoundaryXRanges, [
-    0.2, 0.65, 15,
-  ]);
+  const selectedXRange = weightedRandomChoice(offsetBoundaryXRanges, [0.2, 0.65, 15]);
   let offsetBoundaryX = randomFromRange(selectedXRange.min, selectedXRange.max);
 
   // Offset boundary Y — same distribution
@@ -58,9 +55,7 @@ export function generateRandomCurveParameters(
     { min: 45, max: 74 },
     { min: 75, max: 99 },
   ];
-  const selectedYRange = weightedRandomChoice(offsetBoundaryYRanges, [
-    0.2, 0.65, 15,
-  ]);
+  const selectedYRange = weightedRandomChoice(offsetBoundaryYRanges, [0.2, 0.65, 15]);
   let offsetBoundaryY = randomFromRange(selectedYRange.min, selectedYRange.max);
 
   // Knots count — most likely 2-3, tailing off
@@ -80,18 +75,12 @@ export function generateRandomCurveParameters(
     { min: 45, max: 59 },
     { min: 60, max: 79 },
   ];
-  const selectedPointsRange = weightedRandomChoice(targetPointsRanges, [
-    0.53, 0.32, 0.15,
-  ]);
-  const targetPoints = randomFromRange(
-    selectedPointsRange.min,
-    selectedPointsRange.max,
-  );
+  const selectedPointsRange = weightedRandomChoice(targetPointsRanges, [0.53, 0.32, 0.15]);
+  const targetPoints = randomFromRange(selectedPointsRange.min, selectedPointsRange.max);
 
   // Scale boundaries relative to movement distance
   const distance = Math.sqrt(
-    Math.pow(postDestination.x - preOrigin.x, 2) +
-      Math.pow(postDestination.y - preOrigin.y, 2),
+    Math.pow(postDestination.x - preOrigin.x, 2) + Math.pow(postDestination.y - preOrigin.y, 2),
   );
 
   const minBoundary = Math.max(30, distance * 0.15);

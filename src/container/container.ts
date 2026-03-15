@@ -1,6 +1,6 @@
-import { Effect } from 'effect';
+import { Effect } from "effect";
 
-import { runForkInServer } from '../otel-runtime.js';
+import { runForkInServer } from "../otel-runtime.js";
 
 /**
  * Service factory function type.
@@ -46,7 +46,7 @@ export class ServiceContainer {
   registerSingleton<T>(
     name: string,
     factory: ServiceFactory<T>,
-    dependencies: string[] = []
+    dependencies: string[] = [],
   ): this {
     if (this.services.has(name)) {
       runForkInServer(Effect.logWarning(`Service "${name}" is being overwritten`));
@@ -68,7 +68,7 @@ export class ServiceContainer {
   registerTransient<T>(
     name: string,
     factory: ServiceFactory<T>,
-    dependencies: string[] = []
+    dependencies: string[] = [],
   ): this {
     if (this.services.has(name)) {
       runForkInServer(Effect.logWarning(`Service "${name}" is being overwritten`));
@@ -119,7 +119,7 @@ export class ServiceContainer {
 
     // Circular dependency detection
     if (this.resolving.has(name)) {
-      const chain = Array.from(this.resolving).join(' -> ');
+      const chain = Array.from(this.resolving).join(" -> ");
       throw new Error(`Circular dependency detected: ${chain} -> ${name}`);
     }
 
@@ -161,15 +161,13 @@ export class ServiceContainer {
    * Call this at startup to fail fast.
    */
   validate(): void {
-    runForkInServer(Effect.logDebug('Validating service container...'));
+    runForkInServer(Effect.logDebug("Validating service container..."));
 
     // Check for missing dependencies
     for (const [name, registration] of this.services) {
       for (const dep of registration.dependencies) {
         if (!this.services.has(dep)) {
-          throw new Error(
-            `Service "${name}" depends on "${dep}" which is not registered`
-          );
+          throw new Error(`Service "${name}" depends on "${dep}" which is not registered`);
         }
       }
     }
@@ -181,9 +179,7 @@ export class ServiceContainer {
     const visit = (name: string, path: string[] = []): void => {
       if (visited.has(name)) return;
       if (visiting.has(name)) {
-        throw new Error(
-          `Circular dependency detected: ${[...path, name].join(' -> ')}`
-        );
+        throw new Error(`Circular dependency detected: ${[...path, name].join(" -> ")}`);
       }
 
       visiting.add(name);

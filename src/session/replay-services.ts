@@ -10,9 +10,9 @@
  * Concrete implementations are provided via Layer in cdp-session.ts buildLayer().
  * Tests use Layer.succeed with mocks (same pattern as cf-services.ts).
  */
-import type { Effect } from 'effect';
-import { ServiceMap } from 'effect';
-import type { ReplayEvent, ReplayMetadata, ReplayStoreError } from '../shared/replay-schemas.js';
+import type { Effect } from "effect";
+import { ServiceMap } from "effect";
+import type { ReplayEvent, ReplayMetadata, ReplayStoreError } from "../shared/replay-schemas.js";
 
 // ─── ReplayWriter ───────────────────────────────────────────────────
 // Writes per-tab replay JSON files + SQLite metadata.
@@ -32,10 +32,8 @@ export const ReplayWriter = ServiceMap.Service<{
   ) => Effect.Effect<void, ReplayStoreError>;
 
   /** Insert metadata into SQLite (without events — for session-level records). */
-  readonly writeMetadata: (
-    metadata: ReplayMetadata,
-  ) => Effect.Effect<void, ReplayStoreError>;
-}>('ReplayWriter');
+  readonly writeMetadata: (metadata: ReplayMetadata) => Effect.Effect<void, ReplayStoreError>;
+}>("ReplayWriter");
 
 // ─── ReplayMetrics ──────────────────────────────────────────────────
 // Prometheus metric operations, wrapped as Effects.
@@ -52,5 +50,4 @@ export const ReplayMetrics = ServiceMap.Service<{
   readonly incEvents: (count: number) => Effect.Effect<void>;
   readonly observeTabDuration: (seconds: number) => Effect.Effect<void>;
   readonly registerSession: (state: SessionGaugeState) => Effect.Effect<() => void>;
-}>('ReplayMetrics');
-
+}>("ReplayMetrics");

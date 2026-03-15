@@ -1,12 +1,5 @@
-import {
-  BrowserlessRoutes,
-  ChromeCDP,
-  WebsocketRoutes,
-} from '@browserless.io/browserless';
-import {
-  default as ChromiumWebSocketRoute,
-  QuerySchema,
-} from '../../../shared/chromium.ws.js';
+import { BrowserlessRoutes, ChromeCDP, WebsocketRoutes } from "@browserless.io/browserless";
+import { default as ChromiumWebSocketRoute, QuerySchema } from "../../../shared/chromium.ws.js";
 
 export default class ChromeCDPWebSocketRoute extends ChromiumWebSocketRoute {
   name = BrowserlessRoutes.ChromeCDPWebSocketRoute;

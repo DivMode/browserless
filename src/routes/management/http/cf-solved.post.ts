@@ -6,9 +6,9 @@ import {
   Methods,
   Request,
   contentTypes,
-} from '@browserless.io/browserless';
-import { ServerResponse } from 'http';
-import { Effect } from 'effect';
+} from "@browserless.io/browserless";
+import { ServerResponse } from "http";
+import { Effect } from "effect";
 
 /**
  * Receives navigator.sendBeacon from the browser when a Turnstile token
@@ -25,7 +25,7 @@ export default class CfSolvedPostRoute extends HTTPRoute {
   browser = null;
   concurrency = false;
   contentTypes = [contentTypes.json];
-  description = 'Receives CF solved beacon from browser (internal, no auth).';
+  description = "Receives CF solved beacon from browser (internal, no auth).";
   method = Methods.post;
   path = HTTPManagementRoutes.cfSolved;
   tags = [APITags.management];
@@ -33,16 +33,22 @@ export default class CfSolvedPostRoute extends HTTPRoute {
   async handler(_req: Request, res: ServerResponse): Promise<void> {
     const route = this;
     return Effect.runPromise(
-      Effect.fn('route.cf-solved.post')(function* () {
+      Effect.fn("route.cf-solved.post")(function* () {
         try {
           // Log ALL incoming requests to diagnose if beacons arrive at all
           const rawBody = _req.body;
-          yield* Effect.logInfo(`Beacon request: type=${typeof rawBody} content-type=${_req.headers['content-type']} len=${typeof rawBody === 'string' ? rawBody.length : JSON.stringify(rawBody)?.length ?? 0}`);
+          yield* Effect.logInfo(
+            `Beacon request: type=${typeof rawBody} content-type=${_req.headers["content-type"]} len=${typeof rawBody === "string" ? rawBody.length : (JSON.stringify(rawBody)?.length ?? 0)}`,
+          );
 
           // sendBeacon sends text/plain — body may be a string or pre-parsed object
           let body: { s?: string; t?: string; l?: number } | undefined;
-          if (typeof rawBody === 'string') {
-            try { body = JSON.parse(rawBody); } catch { body = undefined; }
+          if (typeof rawBody === "string") {
+            try {
+              body = JSON.parse(rawBody);
+            } catch {
+              body = undefined;
+            }
           } else {
             body = rawBody as { s?: string; t?: string; l?: number } | undefined;
           }
@@ -51,7 +57,9 @@ export default class CfSolvedPostRoute extends HTTPRoute {
           const tokenLength = body?.l ?? 0;
 
           if (!targetId) {
-            yield* Effect.logInfo(`Beacon 400: no targetId. s=${sessionId ?? 'null'} t=${targetId ?? 'null'} body=${JSON.stringify(body)?.slice(0, 200)}`);
+            yield* Effect.logInfo(
+              `Beacon 400: no targetId. s=${sessionId ?? "null"} t=${targetId ?? "null"} body=${JSON.stringify(body)?.slice(0, 200)}`,
+            );
             res.writeHead(400);
             res.end();
             return;
@@ -59,12 +67,16 @@ export default class CfSolvedPostRoute extends HTTPRoute {
 
           const browserManager = route.browserManager();
           const sessionCoordinator = browserManager.getSessionCoordinator();
-          const handled = sessionCoordinator.handleCfBeacon(sessionId ?? '', targetId, tokenLength);
+          const handled = sessionCoordinator.handleCfBeacon(sessionId ?? "", targetId, tokenLength);
 
           if (handled) {
-            yield* Effect.logInfo(`Beacon: session=${sessionId ? sessionId.slice(0, 8) : 'broadcast'} target=${targetId.slice(0, 8)} len=${tokenLength}`);
+            yield* Effect.logInfo(
+              `Beacon: session=${sessionId ? sessionId.slice(0, 8) : "broadcast"} target=${targetId.slice(0, 8)} len=${tokenLength}`,
+            );
           } else {
-            yield* Effect.logInfo(`Beacon: no solver for session=${sessionId ? sessionId.slice(0, 8) : 'empty'} (already cleaned up)`);
+            yield* Effect.logInfo(
+              `Beacon: no solver for session=${sessionId ? sessionId.slice(0, 8) : "empty"} (already cleaned up)`,
+            );
           }
 
           res.writeHead(204);

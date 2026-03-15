@@ -1,15 +1,15 @@
-import { Browserless, Config, Metrics } from '@browserless.io/browserless';
-import { expect } from 'chai';
-import { webkit } from 'playwright-core';
+import { Browserless, Config, Metrics } from "@browserless.io/browserless";
+import { expect } from "chai";
+import { webkit } from "playwright-core";
 
-describe('/kill API webkit', function () {
+describe("/kill API webkit", function () {
   let browserless: Browserless;
 
   const start = ({
     config = new Config(),
     metrics = new Metrics(),
   }: { config?: Config; metrics?: Metrics } = {}) => {
-    config.setToken('browserless');
+    config.setToken("browserless");
     browserless = new Browserless({ config, metrics });
     return browserless.start();
   };
@@ -18,7 +18,7 @@ describe('/kill API webkit', function () {
     await browserless.stop();
   });
 
-  it('Kill all sessions', async () => {
+  it("Kill all sessions", async () => {
     await start();
     const browser1 = await webkit.connect(
       `ws://localhost:3000/webkit/playwright?token=browserless&trackingId=session-1`,
@@ -27,11 +27,9 @@ describe('/kill API webkit', function () {
       `ws://localhost:3000/webkit/playwright?token=browserless&trackingId=session-2`,
     );
 
-    await fetch('http://localhost:3000/kill/all?token=browserless').then(
-      async (res) => {
-        expect(res.status).to.equal(204);
-      },
-    );
+    await fetch("http://localhost:3000/kill/all?token=browserless").then(async (res) => {
+      expect(res.status).to.equal(204);
+    });
 
     let errorThrown1;
     try {
@@ -45,27 +43,21 @@ describe('/kill API webkit', function () {
     } catch (e) {
       errorThrown2 = e;
     }
-    expect((errorThrown1 as Error).message).contains('closed');
-    expect((errorThrown2 as Error).message).contains('closed');
+    expect((errorThrown1 as Error).message).contains("closed");
+    expect((errorThrown2 as Error).message).contains("closed");
   });
 
-  it('Kill session by browserId', async () => {
+  it("Kill session by browserId", async () => {
     await start();
-    const browser = await webkit.connect(
-      `ws://localhost:3000/webkit/playwright?token=browserless`,
-    );
+    const browser = await webkit.connect(`ws://localhost:3000/webkit/playwright?token=browserless`);
 
-    await fetch('http://localhost:3000/sessions?token=browserless').then(
-      async (res) => {
-        const sessions = await res.json();
-        const browserId = sessions[0].browserId;
-        await fetch(
-          `http://localhost:3000/kill/${browserId}?token=browserless`,
-        ).then(async (res) => {
-          expect(res.status).to.equal(204);
-        });
-      },
-    );
+    await fetch("http://localhost:3000/sessions?token=browserless").then(async (res) => {
+      const sessions = await res.json();
+      const browserId = sessions[0].browserId;
+      await fetch(`http://localhost:3000/kill/${browserId}?token=browserless`).then(async (res) => {
+        expect(res.status).to.equal(204);
+      });
+    });
 
     let errorThrown;
     try {
@@ -73,20 +65,18 @@ describe('/kill API webkit', function () {
     } catch (e) {
       errorThrown = e;
     }
-    expect((errorThrown as Error).message).contains('closed');
+    expect((errorThrown as Error).message).contains("closed");
   });
 
-  it('Kill session by trackingId', async () => {
+  it("Kill session by trackingId", async () => {
     await start();
     const browser = await webkit.connect(
       `ws://localhost:3000/webkit/playwright?token=browserless&trackingId=session-1`,
     );
 
-    await fetch('http://localhost:3000/kill/session-1?token=browserless').then(
-      async (res) => {
-        expect(res.status).to.equal(204);
-      },
-    );
+    await fetch("http://localhost:3000/kill/session-1?token=browserless").then(async (res) => {
+      expect(res.status).to.equal(204);
+    });
 
     let errorThrown;
     try {
@@ -94,6 +84,6 @@ describe('/kill API webkit', function () {
     } catch (e) {
       errorThrown = e;
     }
-    expect((errorThrown as Error).message).contains('closed');
+    expect((errorThrown as Error).message).contains("closed");
   });
 });

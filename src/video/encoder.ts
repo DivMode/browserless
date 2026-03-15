@@ -1,19 +1,17 @@
-import { spawn } from 'child_process';
-import { readdir, rename, rm, writeFile } from 'fs/promises';
-import path from 'path';
+import { spawn } from "child_process";
+import { readdir, rename, rm, writeFile } from "fs/promises";
+import path from "path";
 
-import { Duration, Effect, ManagedRuntime, Queue } from 'effect';
-import {
-  exists,
-} from '@browserless.io/browserless';
+import { Duration, Effect, ManagedRuntime, Queue } from "effect";
+import { exists } from "@browserless.io/browserless";
 
-import { SharedTracerLayer } from '../otel-runtime.js';
+import { SharedTracerLayer } from "../otel-runtime.js";
 
 export interface EncodingProgress {
   framesProcessed: number;
   totalFrames: number;
   fps: number;
-  status: 'pending' | 'encoding' | 'completed' | 'failed';
+  status: "pending" | "encoding" | "completed" | "failed";
 }
 
 interface EncodeJob {
@@ -47,14 +45,14 @@ export class VideoEncoder {
     // Single runFork: queue creation + consumer loop inline — no .then() gap
     const encoder = this;
     this.runtime.runFork(
-      Effect.gen(function*() {
+      Effect.gen(function* () {
         const queue = yield* Queue.unbounded<EncodeJob>();
         encoder.effectQueue = queue;
         // Consumer loop inline — takes jobs sequentially
         while (true) {
           const job = yield* Queue.take(queue);
-          yield* Effect.tryPromise(
-            () => encoder.encode(job.sessionId, job.videosDir, job.totalFrames),
+          yield* Effect.tryPromise(() =>
+            encoder.encode(job.sessionId, job.videosDir, job.totalFrames),
           ).pipe(Effect.orElseSucceed(() => undefined));
         }
       }),
@@ -75,7 +73,9 @@ export class VideoEncoder {
   queueEncode(sessionId: string, videosDir: string, totalFrames: number = 0): void {
     // Prevent duplicate queue entries (two viewers racing)
     if (this.progress.has(sessionId)) {
-      this.runtime.runFork(Effect.logDebug(`Session ${sessionId} already queued/encoding, skipping`));
+      this.runtime.runFork(
+        Effect.logDebug(`Session ${sessionId} already queued/encoding, skipping`),
+      );
       return;
     }
 
@@ -85,7 +85,7 @@ export class VideoEncoder {
       framesProcessed: 0,
       totalFrames,
       fps: 0,
-      status: 'pending',
+      status: "pending",
     });
 
     // Offer directly — queue is created synchronously in the runFork fiber
@@ -108,7 +108,7 @@ export class VideoEncoder {
   get pendingCount(): number {
     let count = 0;
     for (const p of this.progress.values()) {
-      if (p.status === 'pending' || p.status === 'encoding') count++;
+      if (p.status === "pending" || p.status === "encoding") count++;
     }
     return count;
   }
@@ -125,8 +125,8 @@ export class VideoEncoder {
       let cleaned = 0;
 
       for (const entry of entries) {
-        if (entry.isDirectory() && entry.name !== 'frames') {
-          const framesDir = path.join(videosDir, entry.name, 'frames');
+        if (entry.isDirectory() && entry.name !== "frames") {
+          const framesDir = path.join(videosDir, entry.name, "frames");
           if (await exists(framesDir)) {
             this.runtime.runFork(Effect.logInfo(`Cleaning up orphaned frames: ${entry.name}`));
             await rm(path.join(videosDir, entry.name), { recursive: true });
@@ -139,7 +139,9 @@ export class VideoEncoder {
         this.runtime.runFork(Effect.logInfo(`Cleaned up ${cleaned} orphaned frame directories`));
       }
     } catch (e) {
-      this.runtime.runFork(Effect.logWarning(`Orphan cleanup failed: ${e instanceof Error ? e.message : String(e)}`));
+      this.runtime.runFork(
+        Effect.logWarning(`Orphan cleanup failed: ${e instanceof Error ? e.message : String(e)}`),
+      );
     }
   }
 
@@ -156,26 +158,24 @@ export class VideoEncoder {
    */
   private async encode(sessionId: string, videosDir: string, totalFrames: number): Promise<void> {
     const sessionDir = path.join(videosDir, sessionId);
-    const framesDir = path.join(sessionDir, 'frames');
-    const concatPath = path.join(sessionDir, 'frames.txt');
-    const playlistPath = path.join(sessionDir, 'playlist.m3u8');
+    const framesDir = path.join(sessionDir, "frames");
+    const concatPath = path.join(sessionDir, "frames.txt");
+    const playlistPath = path.join(sessionDir, "playlist.m3u8");
 
     if (!(await exists(framesDir))) {
       this.runtime.runFork(Effect.logWarning(`No frames directory for ${sessionId}, skipping`));
-      this.updateProgress(sessionId, { status: 'failed' });
+      this.updateProgress(sessionId, { status: "failed" });
       return;
     }
 
-    this.updateProgress(sessionId, { status: 'encoding' });
+    this.updateProgress(sessionId, { status: "encoding" });
 
     try {
-      const files = (await readdir(framesDir))
-        .filter(f => f.endsWith('.png'))
-        .sort();
+      const files = (await readdir(framesDir)).filter((f) => f.endsWith(".png")).sort();
 
       if (files.length === 0) {
         this.runtime.runFork(Effect.logWarning(`No frames found for ${sessionId}`));
-        this.updateProgress(sessionId, { status: 'failed' });
+        this.updateProgress(sessionId, { status: "failed" });
         return;
       }
 
@@ -188,11 +188,11 @@ export class VideoEncoder {
       const concatLines: string[] = [];
       let totalDuration = 0;
       for (let i = 0; i < files.length; i++) {
-        const currentTs = parseInt(files[i].replace('.png', ''), 10);
+        const currentTs = parseInt(files[i].replace(".png", ""), 10);
         let duration: number;
 
         if (i < files.length - 1) {
-          const nextTs = parseInt(files[i + 1].replace('.png', ''), 10);
+          const nextTs = parseInt(files[i + 1].replace(".png", ""), 10);
           duration = (nextTs - currentTs) / 1000;
           if (duration <= 0) duration = 0.033;
           if (duration > 10) duration = 10;
@@ -206,57 +206,69 @@ export class VideoEncoder {
       }
 
       concatLines.push(`file 'frames/${files[files.length - 1]}'`);
-      await writeFile(concatPath, concatLines.join('\n'), 'utf-8');
+      await writeFile(concatPath, concatLines.join("\n"), "utf-8");
 
       // Pre-generate VOD playlist (player can load immediately)
       const segDur = VideoEncoder.SEGMENT_DURATION;
       const segmentCount = Math.ceil(totalDuration / segDur);
       const playlistLines = [
-        '#EXTM3U',
-        '#EXT-X-VERSION:3',
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
         `#EXT-X-TARGETDURATION:${segDur + 1}`,
-        '#EXT-X-PLAYLIST-TYPE:VOD',
+        "#EXT-X-PLAYLIST-TYPE:VOD",
       ];
       for (let i = 0; i < segmentCount; i++) {
         const isLast = i === segmentCount - 1;
-        const segLength = isLast ? totalDuration - (i * segDur) : segDur;
+        const segLength = isLast ? totalDuration - i * segDur : segDur;
         playlistLines.push(`#EXTINF:${segLength.toFixed(6)},`);
-        playlistLines.push(`seg${String(i).padStart(3, '0')}.ts`);
+        playlistLines.push(`seg${String(i).padStart(3, "0")}.ts`);
       }
-      playlistLines.push('#EXT-X-ENDLIST');
-      playlistLines.push('');
-      await writeFile(playlistPath, playlistLines.join('\n'), 'utf-8');
+      playlistLines.push("#EXT-X-ENDLIST");
+      playlistLines.push("");
+      await writeFile(playlistPath, playlistLines.join("\n"), "utf-8");
 
       // Encode via ffmpeg — Effect.callback auto-kills proc on fiber interruption
-      const ffmpegPlaylistPath = path.join(sessionDir, '_encoding.m3u8');
-      await Effect.runPromise(this.runFfmpegHlsEffect(concatPath, sessionDir, ffmpegPlaylistPath, sessionId));
+      const ffmpegPlaylistPath = path.join(sessionDir, "_encoding.m3u8");
+      await Effect.runPromise(
+        this.runFfmpegHlsEffect(concatPath, sessionDir, ffmpegPlaylistPath, sessionId),
+      );
 
       // Replace estimated playlist with ffmpeg's exact durations
       if (await exists(ffmpegPlaylistPath)) {
         await rename(ffmpegPlaylistPath, playlistPath);
       }
 
-      this.updateProgress(sessionId, { status: 'completed', framesProcessed: totalFrames });
+      this.updateProgress(sessionId, { status: "completed", framesProcessed: totalFrames });
 
       // Clean up frames + concat (keep HLS segments + playlist)
-      try { await rm(framesDir, { recursive: true }); } catch {}
-      try { await rm(concatPath); } catch {}
-      try { await rm(path.join(sessionDir, '_encoding.m3u8')); } catch {}
+      try {
+        await rm(framesDir, { recursive: true });
+      } catch {}
+      try {
+        await rm(concatPath);
+      } catch {}
+      try {
+        await rm(path.join(sessionDir, "_encoding.m3u8"));
+      } catch {}
 
       this.runtime.runFork(Effect.logInfo(`Video encoded: ${sessionId} (${files.length} frames)`));
 
       // Schedule progress cleanup after 30s
       this.runtime.runFork(
-        Effect.sleep('30 seconds').pipe(
+        Effect.sleep("30 seconds").pipe(
           Effect.andThen(Effect.sync(() => this.progress.delete(sessionId))),
         ),
       );
     } catch (e) {
-      this.runtime.runFork(Effect.logError(`Encoding failed for ${sessionId}: ${e instanceof Error ? e.message : String(e)}`));
-      this.updateProgress(sessionId, { status: 'failed' });
+      this.runtime.runFork(
+        Effect.logError(
+          `Encoding failed for ${sessionId}: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      );
+      this.updateProgress(sessionId, { status: "failed" });
       // Clean up progress entry after 30s (same as success path) to unblock re-encode attempts
       this.runtime.runFork(
-        Effect.sleep('30 seconds').pipe(
+        Effect.sleep("30 seconds").pipe(
           Effect.andThen(Effect.sync(() => this.progress.delete(sessionId))),
         ),
       );
@@ -271,60 +283,85 @@ export class VideoEncoder {
    * fiber interruption. Effect.timeout replaces manual setTimeout.
    * ManagedRuntime.dispose() → interrupts consumer → interrupts this callback → kills proc.
    */
-  private runFfmpegHlsEffect(concatPath: string, sessionDir: string, playlistPath: string, sessionId: string): Effect.Effect<void, Error> {
+  private runFfmpegHlsEffect(
+    concatPath: string,
+    sessionDir: string,
+    playlistPath: string,
+    sessionId: string,
+  ): Effect.Effect<void, Error> {
     const encoder = this;
     const segDur = VideoEncoder.SEGMENT_DURATION;
-    const segmentPattern = path.join(sessionDir, 'seg%03d.ts');
+    const segmentPattern = path.join(sessionDir, "seg%03d.ts");
 
     const args = [
-      '-f', 'concat',
-      '-safe', '0',
-      '-i', concatPath,
-      '-c:v', 'libx264',
-      '-preset', 'ultrafast',
-      '-crf', '28',
-      '-pix_fmt', 'yuv420p',
-      '-force_key_frames', `expr:gte(t,n_forced*${segDur})`,
-      '-f', 'hls',
-      '-hls_time', String(segDur),
-      '-hls_list_size', '0',
-      '-hls_playlist_type', 'vod',
-      '-hls_segment_filename', segmentPattern,
-      '-hls_flags', 'temp_file',
-      '-y',
+      "-f",
+      "concat",
+      "-safe",
+      "0",
+      "-i",
+      concatPath,
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-crf",
+      "28",
+      "-pix_fmt",
+      "yuv420p",
+      "-force_key_frames",
+      `expr:gte(t,n_forced*${segDur})`,
+      "-f",
+      "hls",
+      "-hls_time",
+      String(segDur),
+      "-hls_list_size",
+      "0",
+      "-hls_playlist_type",
+      "vod",
+      "-hls_segment_filename",
+      segmentPattern,
+      "-hls_flags",
+      "temp_file",
+      "-y",
       playlistPath,
     ];
 
     return Effect.callback<void, Error>((resume) => {
-      const proc = spawn('ffmpeg', args, {
+      const proc = spawn("ffmpeg", args, {
         cwd: sessionDir,
-        stdio: ['pipe', 'pipe', 'pipe'],
+        stdio: ["pipe", "pipe", "pipe"],
       });
 
-      let stderrTail = '';
-      proc.stderr.on('data', (data: Buffer) => {
+      let stderrTail = "";
+      proc.stderr.on("data", (data: Buffer) => {
         const chunk = data.toString();
         stderrTail = (stderrTail + chunk).slice(-2000);
         encoder.parseProgress(chunk, sessionId);
       });
 
-      proc.on('close', (code) => {
+      proc.on("close", (code) => {
         if (code === 0) {
           resume(Effect.void);
         } else {
-          resume(Effect.fail(new Error(`ffmpeg HLS exited with code ${code}: ${stderrTail.slice(-500)}`)));
+          resume(
+            Effect.fail(
+              new Error(`ffmpeg HLS exited with code ${code}: ${stderrTail.slice(-500)}`),
+            ),
+          );
         }
       });
 
-      proc.on('error', (err) => {
+      proc.on("error", (err) => {
         resume(Effect.fail(new Error(`ffmpeg HLS spawn failed: ${err.message}`)));
       });
 
       // Cleanup: kill ffmpeg on fiber interruption (shutdown, timeout, etc.)
-      return Effect.sync(() => { proc.kill('SIGKILL'); });
+      return Effect.sync(() => {
+        proc.kill("SIGKILL");
+      });
     }).pipe(
       Effect.timeout(Duration.minutes(5)),
-      Effect.catchTag('TimeoutError', () =>
+      Effect.catchTag("TimeoutError", () =>
         Effect.fail(new Error(`ffmpeg HLS timed out for ${sessionId}`)),
       ),
     );

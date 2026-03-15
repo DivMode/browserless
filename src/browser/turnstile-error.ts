@@ -4,11 +4,11 @@
  *
  * Uses MutationObserver to detect error states in real-time instead of polling.
  */
-import type { Emit } from './types';
+import type { Emit } from "./types";
 
 function hasToken(): boolean {
   try {
-    if (typeof window.turnstile !== 'undefined' && window.turnstile?.getResponse) {
+    if (typeof window.turnstile !== "undefined" && window.turnstile?.getResponse) {
       const t = window.turnstile.getResponse();
       if (t && t.length > 0) return true;
     }
@@ -25,9 +25,9 @@ function checkErrorState(): { errorType: string; hasToken: boolean } | null {
     '[class*="cf-turnstile"], [id^="cf-chl-widget"], [data-sitekey]',
   );
   for (const container of containers) {
-    const text = (container.textContent || '').toLowerCase();
-    if (text.includes('error') || text.includes('failed') || text.includes('try again'))
-      return { errorType: tokenPresent ? 'error_text' : 'confirmed_error', hasToken: tokenPresent };
+    const text = (container.textContent || "").toLowerCase();
+    if (text.includes("error") || text.includes("failed") || text.includes("try again"))
+      return { errorType: tokenPresent ? "error_text" : "confirmed_error", hasToken: tokenPresent };
   }
 
   // Check iframe content for error indicators
@@ -38,20 +38,23 @@ function checkErrorState(): { errorType: string; hasToken: boolean } | null {
     try {
       const doc = iframe.contentDocument;
       if (doc && doc.body) {
-        const iText = (doc.body.textContent || '').toLowerCase();
-        if (iText.includes('error') || iText.includes('failed') || iText.includes('try again'))
-          return { errorType: tokenPresent ? 'iframe_error' : 'confirmed_error', hasToken: tokenPresent };
+        const iText = (doc.body.textContent || "").toLowerCase();
+        if (iText.includes("error") || iText.includes("failed") || iText.includes("try again"))
+          return {
+            errorType: tokenPresent ? "iframe_error" : "confirmed_error",
+            hasToken: tokenPresent,
+          };
       }
     } catch (_) {}
   }
 
   // Check turnstile.isExpired()
-  if (typeof window.turnstile !== 'undefined' && window.turnstile?.isExpired) {
+  if (typeof window.turnstile !== "undefined" && window.turnstile?.isExpired) {
     try {
       const widgets = document.querySelectorAll('[id^="cf-chl-widget"]');
       for (const w of widgets) {
         if (window.turnstile.isExpired(w.id))
-          return { errorType: 'expired', hasToken: tokenPresent };
+          return { errorType: "expired", hasToken: tokenPresent };
       }
     } catch (_) {}
   }
@@ -62,7 +65,7 @@ function checkErrorState(): { errorType: string; hasToken: boolean } | null {
 export function setupErrorMonitor(emit: Emit): void {
   // Initial check
   const initial = checkErrorState();
-  if (initial) emit({ type: 'error', ...initial });
+  if (initial) emit({ type: "error", ...initial });
 
   // MutationObserver for real-time error detection
   const targets = document.querySelectorAll(
@@ -75,7 +78,7 @@ export function setupErrorMonitor(emit: Emit): void {
     const err = checkErrorState();
     if (err && err.errorType !== lastError) {
       lastError = err.errorType;
-      emit({ type: 'error', ...err });
+      emit({ type: "error", ...err });
     }
   });
 
@@ -88,8 +91,9 @@ export function setupErrorMonitor(emit: Emit): void {
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes) {
         if (!(node instanceof HTMLElement)) continue;
-        const isTurnstile =
-          node.matches?.('[class*="cf-turnstile"], [id^="cf-chl-widget"], [data-sitekey]');
+        const isTurnstile = node.matches?.(
+          '[class*="cf-turnstile"], [id^="cf-chl-widget"], [data-sitekey]',
+        );
         if (isTurnstile) {
           observer.observe(node, { childList: true, subtree: true, characterData: true });
         }

@@ -27,29 +27,29 @@ import {
   waitForEvent as waitForEvt,
   waitForFunction as waitForFn,
   writeResponse,
-} from '@browserless.io/browserless';
-import { Page } from 'puppeteer-core';
-import { Effect } from 'effect';
-import { ServerResponse } from 'http';
-import { runForkInServer } from '../otel-runtime.js';
+} from "@browserless.io/browserless";
+import { Page } from "puppeteer-core";
+import { Effect } from "effect";
+import { ServerResponse } from "http";
+import { runForkInServer } from "../otel-runtime.js";
 
 export interface BodySchema {
-  addScriptTag?: Array<Parameters<Page['addScriptTag']>[0]>;
-  addStyleTag?: Array<Parameters<Page['addStyleTag']>[0]>;
-  authenticate?: Parameters<Page['authenticate']>[0];
+  addScriptTag?: Array<Parameters<Page["addScriptTag"]>[0]>;
+  addStyleTag?: Array<Parameters<Page["addStyleTag"]>[0]>;
+  authenticate?: Parameters<Page["authenticate"]>[0];
   bestAttempt?: bestAttempt;
-  cookies?: Array<Parameters<Page['setCookie']>[0]>;
-  emulateMediaType?: Parameters<Page['emulateMediaType']>[0];
-  gotoOptions?: Parameters<Page['goto']>[1];
-  html?: Parameters<Page['setContent']>[0];
+  cookies?: Array<Parameters<Page["setCookie"]>[0]>;
+  emulateMediaType?: Parameters<Page["emulateMediaType"]>[0];
+  gotoOptions?: Parameters<Page["goto"]>[1];
+  html?: Parameters<Page["setContent"]>[0];
   rejectRequestPattern?: rejectRequestPattern[];
   rejectResourceTypes?: rejectResourceTypes[];
   requestInterceptors?: Array<requestInterceptors>;
-  setExtraHTTPHeaders?: Parameters<Page['setExtraHTTPHeaders']>[0];
+  setExtraHTTPHeaders?: Parameters<Page["setExtraHTTPHeaders"]>[0];
   setJavaScriptEnabled?: setJavaScriptEnabled;
-  url?: Parameters<Page['goto']>[0];
-  userAgent?: Parameters<Page['setUserAgent']>[0];
-  viewport?: Parameters<Page['setViewport']>[0];
+  url?: Parameters<Page["goto"]>[0];
+  userAgent?: Parameters<Page["setUserAgent"]>[0];
+  viewport?: Parameters<Page["setViewport"]>[0];
   waitForEvent?: WaitForEventOptions;
   waitForFunction?: WaitForFunctionOptions;
   waitForSelector?: WaitForSelectorOptions;
@@ -77,16 +77,12 @@ export default class ChromiumContentPostRoute extends BrowserHTTPRoute {
   method = Methods.post;
   path = [HTTPRoutes.chromiumContent, HTTPRoutes.content];
   tags = [APITags.browserAPI];
-  async handler(
-    req: Request,
-    res: ServerResponse,
-    browser: BrowserInstance,
-  ): Promise<void> {
+  async handler(req: Request, res: ServerResponse, browser: BrowserInstance): Promise<void> {
     return Effect.runPromise(
-      Effect.fn('route.content.post')(function* () {
-        yield* Effect.logInfo('Content API invoked with body: ' + JSON.stringify(req.body));
+      Effect.fn("route.content.post")(function* () {
+        yield* Effect.logInfo("Content API invoked with body: " + JSON.stringify(req.body));
         const contentType =
-          !req.headers.accept || req.headers.accept?.includes('*')
+          !req.headers.accept || req.headers.accept?.includes("*")
             ? contentTypes.html
             : req.headers.accept;
 
@@ -94,7 +90,7 @@ export default class ChromiumContentPostRoute extends BrowserHTTPRoute {
           throw new BadRequest(`Couldn't parse JSON body`);
         }
 
-        res.setHeader('Content-Type', contentType);
+        res.setHeader("Content-Type", contentType);
 
         const {
           bestAttempt = false,
@@ -127,7 +123,7 @@ export default class ChromiumContentPostRoute extends BrowserHTTPRoute {
 
         const page = (yield* Effect.promise(() =>
           Promise.resolve(browser.newPage()),
-        )) as UnwrapPromise<ReturnType<ChromiumCDP['newPage']>>;
+        )) as UnwrapPromise<ReturnType<ChromiumCDP["newPage"]>>;
         const gotoCall = url ? page.goto.bind(page) : page.setContent.bind(page);
 
         if (emulateMediaType) {
@@ -165,7 +161,7 @@ export default class ChromiumContentPostRoute extends BrowserHTTPRoute {
         ) {
           yield* Effect.promise(() => page.setRequestInterception(true));
 
-          page.on('request', (req) => {
+          page.on("request", (req) => {
             if (
               !!rejectRequestPattern.find((pattern) => req.url().match(pattern)) ||
               rejectResourceTypes.includes(req.resourceType())
@@ -173,15 +169,13 @@ export default class ChromiumContentPostRoute extends BrowserHTTPRoute {
               runForkInServer(Effect.logDebug(`Aborting request ${req.method()}: ${req.url()}`));
               return req.abort();
             }
-            const interceptor = requestInterceptors.find((r) =>
-              req.url().match(r.pattern),
-            );
+            const interceptor = requestInterceptors.find((r) => req.url().match(r.pattern));
             if (interceptor) {
               return req.respond({
                 ...interceptor.response,
                 body: interceptor.response.body
                   ? isBase64Encoded(interceptor.response.body as string)
-                    ? Buffer.from(interceptor.response.body, 'base64')
+                    ? Buffer.from(interceptor.response.body, "base64")
                     : interceptor.response.body
                   : undefined,
               });
@@ -207,9 +201,7 @@ export default class ChromiumContentPostRoute extends BrowserHTTPRoute {
         }
 
         if (waitForTimeout) {
-          yield* Effect.promise(() =>
-            sleep(waitForTimeout).catch(bestAttemptCatch(bestAttempt)),
-          );
+          yield* Effect.promise(() => sleep(waitForTimeout).catch(bestAttemptCatch(bestAttempt)));
         }
 
         if (waitForFunction) {
@@ -234,11 +226,11 @@ export default class ChromiumContentPostRoute extends BrowserHTTPRoute {
         }
 
         const headers = {
-          'X-Response-Code': gotoResponse?.status(),
-          'X-Response-IP': gotoResponse?.remoteAddress().ip,
-          'X-Response-Port': gotoResponse?.remoteAddress().port,
-          'X-Response-Status': gotoResponse?.statusText(),
-          'X-Response-URL': gotoResponse?.url().substring(0, 1000),
+          "X-Response-Code": gotoResponse?.status(),
+          "X-Response-IP": gotoResponse?.remoteAddress().ip,
+          "X-Response-Port": gotoResponse?.remoteAddress().port,
+          "X-Response-Status": gotoResponse?.statusText(),
+          "X-Response-URL": gotoResponse?.url().substring(0, 1000),
         };
 
         for (const [key, value] of Object.entries(headers)) {
@@ -251,7 +243,7 @@ export default class ChromiumContentPostRoute extends BrowserHTTPRoute {
 
         page.close().catch(noop);
 
-        yield* Effect.logInfo('Content API request completed');
+        yield* Effect.logInfo("Content API request completed");
 
         return writeResponse(res, 200, markup, contentTypes.html);
       })(),

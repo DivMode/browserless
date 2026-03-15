@@ -6,9 +6,9 @@
  * to one side — matching how a real wrist/elbow pivot creates a smooth arc.
  * Resampled with easeOutQuad and power-scale point count from Camoufox.
  */
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import { calculatePointsInCurve } from './human-cursor/bezier-calculator.js';
+import { exec } from "child_process";
+import { promisify } from "util";
+import { calculatePointsInCurve } from "./human-cursor/bezier-calculator.js";
 
 const execAsync = promisify(exec);
 
@@ -21,7 +21,7 @@ const execAsync = promisify(exec);
  */
 const CHROME_TOOLBAR_OFFSET = 85;
 
-import type { CdpSessionId } from './cloudflare-detection.js';
+import type { CdpSessionId } from "./cloudflare-detection.js";
 
 type Point = [number, number];
 type Vector = { x: number; y: number };
@@ -55,7 +55,11 @@ export function generatePath(
   options?: { moveSpeed?: number },
 ): Point[] {
   const distance = Math.hypot(endX - startX, endY - startY);
-  if (distance < 1) return [[startX, startY], [endX, endY]];
+  if (distance < 1)
+    return [
+      [startX, startY],
+      [endX, endY],
+    ];
 
   // Unit direction and perpendicular vectors
   const ux = (endX - startX) / distance;
@@ -68,8 +72,8 @@ export function generatePath(
   const arcSign = Math.random() < 0.5 ? 1 : -1;
 
   // Randomize knot positions — not fixed 1/3, 2/3
-  const t1 = 0.2 + Math.random() * 0.15;  // 20-35% along path
-  const t2 = 0.6 + Math.random() * 0.2;   // 60-80% along path
+  const t1 = 0.2 + Math.random() * 0.15; // 20-35% along path
+  const t2 = 0.6 + Math.random() * 0.2; // 60-80% along path
 
   // Front knot arcs more (0.8-1.2x), back knot flattens (0.4-0.7x)
   const knot1: Vector = {
@@ -83,12 +87,7 @@ export function generatePath(
 
   // Raw cubic Bezier (4 control points)
   const numRaw = Math.max(30, Math.min(200, Math.floor(distance * 0.5)));
-  const controlPoints: Vector[] = [
-    { x: startX, y: startY },
-    knot1,
-    knot2,
-    { x: endX, y: endY },
-  ];
+  const controlPoints: Vector[] = [{ x: startX, y: startY }, knot1, knot2, { x: endX, y: endY }];
   const rawPoints = calculatePointsInCurve(numRaw, controlPoints);
 
   // Gaussian distortion on both axes (60% of interior points, stddev=1.5px)
@@ -110,20 +109,14 @@ export function generatePath(
 
   // Camoufox formula: arcLength^0.25 * 8, clamped [2, 60], scaled by speed
   const speed = options?.moveSpeed ?? 1.0;
-  const n = Math.min(
-    60,
-    Math.max(2, Math.round(Math.pow(arcLength, 0.25) * 8 / speed)),
-  );
+  const n = Math.min(60, Math.max(2, Math.round((Math.pow(arcLength, 0.25) * 8) / speed)));
 
   // Resample with easeOutQuad — pick existing points at eased indices
   const result: Point[] = [];
   for (let i = 0; i < n; i++) {
     const t = n > 1 ? i / (n - 1) : 0;
     const easedT = easeOutQuad(t);
-    const index = Math.min(
-      Math.floor(easedT * (distorted.length - 1)),
-      distorted.length - 1,
-    );
+    const index = Math.min(Math.floor(easedT * (distorted.length - 1)), distorted.length - 1);
     result.push([distorted[index].x, distorted[index].y]);
   }
 
@@ -172,12 +165,16 @@ export async function simulateHumanPresence(
         segDur *= rand(0.7, 1.3);
         await sleep(Math.max(20, segDur * 1000));
       }
-      await sendCommand('Input.dispatchMouseEvent', {
-        type: 'mouseMoved',
-        x: Math.round(driftPath[i][0]),
-        y: Math.round(driftPath[i][1]),
-        button: 'none',
-      }, cdpSessionId);
+      await sendCommand(
+        "Input.dispatchMouseEvent",
+        {
+          type: "mouseMoved",
+          x: Math.round(driftPath[i][0]),
+          y: Math.round(driftPath[i][1]),
+          button: "none",
+        },
+        cdpSessionId,
+      );
     }
 
     currentX = targetX;
@@ -185,32 +182,48 @@ export async function simulateHumanPresence(
 
     // 30% chance of scroll
     if (Math.random() < 0.3) {
-      await sendCommand('Input.dispatchMouseEvent', {
-        type: 'mouseWheel',
-        x: Math.round(currentX),
-        y: Math.round(currentY),
-        deltaX: 0,
-        deltaY: randInt(-80, 80),
-        button: 'none',
-      }, cdpSessionId);
+      await sendCommand(
+        "Input.dispatchMouseEvent",
+        {
+          type: "mouseWheel",
+          x: Math.round(currentX),
+          y: Math.round(currentY),
+          deltaX: 0,
+          deltaY: randInt(-80, 80),
+          button: "none",
+        },
+        cdpSessionId,
+      );
     }
 
     // 40% chance of idle keypress
     if (Math.random() < 0.4) {
       const keys = [
-        { key: 'Tab', code: 'Tab', keyCode: 9 },
-        { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
-        { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
+        { key: "Tab", code: "Tab", keyCode: 9 },
+        { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
+        { key: "ArrowUp", code: "ArrowUp", keyCode: 38 },
       ];
       const chosen = keys[Math.floor(Math.random() * keys.length)];
-      await sendCommand('Input.dispatchKeyEvent', {
-        type: 'keyDown', key: chosen.key, code: chosen.code,
-        windowsVirtualKeyCode: chosen.keyCode,
-      }, cdpSessionId).catch(() => {});
+      await sendCommand(
+        "Input.dispatchKeyEvent",
+        {
+          type: "keyDown",
+          key: chosen.key,
+          code: chosen.code,
+          windowsVirtualKeyCode: chosen.keyCode,
+        },
+        cdpSessionId,
+      ).catch(() => {});
       await sleep(rand(50, 120));
-      await sendCommand('Input.dispatchKeyEvent', {
-        type: 'keyUp', key: chosen.key, code: chosen.code,
-      }, cdpSessionId).catch(() => {});
+      await sendCommand(
+        "Input.dispatchKeyEvent",
+        {
+          type: "keyUp",
+          key: chosen.key,
+          code: chosen.code,
+        },
+        cdpSessionId,
+      ).catch(() => {});
     }
 
     // Pause between waypoints
@@ -246,18 +259,23 @@ export async function humanizeMouseToTarget(
   const path = generatePath(startX, startY, targetX, targetY);
 
   for (let i = 0; i < path.length; i++) {
-    await sendCommand('Input.dispatchMouseEvent', {
-      type: 'mouseMoved',
-      x: Math.round(path[i][0]),
-      y: Math.round(path[i][1]),
-      button: 'none',
-    }, sessionId);
+    await sendCommand(
+      "Input.dispatchMouseEvent",
+      {
+        type: "mouseMoved",
+        x: Math.round(path[i][0]),
+        y: Math.round(path[i][1]),
+        button: "none",
+      },
+      sessionId,
+    );
 
     // Human-like timing: 5-15ms between moves, slower near target
     if (i < path.length - 1) {
-      const delay = i >= path.length - 3
-        ? 15 + Math.random() * 25  // decelerate near target
-        : 5 + Math.random() * 10;
+      const delay =
+        i >= path.length - 3
+          ? 15 + Math.random() * 25 // decelerate near target
+          : 5 + Math.random() * 10;
       await sleep(delay);
     }
   }
@@ -276,7 +294,7 @@ export async function xdotoolPresence(
   durationMs: number = 2000,
   chromePid?: number,
 ): Promise<boolean> {
-  if (process.platform !== 'linux' || !process.env.DISPLAY) return false;
+  if (process.platform !== "linux" || !process.env.DISPLAY) return false;
 
   try {
     const windowId = await findChromeWindow(chromePid);
@@ -294,7 +312,9 @@ export async function xdotoolPresence(
     let curY = CHROME_TOOLBAR_OFFSET + 150 + Math.random() * 500;
 
     // Move to initial position
-    await execAsync(`xdotool mousemove --window ${windowId} ${Math.round(curX)} ${Math.round(curY)}`);
+    await execAsync(
+      `xdotool mousemove --window ${windowId} ${Math.round(curX)} ${Math.round(curY)}`,
+    );
 
     // Random drifts until duration elapsed
     while (Date.now() - startTime < durationMs) {
@@ -308,14 +328,14 @@ export async function xdotoolPresence(
         const px = Math.round(path[i][0]);
         const py = Math.round(path[i][1]);
         await execAsync(`xdotool mousemove --window ${windowId} ${px} ${py}`);
-        await new Promise(r => setTimeout(r, 40 + Math.random() * 60));
+        await new Promise((r) => setTimeout(r, 40 + Math.random() * 60));
       }
 
       curX = destX;
       curY = destY;
 
       // Pause between drifts
-      await new Promise(r => setTimeout(r, 200 + Math.random() * 400));
+      await new Promise((r) => setTimeout(r, 200 + Math.random() * 400));
     }
 
     return true;
@@ -342,31 +362,29 @@ async function findChromeWindow(chromePid?: number): Promise<string> {
     if (chromePid) {
       const { stdout } = await execAsync(
         `xdotool search --pid ${chromePid} --name "" 2>/dev/null`,
-      ).catch(() => ({ stdout: '' }));
-      ids = stdout.trim().split('\n').filter(Boolean);
+      ).catch(() => ({ stdout: "" }));
+      ids = stdout.trim().split("\n").filter(Boolean);
     }
 
     // Strategy 2: search by name (fallback — matches any Chrome)
     if (ids.length === 0) {
-      const { stdout } = await execAsync(
-        `xdotool search --name "Chrom" 2>/dev/null`,
-      );
-      ids = stdout.trim().split('\n').filter(Boolean);
+      const { stdout } = await execAsync(`xdotool search --name "Chrom" 2>/dev/null`);
+      ids = stdout.trim().split("\n").filter(Boolean);
     }
 
-    if (ids.length === 0) return '';
+    if (ids.length === 0) return "";
     if (ids.length === 1) return ids[0];
 
     // Find the largest window (actual browser, not clipboard helper)
-    let bestId = '';
+    let bestId = "";
     let bestArea = 0;
     for (const id of ids) {
       try {
         const { stdout: geo } = await execAsync(
           `xdotool getwindowgeometry --shell ${id} 2>/dev/null`,
         );
-        const w = parseInt(geo.match(/WIDTH=(\d+)/)?.[1] || '0');
-        const h = parseInt(geo.match(/HEIGHT=(\d+)/)?.[1] || '0');
+        const w = parseInt(geo.match(/WIDTH=(\d+)/)?.[1] || "0");
+        const h = parseInt(geo.match(/HEIGHT=(\d+)/)?.[1] || "0");
         const area = w * h;
         if (area > bestArea) {
           bestArea = area;
@@ -378,7 +396,7 @@ async function findChromeWindow(chromePid?: number): Promise<string> {
     }
     return bestId;
   } catch {
-    return '';
+    return "";
   }
 }
 
@@ -400,7 +418,7 @@ export async function xdotoolClick(
   toolbarOffset?: number,
   chromePid?: number,
 ): Promise<boolean> {
-  if (process.platform !== 'linux' || !process.env.DISPLAY) return false;
+  if (process.platform !== "linux" || !process.env.DISPLAY) return false;
 
   try {
     const windowId = await findChromeWindow(chromePid);
@@ -424,7 +442,10 @@ export async function xdotoolClick(
     const angle = Math.random() * 2 * Math.PI;
     const dist = 80 + Math.random() * 120;
     const startX = Math.max(10, Math.min(1900, targetX + Math.cos(angle) * dist));
-    const startY = Math.max(CHROME_TOOLBAR_OFFSET + 10, Math.min(1060, targetY + Math.sin(angle) * dist));
+    const startY = Math.max(
+      CHROME_TOOLBAR_OFFSET + 10,
+      Math.min(1060, targetY + Math.sin(angle) * dist),
+    );
 
     // Generate a human-like Bezier path from start to target
     const path = generatePath(startX, startY, targetX, targetY);
@@ -442,14 +463,15 @@ export async function xdotoolClick(
       const py = Math.round(sampled[i][1]);
       await execAsync(`xdotool mousemove --window ${windowId} ${px} ${py}`);
       // Human-like timing: 15-40ms between moves, slower near target
-      const delay = i >= sampled.length - 3
-        ? 30 + Math.random() * 50  // decelerate near target
-        : 15 + Math.random() * 25;
-      await new Promise(r => setTimeout(r, delay));
+      const delay =
+        i >= sampled.length - 3
+          ? 30 + Math.random() * 50 // decelerate near target
+          : 15 + Math.random() * 25;
+      await new Promise((r) => setTimeout(r, delay));
     }
 
     // Decision pause before click (humans pause 100-300ms before clicking)
-    await new Promise(r => setTimeout(r, 100 + Math.random() * 200));
+    await new Promise((r) => setTimeout(r, 100 + Math.random() * 200));
 
     // Click WITHOUT --window flag. This is critical:
     // - `xdotool click --window WINID` checks XGetInputFocus to decide method.
@@ -463,7 +485,7 @@ export async function xdotoolClick(
     await execAsync(`xdotool click 1`);
 
     // Post-click dwell: tiny micro-movements then drift away
-    await new Promise(r => setTimeout(r, 80 + Math.random() * 120));
+    await new Promise((r) => setTimeout(r, 80 + Math.random() * 120));
     const driftX = Math.round(targetX + (Math.random() * 30 - 15));
     const driftY = Math.round(targetY + (Math.random() * 20 - 10));
     await execAsync(`xdotool mousemove --window ${windowId} ${driftX} ${driftY}`);

@@ -11,12 +11,17 @@
  *
  * Deadline is baked in at construction — no unbounded await possible.
  */
-import { Deferred, Duration, Effect, Option } from 'effect';
-import type { CloudflareResult } from '../../shared/cloudflare-detection.js';
+import { Deferred, Duration, Effect, Option } from "effect";
+import type { CloudflareResult } from "../../shared/cloudflare-detection.js";
 
 export type ResolvedOutcome =
-  | { readonly _tag: 'solved'; readonly result: CloudflareResult }
-  | { readonly _tag: 'failed'; readonly reason: string; readonly duration_ms: number; readonly phase_label?: string };
+  | { readonly _tag: "solved"; readonly result: CloudflareResult }
+  | {
+      readonly _tag: "failed";
+      readonly reason: string;
+      readonly duration_ms: number;
+      readonly phase_label?: string;
+    };
 
 export class Resolution {
   /** True after onSettle callback has emitted the marker. Consumer checks this to skip duplicate emission. */
@@ -29,12 +34,15 @@ export class Resolution {
   ) {}
 
   /** Create a new Resolution gate. One per detection lifecycle. */
-  static make(deadline: Duration.Input = '60 seconds'): Effect.Effect<Resolution> {
+  static make(deadline: Duration.Input = "60 seconds"): Effect.Effect<Resolution> {
     return Effect.map(Deferred.make<ResolvedOutcome>(), (d) => new Resolution(d, deadline));
   }
 
   /** Sync factory for imperative contexts (e.g. ActiveDetection creation). */
-  static makeUnsafe(deadline: Duration.Input = '60 seconds', onSettle?: (outcome: ResolvedOutcome) => void): Resolution {
+  static makeUnsafe(
+    deadline: Duration.Input = "60 seconds",
+    onSettle?: (outcome: ResolvedOutcome) => void,
+  ): Resolution {
     return new Resolution(Deferred.makeUnsafe<ResolvedOutcome>(), deadline, onSettle);
   }
 
@@ -45,16 +53,13 @@ export class Resolution {
    * synchronously so the marker timestamp matches settlement — not consumer wake.
    */
   solve(result: CloudflareResult): Effect.Effect<boolean> {
-    return Effect.tap(
-      Deferred.succeed(this.deferred, { _tag: 'solved', result }),
-      (won) => {
-        if (won && this.onSettle && !this.markerEmitted) {
-          this.markerEmitted = true;
-          this.onSettle({ _tag: 'solved', result });
-        }
-        return Effect.void;
-      },
-    );
+    return Effect.tap(Deferred.succeed(this.deferred, { _tag: "solved", result }), (won) => {
+      if (won && this.onSettle && !this.markerEmitted) {
+        this.markerEmitted = true;
+        this.onSettle({ _tag: "solved", result });
+      }
+      return Effect.void;
+    });
   }
 
   /**
@@ -65,11 +70,11 @@ export class Resolution {
    */
   fail(reason: string, duration_ms: number, phase_label?: string): Effect.Effect<boolean> {
     return Effect.tap(
-      Deferred.succeed(this.deferred, { _tag: 'failed', reason, duration_ms, phase_label }),
+      Deferred.succeed(this.deferred, { _tag: "failed", reason, duration_ms, phase_label }),
       (won) => {
         if (won && this.onSettle && !this.markerEmitted) {
           this.markerEmitted = true;
-          this.onSettle({ _tag: 'failed', reason, duration_ms, phase_label });
+          this.onSettle({ _tag: "failed", reason, duration_ms, phase_label });
         }
         return Effect.void;
       },

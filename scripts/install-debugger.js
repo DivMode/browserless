@@ -1,18 +1,18 @@
 /* global fetch, console, process */
-import { Readable } from 'stream';
-import { existsSync } from 'fs';
-import { join } from 'path';
-import os from 'os';
+import { Readable } from "stream";
+import { existsSync } from "fs";
+import { join } from "path";
+import os from "os";
 
-import { deleteAsync } from 'del';
-import gunzip from 'gunzip-maybe';
-import { cp } from 'fs/promises';
-import tar from 'tar-fs';
+import { deleteAsync } from "del";
+import gunzip from "gunzip-maybe";
+import { cp } from "fs/promises";
+import tar from "tar-fs";
 
-const registryURL = 'https://registry.npmjs.org/@browserless.io/debugger/';
-const tmp = join(os.tmpdir(), 'browserless-debugger');
-const untarDir = join(tmp, 'package', 'static');
-const debuggerDir = join(process.cwd(), 'static', 'debugger');
+const registryURL = "https://registry.npmjs.org/@browserless.io/debugger/";
+const tmp = join(os.tmpdir(), "browserless-debugger");
+const untarDir = join(tmp, "package", "static");
+const debuggerDir = join(process.cwd(), "static", "debugger");
 
 const lastFromArr = (arr) => arr[arr.length - 1];
 const dlAndExtract = (url) =>
@@ -23,8 +23,8 @@ const dlAndExtract = (url) =>
         Readable.fromWeb(response.body)
           .pipe(gunzip())
           .pipe(tar.extract(tmp))
-          .on('error', reject)
-          .on('finish', resolve);
+          .on("error", reject)
+          .on("finish", resolve);
       }),
   );
 

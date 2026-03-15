@@ -14,10 +14,10 @@
  *
  * Layer type: Layer.Layer<never> — fully satisfied, merges into any composition.
  */
-import { Layer, References } from 'effect';
-import { Otlp, OtlpSerialization } from 'effect/unstable/observability';
-import { FetchHttpClient } from 'effect/unstable/http';
-import { collectingTracerLayer } from './testing/span-collector.js';
+import { Layer, References } from "effect";
+import { Otlp, OtlpSerialization } from "effect/unstable/observability";
+import { FetchHttpClient } from "effect/unstable/http";
+import { collectingTracerLayer } from "./testing/span-collector.js";
 
 const grafanaEndpoint = process.env.GRAFANA_CLOUD_OTLP_ENDPOINT;
 const grafanaAuth = process.env.GRAFANA_CLOUD_OTLP_AUTH_HEADER;
@@ -27,15 +27,15 @@ const testCollect = !!process.env.TEST_TRACE_COLLECT;
 const endpoint = grafanaEndpoint || alloyEndpoint;
 
 const resource = {
-  serviceName: process.env.OTEL_SERVICE_NAME ?? 'browserless',
+  serviceName: process.env.OTEL_SERVICE_NAME ?? "browserless",
   attributes: {
-    'deployment.environment': process.env.OTEL_DEPLOYMENT_ENVIRONMENT ?? 'production',
+    "deployment.environment": process.env.OTEL_DEPLOYMENT_ENVIRONMENT ?? "production",
   },
 };
 
 // Production (with endpoint): ship Info and above. Debug/Trace filtered at fiber level.
 // Local dev (no endpoint): no OTLP shipping, console only.
-const logLevelLayer = Layer.succeed(References.MinimumLogLevel, 'Info');
+const logLevelLayer = Layer.succeed(References.MinimumLogLevel, "Info");
 
 export const OtelLayer: Layer.Layer<never> = endpoint
   ? Otlp.layer({

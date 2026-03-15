@@ -1,6 +1,6 @@
-import { Config, fetchTimeout, noop } from '@browserless.io/browserless';
-import { Effect } from 'effect';
-import { EventEmitter } from 'events';
+import { Config, fetchTimeout, noop } from "@browserless.io/browserless";
+import { Effect } from "effect";
+import { EventEmitter } from "events";
 
 export class WebHooks extends EventEmitter {
   constructor(protected config: Config) {
@@ -10,7 +10,7 @@ export class WebHooks extends EventEmitter {
   protected callURL(url: string | null) {
     if (url) {
       return fetchTimeout(url, {
-        method: 'GET',
+        method: "GET",
         timeout: 10000,
       }).catch(noop);
     }
@@ -19,11 +19,11 @@ export class WebHooks extends EventEmitter {
   }
 
   protected callURLEffect(url: string | null) {
-    return Effect.fn('webhooks.callURL')(function* () {
+    return Effect.fn("webhooks.callURL")(function* () {
       if (url) {
-        yield* Effect.tryPromise(() =>
-          fetchTimeout(url, { method: 'GET', timeout: 10000 }),
-        ).pipe(Effect.ignore);
+        yield* Effect.tryPromise(() => fetchTimeout(url, { method: "GET", timeout: 10000 })).pipe(
+          Effect.ignore,
+        );
       }
     })();
   }
@@ -52,8 +52,8 @@ export class WebHooks extends EventEmitter {
     const url = this.config.getErrorAlertURL();
 
     try {
-      const fullURL = new URL(url ?? '');
-      fullURL?.searchParams.set('error', message);
+      const fullURL = new URL(url ?? "");
+      fullURL?.searchParams.set("error", message);
       return this.callURL(fullURL.href);
     } catch (err) {
       return console.error(
@@ -80,11 +80,11 @@ export class WebHooks extends EventEmitter {
 
   public callErrorAlertURLEffect(message: string) {
     const webhooks = this;
-    return Effect.fn('webhooks.callErrorAlertURL')(function* () {
+    return Effect.fn("webhooks.callErrorAlertURL")(function* () {
       const url = webhooks.config.getErrorAlertURL();
       try {
-        const fullURL = new URL(url ?? '');
-        fullURL.searchParams.set('error', message);
+        const fullURL = new URL(url ?? "");
+        fullURL.searchParams.set("error", message);
         yield* webhooks.callURLEffect(fullURL.href);
       } catch (err) {
         yield* Effect.logError(

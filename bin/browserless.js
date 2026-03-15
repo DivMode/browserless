@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /* eslint-disable no-undef */
-'use strict';
+"use strict";
 import {
   Browserless,
   buildTypeScript,
@@ -11,65 +11,65 @@ import {
   installDependencies,
   normalizeFileProtocol,
   prompt,
-} from '@browserless.io/browserless';
-import { readFile, writeFile } from 'fs/promises';
+} from "@browserless.io/browserless";
+import { readFile, writeFile } from "fs/promises";
 
-import debug from 'debug';
-import { fileURLToPath } from 'url';
-import fs from 'fs/promises';
-import path from 'path';
+import debug from "debug";
+import { fileURLToPath } from "url";
+import fs from "fs/promises";
+import path from "path";
 
-import { buildDockerImage } from '../build/sdk-utils.js';
-import buildOpenAPI from '../scripts/build-open-api.js';
-import buildSchemas from '../scripts/build-schemas.js';
-import { dedent } from '../build/utils.js';
+import { buildDockerImage } from "../build/sdk-utils.js";
+import buildOpenAPI from "../scripts/build-open-api.js";
+import buildSchemas from "../scripts/build-schemas.js";
+import { dedent } from "../build/utils.js";
 
-if (typeof process.env.DEBUG === 'undefined') {
-  debug.enable('browserless*');
+if (typeof process.env.DEBUG === "undefined") {
+  debug.enable("browserless*");
 }
 
 process
-  .on('unhandledRejection', async (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  .on("unhandledRejection", async (reason, promise) => {
+    console.error("Unhandled Rejection at:", promise, "reason:", reason);
   })
-  .once('uncaughtException', async (err, origin) => {
-    console.error('Unhandled exception at:', origin, 'error:', err);
+  .once("uncaughtException", async (err, origin) => {
+    console.error("Unhandled exception at:", origin, "error:", err);
     process.exit(1);
   })
-  .once('SIGTERM', async () => {
+  .once("SIGTERM", async () => {
     console.debug(`SIGTERM received, saving and closing down`);
     process.exit(0);
   })
-  .once('SIGINT', async () => {
+  .once("SIGINT", async () => {
     console.debug(`SIGINT received, saving and closing down`);
     process.exit(0);
   })
-  .once('SIGHUP', async () => {
+  .once("SIGHUP", async () => {
     console.debug(`SIGHUP received, saving and closing down`);
     process.exit(0);
   })
-  .once('SIGUSR2', async () => {
+  .once("SIGUSR2", async () => {
     console.debug(`SIGUSR2 received, saving and closing down`);
     process.exit(0);
   })
-  .once('exit', (c) => {
+  .once("exit", (c) => {
     console.debug(`Process finished with code ${c}, exiting`);
     process.exit(c);
   });
 
-const log = debug('browserless.io:sdk:log');
+const log = debug("browserless.io:sdk:log");
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const cmd = process.argv[2] ?? 'help';
+const cmd = process.argv[2] ?? "help";
 const subCMD = process.argv[3];
 const allowedCMDs = [
-  'build',
-  'dev',
-  'docker',
-  'start',
-  'create',
-  'help',
-  'clean',
-  'install-browsers',
+  "build",
+  "dev",
+  "docker",
+  "start",
+  "create",
+  "help",
+  "clean",
+  "install-browsers",
 ];
 
 if (!allowedCMDs.includes(cmd)) {
@@ -79,51 +79,44 @@ if (!allowedCMDs.includes(cmd)) {
 }
 
 const projectDir = process.cwd();
-const buildDir = 'build';
-const srcDir = 'src';
+const buildDir = "build";
+const srcDir = "src";
 const compiledDir = path.join(projectDir, buildDir);
 
-const projectPackageJSON = readFile(path.join(projectDir, 'package.json'))
+const projectPackageJSON = readFile(path.join(projectDir, "package.json"))
   .then((r) => JSON.parse(r.toString()))
   .catch(() => null);
 
-const browserlessPackageJSON = readFile(
-  path.join(__dirname, '..', 'package.json'),
-).then((r) => JSON.parse(r.toString()));
+const browserlessPackageJSON = readFile(path.join(__dirname, "..", "package.json")).then((r) =>
+  JSON.parse(r.toString()),
+);
 
 const translateSrcToBuild = (directory) => {
-  const srcToBuild = directory.replace(srcDir, '');
+  const srcToBuild = directory.replace(srcDir, "");
   const pathParsed = path.parse(srcToBuild);
-  return path.format({ ...pathParsed, base: '', ext: '.js' });
+  return path.format({ ...pathParsed, base: "", ext: ".js" });
 };
 
 const importDefault = async (files, fileName) => {
   const pJSON = await projectPackageJSON;
   // Check first if overrides are manually specified in the project's package.json
-  if (pJSON && pJSON.browserless && typeof pJSON.browserless === 'object') {
+  if (pJSON && pJSON.browserless && typeof pJSON.browserless === "object") {
     const camelCaseFileName = camelCase(fileName);
     const relativePath = pJSON.browserless[camelCaseFileName];
     if (relativePath) {
-      const fullFilePath = path.join(
-        compiledDir,
-        translateSrcToBuild(relativePath),
-      );
+      const fullFilePath = path.join(compiledDir, translateSrcToBuild(relativePath));
       log(`Importing module from package.json: "${fullFilePath}"`);
       return (await import(fullFilePath)).default;
     }
   }
 
-  const classModuleFile = files.find((f) =>
-    path.parse(f).name.endsWith(fileName),
-  );
+  const classModuleFile = files.find((f) => path.parse(f).name.endsWith(fileName));
 
   if (!classModuleFile) {
     return;
   }
 
-  const fullFilePath = normalizeFileProtocol(
-    path.join(compiledDir, classModuleFile),
-  );
+  const fullFilePath = normalizeFileProtocol(path.join(compiledDir, classModuleFile));
 
   if (!classModuleFile) {
     return;
@@ -148,17 +141,16 @@ const build = async () => {
   await buildTypeScript(buildDir, projectDir);
 
   log(`Building custom routes`);
-  const { files, httpRoutes, webSocketRoutes } =
-    await getSourceFiles(projectDir);
+  const { files, httpRoutes, webSocketRoutes } = await getSourceFiles(projectDir);
 
   log(`Building route runtime schema validation`);
   await buildSchemas(
-    httpRoutes.map((f) => f.replace('.js', '.d.ts')),
-    webSocketRoutes.map((f) => f.replace('.js', '.d.ts')),
+    httpRoutes.map((f) => f.replace(".js", ".d.ts")),
+    webSocketRoutes.map((f) => f.replace(".js", ".d.ts")),
   );
 
   log(`Generating OpenAPI JSON file`);
-  const disabledRoutes = await importDefault(files, 'disabled-routes');
+  const disabledRoutes = await importDefault(files, "disabled-routes");
   await buildOpenAPI(httpRoutes, webSocketRoutes, disabledRoutes);
 
   log(`All built assets complete`);
@@ -170,7 +162,7 @@ const build = async () => {
   };
 };
 
-const isConstructor = (reference) => typeof reference === 'function';
+const isConstructor = (reference) => typeof reference === "function";
 
 const start = async (dev = false) => {
   const { httpRoutes, webSocketRoutes, files } = dev
@@ -193,18 +185,18 @@ const start = async (dev = false) => {
     disabledRoutes,
     Hooks,
   ] = await Promise.all([
-    importDefault(files, 'browser-manager'),
-    importDefault(files, 'config'),
-    importDefault(files, 'file-system'),
-    importDefault(files, 'limiter'),
-    importDefault(files, 'logger'),
-    importDefault(files, 'metrics'),
-    importDefault(files, 'monitoring'),
-    importDefault(files, 'router'),
-    importDefault(files, 'token'),
-    importDefault(files, 'webhooks'),
-    importDefault(files, 'disabled-routes'),
-    importDefault(files, 'hooks'),
+    importDefault(files, "browser-manager"),
+    importDefault(files, "config"),
+    importDefault(files, "file-system"),
+    importDefault(files, "limiter"),
+    importDefault(files, "logger"),
+    importDefault(files, "metrics"),
+    importDefault(files, "monitoring"),
+    importDefault(files, "router"),
+    importDefault(files, "token"),
+    importDefault(files, "webhooks"),
+    importDefault(files, "disabled-routes"),
+    importDefault(files, "hooks"),
   ]);
 
   log(`Starting Browserless`);
@@ -217,18 +209,12 @@ const start = async (dev = false) => {
   const browserManager = isConstructor(BrowserManager)
     ? new BrowserManager(config)
     : BrowserManager;
-  const monitoring = isConstructor(Monitoring)
-    ? new Monitoring(config)
-    : Monitoring;
-  const fileSystem = isConstructor(FileSystem)
-    ? new FileSystem(config)
-    : FileSystem;
+  const monitoring = isConstructor(Monitoring) ? new Monitoring(config) : Monitoring;
+  const fileSystem = isConstructor(FileSystem) ? new FileSystem(config) : FileSystem;
   const limiter = isConstructor(Limiter)
     ? new Limiter(config, metrics, monitoring, webhooks)
     : Limiter;
-  const router = isConstructor(Router)
-    ? new Router(config, browserManager, limiter)
-    : Router;
+  const router = isConstructor(Router) ? new Router(config, browserManager, limiter) : Router;
 
   const browserless = new Browserless({
     Logger,
@@ -244,7 +230,7 @@ const start = async (dev = false) => {
     webhooks,
   });
 
-  browserless.setStaticSDKDir(path.join(projectDir, 'static'));
+  browserless.setStaticSDKDir(path.join(projectDir, "static"));
 
   if (disabledRoutes !== undefined) {
     if (!Array.isArray(disabledRoutes)) {
@@ -263,35 +249,35 @@ const start = async (dev = false) => {
 
   log(`Binding signal interruption handlers and uncaught errors`);
   process
-    .on('unhandledRejection', async (reason, promise) => {
-      console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    .on("unhandledRejection", async (reason, promise) => {
+      console.error("Unhandled Rejection at:", promise, "reason:", reason);
     })
-    .once('uncaughtException', async (err, origin) => {
-      console.error('Unhandled exception at:', origin, 'error:', err);
+    .once("uncaughtException", async (err, origin) => {
+      console.error("Unhandled exception at:", origin, "error:", err);
       await browserless.stop();
       process.exit(1);
     })
-    .once('SIGTERM', async () => {
+    .once("SIGTERM", async () => {
       debug(`SIGTERM received, saving and closing down`);
       await browserless.stop();
       process.exit(0);
     })
-    .once('SIGINT', async () => {
+    .once("SIGINT", async () => {
       debug(`SIGINT received, saving and closing down`);
       await browserless.stop();
       process.exit(0);
     })
-    .once('SIGHUP', async () => {
+    .once("SIGHUP", async () => {
       debug(`SIGHUP received, saving and closing down`);
       await browserless.stop();
       process.exit(0);
     })
-    .once('SIGUSR2', async () => {
+    .once("SIGUSR2", async () => {
       debug(`SIGUSR2 received, saving and closing down`);
       await browserless.stop();
       process.exit(0);
     })
-    .once('exit', (c) => {
+    .once("exit", (c) => {
       console.debug(`Process finished with code ${c}, exiting`);
       process.exit(c);
     });
@@ -299,13 +285,13 @@ const start = async (dev = false) => {
 
 const buildDocker = async () => {
   const { version } = await browserlessPackageJSON;
-  const finalDockerPath = path.join(compiledDir, 'Dockerfile');
+  const finalDockerPath = path.join(compiledDir, "Dockerfile");
   const argSwitches = getArgSwitches();
 
   await build();
 
   const dockerContents = (
-    await fs.readFile(path.join(__dirname, '..', 'docker', 'sdk', 'Dockerfile'))
+    await fs.readFile(path.join(__dirname, "..", "docker", "sdk", "Dockerfile"))
   ).toString();
 
   log(`Generating Dockerfile at "${finalDockerPath}"`);
@@ -315,36 +301,31 @@ const buildDocker = async () => {
   const from =
     argSwitches.from ||
     (await prompt(
-      'Which docker image do you want to use (defaults to: ghcr.io/browserless/multi)?',
+      "Which docker image do you want to use (defaults to: ghcr.io/browserless/multi)?",
     )) ||
     `ghcr.io/browserless/multi:v${version}`;
 
   const action =
     argSwitches.action ||
-    (await prompt(
-      'Do you want to push the image or load it locally (defaults to load)?',
-    )) ||
-    'load';
+    (await prompt("Do you want to push the image or load it locally (defaults to load)?")) ||
+    "load";
 
   const tag =
     argSwitches.tag ||
-    (await prompt(
-      'What do you want to name the resulting image (eg, my-browserless:latest)?',
-    ));
+    (await prompt("What do you want to name the resulting image (eg, my-browserless:latest)?"));
 
-  if (!tag || !tag.includes(':')) {
+  if (!tag || !tag.includes(":")) {
     throw new Error(`A name for the image is required with a ":" and version.`);
   }
 
   const platformsPrompt =
-    action === 'load'
+    action === "load"
       ? `Which platform do you want to build for (defaults to linux/amd64)?`
       : `Which platforms do you want to build? (defaults to "linux/amd64", must be comma-separated)?`;
 
-  const platforms =
-    argSwitches.platform || (await prompt(platformsPrompt)) || 'linux/amd64';
+  const platforms = argSwitches.platform || (await prompt(platformsPrompt)) || "linux/amd64";
 
-  if (action === 'load' && platforms.includes(',')) {
+  if (action === "load" && platforms.includes(",")) {
     throw new Error(
       `When "load" is specified, only one platform can be built due to limitations in buildx.`,
     );
@@ -353,11 +334,9 @@ const buildDocker = async () => {
   const cmd = `docker buildx build --build-arg FROM=${from} --platform ${platforms} --${action} -f ./build/Dockerfile -t ${tag} .`;
 
   const proceed =
-    argSwitches.proceed ||
-    (await prompt(`Will execute "${cmd}" Proceed (y/n)?`)) ||
-    'n';
+    argSwitches.proceed || (await prompt(`Will execute "${cmd}" Proceed (y/n)?`)) || "n";
 
-  if (proceed || !proceed.includes('n')) {
+  if (proceed || !proceed.includes("n")) {
     log(`Starting docker build`);
     await buildDockerImage(cmd, projectDir);
     process.exit(0);
@@ -370,10 +349,8 @@ const installBrowser = async () => {
 
 const create = async () => {
   const validNameRegex = /^[a-zA-Z0-9-_]+$/gi;
-  const directory = (
-    await prompt('What should we name this project (hyphens are ok)?')
-  ).trim();
-  const scaffoldLocation = path.join(__dirname, 'scaffold');
+  const directory = (await prompt("What should we name this project (hyphens are ok)?")).trim();
+  const scaffoldLocation = path.join(__dirname, "scaffold");
 
   if (!directory) {
     throw new Error(`A valid name is required.`);
@@ -394,13 +371,10 @@ const create = async () => {
   for (const sdkFile of sdkFiles) {
     const from = path.join(scaffoldLocation, sdkFile);
     const to = path.join(installPath, sdkFile);
-    if (sdkFile === 'package.json') {
+    if (sdkFile === "package.json") {
       const sdkPackageJSONTemplate = (await readFile(from)).toString();
       const { version } = await browserlessPackageJSON;
-      const sdkPackageJSON = sdkPackageJSONTemplate.replace(
-        '${BROWSERLESS_VERSION}',
-        version,
-      );
+      const sdkPackageJSON = sdkPackageJSONTemplate.replace("${BROWSERLESS_VERSION}", version);
       await writeFile(to, sdkPackageJSON);
     } else if ((await fs.lstat(from)).isDirectory()) {
       await fs.mkdir(to);
@@ -425,7 +399,7 @@ const help = async () => {
     }
 
     switch (subCMD) {
-      case 'start':
+      case "start":
         console.log(dedent`
         Usage: npx @browserless.io/browserless start
 
@@ -435,7 +409,7 @@ const help = async () => {
       `);
         break;
 
-      case 'clean':
+      case "clean":
         console.log(dedent`
         Usage: npx @browserless.io/browserless clean
 
@@ -444,7 +418,7 @@ const help = async () => {
       `);
         break;
 
-      case 'dev':
+      case "dev":
         console.log(dedent`
         Usage: npx @browserless.io/browserless dev
 
@@ -454,7 +428,7 @@ const help = async () => {
       `);
         break;
 
-      case 'build':
+      case "build":
         console.log(dedent`
         Usage: npx @browserless.io/browserless build
 
@@ -464,7 +438,7 @@ const help = async () => {
       `);
         break;
 
-      case 'install-browsers':
+      case "install-browsers":
         console.log(dedent`
         Usage: npx @browserless.io/browserless install-browsers
 
@@ -472,7 +446,7 @@ const help = async () => {
       `);
         break;
 
-      case 'docker':
+      case "docker":
         console.log(dedent`
         Usage: npx @browserless.io/browserless docker
 
@@ -488,7 +462,7 @@ const help = async () => {
       `);
         break;
 
-      case 'create':
+      case "create":
         console.log(dedent`
         Usage: npx @browserless.io/browserless create
 
@@ -515,31 +489,31 @@ const help = async () => {
 };
 
 switch (cmd) {
-  case 'clean':
+  case "clean":
     clean();
     break;
 
-  case 'start':
+  case "start":
     start(false);
     break;
 
-  case 'dev':
+  case "dev":
     start(true);
     break;
 
-  case 'build':
+  case "build":
     build();
     break;
 
-  case 'docker':
+  case "docker":
     buildDocker();
     break;
 
-  case 'create':
+  case "create":
     create();
     break;
 
-  case 'install-browsers':
+  case "install-browsers":
     installBrowser();
     break;
 

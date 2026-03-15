@@ -1,5 +1,5 @@
-import * as http from 'http';
-import * as stream from 'stream';
+import * as http from "http";
+import * as stream from "stream";
 import {
   APITags,
   Browserless,
@@ -15,20 +15,11 @@ import {
   WebKitPlaywright,
   WebsocketRoutes,
   contentTypes,
-} from '@browserless.io/browserless';
-import type { VideoManager } from './video/video-manager.js';
-import {
-  HTTPRequest,
-  Page,
-  ResponseForRequest,
-  ScreenshotOptions,
-} from 'puppeteer-core';
+} from "@browserless.io/browserless";
+import type { VideoManager } from "./video/video-manager.js";
+import { HTTPRequest, Page, ResponseForRequest, ScreenshotOptions } from "puppeteer-core";
 
-export type PathTypes =
-  | HTTPRoutes
-  | WebsocketRoutes
-  | HTTPManagementRoutes
-  | string;
+export type PathTypes = HTTPRoutes | WebsocketRoutes | HTTPManagementRoutes | string;
 
 export interface BeforeRequest {
   head?: Buffer;
@@ -40,7 +31,7 @@ export interface BeforeRequest {
 export interface AfterResponse {
   req: Request;
   start: number;
-  status: 'successful' | 'error' | 'timedout';
+  status: "successful" | "error" | "timedout";
   error?: Error;
 }
 
@@ -77,10 +68,10 @@ export type BrowserInstance =
 
 export interface BrowserJSON {
   Browser: string;
-  'Protocol-Version': string;
-  'User-Agent': string;
-  'V8-Version': string;
-  'WebKit-Version': string;
+  "Protocol-Version": string;
+  "User-Agent": string;
+  "V8-Version": string;
+  "WebKit-Version": string;
 }
 
 /**
@@ -96,13 +87,13 @@ abstract class Route {
   protected _videoManager?: VideoManager;
 
   constructor(
-    protected _browserManager: Browserless['browserManager'],
-    protected _config: Browserless['config'],
-    protected _fileSystem: Browserless['fileSystem'],
-    protected _metrics: Browserless['metrics'],
-    protected _monitoring: Browserless['monitoring'],
-    protected _staticSDKDir: Browserless['staticSDKDir'],
-    protected _limiter: Browserless['limiter'],
+    protected _browserManager: Browserless["browserManager"],
+    protected _config: Browserless["config"],
+    protected _fileSystem: Browserless["fileSystem"],
+    protected _metrics: Browserless["metrics"],
+    protected _monitoring: Browserless["monitoring"],
+    protected _staticSDKDir: Browserless["staticSDKDir"],
+    protected _limiter: Browserless["limiter"],
   ) {}
 
   /**
@@ -264,10 +255,7 @@ export abstract class HTTPRoute extends BasicHTTPRoute {
   /**
    * Handles an inbound HTTP request, and supplies the Request and Response objects from node's HTTP request event
    */
-  abstract handler(
-    req: Request,
-    res: http.ServerResponse,
-  ): Promise<unknown>;
+  abstract handler(req: Request, res: http.ServerResponse): Promise<unknown>;
 }
 
 /**
@@ -307,20 +295,12 @@ export abstract class WebSocketRoute extends Route {
   /**
    * Handles an inbound Websocket request, and handles the connection
    */
-  abstract handler(
-    req: Request,
-    socket: stream.Duplex,
-    head: Buffer,
-  ): Promise<unknown>;
+  abstract handler(req: Request, socket: stream.Duplex, head: Buffer): Promise<unknown>;
 
   /**
    * Handles an inbound HTTP request, and supplies the Request and Response objects from node's HTTP request event
    */
-  before?: (
-    req: Request,
-    socket: stream.Duplex,
-    head: Buffer,
-  ) => Promise<boolean>;
+  before?: (req: Request, socket: stream.Duplex, head: Buffer) => Promise<boolean>;
 }
 
 /**
@@ -353,11 +333,7 @@ export abstract class BrowserWebsocketRoute extends Route {
   /**
    * Handles an inbound HTTP request, and supplies the Request and Response objects from node's HTTP request event
    */
-  before?: (
-    req: Request,
-    socket: stream.Duplex,
-    head: Buffer,
-  ) => Promise<boolean>;
+  before?: (req: Request, socket: stream.Duplex, head: Buffer) => Promise<boolean>;
 }
 
 interface BrowserlessLaunch {
@@ -376,7 +352,7 @@ export interface CDPLaunchOptions extends BrowserlessLaunch {
   };
   devtools?: boolean;
   dumpio?: boolean;
-  headless?: boolean | 'shell';
+  headless?: boolean | "shell";
   ignoreDefaultArgs?: boolean | string[];
   /** @deprecated use acceptInsecureCerts field instead */
   ignoreHTTPSErrors?: boolean;
@@ -443,7 +419,7 @@ export interface BrowserlessSessionJSON {
   startedOn: number;
   timeAliveMs: number;
   trackingId?: string;
-  type: 'browser' | 'page';
+  type: "browser" | "page";
   userDataDir: string | null;
 }
 
@@ -520,10 +496,10 @@ export interface InBoundRequest {
 }
 
 export const debugScreenshotOpts: ScreenshotOptions = {
-  encoding: 'base64',
+  encoding: "base64",
   fullPage: true,
   quality: 20,
-  type: 'jpeg',
+  type: "jpeg",
 };
 
 /**
@@ -543,7 +519,7 @@ export type setJavaScriptEnabled = boolean;
  * Internally we do this with the following: `req.url().match(pattern)`.
  */
 export type rejectRequestPattern = string;
-export type rejectResourceTypes = ReturnType<HTTPRequest['resourceType']>;
+export type rejectResourceTypes = ReturnType<HTTPRequest["resourceType"]>;
 
 /**
  * An array of patterns (using `req.url().match(r.pattern)` to match) and their
@@ -555,7 +531,7 @@ export type requestInterceptors = {
    * corresponding responses to use in order to fulfill those requests.
    */
   pattern: string;
-  response: Partial<Omit<ResponseForRequest, 'body'>> & {
+  response: Partial<Omit<ResponseForRequest, "body">> & {
     /**
      * A string representation of the body to return. Can be a base64-encoded
      * string but please omit any leading content-type data (eg "data:image/png;base64,").
@@ -660,91 +636,90 @@ export interface CDPJSONPayload {
 }
 
 export const BrowserlessChromeRoutes = {
-  ChromeBrowserWebSocketRoute: 'ChromeBrowserWebSocketRoute',
-  ChromeCDPWebSocketRoute: 'ChromeCDPWebSocketRoute',
-  ChromeContentPostRoute: 'ChromeContentPostRoute',
-  ChromeDownloadPostRoute: 'ChromeDownloadPostRoute',
-  ChromeFunctionConnectWebSocketRoute: 'ChromeFunctionConnectWebSocketRoute',
-  ChromeFunctionPostRoute: 'ChromeFunctionPostRoute',
-  ChromeJSONListGetRoute: 'ChromeJSONListGetRoute',
-  ChromeJSONNewPutRoute: 'ChromeJSONNewPutRoute',
-  ChromeJSONProtocolGetRoute: 'ChromeJSONProtocolGetRoute',
-  ChromeJSONVersionGetRoute: 'ChromeJSONVersionGetRoute',
-  ChromePDFPostRoute: 'ChromePDFPostRoute',
-  ChromePageWebSocketRoute: 'ChromePageWebSocketRoute',
-  ChromePerformancePostRoute: 'ChromePerformancePostRoute',
-  ChromePlaywrightWebSocketRoute: 'ChromePlaywrightWebSocketRoute',
-  ChromeScrapePostRoute: 'ChromeScrapePostRoute',
-  ChromeScreenshotPostRoute: 'ChromeScreenshotPostRoute',
+  ChromeBrowserWebSocketRoute: "ChromeBrowserWebSocketRoute",
+  ChromeCDPWebSocketRoute: "ChromeCDPWebSocketRoute",
+  ChromeContentPostRoute: "ChromeContentPostRoute",
+  ChromeDownloadPostRoute: "ChromeDownloadPostRoute",
+  ChromeFunctionConnectWebSocketRoute: "ChromeFunctionConnectWebSocketRoute",
+  ChromeFunctionPostRoute: "ChromeFunctionPostRoute",
+  ChromeJSONListGetRoute: "ChromeJSONListGetRoute",
+  ChromeJSONNewPutRoute: "ChromeJSONNewPutRoute",
+  ChromeJSONProtocolGetRoute: "ChromeJSONProtocolGetRoute",
+  ChromeJSONVersionGetRoute: "ChromeJSONVersionGetRoute",
+  ChromePDFPostRoute: "ChromePDFPostRoute",
+  ChromePageWebSocketRoute: "ChromePageWebSocketRoute",
+  ChromePerformancePostRoute: "ChromePerformancePostRoute",
+  ChromePlaywrightWebSocketRoute: "ChromePlaywrightWebSocketRoute",
+  ChromeScrapePostRoute: "ChromeScrapePostRoute",
+  ChromeScreenshotPostRoute: "ChromeScreenshotPostRoute",
 };
 
 export const BrowserlessEdgeRoutes = {
-  EdgeBrowserWebSocketRoute: 'EdgeBrowserWebSocketRoute',
-  EdgeCDPWebSocketRoute: 'EdgeCDPWebSocketRoute',
-  EdgeContentPostRoute: 'EdgeContentPostRoute',
-  EdgeDownloadPostRoute: 'EdgeDownloadPostRoute',
-  EdgeFunctionConnectWebSocketRoute: 'EdgeFunctionConnectWebSocketRoute',
-  EdgeFunctionPostRoute: 'EdgeFunctionPostRoute',
-  EdgeJSONListGetRoute: 'EdgeJSONListGetRoute',
-  EdgeJSONNewPutRoute: 'EdgeJSONNewPutRoute',
-  EdgeJSONProtocolGetRoute: 'EdgeJSONProtocolGetRoute',
-  EdgeJSONVersionGetRoute: 'EdgeJSONVersionGetRoute',
-  EdgePDFPostRoute: 'EdgePDFPostRoute',
-  EdgePageWebSocketRoute: 'EdgePageWebSocketRoute',
-  EdgePerformancePostRoute: 'EdgePerformancePostRoute',
-  EdgePlaywrightWebSocketRoute: 'EdgePlaywrightWebSocketRoute',
-  EdgeScrapePostRoute: 'EdgeScrapePostRoute',
-  EdgeScreenshotPostRoute: 'EdgeScreenshotPostRoute',
+  EdgeBrowserWebSocketRoute: "EdgeBrowserWebSocketRoute",
+  EdgeCDPWebSocketRoute: "EdgeCDPWebSocketRoute",
+  EdgeContentPostRoute: "EdgeContentPostRoute",
+  EdgeDownloadPostRoute: "EdgeDownloadPostRoute",
+  EdgeFunctionConnectWebSocketRoute: "EdgeFunctionConnectWebSocketRoute",
+  EdgeFunctionPostRoute: "EdgeFunctionPostRoute",
+  EdgeJSONListGetRoute: "EdgeJSONListGetRoute",
+  EdgeJSONNewPutRoute: "EdgeJSONNewPutRoute",
+  EdgeJSONProtocolGetRoute: "EdgeJSONProtocolGetRoute",
+  EdgeJSONVersionGetRoute: "EdgeJSONVersionGetRoute",
+  EdgePDFPostRoute: "EdgePDFPostRoute",
+  EdgePageWebSocketRoute: "EdgePageWebSocketRoute",
+  EdgePerformancePostRoute: "EdgePerformancePostRoute",
+  EdgePlaywrightWebSocketRoute: "EdgePlaywrightWebSocketRoute",
+  EdgeScrapePostRoute: "EdgeScrapePostRoute",
+  EdgeScreenshotPostRoute: "EdgeScreenshotPostRoute",
 };
 
 export const BrowserlessChromiumRoutes = {
-  ChromiumBrowserWebSocketRoute: 'ChromiumBrowserWebSocketRoute',
-  ChromiumCDPWebSocketRoute: 'ChromiumCDPWebSocketRoute',
-  ChromiumContentPostRoute: 'ChromiumContentPostRoute',
-  ChromiumDownloadPostRoute: 'ChromiumDownloadPostRoute',
-  ChromiumFunctionConnectWebSocketRoute:
-    'ChromiumFunctionConnectWebSocketRoute',
-  ChromiumFunctionPostRoute: 'ChromiumFunctionPostRoute',
-  ChromiumJSONListGetRoute: 'ChromiumJSONListGetRoute',
-  ChromiumJSONNewPutRoute: 'ChromiumJSONNewPutRoute',
-  ChromiumJSONProtocolGetRoute: 'ChromiumJSONProtocolGetRoute',
-  ChromiumJSONVersionGetRoute: 'ChromiumJSONVersionGetRoute',
-  ChromiumPDFPostRoute: 'ChromiumPDFPostRoute',
-  ChromiumPageWebSocketRoute: 'ChromiumPageWebSocketRoute',
-  ChromiumPerformancePostRoute: 'ChromiumPerformancePostRoute',
-  ChromiumPlaywrightWebSocketRoute: 'ChromiumPlaywrightWebSocketRoute',
-  ChromiumScrapePostRoute: 'ChromiumScrapePostRoute',
-  ChromiumScreenshotPostRoute: 'ChromiumScreenshotPostRoute',
+  ChromiumBrowserWebSocketRoute: "ChromiumBrowserWebSocketRoute",
+  ChromiumCDPWebSocketRoute: "ChromiumCDPWebSocketRoute",
+  ChromiumContentPostRoute: "ChromiumContentPostRoute",
+  ChromiumDownloadPostRoute: "ChromiumDownloadPostRoute",
+  ChromiumFunctionConnectWebSocketRoute: "ChromiumFunctionConnectWebSocketRoute",
+  ChromiumFunctionPostRoute: "ChromiumFunctionPostRoute",
+  ChromiumJSONListGetRoute: "ChromiumJSONListGetRoute",
+  ChromiumJSONNewPutRoute: "ChromiumJSONNewPutRoute",
+  ChromiumJSONProtocolGetRoute: "ChromiumJSONProtocolGetRoute",
+  ChromiumJSONVersionGetRoute: "ChromiumJSONVersionGetRoute",
+  ChromiumPDFPostRoute: "ChromiumPDFPostRoute",
+  ChromiumPageWebSocketRoute: "ChromiumPageWebSocketRoute",
+  ChromiumPerformancePostRoute: "ChromiumPerformancePostRoute",
+  ChromiumPlaywrightWebSocketRoute: "ChromiumPlaywrightWebSocketRoute",
+  ChromiumScrapePostRoute: "ChromiumScrapePostRoute",
+  ChromiumScreenshotPostRoute: "ChromiumScreenshotPostRoute",
 };
 
 export const BrowserlessFirefoxRoutes = {
-  FirefoxPlaywrightWebSocketRoute: 'FirefoxPlaywrightWebSocketRoute',
+  FirefoxPlaywrightWebSocketRoute: "FirefoxPlaywrightWebSocketRoute",
 };
 
 export const BrowserlessWebKitRoutes = {
-  WebKitPlaywrightWebSocketRoute: 'WebKitPlaywrightWebSocketRoute',
+  WebKitPlaywrightWebSocketRoute: "WebKitPlaywrightWebSocketRoute",
 };
 
 export const BrowserlessManagementRoutes = {
-  ActiveGetRoute: 'ActiveGetRoute',
-  ConfigGetRoute: 'ConfigGetRoute',
-  KillGetRoute: 'KillGetRoute',
-  MetaGetRoute: 'MetaGetRoute',
-  MetricsGetRoute: 'MetricsGetRoute',
-  MetricsTotalGetRoute: 'MetricsTotalGetRoute',
-  PressureGetRoute: 'PressureGetRoute',
-  ReplayDataDeleteRoute: 'ReplayDataDeleteRoute',
-  ReplayDataGetRoute: 'ReplayDataGetRoute',
-  ReplayGetRoute: 'ReplayGetRoute',
-  ReplayMetadataGetRoute: 'ReplayMetadataGetRoute',
-  VideoDeleteRoute: 'VideoDeleteRoute',
-  VideoGetRoute: 'VideoGetRoute',
-  VideoStatusGetRoute: 'VideoStatusGetRoute',
-  VideoHlsGetRoute: 'VideoHlsGetRoute',
-  ReplaysGetRoute: 'ReplaysGetRoute',
-  CfSolvedPostRoute: 'CfSolvedPostRoute',
-  SessionsGetRoute: 'SessionsGetRoute',
-  StaticGetRoute: 'StaticGetRoute',
+  ActiveGetRoute: "ActiveGetRoute",
+  ConfigGetRoute: "ConfigGetRoute",
+  KillGetRoute: "KillGetRoute",
+  MetaGetRoute: "MetaGetRoute",
+  MetricsGetRoute: "MetricsGetRoute",
+  MetricsTotalGetRoute: "MetricsTotalGetRoute",
+  PressureGetRoute: "PressureGetRoute",
+  ReplayDataDeleteRoute: "ReplayDataDeleteRoute",
+  ReplayDataGetRoute: "ReplayDataGetRoute",
+  ReplayGetRoute: "ReplayGetRoute",
+  ReplayMetadataGetRoute: "ReplayMetadataGetRoute",
+  VideoDeleteRoute: "VideoDeleteRoute",
+  VideoGetRoute: "VideoGetRoute",
+  VideoStatusGetRoute: "VideoStatusGetRoute",
+  VideoHlsGetRoute: "VideoHlsGetRoute",
+  ReplaysGetRoute: "ReplaysGetRoute",
+  CfSolvedPostRoute: "CfSolvedPostRoute",
+  SessionsGetRoute: "SessionsGetRoute",
+  StaticGetRoute: "StaticGetRoute",
 };
 
 export const BrowserlessRoutes = {

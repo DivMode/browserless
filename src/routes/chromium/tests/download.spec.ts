@@ -1,7 +1,7 @@
-import { Browserless, Config, Metrics } from '@browserless.io/browserless';
-import { expect } from 'chai';
+import { Browserless, Config, Metrics } from "@browserless.io/browserless";
+import { expect } from "chai";
 
-describe('/chromium/download API', function () {
+describe("/chromium/download API", function () {
   let browserless: Browserless;
 
   const start = ({
@@ -16,13 +16,13 @@ describe('/chromium/download API', function () {
     await browserless.stop();
   });
 
-  it('allows requests', async () => {
+  it("allows requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
-    await fetch('http://localhost:3000/chromium/download?token=browserless', {
+    await fetch("http://localhost:3000/chromium/download?token=browserless", {
       body: `export default async ({ page }) => {
         await page.evaluate(() => {
           const txtContent = "data:text/plain;charset=utf-8,Hello world!";
@@ -37,20 +37,20 @@ describe('/chromium/download API', function () {
         await new Promise(r => setTimeout(r, 1000));
       }`,
       headers: {
-        'content-type': 'application/javascript',
+        "content-type": "application/javascript",
       },
-      method: 'POST',
+      method: "POST",
     }).then(async (res) => {
       expect(res.status).to.equal(200);
-      expect(res.headers.get('content-type')).to.equal('text/plain');
-      expect(await res.text()).to.equal('Hello world!');
+      expect(res.headers.get("content-type")).to.equal("text/plain");
+      expect(await res.text()).to.equal("Hello world!");
     });
   });
 
-  it('allows requests without token when auth token is not set', async () => {
+  it("allows requests without token when auth token is not set", async () => {
     await start();
 
-    await fetch('http://localhost:3000/chromium/download', {
+    await fetch("http://localhost:3000/chromium/download", {
       body: `export default async ({ page }) => {
         await page.evaluate(() => {
           const txtContent = "data:text/plain;charset=utf-8,Hello world!";
@@ -65,13 +65,13 @@ describe('/chromium/download API', function () {
         await new Promise(r => setTimeout(r, 1000));
       }`,
       headers: {
-        'content-type': 'application/javascript',
+        "content-type": "application/javascript",
       },
-      method: 'POST',
+      method: "POST",
     }).then(async (res) => {
       expect(res.status).to.equal(200);
-      expect(res.headers.get('content-type')).to.equal('text/plain');
-      expect(await res.text()).to.equal('Hello world!');
+      expect(res.headers.get("content-type")).to.equal("text/plain");
+      expect(await res.text()).to.equal("Hello world!");
     });
   });
 });

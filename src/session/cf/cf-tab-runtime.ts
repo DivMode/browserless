@@ -8,8 +8,8 @@
  * State is GC'd when the TabRuntime entry is deleted from the map —
  * no manual per-field cleanup needed.
  */
-import type { CdpSessionId, TargetId } from '../../shared/cloudflare-detection.js';
-import { TabSolverState } from './cf-tab-state.js';
+import type { CdpSessionId, TargetId } from "../../shared/cloudflare-detection.js";
+import { TabSolverState } from "./cf-tab-state.js";
 
 /** Per-tab state container. */
 export interface TabRuntime {

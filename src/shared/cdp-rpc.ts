@@ -19,11 +19,11 @@
  *   // Promise bridge (for imperative callers):
  *   const result = await conn.sendPromise('DOM.getDocument', { depth: -1 });
  */
-import { Effect } from 'effect';
-import type WebSocket from 'ws';
-import { CdpSessionGone, CdpTimeout } from '../session/cf/cf-errors.js';
+import { Effect } from "effect";
+import type WebSocket from "ws";
+import { CdpSessionGone, CdpTimeout } from "../session/cf/cf-errors.js";
 export type { CdpSessionGone, CdpTimeout };
-import { CdpSessionId } from './cloudflare-detection.js';
+import { CdpSessionId } from "./cloudflare-detection.js";
 
 // ═══════════════════════════════════════════════════════════════════════
 // Types
@@ -82,10 +82,14 @@ export class CdpConnection {
   ): Effect.Effect<any, CdpSessionGone | CdpTimeout> {
     return Effect.callback<any, CdpSessionGone | CdpTimeout>((resume) => {
       if (this.disposed || this.ws.readyState !== 1 /* OPEN */) {
-        resume(Effect.fail(new CdpSessionGone({
-          sessionId: sessionId ?? (CdpSessionId.makeUnsafe('')),
-          method,
-        })));
+        resume(
+          Effect.fail(
+            new CdpSessionGone({
+              sessionId: sessionId ?? CdpSessionId.makeUnsafe(""),
+              method,
+            }),
+          ),
+        );
         return;
       }
 
@@ -110,10 +114,14 @@ export class CdpConnection {
       } catch {
         this.pending.delete(id);
         clearTimeout(timer);
-        resume(Effect.fail(new CdpSessionGone({
-          sessionId: sessionId ?? (CdpSessionId.makeUnsafe('')),
-          method,
-        })));
+        resume(
+          Effect.fail(
+            new CdpSessionGone({
+              sessionId: sessionId ?? CdpSessionId.makeUnsafe(""),
+              method,
+            }),
+          ),
+        );
       }
 
       // Interruption cleanup: if the fiber is interrupted, remove the pending entry
@@ -141,10 +149,10 @@ export class CdpConnection {
   ): Promise<any> {
     return Effect.runPromise(
       this.send(method, params, sessionId, timeoutMs).pipe(
-        Effect.catchTag('CdpTimeout', (e) =>
+        Effect.catchTag("CdpTimeout", (e) =>
           Effect.fail(new Error(`CDP command ${e.method} timed out after ${e.timeoutMs}ms`)),
         ),
-        Effect.catchTag('CdpSessionGone', (e) =>
+        Effect.catchTag("CdpSessionGone", (e) =>
           Effect.fail(new Error(`CDP session gone during ${e.method} (session=${e.sessionId})`)),
         ),
       ),
@@ -167,10 +175,14 @@ export class CdpConnection {
     this.pending.delete(msg.id);
 
     if (msg.error) {
-      entry.resume(Effect.fail(new CdpSessionGone({
-        sessionId: CdpSessionId.makeUnsafe(''),
-        method: `response:${msg.id}`,
-      })));
+      entry.resume(
+        Effect.fail(
+          new CdpSessionGone({
+            sessionId: CdpSessionId.makeUnsafe(""),
+            method: `response:${msg.id}`,
+          }),
+        ),
+      );
     } else {
       entry.resume(Effect.succeed(msg.result));
     }
@@ -181,13 +193,17 @@ export class CdpConnection {
    * Reject all pending commands (e.g. on WS close or session destroy).
    * Each pending command receives a CdpSessionGone error.
    */
-  drainPending(reason = 'connection closed'): void {
+  drainPending(reason = "connection closed"): void {
     for (const [, entry] of this.pending) {
       clearTimeout(entry.timer);
-      entry.resume(Effect.fail(new CdpSessionGone({
-        sessionId: CdpSessionId.makeUnsafe(''),
-        method: `drain:${reason}`,
-      })));
+      entry.resume(
+        Effect.fail(
+          new CdpSessionGone({
+            sessionId: CdpSessionId.makeUnsafe(""),
+            method: `drain:${reason}`,
+          }),
+        ),
+      );
     }
     this.pending.clear();
   }
@@ -199,7 +215,7 @@ export class CdpConnection {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.drainPending('disposed');
+    this.drainPending("disposed");
   }
 
   /** Number of commands awaiting responses. */

@@ -13,9 +13,9 @@
  *
  * - FrameParams: CDP Page.screencastFrame parameters.
  */
-import type { Effect } from 'effect';
-import { Schema, ServiceMap } from 'effect';
-import type { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
+import type { Effect } from "effect";
+import { Schema, ServiceMap } from "effect";
+import type { CdpSessionId, TargetId } from "../shared/cloudflare-detection.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -25,7 +25,11 @@ export interface FrameParams {
   sessionId: number;
 }
 
-export type SendCommand = (method: string, params: object, cdpSessionId?: string) => Promise<unknown>;
+export type SendCommand = (
+  method: string,
+  params: object,
+  cdpSessionId?: string,
+) => Promise<unknown>;
 
 // ─── VideoHooks ──────────────────────────────────────────────────────
 // The contract between session management and video capture.
@@ -36,7 +40,12 @@ export interface VideoHooks {
   /** Session initialized — WS connected, videosDir known */
   onInit(sessionId: string, sendCommand: SendCommand, videosDir: string): Promise<void>;
   /** New page target attached — start capturing frames for this target */
-  onTargetAttached(sessionId: string, sendCommand: SendCommand, cdpSessionId: string, targetId: string): Effect.Effect<void>;
+  onTargetAttached(
+    sessionId: string,
+    sendCommand: SendCommand,
+    cdpSessionId: string,
+    targetId: string,
+  ): Effect.Effect<void>;
   /** CDP Page.screencastFrame arrived — sync, hot path */
   onFrame(sessionId: string, cdpSessionId: string, params: FrameParams): void;
   /** Tab finalized — stop capture, return frame count */
@@ -47,10 +56,10 @@ export interface VideoHooks {
 
 // ─── Errors ──────────────────────────────────────────────────────────
 
-export class ScreencastError extends Schema.TaggedErrorClass<ScreencastError>()(
-  'ScreencastError',
-  { reason: Schema.String, cdpSessionId: Schema.String },
-) {}
+export class ScreencastError extends Schema.TaggedErrorClass<ScreencastError>()("ScreencastError", {
+  reason: Schema.String,
+  cdpSessionId: Schema.String,
+}) {}
 
 // ─── Service ─────────────────────────────────────────────────────────
 
@@ -67,12 +76,7 @@ export const ScreencastService = ServiceMap.Service<{
     params: FrameParams,
   ) => Effect.Effect<void>;
 
-  readonly stopTarget: (
-    sessionId: string,
-    cdpSessionId: string,
-  ) => Effect.Effect<number>;
+  readonly stopTarget: (sessionId: string, cdpSessionId: string) => Effect.Effect<number>;
 
-  readonly stopAll: (
-    sessionId: string,
-  ) => Effect.Effect<number>;
-}>('ScreencastService');
+  readonly stopAll: (sessionId: string) => Effect.Effect<number>;
+}>("ScreencastService");

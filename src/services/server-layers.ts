@@ -6,7 +6,7 @@
  *
  * Phase 1: purely additive — used by later phases to compose the server layer.
  */
-import { Effect, Layer } from 'effect';
+import { Effect, Layer } from "effect";
 
 import type {
   Config,
@@ -17,13 +17,13 @@ import type {
   Router,
   Token,
   WebHooks,
-} from '@browserless.io/browserless';
+} from "@browserless.io/browserless";
 
 import {
   BrowserManager as BrowserManagerClass,
   Limiter as LimiterClass,
   SessionRegistry as SessionRegistryClass,
-} from '@browserless.io/browserless';
+} from "@browserless.io/browserless";
 
 import {
   BrowserManagerService,
@@ -37,7 +37,7 @@ import {
   SessionRegistryService,
   TokenService,
   WebHooksService,
-} from './server-services.js';
+} from "./server-services.js";
 
 // ═══════════════════════════════════════════════════════════════════════
 // ConfigService Layer
@@ -118,8 +118,7 @@ export const monitoringFromInstance = (monitoring: Monitoring) =>
 
 export const tokenFromInstance = (token: Token) =>
   Layer.succeed(TokenService, {
-    isAuthorized: (req, route) =>
-      Effect.tryPromise(() => token.isAuthorized(req, route)),
+    isAuthorized: (req, route) => Effect.tryPromise(() => token.isAuthorized(req, route)),
   });
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -140,14 +139,10 @@ export const hooksFromInstance = (hooks: Hooks) =>
 
 export const webHooksFromInstance = (webhooks: WebHooks) =>
   Layer.succeed(WebHooksService, {
-    callFailedHealthURL: () =>
-      Effect.sync(() => webhooks.callFailedHealthURL() as Response | void),
-    callQueueAlertURL: () =>
-      Effect.sync(() => webhooks.callQueueAlertURL() as Response | void),
-    callRejectAlertURL: () =>
-      Effect.sync(() => webhooks.callRejectAlertURL() as Response | void),
-    callTimeoutAlertURL: () =>
-      Effect.sync(() => webhooks.callTimeoutAlertURL() as Response | void),
+    callFailedHealthURL: () => Effect.sync(() => webhooks.callFailedHealthURL() as Response | void),
+    callQueueAlertURL: () => Effect.sync(() => webhooks.callQueueAlertURL() as Response | void),
+    callRejectAlertURL: () => Effect.sync(() => webhooks.callRejectAlertURL() as Response | void),
+    callTimeoutAlertURL: () => Effect.sync(() => webhooks.callTimeoutAlertURL() as Response | void),
     callErrorAlertURL: (msg) =>
       Effect.sync(() => webhooks.callErrorAlertURL(msg) as Response | void),
   });
@@ -158,10 +153,8 @@ export const webHooksFromInstance = (webhooks: WebHooks) =>
 
 export const fileSystemFromInstance = (fs: FileSystem) =>
   Layer.succeed(FileSystemService, {
-    append: (path, content, encode) =>
-      Effect.tryPromise(() => fs.append(path, content, encode)),
-    read: (path, encoded) =>
-      Effect.tryPromise(() => fs.read(path, encoded)),
+    append: (path, content, encode) => Effect.tryPromise(() => fs.append(path, content, encode)),
+    read: (path, encoded) => Effect.tryPromise(() => fs.read(path, encoded)),
   });
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -199,18 +192,12 @@ export const browserManagerFromInstance = (manager: BrowserManagerClass) =>
       Effect.tryPromise(() => manager.getBrowserForRequest(req, route)),
     close: (browser, session, force) =>
       Effect.tryPromise(() => manager.close(browser, session, force)),
-    complete: (browser) =>
-      Effect.tryPromise(() => manager.complete(browser)),
-    killSessions: (target) =>
-      Effect.tryPromise(() => manager.killSessions(target)),
-    getAllSessions: (trackingId) =>
-      Effect.tryPromise(() => manager.getAllSessions(trackingId)),
-    getProtocolJSON: () =>
-      Effect.tryPromise(() => manager.getProtocolJSON()),
-    getVersionJSON: () =>
-      Effect.tryPromise(() => manager.getVersionJSON()),
-    getJSONList: () =>
-      Effect.tryPromise(() => manager.getJSONList()),
+    complete: (browser) => Effect.tryPromise(() => manager.complete(browser)),
+    killSessions: (target) => Effect.tryPromise(() => manager.killSessions(target)),
+    getAllSessions: (trackingId) => Effect.tryPromise(() => manager.getAllSessions(trackingId)),
+    getProtocolJSON: () => Effect.tryPromise(() => manager.getProtocolJSON()),
+    getVersionJSON: () => Effect.tryPromise(() => manager.getVersionJSON()),
+    getJSONList: () => Effect.tryPromise(() => manager.getJSONList()),
   });
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -221,11 +208,21 @@ export const limiterFromInstance = (limiter: LimiterClass) =>
   Layer.succeed(LimiterService, {
     limit: (limitFn, overCapacityFn, onTimeoutFn, timeoutOverrideFn) =>
       limiter.limit(limitFn, overCapacityFn, onTimeoutFn, timeoutOverrideFn),
-    get hasCapacity() { return limiter.hasCapacity; },
-    get executing() { return limiter.executing; },
-    get waiting() { return limiter.waiting; },
-    get willQueue() { return limiter.willQueue; },
-    get concurrencySize() { return limiter.concurrencySize; },
+    get hasCapacity() {
+      return limiter.hasCapacity;
+    },
+    get executing() {
+      return limiter.executing;
+    },
+    get waiting() {
+      return limiter.waiting;
+    },
+    get willQueue() {
+      return limiter.willQueue;
+    },
+    get concurrencySize() {
+      return limiter.concurrencySize;
+    },
   });
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -237,8 +234,7 @@ export const routerFromInstance = (router: Router) =>
     registerHTTPRoute: (route) => router.registerHTTPRoute(route),
     registerWebSocketRoute: (route) => router.registerWebSocketRoute(route),
     getStaticHandler: () => router.getStaticHandler(),
-    getRouteForHTTPRequest: (req) =>
-      Effect.tryPromise(() => router.getRouteForHTTPRequest(req)),
+    getRouteForHTTPRequest: (req) => Effect.tryPromise(() => router.getRouteForHTTPRequest(req)),
     getRouteForWebSocketRequest: (req) =>
       Effect.tryPromise(() => router.getRouteForWebSocketRequest(req)),
   });

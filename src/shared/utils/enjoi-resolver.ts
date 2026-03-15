@@ -2,21 +2,19 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-unused-expressions */
-import * as Bourne from '@hapi/bourne';
-import * as Hoek from '@hapi/hoek';
-import Joi from 'joi';
+import * as Bourne from "@hapi/bourne";
+import * as Hoek from "@hapi/hoek";
+import Joi from "joi";
 
 // Modern replacements for deprecated Node.js util functions
 const isArray = Array.isArray;
 const isObject = (value: any): value is object =>
-  value && typeof value === 'object' && value.constructor === Object;
-const isNumber = (value: any): value is number => typeof value === 'number';
+  value && typeof value === "object" && value.constructor === Object;
+const isNumber = (value: any): value is number => typeof value === "number";
 const isUndefined = (value: any): value is undefined => value === undefined;
 
 function randomString(length: number): string {
-  return Math.round(
-    Math.pow(36, length + 1) - Math.random() * Math.pow(36, length),
-  )
+  return Math.round(Math.pow(36, length + 1) - Math.random() * Math.pow(36, length))
     .toString(36)
     .slice(1);
 }
@@ -93,16 +91,13 @@ class SchemaResolver {
 
     this.joi = Joi.extend(
       {
-        type: 'object',
+        type: "object",
         base: Joi.object(),
         coerce: {
-          from: 'string',
+          from: "string",
           // @ts-ignore - Type compatibility issue with Joi coerce method
           method(value: any) {
-            if (
-              typeof value !== 'string' ||
-              (value[0] !== '{' && !/^\s*\{/.test(value))
-            ) {
+            if (typeof value !== "string" || (value[0] !== "{" && !/^\s*\{/.test(value))) {
               return;
             }
 
@@ -115,15 +110,12 @@ class SchemaResolver {
         },
       },
       {
-        type: 'array',
+        type: "array",
         base: Joi.array(),
         coerce: {
-          from: 'string',
+          from: "string",
           method(value: any) {
-            if (
-              typeof value !== 'string' ||
-              (value[0] !== '[' && !/^\s*\[/.test(value))
-            ) {
+            if (typeof value !== "string" || (value[0] !== "[" && !/^\s*\[/.test(value))) {
               return;
             }
             try {
@@ -145,30 +137,26 @@ class SchemaResolver {
     if (generatedId && ancestors.lastIndexOf(generatedId) > -1) {
       // resolve cyclic schema by using joi reference via generated unique ids
       return this.resolveLink(schema);
-    } else if (typeof schema === 'object') {
+    } else if (typeof schema === "object") {
       generatedId = randomString(10);
       this.walkedSchemas.set(schema, generatedId);
     }
 
-    if (typeof schema === 'string') {
+    if (typeof schema === "string") {
       // If schema is itself a string, interpret it as a type
       resolvedSchema = this.resolveType({ type: schema }, ancestors);
     } else if (schema.$ref) {
       resolvedSchema = this.resolve(
         this.resolveReference(schema.$ref),
-        ancestors.concat(generatedId || ''),
+        ancestors.concat(generatedId || ""),
       );
     } else {
       const partialSchemas: any[] = [];
       if (schema.type) {
-        partialSchemas.push(
-          this.resolveType(schema, ancestors.concat(generatedId || '')),
-        );
+        partialSchemas.push(this.resolveType(schema, ancestors.concat(generatedId || "")));
       } else if (schema.properties) {
         // if no type is specified, just properties
-        partialSchemas.push(
-          this.object(schema, ancestors.concat(generatedId || '')),
-        );
+        partialSchemas.push(this.object(schema, ancestors.concat(generatedId || "")));
       } else if (schema.format) {
         // if no type is specified, just format
         partialSchemas.push(this.string(schema));
@@ -177,24 +165,16 @@ class SchemaResolver {
         partialSchemas.push(this.joi.any().valid(...schema.enum));
       }
       if (schema.anyOf) {
-        partialSchemas.push(
-          this.resolveAnyOf(schema, ancestors.concat(generatedId || '')),
-        );
+        partialSchemas.push(this.resolveAnyOf(schema, ancestors.concat(generatedId || "")));
       }
       if (schema.allOf) {
-        partialSchemas.push(
-          this.resolveAllOf(schema, ancestors.concat(generatedId || '')),
-        );
+        partialSchemas.push(this.resolveAllOf(schema, ancestors.concat(generatedId || "")));
       }
       if (schema.oneOf) {
-        partialSchemas.push(
-          this.resolveOneOf(schema, ancestors.concat(generatedId || '')),
-        );
+        partialSchemas.push(this.resolveOneOf(schema, ancestors.concat(generatedId || "")));
       }
       if (schema.not) {
-        partialSchemas.push(
-          this.resolveNot(schema, ancestors.concat(generatedId || '')),
-        );
+        partialSchemas.push(this.resolveNot(schema, ancestors.concat(generatedId || "")));
       }
       if (partialSchemas.length === 0) {
         //Fall through to whatever.
@@ -209,7 +189,7 @@ class SchemaResolver {
       resolvedSchema =
         partialSchemas.length === 1
           ? partialSchemas[0]
-          : this.joi.alternatives(partialSchemas).match('all');
+          : this.joi.alternatives(partialSchemas).match("all");
     }
 
     if (generatedId) {
@@ -231,24 +211,23 @@ class SchemaResolver {
   resolveReference(value: string): any {
     let refschema: any;
 
-    const id = value.substr(0, value.indexOf('#') + 1);
-    const path = value.substr(value.indexOf('#') + 1);
+    const id = value.substr(0, value.indexOf("#") + 1);
+    const path = value.substr(value.indexOf("#") + 1);
 
     if (id && this.subSchemas) {
-      refschema =
-        this.subSchemas[id] || this.subSchemas[id.substr(0, id.length - 1)];
+      refschema = this.subSchemas[id] || this.subSchemas[id.substr(0, id.length - 1)];
     }
     if (!refschema) {
       refschema = this.root;
     }
 
-    Hoek.assert(refschema, 'Can not find schema reference: ' + value + '.');
+    Hoek.assert(refschema, "Can not find schema reference: " + value + ".");
 
     let fragment = refschema;
-    const paths = path.split('/');
+    const paths = path.split("/");
 
     for (let i = 1; i < paths.length && fragment; i++) {
-      fragment = typeof fragment === 'object' && fragment[paths[i]];
+      fragment = typeof fragment === "object" && fragment[paths[i]];
     }
 
     return fragment;
@@ -258,9 +237,9 @@ class SchemaResolver {
     let joischema: any;
 
     const typeDefinitionMap: Record<string, string> = {
-      description: 'description',
-      title: 'label',
-      default: 'default',
+      description: "description",
+      title: "label",
+      default: "default",
     };
 
     const joitype = (type: string, format?: string): any => {
@@ -271,30 +250,30 @@ class SchemaResolver {
       }
 
       switch (type) {
-        case 'array':
+        case "array":
           joischema = this.array(schema, ancestors);
           break;
-        case 'boolean':
+        case "boolean":
           joischema = this.joi.boolean();
           break;
-        case 'integer':
-        case 'number':
+        case "integer":
+        case "number":
           joischema = this.number(schema);
           break;
-        case 'object':
+        case "object":
           joischema = this.object(schema, ancestors);
           break;
-        case 'string':
+        case "string":
           joischema = this.string(schema);
           break;
-        case 'null':
+        case "null":
           joischema = this.joi.any().valid(null);
           break;
         default:
           joischema = this.joi.types()[type];
       }
 
-      Hoek.assert(joischema, 'Could not resolve type: ' + schema.type + '.');
+      Hoek.assert(joischema, "Could not resolve type: " + schema.type + ".");
 
       return this.strictMode === true ? joischema.strict(true) : joischema;
     };
@@ -321,45 +300,33 @@ class SchemaResolver {
   }
 
   resolveOneOf(schema: JSONSchema, ancestors: string[]): any {
-    Hoek.assert(isArray(schema.oneOf), 'Expected oneOf to be an array.');
+    Hoek.assert(isArray(schema.oneOf), "Expected oneOf to be an array.");
 
     return this.joi
-      .alternatives(
-        schema.oneOf!.map((subSchema: any) =>
-          this.resolve(subSchema, ancestors),
-        ),
-      )
-      .match('one');
+      .alternatives(schema.oneOf!.map((subSchema: any) => this.resolve(subSchema, ancestors)))
+      .match("one");
   }
 
   resolveAnyOf(schema: JSONSchema, ancestors: string[]): any {
-    Hoek.assert(isArray(schema.anyOf), 'Expected anyOf to be an array.');
+    Hoek.assert(isArray(schema.anyOf), "Expected anyOf to be an array.");
 
     return this.joi
-      .alternatives(
-        schema.anyOf!.map((subSchema: any) =>
-          this.resolve(subSchema, ancestors),
-        ),
-      )
-      .match('any');
+      .alternatives(schema.anyOf!.map((subSchema: any) => this.resolve(subSchema, ancestors)))
+      .match("any");
   }
 
   resolveAllOf(schema: JSONSchema, ancestors: string[]): any {
-    Hoek.assert(isArray(schema.allOf), 'Expected allOf to be an array.');
+    Hoek.assert(isArray(schema.allOf), "Expected allOf to be an array.");
 
     return this.joi
-      .alternatives(
-        schema.allOf!.map((subSchema: any) =>
-          this.resolve(subSchema, ancestors),
-        ),
-      )
-      .match('all');
+      .alternatives(schema.allOf!.map((subSchema: any) => this.resolve(subSchema, ancestors)))
+      .match("all");
   }
 
   resolveNot(schema: JSONSchema, ancestors: string[]): any {
-    Hoek.assert(isObject(schema.not), 'Expected Not to be an object.');
+    Hoek.assert(isObject(schema.not), "Expected Not to be an object.");
 
-    return this.joi.alternatives().conditional('.', {
+    return this.joi.alternatives().conditional(".", {
       not: this.resolve(schema.not, ancestors),
       then: this.joi.any(),
       otherwise: this.joi.any().forbidden(),
@@ -396,18 +363,13 @@ class SchemaResolver {
     let joischema = this.joi.object(resolveproperties());
 
     if (isObject(schema.additionalProperties)) {
-      joischema = joischema.pattern(
-        /^/,
-        this.resolve(schema.additionalProperties, ancestors),
-      );
+      joischema = joischema.pattern(/^/, this.resolve(schema.additionalProperties, ancestors));
     } else {
       joischema = joischema.unknown(schema.additionalProperties !== false);
     }
 
-    isNumber(schema.minProperties) &&
-      (joischema = joischema.min(schema.minProperties));
-    isNumber(schema.maxProperties) &&
-      (joischema = joischema.max(schema.maxProperties));
+    isNumber(schema.minProperties) && (joischema = joischema.min(schema.minProperties));
+    isNumber(schema.maxProperties) && (joischema = joischema.max(schema.maxProperties));
 
     return joischema;
   }
@@ -451,16 +413,14 @@ class SchemaResolver {
   number(schema: JSONSchema): any {
     let joischema = this.joi.number();
 
-    if (schema.type === 'integer') {
+    if (schema.type === "integer") {
       joischema = joischema.integer();
     }
 
     isNumber(schema.minimum) && (joischema = joischema.min(schema.minimum));
     isNumber(schema.maximum) && (joischema = joischema.max(schema.maximum));
-    isNumber(schema.exclusiveMinimum) &&
-      (joischema = joischema.greater(schema.exclusiveMinimum));
-    isNumber(schema.exclusiveMaximum) &&
-      (joischema = joischema.less(schema.exclusiveMaximum));
+    isNumber(schema.exclusiveMinimum) && (joischema = joischema.greater(schema.exclusiveMinimum));
+    isNumber(schema.exclusiveMaximum) && (joischema = joischema.less(schema.exclusiveMaximum));
     isNumber(schema.multipleOf) &&
       schema.multipleOf !== 0 &&
       (joischema = joischema.multiple(schema.multipleOf));
@@ -471,54 +431,48 @@ class SchemaResolver {
   string(schema: JSONSchema): any {
     let joischema = this.joi.string();
 
-    const dateRegex = '(\\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])';
+    const dateRegex = "(\\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])";
     const timeRegex =
-      '([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9]|60)(.[0-9]+)?(Z|(\\+|-)([01][0-9]|2[0-3]):([0-5][0-9]))';
-    const dateTimeRegex = dateRegex + 'T' + timeRegex;
+      "([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9]|60)(.[0-9]+)?(Z|(\\+|-)([01][0-9]|2[0-3]):([0-5][0-9]))";
+    const dateTimeRegex = dateRegex + "T" + timeRegex;
 
     if (schema.enum) {
       return this.joi.string().valid(...schema.enum);
     }
 
     switch (schema.format) {
-      case 'date':
+      case "date":
+        return joischema.regex(new RegExp("^" + dateRegex + "$", "i"), "JsonSchema date format");
+      case "time":
+        return joischema.regex(new RegExp("^" + timeRegex + "$", "i"), "JsonSchema time format");
+      case "date-time":
         return joischema.regex(
-          new RegExp('^' + dateRegex + '$', 'i'),
-          'JsonSchema date format',
+          new RegExp("^" + dateTimeRegex + "$", "i"),
+          "JsonSchema date-time format",
         );
-      case 'time':
-        return joischema.regex(
-          new RegExp('^' + timeRegex + '$', 'i'),
-          'JsonSchema time format',
-        );
-      case 'date-time':
-        return joischema.regex(
-          new RegExp('^' + dateTimeRegex + '$', 'i'),
-          'JsonSchema date-time format',
-        );
-      case 'binary':
+      case "binary":
         joischema = this.binary(schema);
         break;
-      case 'email':
+      case "email":
         return joischema.email();
-      case 'hostname':
+      case "hostname":
         return joischema.hostname();
-      case 'ipv4':
+      case "ipv4":
         return joischema.ip({
-          version: ['ipv4'],
+          version: ["ipv4"],
         });
-      case 'ipv6':
+      case "ipv6":
         return joischema.ip({
-          version: ['ipv6'],
+          version: ["ipv6"],
         });
-      case 'uri':
+      case "uri":
         return joischema.uri();
-      case 'byte':
+      case "byte":
         joischema = joischema.base64();
         break;
-      case 'uuid':
-        return joischema.guid({ version: ['uuidv4'] });
-      case 'guid':
+      case "uuid":
+        return joischema.guid({ version: ["uuidv4"] });
+      case "guid":
         return joischema.guid();
     }
     return this.regularString(schema, joischema);
@@ -530,10 +484,10 @@ class SchemaResolver {
     if (isUndefined(schema.minLength)) {
       schema.minLength = 0;
       if (!schema.pattern && !schema.format) {
-        joischema = joischema.allow('');
+        joischema = joischema.allow("");
       }
     } else if (schema.minLength === 0) {
-      joischema = joischema.allow('');
+      joischema = joischema.allow("");
     }
     isNumber(schema.minLength) && (joischema = joischema.min(schema.minLength));
     isNumber(schema.maxLength) && (joischema = joischema.max(schema.maxLength));

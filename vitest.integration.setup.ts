@@ -16,33 +16,39 @@
  * grabs port 3000 before our spawn. killByName() kills ALL matching processes
  * regardless of port binding state. See: 2026-03-04 zombie process incident.
  */
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { createWriteStream, existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-import { loadEnv } from 'vite';
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { createWriteStream, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { loadEnv } from "vite";
 
 // Load .env.{TEST_ENV} into process.env — globalSetup doesn't receive vitest's test.env
 // MUST use import.meta.dirname (not process.cwd()) — cwd may differ from project root
-const testEnvMode = process.env.TEST_ENV || 'dev';
-const envVars = loadEnv(testEnvMode, import.meta.dirname, '');
+const testEnvMode = process.env.TEST_ENV || "dev";
+const envVars = loadEnv(testEnvMode, import.meta.dirname, "");
 Object.assign(process.env, envVars);
 
-console.log(`[globalSetup] Loaded ${Object.keys(envVars).length} env vars from .env.${testEnvMode}`);
+console.log(
+  `[globalSetup] Loaded ${Object.keys(envVars).length} env vars from .env.${testEnvMode}`,
+);
 
 async function killPort(port: number): Promise<void> {
   try {
-    const stdout = execFileSync('lsof', ['-ti', `:${port}`], { encoding: 'utf-8' });
-    const pids = stdout.trim().split('\n').filter(Boolean);
+    const stdout = execFileSync("lsof", ["-ti", `:${port}`], { encoding: "utf-8" });
+    const pids = stdout.trim().split("\n").filter(Boolean);
     if (pids.length === 0) return;
-    console.log(`[globalSetup] Killing stale process(es) on port ${port}: ${pids.join(', ')}`);
+    console.log(`[globalSetup] Killing stale process(es) on port ${port}: ${pids.join(", ")}`);
     for (const pid of pids) {
-      process.kill(Number(pid), 'SIGTERM');
+      process.kill(Number(pid), "SIGTERM");
     }
     // Wait for graceful shutdown, then SIGKILL survivors
     await new Promise((r) => setTimeout(r, 1000));
     for (const pid of pids) {
-      try { process.kill(Number(pid), 'SIGKILL'); } catch { /* already dead */ }
+      try {
+        process.kill(Number(pid), "SIGKILL");
+      } catch {
+        /* already dead */
+      }
     }
   } catch {
     // No process on port — nothing to kill
@@ -61,22 +67,27 @@ async function killPort(port: number): Promise<void> {
  */
 async function killByName(): Promise<void> {
   try {
-    const stdout = execFileSync(
-      'pgrep', ['-f', 'node.*build/index\\.js'],
-      { encoding: 'utf-8' },
-    );
-    const pids = stdout.trim().split('\n').filter(Boolean).map(Number);
+    const stdout = execFileSync("pgrep", ["-f", "node.*build/index\\.js"], { encoding: "utf-8" });
+    const pids = stdout.trim().split("\n").filter(Boolean).map(Number);
     const ownPid = process.pid;
     const toKill = pids.filter((pid) => pid !== ownPid);
     if (toKill.length === 0) return;
-    console.log(`[globalSetup] Killing stale node build/index processes: ${toKill.join(', ')}`);
+    console.log(`[globalSetup] Killing stale node build/index processes: ${toKill.join(", ")}`);
     for (const pid of toKill) {
-      try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        /* already dead */
+      }
     }
     // Wait for graceful shutdown, then SIGKILL survivors
     await new Promise((r) => setTimeout(r, 1000));
     for (const pid of toKill) {
-      try { process.kill(pid, 'SIGKILL'); } catch { /* already dead */ }
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* already dead */
+      }
     }
   } catch {
     // pgrep returns exit code 1 when no processes match — expected
@@ -88,7 +99,7 @@ const HEALTH_URL = `http://127.0.0.1:${PORT}/json/version`;
 const BROWSERLESS_HTTP = `http://127.0.0.1:${PORT}`;
 const REPLAY_HTTP = process.env.REPLAY_INGEST_URL;
 if (!REPLAY_HTTP) {
-  throw new Error('REPLAY_INGEST_URL env var required — set in .env.dev or .env.prod');
+  throw new Error("REPLAY_INGEST_URL env var required — set in .env.dev or .env.prod");
 }
 // Worktree-aware: if real npm dependencies don't exist here (git worktree),
 // resolve to the main repo root. Check for a real package (effect) instead of
@@ -96,22 +107,26 @@ if (!REPLAY_HTTP) {
 // which would fool a bare existsSync('node_modules') check.
 function resolveBrowserlessDir(): string {
   const dir = path.resolve(import.meta.dirname);
-  if (existsSync(path.join(dir, 'node_modules', 'effect'))) return dir;
+  if (existsSync(path.join(dir, "node_modules", "effect"))) return dir;
   try {
-    const output = execFileSync('git', ['worktree', 'list', '--porcelain'],
-      { cwd: dir, encoding: 'utf8' });
+    const output = execFileSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: dir,
+      encoding: "utf8",
+    });
     const match = output.match(/^worktree (.+)$/m);
-    if (match && existsSync(path.join(match[1], 'node_modules', 'effect'))) {
+    if (match && existsSync(path.join(match[1], "node_modules", "effect"))) {
       console.log(`[globalSetup] Worktree detected — using main repo: ${match[1]}`);
       return match[1];
     }
-  } catch { /* not a git repo */ }
+  } catch {
+    /* not a git repo */
+  }
   return dir;
 }
 const BROWSERLESS_DIR = resolveBrowserlessDir();
 const MAX_WAIT_MS = 30_000;
 const POLL_INTERVAL_MS = 500;
-const RESULTS_FILE = path.join(tmpdir(), 'cf-integration-results.jsonl');
+const RESULTS_FILE = path.join(tmpdir(), "cf-integration-results.jsonl");
 
 async function isRunning(): Promise<boolean> {
   try {
@@ -136,7 +151,7 @@ async function waitForReady(timeoutMs: number): Promise<void> {
 
   // Server process state
   if (serverProcess) {
-    diagnostics.push(`  PID: ${serverProcess.pid ?? 'unknown'}`);
+    diagnostics.push(`  PID: ${serverProcess.pid ?? "unknown"}`);
     diagnostics.push(`  exitCode: ${serverProcess.exitCode}`);
     diagnostics.push(`  killed: ${serverProcess.killed}`);
     diagnostics.push(`  signalCode: ${serverProcess.signalCode}`);
@@ -144,24 +159,24 @@ async function waitForReady(timeoutMs: number): Promise<void> {
 
   // Port ownership
   try {
-    const lsofOut = execFileSync('lsof', ['-ti', `:${PORT}`], { encoding: 'utf-8' });
-    diagnostics.push(`  Port ${PORT} owners: ${lsofOut.trim().replace(/\n/g, ', ')}`);
+    const lsofOut = execFileSync("lsof", ["-ti", `:${PORT}`], { encoding: "utf-8" });
+    diagnostics.push(`  Port ${PORT} owners: ${lsofOut.trim().replace(/\n/g, ", ")}`);
   } catch {
     diagnostics.push(`  Port ${PORT}: no process listening`);
   }
 
   // Server log tail — last 20 lines
-  const logPath = path.join(BROWSERLESS_DIR, 'test-server.log');
+  const logPath = path.join(BROWSERLESS_DIR, "test-server.log");
   if (existsSync(logPath)) {
-    const log = readFileSync(logPath, 'utf-8');
-    const lines = log.trim().split('\n');
-    const tail = lines.slice(-20).join('\n');
+    const log = readFileSync(logPath, "utf-8");
+    const lines = log.trim().split("\n");
+    const tail = lines.slice(-20).join("\n");
     diagnostics.push(`  Server log (last ${Math.min(20, lines.length)} lines):\n${tail}`);
   } else {
-    diagnostics.push('  Server log: file not found');
+    diagnostics.push("  Server log: file not found");
   }
 
-  const message = diagnostics.join('\n');
+  const message = diagnostics.join("\n");
   // Print to stderr so it's visible even if vitest swallows the error
   console.error(`\n[globalSetup] STARTUP FAILURE DIAGNOSTICS:\n${message}\n`);
   throw new Error(message);
@@ -171,12 +186,12 @@ let serverProcess: ChildProcess | null = null;
 
 export async function setup() {
   // Clear results file from previous run
-  writeFileSync(RESULTS_FILE, '');
+  writeFileSync(RESULTS_FILE, "");
 
   // Check proxy — fail fast before any build/spawn work
   if (!process.env.LOCAL_MOBILE_PROXY) {
     throw new Error(
-      'LOCAL_MOBILE_PROXY env var required. Run with:\n' +
+      "LOCAL_MOBILE_PROXY env var required. Run with:\n" +
         '  LOCAL_MOBILE_PROXY=$(op read "op://Catchseo.com/Proxies/local_mobile_proxy") npx vitest run --config vitest.integration.config.ts',
     );
   }
@@ -189,7 +204,7 @@ export async function setup() {
     const healthUrl = `${endpoint}/json/version`;
     const res = await fetch(healthUrl).catch(() => null);
     if (!res?.ok) throw new Error(`Remote browserless not reachable at ${healthUrl}`);
-    console.log('[globalSetup] Remote browserless is healthy');
+    console.log("[globalSetup] Remote browserless is healthy");
     return;
   }
 
@@ -201,62 +216,58 @@ export async function setup() {
   await killByName();
 
   // Always build — ensures build/ reflects latest source edits
-  console.log('[globalSetup] Building browserless (tsc)...');
+  console.log("[globalSetup] Building browserless (tsc)...");
   const buildStart = Date.now();
-  execFileSync('npx', ['tsc'], { cwd: BROWSERLESS_DIR, stdio: 'inherit' });
+  execFileSync("npx", ["tsc"], { cwd: BROWSERLESS_DIR, stdio: "inherit" });
   console.log(`[globalSetup] Build done (${Date.now() - buildStart}ms)`);
 
   // Build rrweb Chrome extension if missing (needed for replay player debugging)
-  const extensionPath = path.join(BROWSERLESS_DIR, 'extensions/replay/rrweb-recorder.js');
+  const extensionPath = path.join(BROWSERLESS_DIR, "extensions/replay/rrweb-recorder.js");
   if (!existsSync(extensionPath)) {
-    console.log('[globalSetup] Building rrweb extension...');
-    execFileSync('bun', ['extensions/replay/build.js'], { cwd: BROWSERLESS_DIR, stdio: 'inherit' });
+    console.log("[globalSetup] Building rrweb extension...");
+    execFileSync("bun", ["extensions/replay/build.js"], { cwd: BROWSERLESS_DIR, stdio: "inherit" });
   }
 
   // Kill AGAIN after build — tsc file changes trigger `node --watch` restarts
   await killPort(PORT);
   await killByName();
 
-  console.log('[globalSetup] Starting browserless...');
+  console.log("[globalSetup] Starting browserless...");
 
   // MUST use node (not bun — bun breaks WS proxying).
   // Env vars come from Vite loadEnv (line 19), NOT env-cmd.
-  serverProcess = spawn(
-    'node',
-    ['build/index.js'],
-    {
-      cwd: BROWSERLESS_DIR,
-      env: { ...process.env, PORT: String(PORT), HOST: '0.0.0.0', TEST_TRACE_COLLECT: '1' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
+  serverProcess = spawn("node", ["build/index.js"], {
+    cwd: BROWSERLESS_DIR,
+    env: { ...process.env, PORT: String(PORT), HOST: "0.0.0.0", TEST_TRACE_COLLECT: "1" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 
   const spawnedPid = serverProcess.pid;
   console.log(`[globalSetup] Spawned server PID: ${spawnedPid}`);
 
   // Redirect server output to log file — keeps test output clean
-  const logPath = path.join(BROWSERLESS_DIR, 'test-server.log');
+  const logPath = path.join(BROWSERLESS_DIR, "test-server.log");
   const logStream = createWriteStream(logPath);
   serverProcess.stdout?.pipe(logStream);
   serverProcess.stderr?.pipe(logStream);
   console.log(`[globalSetup] Server logs: ${logPath}`);
-  serverProcess.on('error', (err) => {
+  serverProcess.on("error", (err) => {
     throw new Error(`Failed to spawn browserless: ${err.message}`);
   });
 
-  serverProcess.on('exit', (code, signal) => {
+  serverProcess.on("exit", (code, signal) => {
     if (code && code !== 0) {
       // Dump server log on crash — visible to any agent reading stdout
-      const logPath = path.join(BROWSERLESS_DIR, 'test-server.log');
-      let logTail = '';
+      const logPath = path.join(BROWSERLESS_DIR, "test-server.log");
+      let logTail = "";
       if (existsSync(logPath)) {
-        const lines = readFileSync(logPath, 'utf-8').trim().split('\n');
-        logTail = lines.slice(-10).join('\n');
+        const lines = readFileSync(logPath, "utf-8").trim().split("\n");
+        logTail = lines.slice(-10).join("\n");
       }
       console.error(
         `[globalSetup] Browserless crashed!\n` +
-        `  exit code: ${code}, signal: ${signal}\n` +
-        `  Server log (last 10 lines):\n${logTail}`,
+          `  exit code: ${code}, signal: ${signal}\n` +
+          `  Server log (last 10 lines):\n${logTail}`,
       );
     }
   });
@@ -270,24 +281,24 @@ export async function setup() {
   // and all connections go to the wrong process.
   if (spawnedPid) {
     try {
-      const lsofOut = execFileSync('lsof', ['-ti', `:${PORT}`], { encoding: 'utf-8' });
-      const portPids = lsofOut.trim().split('\n').filter(Boolean).map(Number);
+      const lsofOut = execFileSync("lsof", ["-ti", `:${PORT}`], { encoding: "utf-8" });
+      const portPids = lsofOut.trim().split("\n").filter(Boolean).map(Number);
       if (!portPids.includes(spawnedPid)) {
         // Our PID is NOT on the port — a zombie stole it
-        const portOwners = portPids.join(', ');
+        const portOwners = portPids.join(", ");
         throw new Error(
           `Port ${PORT} owned by PID(s) ${portOwners}, but we spawned PID ${spawnedPid}. ` +
-          `A stale process is intercepting connections. ` +
-          `Kill all: pkill -f "node.*build/index"`,
+            `A stale process is intercepting connections. ` +
+            `Kill all: pkill -f "node.*build/index"`,
         );
       }
     } catch (err) {
-      if (err instanceof Error && err.message.includes('owned by PID')) throw err;
+      if (err instanceof Error && err.message.includes("owned by PID")) throw err;
       // lsof failed — non-fatal, server is responding to health check
     }
   }
 
-  console.log('[globalSetup] Browserless ready');
+  console.log("[globalSetup] Browserless ready");
 }
 
 export async function teardown() {
@@ -298,15 +309,15 @@ export async function teardown() {
 
   if (!serverProcess) return; // didn't spawn (remote mode)
 
-  serverProcess.kill('SIGTERM');
+  serverProcess.kill("SIGTERM");
 
   // Wait up to 5s for graceful shutdown, then SIGKILL
   await new Promise<void>((resolve) => {
     const timeout = setTimeout(() => {
-      serverProcess?.kill('SIGKILL');
+      serverProcess?.kill("SIGKILL");
       resolve();
     }, 5000);
-    serverProcess!.on('exit', () => {
+    serverProcess!.on("exit", () => {
       clearTimeout(timeout);
       resolve();
     });
@@ -320,20 +331,26 @@ export async function teardown() {
 
 interface SiteResult {
   name: string;
-  summary: { label: string; type: string; method: string; signal?: string; durationMs?: number } | null;
+  summary: {
+    label: string;
+    type: string;
+    method: string;
+    signal?: string;
+    durationMs?: number;
+  } | null;
   replayId: string | null;
   durationMs: number;
-  status: 'PASS' | 'FAIL' | 'SKIP';
+  status: "PASS" | "FAIL" | "SKIP";
   error?: string;
 }
 
 function printSummaryTable() {
   if (!existsSync(RESULTS_FILE)) return;
 
-  const raw = readFileSync(RESULTS_FILE, 'utf-8').trim();
+  const raw = readFileSync(RESULTS_FILE, "utf-8").trim();
   if (!raw) return;
 
-  const results: SiteResult[] = raw.split('\n').map((line) => JSON.parse(line));
+  const results: SiteResult[] = raw.split("\n").map((line) => JSON.parse(line));
   if (results.length === 0) return;
 
   const out = process.stdout;
@@ -346,26 +363,32 @@ function printSummaryTable() {
   const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
   const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 
-  out.write('\n');
-  out.write('╔════════════════╤═════════╤══════════════╤═════════════════╤════════════════╤══════════╤════════╗\n');
-  out.write('║ Site           │ Summary │ Type         │ Method          │ Signal         │ Duration │ Replay ║\n');
-  out.write('╠════════════════╪═════════╪══════════════╪═════════════════╪════════════════╪══════════╪════════╣\n');
+  out.write("\n");
+  out.write(
+    "╔════════════════╤═════════╤══════════════╤═════════════════╤════════════════╤══════════╤════════╗\n",
+  );
+  out.write(
+    "║ Site           │ Summary │ Type         │ Method          │ Signal         │ Duration │ Replay ║\n",
+  );
+  out.write(
+    "╠════════════════╪═════════╪══════════════╪═════════════════╪════════════════╪══════════╪════════╣\n",
+  );
 
   for (const r of results) {
     const s = r.summary;
-    const rawLabel = s?.label ?? (r.status === 'SKIP' ? 'SKIP' : 'FAIL');
-    const type = s?.type ?? '';
-    const method = s?.method ?? '';
-    const signal = s?.signal ?? '';
-    const dur = s?.durationMs != null ? `${(s.durationMs / 1000).toFixed(1)}s` : '';
+    const rawLabel = s?.label ?? (r.status === "SKIP" ? "SKIP" : "FAIL");
+    const type = s?.type ?? "";
+    const method = s?.method ?? "";
+    const signal = s?.signal ?? "";
+    const dur = s?.durationMs != null ? `${(s.durationMs / 1000).toFixed(1)}s` : "";
 
     // Color the summary label — red for failures even if solver produced a label
     let label: string;
-    if (r.status === 'FAIL') {
+    if (r.status === "FAIL") {
       label = red(rawLabel.padEnd(7));
-    } else if (rawLabel.includes('✓') || rawLabel.includes('→')) {
+    } else if (rawLabel.includes("✓") || rawLabel.includes("→")) {
       label = green(rawLabel.padEnd(7));
-    } else if (rawLabel === 'SKIP') {
+    } else if (rawLabel === "SKIP") {
       label = dim(rawLabel.padEnd(7));
     } else {
       label = red(rawLabel.padEnd(7));
@@ -375,9 +398,9 @@ function printSummaryTable() {
     let replayCell: string;
     if (r.replayId) {
       const replayUrl = `${REPLAY_HTTP}/replay/${r.replayId}`;
-      replayCell = link(replayUrl, 'replay');
+      replayCell = link(replayUrl, "replay");
     } else {
-      replayCell = dim('  --  ');
+      replayCell = dim("  --  ");
     }
 
     out.write(
@@ -385,25 +408,27 @@ function printSummaryTable() {
     );
   }
 
-  out.write('╚════════════════╧═════════╧══════════════╧═════════════════╧════════════════╧══════════╧════════╝\n');
+  out.write(
+    "╚════════════════╧═════════╧══════════════╧═════════════════╧════════════════╧══════════╧════════╝\n",
+  );
 
   // Print failure reasons
-  const failures = results.filter((r) => r.status === 'FAIL' && r.error);
+  const failures = results.filter((r) => r.status === "FAIL" && r.error);
   if (failures.length > 0) {
-    out.write('\n');
+    out.write("\n");
     for (const f of failures) {
-      out.write(`  ${red('✗')} ${f.name}: ${f.error}\n`);
+      out.write(`  ${red("✗")} ${f.name}: ${f.error}\n`);
     }
   }
 
   // Pass/fail counts
-  const passed = results.filter((r) => r.status === 'PASS').length;
-  const failed = results.filter((r) => r.status === 'FAIL').length;
-  const skipped = results.filter((r) => r.status === 'SKIP').length;
+  const passed = results.filter((r) => r.status === "PASS").length;
+  const failed = results.filter((r) => r.status === "FAIL").length;
+  const skipped = results.filter((r) => r.status === "SKIP").length;
 
   const parts: string[] = [];
   if (passed > 0) parts.push(green(`${passed} passed`));
   if (failed > 0) parts.push(red(`${failed} failed`));
   if (skipped > 0) parts.push(dim(`${skipped} skipped`));
-  out.write(`\n${parts.join(', ')} out of ${results.length} sites\n\n`);
+  out.write(`\n${parts.join(", ")} out of ${results.length} sites\n\n`);
 }

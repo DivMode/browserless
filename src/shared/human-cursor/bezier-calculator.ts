@@ -1,4 +1,4 @@
-import type { Vector } from './math.js';
+import type { Vector } from "./math.js";
 
 function factorial(n: number): number {
   if (n <= 1) return 1;
@@ -17,9 +17,7 @@ function bernsteinPolynomialPoint(x: number, i: number, n: number): number {
   return binomial(n, i) * Math.pow(x, i) * Math.pow(1 - x, n - i);
 }
 
-function bernsteinPolynomial(
-  points: Vector[],
-): (t: number) => Vector {
+function bernsteinPolynomial(points: Vector[]): (t: number) => Vector {
   return (t: number): Vector => {
     const n = points.length - 1;
     let x = 0;
@@ -39,12 +37,9 @@ function bernsteinPolynomial(
  * Given list of control points, returns n points in the Bezier curve
  * described by these points.
  */
-export function calculatePointsInCurve(
-  n: number,
-  points: Vector[],
-): Vector[] {
+export function calculatePointsInCurve(n: number, points: Vector[]): Vector[] {
   if (n < 2) {
-    throw new Error('n must be at least 2');
+    throw new Error("n must be at least 2");
   }
 
   const curvePoints: Vector[] = [];

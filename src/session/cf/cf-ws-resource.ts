@@ -10,9 +10,9 @@
  * Reference pattern: CDPProxy (cdp-proxy.ts:99-180) — Scope.makeUnsafe() + upfront
  * Scope.addFinalizer + scope-bound FiberSet + atomic Scope.close().
  */
-import { Effect, Scope } from 'effect';
-import { CdpConnection } from '../../shared/cdp-rpc.js';
-import { incCounter, wsLifecycle } from '../../effect-metrics.js';
+import { Effect, Scope } from "effect";
+import { CdpConnection } from "../../shared/cdp-rpc.js";
+import { incCounter, wsLifecycle } from "../../effect-metrics.js";
 
 export interface ScopedWsOptions {
   /** Starting command ID for CdpConnection (avoids collisions between WS types). */
@@ -46,8 +46,8 @@ export function openScopedWs(
 ): Effect.Effect<CdpConnection, Error, Scope.Scope> {
   const openTimeoutMs = opts.openTimeoutMs ?? 2_000;
   return Effect.acquireRelease(
-    Effect.gen(function*() {
-      const { default: WebSocket } = yield* Effect.promise(() => import('ws'));
+    Effect.gen(function* () {
+      const { default: WebSocket } = yield* Effect.promise(() => import("ws"));
       const ws = new WebSocket(url);
 
       yield* Effect.callback<void, Error>((resume) => {
@@ -55,38 +55,55 @@ export function openScopedWs(
           ws.terminate();
           resume(Effect.fail(new Error(`WS open timeout (${label})`)));
         }, openTimeoutMs);
-        ws.on('open', () => { clearTimeout(timer); resume(Effect.void); });
-        ws.on('error', (err) => { clearTimeout(timer); resume(Effect.fail(err)); });
-        return Effect.sync(() => { clearTimeout(timer); ws.terminate(); });
+        ws.on("open", () => {
+          clearTimeout(timer);
+          resume(Effect.void);
+        });
+        ws.on("error", (err) => {
+          clearTimeout(timer);
+          resume(Effect.fail(err));
+        });
+        return Effect.sync(() => {
+          clearTimeout(timer);
+          ws.terminate();
+        });
       });
 
       // Counter AFTER open succeeds — structural guarantee.
       // If handshake fails or fiber interrupts during open, acquire never
       // completes → release never fires → no counter gap.
-      yield* incCounter(wsLifecycle, { type: label, action: 'create' });
+      yield* incCounter(wsLifecycle, { type: label, action: "create" });
 
       const conn = new CdpConnection(ws, {
         startId: opts.startId,
         defaultTimeout: opts.defaultTimeout,
       });
 
-      ws.on('message', (data: Buffer) => {
+      ws.on("message", (data: Buffer) => {
         try {
           const msg = JSON.parse(data.toString());
           conn.handleResponse(msg);
-        } catch { /* malformed CDP response — ignore */ }
+        } catch {
+          /* malformed CDP response — ignore */
+        }
       });
 
       return conn;
     }),
-    (conn) => Effect.fn(`ws.release.${label}`)(function*() {
-      conn.drainPending(`${label} scope close`);
-      conn.dispose();
-      const ws = (conn as any).ws;
-      if (ws) {
-        try { ws.removeAllListeners(); ws.terminate(); } catch { /* already closed */ }
-      }
-      yield* incCounter(wsLifecycle, { type: label, action: 'destroy' });
-    })(),
+    (conn) =>
+      Effect.fn(`ws.release.${label}`)(function* () {
+        conn.drainPending(`${label} scope close`);
+        conn.dispose();
+        const ws = (conn as any).ws;
+        if (ws) {
+          try {
+            ws.removeAllListeners();
+            ws.terminate();
+          } catch {
+            /* already closed */
+          }
+        }
+        yield* incCounter(wsLifecycle, { type: label, action: "destroy" });
+      })(),
   );
 }

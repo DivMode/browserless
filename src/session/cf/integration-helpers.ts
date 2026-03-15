@@ -7,28 +7,32 @@
 
 // ── Config ──────────────────────────────────────────────────────────
 
-import { execFile } from 'node:child_process';
-import { appendFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { promisify } from 'node:util';
-import { join } from 'node:path';
-import { Schema } from 'effect';
+import { execFile } from "node:child_process";
+import { appendFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { promisify } from "node:util";
+import { join } from "node:path";
+import { Schema } from "effect";
 
-export const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN || '';
-export const PROXY_URL = process.env.LOCAL_MOBILE_PROXY ?? (() => { throw new Error('LOCAL_MOBILE_PROXY required — add it to .env'); })();
-export const BROWSERLESS_HTTP = process.env.BROWSERLESS_ENDPOINT || 'http://localhost:3000';
+export const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN || "";
+export const PROXY_URL =
+  process.env.LOCAL_MOBILE_PROXY ??
+  (() => {
+    throw new Error("LOCAL_MOBILE_PROXY required — add it to .env");
+  })();
+export const BROWSERLESS_HTTP = process.env.BROWSERLESS_ENDPOINT || "http://localhost:3000";
 /** Replay server HTTP endpoint — separate from browserless in the new architecture. */
 const _replayUrl = process.env.REPLAY_INGEST_URL;
 if (!_replayUrl) {
   throw new Error(
-    'REPLAY_INGEST_URL env var required for integration tests. ' +
-    'Ensure .env.dev exists and vitest.integration.config.ts loads it via loadEnv.',
+    "REPLAY_INGEST_URL env var required for integration tests. " +
+      "Ensure .env.dev exists and vitest.integration.config.ts loads it via loadEnv.",
   );
 }
 export const REPLAY_HTTP: string = _replayUrl;
 
 /** Shared path for test results — written by tests, read by globalSetup teardown. */
-export const RESULTS_FILE = join(tmpdir(), 'cf-integration-results.jsonl');
+export const RESULTS_FILE = join(tmpdir(), "cf-integration-results.jsonl");
 
 /** Append a site result as a JSON line to the shared results file. */
 export function writeSiteResult(result: {
@@ -36,17 +40,17 @@ export function writeSiteResult(result: {
   summary: TurnstileSummary | ServerCfSummary | null;
   replayId: string | null;
   durationMs: number;
-  status: 'PASS' | 'FAIL' | 'SKIP';
+  status: "PASS" | "FAIL" | "SKIP";
   error?: string;
 }): void {
-  appendFileSync(RESULTS_FILE, JSON.stringify(result) + '\n');
+  appendFileSync(RESULTS_FILE, JSON.stringify(result) + "\n");
 }
 
 export function parseProxy(url: string) {
   if (!url) return null;
   const m = url.match(/^https?:\/\/(?:([^:]+):([^@]+)@)?(.+)$/);
   if (!m) return null;
-  return { server: m[3], username: m[1] || '', password: m[2] || '' };
+  return { server: m[3], username: m[1] || "", password: m[2] || "" };
 }
 
 export const PROXY = parseProxy(PROXY_URL);
@@ -55,25 +59,25 @@ export const PROXY = parseProxy(PROXY_URL);
 export function buildWsUrl(): string {
   const httpUrl = new URL(BROWSERLESS_HTTP);
   const params = new URLSearchParams();
-  if (BROWSERLESS_TOKEN) params.set('token', BROWSERLESS_TOKEN);
-  if (PROXY) params.set('--proxy-server', PROXY.server);
-  params.set('headless', 'false');
-  params.set('replay', 'true');
-  params.set('cfSolver', 'true');
-  params.set('launch', JSON.stringify({ args: ['--window-size=1280,900'] }));
+  if (BROWSERLESS_TOKEN) params.set("token", BROWSERLESS_TOKEN);
+  if (PROXY) params.set("--proxy-server", PROXY.server);
+  params.set("headless", "false");
+  params.set("replay", "true");
+  params.set("cfSolver", "true");
+  params.set("launch", JSON.stringify({ args: ["--window-size=1280,900"] }));
   // Prod container has Chromium (not Chrome) — /chrome route 404s. Use /chromium which works everywhere.
   return `ws://${httpUrl.host}/chromium?${params.toString()}`;
 }
 
 export function tokenParam(): string {
-  return BROWSERLESS_TOKEN ? `?token=${BROWSERLESS_TOKEN}` : '';
+  return BROWSERLESS_TOKEN ? `?token=${BROWSERLESS_TOKEN}` : "";
 }
 
 // ── Types & Pure Summary Functions (re-exported from cf-summary) ─────
 
-export type { ReplayMarker, TurnstileSummary } from './cf-summary.js';
-export { CF_MARKERS, buildSummaryFromMarkers, assertSummaryConsistency } from './cf-summary.js';
-import type { ReplayMarker, TurnstileSummary } from './cf-summary.js';
+export type { ReplayMarker, TurnstileSummary } from "./cf-summary.js";
+export { CF_MARKERS, buildSummaryFromMarkers, assertSummaryConsistency } from "./cf-summary.js";
+import type { ReplayMarker, TurnstileSummary } from "./cf-summary.js";
 
 // Runtime schema for replay list response — catches server-side field renames immediately
 const CfSummaryFromServer = Schema.Struct({
@@ -160,7 +164,7 @@ export async function fetchMarkers(replayId: string): Promise<ReplayMarker[]> {
   };
   if (!replay.events) return [];
   return replay.events
-    .filter((e) => e.type === 5 && e.data?.tag?.startsWith('cf.'))
+    .filter((e) => e.type === 5 && e.data?.tag?.startsWith("cf."))
     .map((e) => ({ tag: e.data.tag, payload: e.data.payload, timestamp: e.timestamp }));
 }
 
@@ -181,9 +185,9 @@ export async function fetchDebugData(replayId: string): Promise<{
     .filter((e) => e.type === 6)
     .flatMap((e) => {
       const data = e.data as { plugin?: string; payload?: { level?: string; payload?: string[] } };
-      if (data.plugin !== 'rrweb/console@1') return [];
+      if (data.plugin !== "rrweb/console@1") return [];
       const level = data.payload?.level;
-      if (level !== 'error' && level !== 'warn') return [];
+      if (level !== "error" && level !== "warn") return [];
       const msgs = data.payload?.payload ?? [];
       return msgs.map((m) => `[${level}] ${m}`);
     });
@@ -239,27 +243,27 @@ export function failWithEvidence(
   markers: ReplayMarker[],
   replayUrl: string | null,
 ): never {
-  const cfMarkers = markers.filter(m => m.tag.startsWith('cf.'));
+  const cfMarkers = markers.filter((m) => m.tag.startsWith("cf."));
   const sorted = [...cfMarkers].sort((a, b) => a.timestamp - b.timestamp);
   const baseTs = sorted[0]?.timestamp ?? 0;
   const markerDump = sorted
-    .map(m => `  ${m.tag} +${m.timestamp - baseTs}ms ${JSON.stringify(m.payload)}`)
-    .join('\n');
+    .map((m) => `  ${m.tag} +${m.timestamp - baseTs}ms ${JSON.stringify(m.payload)}`)
+    .join("\n");
   const full =
     `${siteName}: ${message}\n\n` +
     `=== CF MARKERS (${cfMarkers.length}) ===\n${markerDump}\n\n` +
-    (replayUrl ? `Replay: ${replayUrl}` : 'No replay URL');
+    (replayUrl ? `Replay: ${replayUrl}` : "No replay URL");
   // Throw AssertionError-like to integrate with vitest's test runner.
   // Cannot import vitest here (src/ file compiled by tsc).
   const err = new Error(full);
-  err.name = 'AssertionError';
+  err.name = "AssertionError";
   throw err;
 }
 
 // ── Debug helpers ───────────────────────────────────────────────────
 
 export function dumpMarkerTimeline(markers: ReplayMarker[]) {
-  console.error('=== MARKER TIMELINE ===');
+  console.error("=== MARKER TIMELINE ===");
   const sorted = [...markers].sort((a, b) => a.timestamp - b.timestamp);
   const baseTs = sorted[0]?.timestamp ?? 0;
   for (const m of sorted) {
@@ -269,7 +273,7 @@ export function dumpMarkerTimeline(markers: ReplayMarker[]) {
 
 export function dumpConsoleErrors(errors: string[]) {
   if (errors.length === 0) return;
-  console.error('=== CONSOLE ERRORS ===');
+  console.error("=== CONSOLE ERRORS ===");
   for (const e of errors) {
     console.error(`  ${e}`);
   }
@@ -278,33 +282,41 @@ export function dumpConsoleErrors(errors: string[]) {
 export function dumpReplayHint(replayId: string) {
   console.error(`=== REPLAY ===`);
   console.error(`  ID: ${replayId}`);
-  console.error(`  curl -s ${REPLAY_HTTP}/replays/${replayId} | python3 -c "import sys,json; [print(f'{e[\"type\"]}:{e.get(\"data\",{}).get(\"tag\",\"\")}') for e in json.load(sys.stdin).get('events',[])]"`);
+  console.error(
+    `  curl -s ${REPLAY_HTTP}/replays/${replayId} | python3 -c "import sys,json; [print(f'{e[\"type\"]}:{e.get(\"data\",{}).get(\"tag\",\"\")}') for e in json.load(sys.stdin).get('events',[])]"`,
+  );
 }
 
 export function dumpRechallengeDiag(markers: ReplayMarker[], replayId: string | null): void {
-  const detections = markers.filter((m) => m.tag === 'cf.detected');
-  const solves = markers.filter((m) => m.tag === 'cf.solved');
-  const fails = markers.filter((m) => m.tag === 'cf.failed');
+  const detections = markers.filter((m) => m.tag === "cf.detected");
+  const solves = markers.filter((m) => m.tag === "cf.solved");
+  const fails = markers.filter((m) => m.tag === "cf.failed");
 
-  console.error('=== RECHALLENGE DIAGNOSTIC ===');
+  console.error("=== RECHALLENGE DIAGNOSTIC ===");
   console.error(`Detections: ${detections.length}`);
   for (const d of detections) {
-    console.error(`  +${d.timestamp}ms  type=${d.payload.type} method=${d.payload.method ?? d.payload.detectionMethod}`);
+    console.error(
+      `  +${d.timestamp}ms  type=${d.payload.type} method=${d.payload.method ?? d.payload.detectionMethod}`,
+    );
   }
   console.error(`Solves: ${solves.length}`);
   for (const s of solves) {
-    console.error(`  +${s.timestamp}ms  method=${s.payload.method} signal=${s.payload.signal} duration=${s.payload.duration_ms}ms`);
+    console.error(
+      `  +${s.timestamp}ms  method=${s.payload.method} signal=${s.payload.signal} duration=${s.payload.duration_ms}ms`,
+    );
   }
   console.error(`Fails: ${fails.length}`);
   for (const f of fails) {
-    console.error(`  +${f.timestamp}ms  reason=${f.payload.reason} duration=${f.payload.duration_ms}ms`);
+    console.error(
+      `  +${f.timestamp}ms  reason=${f.payload.reason} duration=${f.payload.duration_ms}ms`,
+    );
   }
   if (replayId) dumpReplayHint(replayId);
 }
 
 // ── Pydoll subprocess helpers ─────────────────────────────────────
 
-export const PYDOLL_DIR = '/Users/peter/Developer/catchseo/packages/pydoll-scraper';
+export const PYDOLL_DIR = "/Users/peter/Developer/catchseo/packages/pydoll-scraper";
 
 /**
  * Typed result from pydoll CLI JSON output.
@@ -355,13 +367,13 @@ const execFileAsync = promisify(execFile);
  */
 export async function runPydoll(args: string[], timeoutMs: number): Promise<PydollResult> {
   const proxy = process.env.LOCAL_MOBILE_PROXY;
-  if (!proxy) throw new Error('LOCAL_MOBILE_PROXY not in environment — check .zshenv');
+  if (!proxy) throw new Error("LOCAL_MOBILE_PROXY not in environment — check .zshenv");
 
   let stdout: string;
   try {
-    const result = await execFileAsync('uv', ['run', 'pydoll', ...args], {
+    const result = await execFileAsync("uv", ["run", "pydoll", ...args], {
       cwd: PYDOLL_DIR,
-      encoding: 'utf-8',
+      encoding: "utf-8",
       timeout: timeoutMs,
       maxBuffer: 10 * 1024 * 1024,
     });
@@ -369,12 +381,12 @@ export async function runPydoll(args: string[], timeoutMs: number): Promise<Pydo
   } catch (err: unknown) {
     const execErr = err as { stderr?: string; stdout?: string };
     throw new Error(
-      `pydoll ${args[0]} failed:\n${execErr.stderr || ''}\n\nstdout:\n${execErr.stdout || ''}`,
+      `pydoll ${args[0]} failed:\n${execErr.stderr || ""}\n\nstdout:\n${execErr.stdout || ""}`,
     );
   }
 
   // Skip text lines (e.g. [Turnstile] ...) before the JSON blob
-  const jsonStart = stdout.indexOf('{');
+  const jsonStart = stdout.indexOf("{");
   if (jsonStart === -1) throw new Error(`No JSON in pydoll output:\n${stdout.slice(0, 500)}`);
   return JSON.parse(stdout.slice(jsonStart)) as PydollResult;
 }

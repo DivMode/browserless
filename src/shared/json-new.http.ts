@@ -11,8 +11,8 @@ import {
   dedent,
   jsonResponse,
   pageID,
-} from '@browserless.io/browserless';
-import path from 'path';
+} from "@browserless.io/browserless";
+import path from "path";
 
 /*
 Example Payload from Chromium:
@@ -48,20 +48,17 @@ export default class ChromiumJSONNewPutRoute extends HTTPRoute {
     const config = this.config();
     const externalAddress = config.getExternalWebSocketAddress();
     const id = pageID();
-    const { protocol, host, pathname, href } = new URL(
-      `/devtools/page/${id}`,
-      externalAddress,
-    );
-    const param = protocol.includes('wss') ? 'wss' : 'ws';
+    const { protocol, host, pathname, href } = new URL(`/devtools/page/${id}`, externalAddress);
+    const param = protocol.includes("wss") ? "wss" : "ws";
     const value = path.join(host, pathname);
 
     return jsonResponse(res, 200, {
-      description: '',
+      description: "",
       devtoolsFrontendUrl: `/devtools/inspector.html?${param}=${value}`,
       id,
-      title: 'New Tab',
-      type: 'page',
-      url: 'about:blank',
+      title: "New Tab",
+      type: "page",
+      url: "about:blank",
       webSocketDebuggerUrl: href,
     });
   }

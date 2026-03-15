@@ -1,9 +1,12 @@
 <head>
   <title>Browserless Docs</title>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="icon" href="./favicon-32x32.png" type="image/png">
-  <link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="./favicon-32x32.png" type="image/png" />
+  <link
+    href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700"
+    rel="stylesheet"
+  />
   <style>
     body {
       margin: 0;
@@ -31,7 +34,18 @@
     td span ~ div button {
       background-color: rgb(50, 50, 159) !important;
     }
-    h1, h2, h3, h4, h5, p, a, button, li, div, path, span:not(.token) {
+    h1,
+    h2,
+    h3,
+    h4,
+    h5,
+    p,
+    a,
+    button,
+    li,
+    div,
+    path,
+    span:not(.token) {
       color: white !important;
     }
     div[aria-hidden="false"] * {
@@ -43,14 +57,14 @@
     }
     .menu-content {
       background-color: rgb(13, 13, 13) !important;
-      background: linear-gradient(225deg,#1a1a1a 27.14%,rgba(26,26,26,0)),#000;
-      padding: .5rem;
+      background: linear-gradient(225deg, #1a1a1a 27.14%, rgba(26, 26, 26, 0)), #000;
+      padding: 0.5rem;
     }
-    label[role=menuitem] polygon {
+    label[role="menuitem"] polygon {
       fill: white !important;
     }
     pre {
-      background: linear-gradient(225deg,#1a1a1a 27.14%,rgba(26,26,26,0)),#000;
+      background: linear-gradient(225deg, #1a1a1a 27.14%, rgba(26, 26, 26, 0)), #000;
     }
     label[type="tag"].active,
     label[role="menuitem"].active,
@@ -101,6 +115,6 @@
   </style>
 </head>
 <body>
-  <redoc spec-url='docs/swagger.json'></redoc>
+  <redoc spec-url="docs/swagger.json"></redoc>
   <script src="https://cdn.jsdelivr.net/npm/redoc@2/bundles/redoc.standalone.js"></script>
 </body>

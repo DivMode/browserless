@@ -4,7 +4,7 @@
  * These extract the repeated conditional `withParentSpan` pattern used
  * throughout cdp-session.ts and cloudflare-solver.ts into composable helpers.
  */
-import { Effect, Fiber, FiberMap, ManagedRuntime, type Tracer } from 'effect';
+import { Effect, Fiber, FiberMap, ManagedRuntime, type Tracer } from "effect";
 
 /**
  * Conditionally parent an effect under a session span.
@@ -13,8 +13,7 @@ import { Effect, Fiber, FiberMap, ManagedRuntime, type Tracer } from 'effect';
 export const withSessionSpan = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
   span: Tracer.AnySpan | null | undefined,
-): Effect.Effect<A, E, R> =>
-  span ? effect.pipe(Effect.withParentSpan(span)) : effect;
+): Effect.Effect<A, E, R> => (span ? effect.pipe(Effect.withParentSpan(span)) : effect);
 
 /**
  * Fork an effect into a FiberMap, parented under a session span.
@@ -79,16 +78,12 @@ export const forkLinkedRootFiber = <K extends string>(
  * This caused ghost detection fibers: the session runtime interrupted the
  * handler, but the solver runtime's copy kept running (500ms sleep → fork ghost).
  */
-export const bridgeRuntime = <R>(
-  runtime: ManagedRuntime.ManagedRuntime<R, never>,
-) => <A, E>(
-  effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E> =>
-  Effect.withFiber((fiber) => {
-    const parentSpan = fiber.currentSpan;
-    const traced = withSessionSpan(effect, parentSpan);
-    const innerFiber = runtime.runFork(traced);
-    return Fiber.join(innerFiber).pipe(
-      Effect.onInterrupt(() => Fiber.interrupt(innerFiber)),
-    );
-  });
+export const bridgeRuntime =
+  <R>(runtime: ManagedRuntime.ManagedRuntime<R, never>) =>
+  <A, E>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E> =>
+    Effect.withFiber((fiber) => {
+      const parentSpan = fiber.currentSpan;
+      const traced = withSessionSpan(effect, parentSpan);
+      const innerFiber = runtime.runFork(traced);
+      return Fiber.join(innerFiber).pipe(Effect.onInterrupt(() => Fiber.interrupt(innerFiber)));
+    });

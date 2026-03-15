@@ -6,13 +6,13 @@
  *
  * Reuses branded IDs from the CF solver (CdpSessionId, TargetId).
  */
-import { Schema } from 'effect';
-import { TargetId } from './cloudflare-detection.js';
+import { Schema } from "effect";
+import { TargetId } from "./cloudflare-detection.js";
 
 // ─── Branded IDs ────────────────────────────────────────────────────
 // Reuse TargetId from CF solver. Add SessionId for replay scope.
 
-export const SessionId = Schema.String.pipe(Schema.brand('SessionId'));
+export const SessionId = Schema.String.pipe(Schema.brand("SessionId"));
 export type SessionId = typeof SessionId.Type;
 
 // Re-export for convenience
@@ -36,7 +36,14 @@ export const ReplayMetadata = Schema.Struct({
   duration: Schema.Number,
   eventCount: Schema.Number,
   frameCount: Schema.Number,
-  encodingStatus: Schema.Literals(['none', 'deferred', 'pending', 'encoding', 'completed', 'failed']),
+  encodingStatus: Schema.Literals([
+    "none",
+    "deferred",
+    "pending",
+    "encoding",
+    "completed",
+    "failed",
+  ]),
   sessionId: Schema.optionalKey(SessionId),
   targetId: Schema.optionalKey(TargetId),
   parentSessionId: Schema.optionalKey(Schema.String),
@@ -62,6 +69,6 @@ export const RrwebEventBatch = Schema.Array(ReplayEvent);
 // ─── Tagged Errors ──────────────────────────────────────────────────
 
 export class ReplayStoreError extends Schema.TaggedErrorClass<ReplayStoreError>()(
-  'ReplayStoreError', { message: Schema.String },
+  "ReplayStoreError",
+  { message: Schema.String },
 ) {}
-

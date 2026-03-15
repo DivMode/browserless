@@ -6,20 +6,20 @@ import {
   ServerError,
   chromeExecutablePath,
   edgeExecutablePath,
-} from '@browserless.io/browserless';
-import playwright, { Page } from 'playwright-core';
-import { Duplex } from 'stream';
-import { Effect } from 'effect';
-import { EventEmitter } from 'events';
-import httpProxy from 'http-proxy';
-import path from 'path';
+} from "@browserless.io/browserless";
+import playwright, { Page } from "playwright-core";
+import { Duplex } from "stream";
+import { Effect } from "effect";
+import { EventEmitter } from "events";
+import httpProxy from "http-proxy";
+import path from "path";
 
-import { runForkInServer } from '../otel-runtime.js';
+import { runForkInServer } from "../otel-runtime.js";
 
 enum PlaywrightBrowserTypes {
-  chromium = 'chromium',
-  firefox = 'firefox',
-  webkit = 'webkit',
+  chromium = "chromium",
+  firefox = "firefox",
+  webkit = "webkit",
 }
 
 class BasePlaywright extends EventEmitter {
@@ -30,10 +30,8 @@ class BasePlaywright extends EventEmitter {
   protected proxy = httpProxy.createProxyServer();
   protected browser: playwright.BrowserServer | null = null;
   protected browserWSEndpoint: string | null = null;
-  protected playwrightBrowserType: PlaywrightBrowserTypes =
-    PlaywrightBrowserTypes.chromium;
-  protected executablePath = () =>
-    playwright[this.playwrightBrowserType].executablePath();
+  protected playwrightBrowserType: PlaywrightBrowserTypes = PlaywrightBrowserTypes.chromium;
+  protected executablePath = () => playwright[this.playwrightBrowserType].executablePath();
   protected keepUntilMS = 0;
 
   constructor({
@@ -41,7 +39,7 @@ class BasePlaywright extends EventEmitter {
     userDataDir,
   }: {
     config: Config;
-    userDataDir: BasePlaywright['userDataDir'];
+    userDataDir: BasePlaywright["userDataDir"];
   }) {
     super();
 
@@ -57,13 +55,11 @@ class BasePlaywright extends EventEmitter {
 
   protected makeLaunchOptions(opts: BrowserServerOptions) {
     // Strip headless=old as it'll cause issues with newer Chromium
-    const args = (opts.args ?? []).filter((a) => !a.includes('--headless=old'));
-    const hasHeadless =
-      args.some((a) => a.startsWith('--headless')) ||
-      opts.headless !== undefined; // check for undefinity, since it can be set to false as well
+    const args = (opts.args ?? []).filter((a) => !a.includes("--headless=old"));
+    const hasHeadless = args.some((a) => a.startsWith("--headless")) || opts.headless !== undefined; // check for undefinity, since it can be set to false as well
 
     if (!hasHeadless) {
-      args.push('--headless=new');
+      args.push("--headless=new");
     }
 
     return {
@@ -73,7 +69,7 @@ class BasePlaywright extends EventEmitter {
         // Playwright 1.57+ uses Chrome For Test, which has stricter security than Chromium.
         // This is needed to allow WebSocket connections to localhost.
         `--disable-features=LocalNetworkAccessChecks`,
-        this.userDataDir ? `--user-data-dir=${this.userDataDir}` : '',
+        this.userDataDir ? `--user-data-dir=${this.userDataDir}` : "",
       ],
       executablePath: this.executablePath(),
     };
@@ -94,11 +90,9 @@ class BasePlaywright extends EventEmitter {
 
   public async close(): Promise<void> {
     if (this.browser) {
-      runForkInServer(Effect.logInfo(
-        `Closing ${this.constructor.name} process and all listeners`,
-      ));
+      runForkInServer(Effect.logInfo(`Closing ${this.constructor.name} process and all listeners`));
       this.socket?.destroy();
-      this.emit('close');
+      this.emit("close");
       // Store reference before nulling
       const browser = this.browser;
       this.running = false;
@@ -120,9 +114,7 @@ class BasePlaywright extends EventEmitter {
   }
 
   public getPageId(): string {
-    throw new ServerError(
-      `#getPageId is not yet supported with ${this.constructor.name}.`,
-    );
+    throw new ServerError(`#getPageId is not yet supported with ${this.constructor.name}.`);
   }
 
   public makeLiveURL(): void {
@@ -133,19 +125,13 @@ class BasePlaywright extends EventEmitter {
 
   public async newPage(): Promise<Page> {
     if (!this.browser || !this.browserWSEndpoint) {
-      throw new ServerError(
-        `${this.constructor.name} hasn't been launched yet!`,
-      );
+      throw new ServerError(`${this.constructor.name} hasn't been launched yet!`);
     }
-    const browser = await playwright[this.playwrightBrowserType].connect(
-      this.browserWSEndpoint,
-    );
+    const browser = await playwright[this.playwrightBrowserType].connect(this.browserWSEndpoint);
     return await browser.newPage();
   }
 
-  public async launch(
-    launcherOpts: BrowserLauncherOptions,
-  ): Promise<playwright.BrowserServer> {
+  public async launch(launcherOpts: BrowserLauncherOptions): Promise<playwright.BrowserServer> {
     const { options, pwVersion } = launcherOpts;
     runForkInServer(Effect.logInfo(`Launching ${this.constructor.name} Handler`));
 
@@ -157,9 +143,7 @@ class BasePlaywright extends EventEmitter {
     });
     const browserWSEndpoint = browser.wsEndpoint();
 
-    runForkInServer(Effect.logInfo(
-      `${this.constructor.name} is running on ${browserWSEndpoint}`,
-    ));
+    runForkInServer(Effect.logInfo(`${this.constructor.name} is running on ${browserWSEndpoint}`));
     this.running = true;
     this.browserWSEndpoint = browserWSEndpoint;
     this.browser = browser;
@@ -182,7 +166,7 @@ class BasePlaywright extends EventEmitter {
     externalURL.pathname = path.join(externalURL.pathname, pathname);
 
     if (token) {
-      externalURL.searchParams.set('token', token);
+      externalURL.searchParams.set("token", token);
     }
 
     return externalURL.href;
@@ -192,28 +176,24 @@ class BasePlaywright extends EventEmitter {
     runForkInServer(Effect.logError(`Not yet implemented in ${this.constructor.name}`));
   }
 
-  public async proxyWebSocket(
-    req: Request,
-    socket: Duplex,
-    head: Buffer,
-  ): Promise<void> {
+  public async proxyWebSocket(req: Request, socket: Duplex, head: Buffer): Promise<void> {
     this.socket = socket;
     return new Promise((resolve, reject) => {
       if (!this.browserWSEndpoint) {
-        throw new ServerError(
-          `No browserWSEndpoint found, did you launch first?`,
-        );
+        throw new ServerError(`No browserWSEndpoint found, did you launch first?`);
       }
-      socket.once('close', resolve);
+      socket.once("close", resolve);
 
-      runForkInServer(Effect.logInfo(
-        `Proxying ${req.parsed.href} to ${this.constructor.name} ${this.browserWSEndpoint}`,
-      ));
+      runForkInServer(
+        Effect.logInfo(
+          `Proxying ${req.parsed.href} to ${this.constructor.name} ${this.browserWSEndpoint}`,
+        ),
+      );
 
       // Delete headers known to cause issues
       delete req.headers.origin;
 
-      req.url = '';
+      req.url = "";
 
       this.proxy.ws(
         req,
@@ -224,9 +204,9 @@ class BasePlaywright extends EventEmitter {
           target: this.browserWSEndpoint,
         },
         (error) => {
-          runForkInServer(Effect.logError(
-            `Error proxying session to ${this.constructor.name}: ${error}`,
-          ));
+          runForkInServer(
+            Effect.logError(`Error proxying session to ${this.constructor.name}: ${error}`),
+          );
           this.close();
           return reject(error);
         },
@@ -255,10 +235,7 @@ export class FirefoxPlaywright extends BasePlaywright {
   protected makeLaunchOptions(opts: BrowserServerOptions) {
     return {
       ...opts,
-      args: [
-        ...(opts.args || []),
-        this.userDataDir ? `-profile=${this.userDataDir}` : '',
-      ],
+      args: [...(opts.args || []), this.userDataDir ? `-profile=${this.userDataDir}` : ""],
       executablePath: this.executablePath(),
     };
   }
@@ -270,10 +247,7 @@ export class WebKitPlaywright extends BasePlaywright {
   protected makeLaunchOptions(opts: BrowserServerOptions) {
     return {
       ...opts,
-      args: [
-        ...(opts.args || []),
-        this.userDataDir ? `-profile=${this.userDataDir}` : '',
-      ],
+      args: [...(opts.args || []), this.userDataDir ? `-profile=${this.userDataDir}` : ""],
       executablePath: this.executablePath(),
     };
   }

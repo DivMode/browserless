@@ -1,19 +1,19 @@
-import { describe, expect, it } from '@effect/vitest';
-import { Effect, Fiber, Latch, Scope } from 'effect';
-import { CdpSessionId, TargetId } from '../../shared/cloudflare-detection.js';
-import type { CloudflareInfo } from '../../shared/cloudflare-detection.js';
-import { CloudflareTracker } from './cloudflare-event-emitter.js';
-import type { ActiveDetection } from './cloudflare-event-emitter.js';
-import { DetectionContext, OOPIFState } from './cf-detection-context.js';
-import { DetectionRegistry } from './cf-detection-registry.js';
-import { Resolution } from './cf-resolution.js';
-import type { SolveSignal } from './cloudflare-state-tracker.js';
+import { describe, expect, it } from "@effect/vitest";
+import { Effect, Fiber, Latch, Scope } from "effect";
+import { CdpSessionId, TargetId } from "../../shared/cloudflare-detection.js";
+import type { CloudflareInfo } from "../../shared/cloudflare-detection.js";
+import { CloudflareTracker } from "./cloudflare-event-emitter.js";
+import type { ActiveDetection } from "./cloudflare-event-emitter.js";
+import { DetectionContext, OOPIFState } from "./cf-detection-context.js";
+import { DetectionRegistry } from "./cf-detection-registry.js";
+import { Resolution } from "./cf-resolution.js";
+import type { SolveSignal } from "./cloudflare-state-tracker.js";
 
 const makeActive = (targetId: string): ActiveDetection => {
-  const info: CloudflareInfo = { type: 'turnstile', url: '', detectionMethod: 'cdp_dom_walk' };
+  const info: CloudflareInfo = { type: "turnstile", url: "", detectionMethod: "cdp_dom_walk" };
   return {
     info,
-    pageCdpSessionId: CdpSessionId.makeUnsafe('session-1'),
+    pageCdpSessionId: CdpSessionId.makeUnsafe("session-1"),
     pageTargetId: TargetId.makeUnsafe(targetId),
     startTime: Date.now(),
     attempt: 1,
@@ -24,10 +24,10 @@ const makeActive = (targetId: string): ActiveDetection => {
   };
 };
 
-describe('DetectionContext', () => {
-  it.effect('setAborted sets aborted=true and opens latch', () =>
-    Effect.gen(function*() {
-      const active = makeActive('T1');
+describe("DetectionContext", () => {
+  it.effect("setAborted sets aborted=true and opens latch", () =>
+    Effect.gen(function* () {
+      const active = makeActive("T1");
 
       expect(active.aborted).toBe(false);
 
@@ -37,27 +37,31 @@ describe('DetectionContext', () => {
       // Latch should be open — await resolves immediately
       let latchOpened = false;
       yield* active.abortLatch.await.pipe(
-        Effect.map(() => { latchOpened = true; }),
-        Effect.timeout('100 millis'),
+        Effect.map(() => {
+          latchOpened = true;
+        }),
+        Effect.timeout("100 millis"),
         Effect.ignore,
       );
       expect(latchOpened).toBe(true);
-    }));
+    }),
+  );
 
-  it.effect('setAborted is idempotent — second call is no-op', () =>
-    Effect.gen(function*() {
-      const active = makeActive('T1');
+  it.effect("setAborted is idempotent — second call is no-op", () =>
+    Effect.gen(function* () {
+      const active = makeActive("T1");
 
       DetectionContext.setAborted(active);
       DetectionContext.setAborted(active); // should not throw
 
       expect(active.aborted).toBe(true);
-    }));
+    }),
+  );
 
-  it.effect('abort() sets aborted=true and opens latch', () =>
-    Effect.gen(function*() {
+  it.effect("abort() sets aborted=true and opens latch", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
       expect(ctx.aborted).toBe(false);
@@ -67,24 +71,26 @@ describe('DetectionContext', () => {
 
       expect(ctx.aborted).toBe(true);
       expect(active.aborted).toBe(true);
-    }));
+    }),
+  );
 
-  it.effect('abort() is idempotent — second call is no-op', () =>
-    Effect.gen(function*() {
+  it.effect("abort() is idempotent — second call is no-op", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
       yield* ctx.abort();
       yield* ctx.abort(); // should not throw
 
       expect(ctx.aborted).toBe(true);
-    }));
+    }),
+  );
 
-  it.effect('resolve() sets resolved=true and closes scope', () =>
-    Effect.gen(function*() {
+  it.effect("resolve() sets resolved=true and closes scope", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
       expect(ctx.resolved).toBe(false);
@@ -92,30 +98,32 @@ describe('DetectionContext', () => {
       yield* ctx.resolve();
 
       expect(ctx.resolved).toBe(true);
-    }));
+    }),
+  );
 
-  it.effect('resolve() is idempotent — second call is no-op', () =>
-    Effect.gen(function*() {
+  it.effect("resolve() is idempotent — second call is no-op", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
       yield* ctx.resolve();
       yield* ctx.resolve(); // should not throw
 
       expect(ctx.resolved).toBe(true);
-    }));
+    }),
+  );
 
-  it.effect('bindOOPIF registers OOPIF and sets active fields', () =>
-    Effect.gen(function*() {
+  it.effect("bindOOPIF registers OOPIF and sets active fields", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
       expect(ctx.oopif).toBeNull();
 
-      const iframeTargetId = TargetId.makeUnsafe('iframe-1');
-      const iframeCdpSessionId = CdpSessionId.makeUnsafe('iframe-session-1');
+      const iframeTargetId = TargetId.makeUnsafe("iframe-1");
+      const iframeCdpSessionId = CdpSessionId.makeUnsafe("iframe-session-1");
       yield* ctx.bindOOPIF(iframeTargetId, iframeCdpSessionId);
 
       expect(ctx.oopif).not.toBeNull();
@@ -126,62 +134,65 @@ describe('DetectionContext', () => {
       expect(active.iframeCdpSessionId).toBe(iframeCdpSessionId);
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
-    }));
+      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+    }),
+  );
 
-  it.effect('OOPIF scope close pre-click → detection NOT aborted (normal CF lifecycle)', () =>
-    Effect.gen(function*() {
+  it.effect("OOPIF scope close pre-click → detection NOT aborted (normal CF lifecycle)", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
-      const iframeTargetId = TargetId.makeUnsafe('iframe-1');
-      const iframeCdpSessionId = CdpSessionId.makeUnsafe('iframe-session-1');
+      const iframeTargetId = TargetId.makeUnsafe("iframe-1");
+      const iframeCdpSessionId = CdpSessionId.makeUnsafe("iframe-session-1");
       yield* ctx.bindOOPIF(iframeTargetId, iframeCdpSessionId);
 
       expect(ctx.aborted).toBe(false);
 
       // Simulate pre-click OOPIF destruction — clickDelivered is falsy
-      yield* Scope.close(ctx.oopif!.scope, { _tag: 'Success', value: void 0 });
+      yield* Scope.close(ctx.oopif!.scope, { _tag: "Success", value: void 0 });
 
       // Detection should NOT be aborted — pre-click OOPIF death is normal
       expect(ctx.aborted).toBe(false);
       expect(active.aborted).toBe(false);
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
-    }));
+      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+    }),
+  );
 
-  it.effect('OOPIF scope close post-click → detection aborted', () =>
-    Effect.gen(function*() {
+  it.effect("OOPIF scope close post-click → detection aborted", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
-      const iframeTargetId = TargetId.makeUnsafe('iframe-1');
-      const iframeCdpSessionId = CdpSessionId.makeUnsafe('iframe-session-1');
+      const iframeTargetId = TargetId.makeUnsafe("iframe-1");
+      const iframeCdpSessionId = CdpSessionId.makeUnsafe("iframe-session-1");
       yield* ctx.bindOOPIF(iframeTargetId, iframeCdpSessionId);
 
       // Mark click as delivered — post-click OOPIF death should abort
       active.clickDelivered = true;
 
       // Simulate post-click OOPIF destruction
-      yield* Scope.close(ctx.oopif!.scope, { _tag: 'Success', value: void 0 });
+      yield* Scope.close(ctx.oopif!.scope, { _tag: "Success", value: void 0 });
 
       // Parent detection SHOULD be aborted — CF rejected our click
       expect(ctx.aborted).toBe(true);
       expect(active.aborted).toBe(true);
-    }));
+    }),
+  );
 
-  it.effect('clearOOPIF resets binding so new OOPIF can bind', () =>
-    Effect.gen(function*() {
+  it.effect("clearOOPIF resets binding so new OOPIF can bind", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
       // Bind first OOPIF
-      const iframe1Target = TargetId.makeUnsafe('iframe-1');
-      const iframe1Session = CdpSessionId.makeUnsafe('iframe-session-1');
+      const iframe1Target = TargetId.makeUnsafe("iframe-1");
+      const iframe1Session = CdpSessionId.makeUnsafe("iframe-session-1");
       yield* ctx.bindOOPIF(iframe1Target, iframe1Session);
 
       expect(ctx.oopif).not.toBeNull();
@@ -196,8 +207,8 @@ describe('DetectionContext', () => {
       expect(ctx.aborted).toBe(false);
 
       // Bind replacement OOPIF
-      const iframe2Target = TargetId.makeUnsafe('iframe-2');
-      const iframe2Session = CdpSessionId.makeUnsafe('iframe-session-2');
+      const iframe2Target = TargetId.makeUnsafe("iframe-2");
+      const iframe2Session = CdpSessionId.makeUnsafe("iframe-session-2");
       yield* ctx.bindOOPIF(iframe2Target, iframe2Session);
 
       expect(ctx.oopif).not.toBeNull();
@@ -206,43 +217,45 @@ describe('DetectionContext', () => {
       expect(active.iframeCdpSessionId).toBe(iframe2Session);
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
-    }));
+      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+    }),
+  );
 
-  it.effect('oopifState transitions: Unbound → Bound → Cleared → Bound', () =>
-    Effect.gen(function*() {
+  it.effect("oopifState transitions: Unbound → Bound → Cleared → Bound", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
       // Initial state: Unbound
-      expect(ctx.oopifState._tag).toBe('Unbound');
+      expect(ctx.oopifState._tag).toBe("Unbound");
       expect(ctx.canBindOOPIF).toBe(true);
 
       // Bind → Bound
-      yield* ctx.bindOOPIF(TargetId.makeUnsafe('i1'), CdpSessionId.makeUnsafe('s1'));
-      expect(ctx.oopifState._tag).toBe('Bound');
+      yield* ctx.bindOOPIF(TargetId.makeUnsafe("i1"), CdpSessionId.makeUnsafe("s1"));
+      expect(ctx.oopifState._tag).toBe("Bound");
       expect(ctx.canBindOOPIF).toBe(false);
 
       // Clear → Cleared
       ctx.clearOOPIF();
-      expect(ctx.oopifState._tag).toBe('Cleared');
+      expect(ctx.oopifState._tag).toBe("Cleared");
       expect(ctx.canBindOOPIF).toBe(true);
       expect(ctx.oopif).toBeNull();
 
       // Rebind → Bound
-      yield* ctx.bindOOPIF(TargetId.makeUnsafe('i2'), CdpSessionId.makeUnsafe('s2'));
-      expect(ctx.oopifState._tag).toBe('Bound');
-      expect(ctx.oopif!.iframeTargetId).toBe(TargetId.makeUnsafe('i2'));
+      yield* ctx.bindOOPIF(TargetId.makeUnsafe("i2"), CdpSessionId.makeUnsafe("s2"));
+      expect(ctx.oopifState._tag).toBe("Bound");
+      expect(ctx.oopif!.iframeTargetId).toBe(TargetId.makeUnsafe("i2"));
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
-    }));
+      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+    }),
+  );
 
-  it.effect('OOPIF destroyed before binding → no crash, detection not aborted', () =>
-    Effect.gen(function*() {
+  it.effect("OOPIF destroyed before binding → no crash, detection not aborted", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
       // No bindOOPIF called — oopif is null
@@ -250,46 +263,49 @@ describe('DetectionContext', () => {
       expect(ctx.aborted).toBe(false);
 
       // Detection times out normally — no crash
-      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
-    }));
+      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+    }),
+  );
 
-  it.effect('detection scope close → OOPIF scope also closes', () =>
-    Effect.gen(function*() {
+  it.effect("detection scope close → OOPIF scope also closes", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
-      const iframeTargetId = TargetId.makeUnsafe('iframe-1');
-      const iframeCdpSessionId = CdpSessionId.makeUnsafe('iframe-session-1');
+      const iframeTargetId = TargetId.makeUnsafe("iframe-1");
+      const iframeCdpSessionId = CdpSessionId.makeUnsafe("iframe-session-1");
       yield* ctx.bindOOPIF(iframeTargetId, iframeCdpSessionId);
 
       // Close detection scope
       yield* ctx.abort();
 
       // OOPIF scope should also be closed — closing it again is idempotent
-      yield* Scope.close(ctx.oopif!.scope, { _tag: 'Success', value: void 0 });
+      yield* Scope.close(ctx.oopif!.scope, { _tag: "Success", value: void 0 });
       // No throw = success
-    }));
+    }),
+  );
 
-  it.effect('active getter returns ReadonlyActiveDetection', () =>
-    Effect.gen(function*() {
+  it.effect("active getter returns ReadonlyActiveDetection", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
       // ctx.active returns the same object (readonly view)
       expect(ctx.active.pageTargetId).toBe(active.pageTargetId);
-      expect(ctx.active.info.type).toBe('turnstile');
+      expect(ctx.active.info.type).toBe("turnstile");
       expect(ctx.active.aborted).toBe(false);
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
-    }));
+      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+    }),
+  );
 
-  it.effect('setClickDelivered sets clickDelivered and timestamp', () =>
-    Effect.gen(function*() {
+  it.effect("setClickDelivered sets clickDelivered and timestamp", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
       expect(active.clickDelivered).toBeUndefined();
@@ -298,17 +314,18 @@ describe('DetectionContext', () => {
       ctx.setClickDelivered();
 
       expect(active.clickDelivered).toBe(true);
-      expect(active.clickDeliveredAt).toBeTypeOf('number');
+      expect(active.clickDeliveredAt).toBeTypeOf("number");
       expect(active.clickDeliveredAt).toBeLessThanOrEqual(Date.now());
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
-    }));
+      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+    }),
+  );
 
-  it.effect('markActivityLoopStarted sets activityLoopStarted', () =>
-    Effect.gen(function*() {
+  it.effect("markActivityLoopStarted sets activityLoopStarted", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
       expect(active.activityLoopStarted).toBeUndefined();
@@ -322,13 +339,14 @@ describe('DetectionContext', () => {
       expect(active.activityLoopStarted).toBe(true);
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
-    }));
+      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+    }),
+  );
 
-  it.effect('resetForRetry increments attempt and resets aborted', () =>
-    Effect.gen(function*() {
+  it.effect("resetForRetry increments attempt and resets aborted", () =>
+    Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const active = makeActive('T1');
+      const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
       expect(active.attempt).toBe(1);
@@ -344,16 +362,17 @@ describe('DetectionContext', () => {
       expect(active.aborted).toBe(false);
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: 'Success', value: void 0 });
-    }));
+      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+    }),
+  );
 });
 
-describe('DetectionRegistry with DetectionContext', () => {
-  it.effect('register returns DetectionContext', () =>
-    Effect.gen(function*() {
+describe("DetectionRegistry with DetectionContext", () => {
+  it.effect("register returns DetectionContext", () =>
+    Effect.gen(function* () {
       const registry = new DetectionRegistry(() => {});
-      const targetId = TargetId.makeUnsafe('T1');
-      const active = makeActive('T1');
+      const targetId = TargetId.makeUnsafe("T1");
+      const active = makeActive("T1");
 
       const ctx = yield* registry.register(targetId, active);
 
@@ -364,54 +383,57 @@ describe('DetectionRegistry with DetectionContext', () => {
       expect(registry.getContext(targetId)).toBe(ctx);
 
       yield* ctx.resolve();
-    }));
+    }),
+  );
 
-  it.effect('findByIframeTarget finds context with bound OOPIF', () =>
-    Effect.gen(function*() {
+  it.effect("findByIframeTarget finds context with bound OOPIF", () =>
+    Effect.gen(function* () {
       const registry = new DetectionRegistry(() => {});
-      const targetId = TargetId.makeUnsafe('T1');
-      const active = makeActive('T1');
+      const targetId = TargetId.makeUnsafe("T1");
+      const active = makeActive("T1");
 
       const ctx = yield* registry.register(targetId, active);
-      const iframeTargetId = TargetId.makeUnsafe('iframe-1');
-      yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe('iframe-session-1'));
+      const iframeTargetId = TargetId.makeUnsafe("iframe-1");
+      yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe("iframe-session-1"));
 
       const found = registry.findByIframeTarget(iframeTargetId);
       expect(found).toBe(ctx);
 
-      const notFound = registry.findByIframeTarget(TargetId.makeUnsafe('unknown'));
+      const notFound = registry.findByIframeTarget(TargetId.makeUnsafe("unknown"));
       expect(notFound).toBeUndefined();
 
       yield* ctx.resolve();
-    }));
+    }),
+  );
 
-  it.effect('findByIframeTarget returns undefined when no OOPIF bound', () =>
-    Effect.gen(function*() {
+  it.effect("findByIframeTarget returns undefined when no OOPIF bound", () =>
+    Effect.gen(function* () {
       const registry = new DetectionRegistry(() => {});
-      const targetId = TargetId.makeUnsafe('T1');
-      const ctx = yield* registry.register(targetId, makeActive('T1'));
+      const targetId = TargetId.makeUnsafe("T1");
+      const ctx = yield* registry.register(targetId, makeActive("T1"));
 
-      const found = registry.findByIframeTarget(TargetId.makeUnsafe('iframe-1'));
+      const found = registry.findByIframeTarget(TargetId.makeUnsafe("iframe-1"));
       expect(found).toBeUndefined();
 
       yield* ctx.resolve();
-    }));
+    }),
+  );
 
-  it.effect('OOPIF destroyed pre-click → detection NOT aborted, no emission', () =>
-    Effect.gen(function*() {
+  it.effect("OOPIF destroyed pre-click → detection NOT aborted, no emission", () =>
+    Effect.gen(function* () {
       const emissions: Array<{ targetId: string; signal: SolveSignal }> = [];
       const registry = new DetectionRegistry((active, signal) => {
         emissions.push({ targetId: active.pageTargetId, signal });
       });
 
-      const targetId = TargetId.makeUnsafe('T1');
-      const active = makeActive('T1');
+      const targetId = TargetId.makeUnsafe("T1");
+      const active = makeActive("T1");
       const ctx = yield* registry.register(targetId, active);
-      const iframeTargetId = TargetId.makeUnsafe('iframe-1');
-      yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe('iframe-session-1'));
+      const iframeTargetId = TargetId.makeUnsafe("iframe-1");
+      yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe("iframe-session-1"));
 
       // Simulate pre-click OOPIF destruction
-      yield* Scope.close(ctx.oopif!.scope, { _tag: 'Success', value: void 0 });
+      yield* Scope.close(ctx.oopif!.scope, { _tag: "Success", value: void 0 });
 
       // Detection should NOT be aborted — pre-click OOPIF death is normal
       expect(ctx.aborted).toBe(false);
@@ -420,69 +442,76 @@ describe('DetectionRegistry with DetectionContext', () => {
 
       // Cleanup
       yield* ctx.resolve();
-    }));
+    }),
+  );
 
-  it.effect('OOPIF destroyed post-click → detection aborted, resolution NOT settled (waits for bridge push)', () =>
-    Effect.gen(function*() {
-      const emissions: Array<{ targetId: string; signal: SolveSignal }> = [];
-      const registry = new DetectionRegistry((active, signal) => {
-        emissions.push({ targetId: active.pageTargetId, signal });
-      });
+  it.effect(
+    "OOPIF destroyed post-click → detection aborted, resolution NOT settled (waits for bridge push)",
+    () =>
+      Effect.gen(function* () {
+        const emissions: Array<{ targetId: string; signal: SolveSignal }> = [];
+        const registry = new DetectionRegistry((active, signal) => {
+          emissions.push({ targetId: active.pageTargetId, signal });
+        });
 
-      const targetId = TargetId.makeUnsafe('T1');
-      const active = makeActive('T1');
-      const ctx = yield* registry.register(targetId, active);
-      const iframeTargetId = TargetId.makeUnsafe('iframe-1');
-      yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe('iframe-session-1'));
+        const targetId = TargetId.makeUnsafe("T1");
+        const active = makeActive("T1");
+        const ctx = yield* registry.register(targetId, active);
+        const iframeTargetId = TargetId.makeUnsafe("iframe-1");
+        yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe("iframe-session-1"));
 
-      // Mark click as delivered
-      active.clickDelivered = true;
+        // Mark click as delivered
+        active.clickDelivered = true;
 
-      // Simulate post-click OOPIF destruction
-      yield* Scope.close(ctx.oopif!.scope, { _tag: 'Success', value: void 0 });
+        // Simulate post-click OOPIF destruction
+        yield* Scope.close(ctx.oopif!.scope, { _tag: "Success", value: void 0 });
 
-      // Detection SHOULD be aborted — CF rejected our click
-      expect(ctx.aborted).toBe(true);
-      expect(registry.has(targetId)).toBe(false);
-      // Finalizer does NOT settle for aborted detections — handler fiber
-      // waits for bridge push (typical ~200ms) or 60s timeout (zombie fix).
-      expect(emissions).toHaveLength(0);
-      expect(active.resolution.isDone).toBe(false);
-    }));
+        // Detection SHOULD be aborted — CF rejected our click
+        expect(ctx.aborted).toBe(true);
+        expect(registry.has(targetId)).toBe(false);
+        // Finalizer does NOT settle for aborted detections — handler fiber
+        // waits for bridge push (typical ~200ms) or 60s timeout (zombie fix).
+        expect(emissions).toHaveLength(0);
+        expect(active.resolution.isDone).toBe(false);
+      }),
+  );
 
-  it.effect('OOPIF destroyed after resolve → no fallback emission', () =>
-    Effect.gen(function*() {
+  it.effect("OOPIF destroyed after resolve → no fallback emission", () =>
+    Effect.gen(function* () {
       const emissions: string[] = [];
       const registry = new DetectionRegistry((active) => {
         emissions.push(active.pageTargetId);
       });
 
-      const targetId = TargetId.makeUnsafe('T1');
-      const ctx = yield* registry.register(targetId, makeActive('T1'));
-      const iframeTargetId = TargetId.makeUnsafe('iframe-1');
-      yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe('iframe-session-1'));
+      const targetId = TargetId.makeUnsafe("T1");
+      const ctx = yield* registry.register(targetId, makeActive("T1"));
+      const iframeTargetId = TargetId.makeUnsafe("iframe-1");
+      yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe("iframe-session-1"));
 
       // Resolve first
       yield* ctx.resolve();
 
       // Then OOPIF destroyed — no fallback emission
-      yield* Scope.close(ctx.oopif!.scope, { _tag: 'Success', value: void 0 });
+      yield* Scope.close(ctx.oopif!.scope, { _tag: "Success", value: void 0 });
 
       expect(emissions).toHaveLength(0);
-    }));
+    }),
+  );
 
-  it.effect('context.abort() opens latch — raceFirst pattern works', () =>
-    Effect.gen(function*() {
+  it.effect("context.abort() opens latch — raceFirst pattern works", () =>
+    Effect.gen(function* () {
       const registry = new DetectionRegistry(() => {});
-      const targetId = TargetId.makeUnsafe('T1');
-      const active = makeActive('T1');
+      const targetId = TargetId.makeUnsafe("T1");
+      const active = makeActive("T1");
       const ctx = yield* registry.register(targetId, active);
 
       // Simulate a poll loop waiting on the latch
       let latchOpened = false;
       const waiter = active.abortLatch.await.pipe(
-        Effect.map(() => { latchOpened = true; }),
-        Effect.timeout('100 millis'),
+        Effect.map(() => {
+          latchOpened = true;
+        }),
+        Effect.timeout("100 millis"),
         Effect.ignore,
       );
 
@@ -491,66 +520,67 @@ describe('DetectionRegistry with DetectionContext', () => {
       yield* waiter;
 
       expect(latchOpened).toBe(true);
-    }));
+    }),
+  );
 
   // ═══════════════════════════════════════════════════════════════════════
   // Resolution + Finalizer Regression Tests
   // ═══════════════════════════════════════════════════════════════════════
 
-  it.effect('resolution._unsafeAwait unblocks on resolution settlement', () =>
-    Effect.gen(function*() {
-      const active = makeActive('T1');
+  it.effect("resolution._unsafeAwait unblocks on resolution settlement", () =>
+    Effect.gen(function* () {
+      const active = makeActive("T1");
 
       const fiber = yield* active.resolution._unsafeAwait.pipe(Effect.forkChild);
 
       // Settle resolution — simulates bridge push
       yield* active.resolution.solve({
-        type: 'turnstile',
-        method: 'auto_solve',
-        signal: 'bridge_solved',
+        type: "turnstile",
+        method: "auto_solve",
+        signal: "bridge_solved",
         duration_ms: 5000,
-        phase_label: '→',
+        phase_label: "→",
       });
 
       const result = yield* Fiber.join(fiber).pipe(
-        Effect.timeout('2 seconds'),
-        Effect.catchTag('TimeoutError', () =>
-          Effect.succeed(null),
-        ),
+        Effect.timeout("2 seconds"),
+        Effect.catchTag("TimeoutError", () => Effect.succeed(null)),
       );
 
       expect(result).not.toBeNull();
-      expect(result!._tag).toBe('solved');
-    }));
+      expect(result!._tag).toBe("solved");
+    }),
+  );
 
-  it.effect('late push after abort does not re-settle', () =>
-    Effect.gen(function*() {
-      const active = makeActive('T1');
+  it.effect("late push after abort does not re-settle", () =>
+    Effect.gen(function* () {
+      const active = makeActive("T1");
 
       // Abort first
       DetectionContext.setAborted(active);
       const abortDuration = Date.now() - active.startTime;
-      yield* active.resolution.fail('aborted', abortDuration);
+      yield* active.resolution.fail("aborted", abortDuration);
 
       expect(active.resolution.isDone).toBe(true);
 
       // Late push — should be a no-op (returns false)
       const lateSolve = yield* active.resolution.solve({
-        type: 'turnstile',
-        method: 'auto_solve',
-        signal: 'bridge_solved',
+        type: "turnstile",
+        method: "auto_solve",
+        signal: "bridge_solved",
         duration_ms: 5000,
-        phase_label: '→',
+        phase_label: "→",
       });
 
       expect(lateSolve).toBe(false);
-    }));
+    }),
+  );
 
-  it.effect('scope finalizer settles resolution when aborted', () =>
-    Effect.gen(function*() {
+  it.effect("scope finalizer settles resolution when aborted", () =>
+    Effect.gen(function* () {
       const registry = new DetectionRegistry(() => {});
-      const targetId = TargetId.makeUnsafe('T1');
-      const active = makeActive('T1');
+      const targetId = TargetId.makeUnsafe("T1");
+      const active = makeActive("T1");
       yield* registry.register(targetId, active);
 
       // Abort the detection (opens latch + closes scope → finalizer runs)
@@ -560,19 +590,20 @@ describe('DetectionRegistry with DetectionContext', () => {
       yield* registry.unregister(targetId);
 
       expect(active.resolution.isDone).toBe(true);
-    }));
+    }),
+  );
 
-  it.effect('aborted detection: bridge push still settles resolution after OOPIF destruction', () =>
-    Effect.gen(function*() {
+  it.effect("aborted detection: bridge push still settles resolution after OOPIF destruction", () =>
+    Effect.gen(function* () {
       const registry = new DetectionRegistry(() => {});
-      const targetId = TargetId.makeUnsafe('T1');
-      const active = makeActive('T1');
+      const targetId = TargetId.makeUnsafe("T1");
+      const active = makeActive("T1");
       const ctx = yield* registry.register(targetId, active);
 
       // Simulate OOPIF post-click destruction — sets aborted + opens latch
       ctx.setClickDelivered();
       DetectionContext.setAborted(active);
-      yield* Scope.close(ctx.scope, { _tag: 'Success', value: void 0 });
+      yield* Scope.close(ctx.scope, { _tag: "Success", value: void 0 });
 
       // Resolution NOT settled by finalizer — handler waits for bridge push
       expect(active.resolution.isDone).toBe(false);
@@ -580,30 +611,34 @@ describe('DetectionRegistry with DetectionContext', () => {
       // Bridge push arrives after OOPIF destruction (typical ~200ms later) —
       // this is the happy path, resolution.solve() succeeds
       const solved = yield* active.resolution.solve({
-        type: 'turnstile',
-        method: 'auto_solve',
-        signal: 'bridge_solved',
+        type: "turnstile",
+        method: "auto_solve",
+        signal: "bridge_solved",
         duration_ms: 5000,
-        phase_label: '→',
+        phase_label: "→",
       });
 
       expect(solved).toBe(true);
       expect(active.resolution.isDone).toBe(true);
-    }));
+    }),
+  );
 
-  it.effect('aborted detection: resolution stays unsettled after abort (zombie fix = timeout in handler)', () =>
-    Effect.gen(function*() {
-      const active = makeActive('T1');
+  it.effect(
+    "aborted detection: resolution stays unsettled after abort (zombie fix = timeout in handler)",
+    () =>
+      Effect.gen(function* () {
+        const active = makeActive("T1");
 
-      // Simulate abort (OOPIF destroyed) — resolution NOT settled
-      DetectionContext.setAborted(active);
-      expect(active.aborted).toBe(true);
-      expect(active.resolution.isDone).toBe(false);
+        // Simulate abort (OOPIF destroyed) — resolution NOT settled
+        DetectionContext.setAborted(active);
+        expect(active.aborted).toBe(true);
+        expect(active.resolution.isDone).toBe(false);
 
-      // The zombie fix: awaitResolutionRace uses resolution.awaitBounded which
-      // has a built-in deadline. If no bridge push arrives, the timeout
-      // fires and emits resolution_timeout. This bounds zombie lifetime
-      // from ∞ to 60s. We verify the architecture here — resolution stays
-      // unsettled after abort so the handler can wait for bridge push.
-    }));
+        // The zombie fix: awaitResolutionRace uses resolution.awaitBounded which
+        // has a built-in deadline. If no bridge push arrives, the timeout
+        // fires and emits resolution_timeout. This bounds zombie lifetime
+        // from ∞ to 60s. We verify the architecture here — resolution stays
+        // unsettled after abort so the handler can wait for bridge push.
+      }),
+  );
 });

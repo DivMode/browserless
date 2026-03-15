@@ -1,33 +1,54 @@
-import { Cause, Effect, Exit, FiberMap, Layer, ManagedRuntime, Queue, Scope, Semaphore, type Tracer } from 'effect';
-import { CdpSessionId } from '../shared/cloudflare-detection.js';
-import type { TargetId, CloudflareConfig } from '../shared/cloudflare-detection.js';
-import { CloudflareDetector } from './cf/cloudflare-detector.js';
-import { CloudflareSolveStrategies, SolveOutcome } from './cf/cloudflare-solve-strategies.js';
-import { CloudflareStateTracker } from './cf/cloudflare-state-tracker.js';
-import type { ActiveDetection, EmitClientEvent, InjectMarker } from './cf/cloudflare-event-emitter.js';
-import { CFEvent } from './cf/cf-event-types.js';
-import { makeCFEventPipeline } from './cf/cf-event-queue.js';
-import type { SendCommand } from './cf/cloudflare-state-tracker.js';
 import {
-  CdpSender, SolverEvents, SolveDeps,
-  SolveDispatcher, DetectionLoopStarter, OOPIFChecker, SolverConfig,
-  TabSolverContext, TabDetector,
-} from './cf/cf-services.js';
-import { filterOwnedTargets } from './cf/cloudflare-detector.js';
-import { CdpSessionGone } from './cf/cf-errors.js';
-import { solveDetection as solveDetectionEffect } from './cf/cloudflare-solver.effect.js';
-import { simulateHumanPresence } from '../shared/mouse-humanizer.js';
-import { SharedTracerLayer } from '../otel-runtime.js';
-import { WS_SCOPE_BUDGET } from './cf/cf-ws-resource.js';
-import { withSessionSpan, forkTracedFiber, bridgeRuntime } from './trace-helpers.js';
-import { makeTabRuntime } from './cf/cf-tab-runtime.js';
-import type { TabRuntime } from './cf/cf-tab-runtime.js';
+  Cause,
+  Effect,
+  Exit,
+  FiberMap,
+  Layer,
+  ManagedRuntime,
+  Queue,
+  Scope,
+  Semaphore,
+  type Tracer,
+} from "effect";
+import { CdpSessionId } from "../shared/cloudflare-detection.js";
+import type { TargetId, CloudflareConfig } from "../shared/cloudflare-detection.js";
+import { CloudflareDetector } from "./cf/cloudflare-detector.js";
+import { CloudflareSolveStrategies, SolveOutcome } from "./cf/cloudflare-solve-strategies.js";
+import { CloudflareStateTracker } from "./cf/cloudflare-state-tracker.js";
+import type {
+  ActiveDetection,
+  EmitClientEvent,
+  InjectMarker,
+} from "./cf/cloudflare-event-emitter.js";
+import { CFEvent } from "./cf/cf-event-types.js";
+import { makeCFEventPipeline } from "./cf/cf-event-queue.js";
+import type { SendCommand } from "./cf/cloudflare-state-tracker.js";
+import {
+  CdpSender,
+  SolverEvents,
+  SolveDeps,
+  SolveDispatcher,
+  DetectionLoopStarter,
+  OOPIFChecker,
+  SolverConfig,
+  TabSolverContext,
+  TabDetector,
+} from "./cf/cf-services.js";
+import { filterOwnedTargets } from "./cf/cloudflare-detector.js";
+import { CdpSessionGone } from "./cf/cf-errors.js";
+import { solveDetection as solveDetectionEffect } from "./cf/cloudflare-solver.effect.js";
+import { simulateHumanPresence } from "../shared/mouse-humanizer.js";
+import { SharedTracerLayer } from "../otel-runtime.js";
+import { WS_SCOPE_BUDGET } from "./cf/cf-ws-resource.js";
+import { withSessionSpan, forkTracedFiber, bridgeRuntime } from "./trace-helpers.js";
+import { makeTabRuntime } from "./cf/cf-tab-runtime.js";
+import type { TabRuntime } from "./cf/cf-tab-runtime.js";
 
-import { incCounter, wsLifecycle, wsScopeBudgetExceeded } from '../effect-metrics.js';
-import type { CdpConnection } from '../shared/cdp-rpc.js';
+import { incCounter, wsLifecycle, wsScopeBudgetExceeded } from "../effect-metrics.js";
+import type { CdpConnection } from "../shared/cdp-rpc.js";
 
 let _solveIdCounter = 0;
-import type WebSocket from 'ws';
+import type WebSocket from "ws";
 
 /** Return type of CDPProxy.createIsolatedConnection(). */
 type IsolatedConnection = {
@@ -88,9 +109,7 @@ export class CloudflareSolver {
    * JS single-threadedness guarantees add() at ~7ms is visible to has() at ~500ms. */
   private readonly destroyedTargets = new Set<string>();
   private readonly detectionFibers = Effect.runSync(
-    FiberMap.make<TargetId>().pipe(
-      Effect.provideService(Scope.Scope, this.solverScope),
-    ),
+    FiberMap.make<TargetId>().pipe(Effect.provideService(Scope.Scope, this.solverScope)),
   );
 
   private runtime: ManagedRuntime.ManagedRuntime<SolverR, never>;
@@ -101,8 +120,13 @@ export class CloudflareSolver {
     return bridgeRuntime(this.runtime)(effect);
   }
 
-  constructor(sendCommand: SendCommand, injectMarker: InjectMarker, chromePort?: string, sessionId?: string) {
-    this.sessionId = sessionId ?? '';
+  constructor(
+    sendCommand: SendCommand,
+    injectMarker: InjectMarker,
+    chromePort?: string,
+    sessionId?: string,
+  ) {
+    this.sessionId = sessionId ?? "";
     this.sendCommand = sendCommand;
 
     // Queue-based event pipeline — replaces createCFEvents frozen closure.
@@ -110,7 +134,7 @@ export class CloudflareSolver {
     const pipeline = makeCFEventPipeline({
       injectMarker,
       emitClientEvent: () => this._realEmit,
-      sessionId: sessionId ?? '',
+      sessionId: sessionId ?? "",
       shouldRecordMarkers: () => this.stateTracker.config.recordingMarkers,
     });
     this.cfQueue = pipeline.queue;
@@ -119,23 +143,27 @@ export class CloudflareSolver {
     this.strategies = new CloudflareSolveStrategies(chromePort);
     this.stateTracker = new CloudflareStateTracker(this.cfPublish);
     this.detector = new CloudflareDetector(
-      this.cfPublish, this.stateTracker, this.strategies, sessionId ?? '',
+      this.cfPublish,
+      this.stateTracker,
+      this.strategies,
+      sessionId ?? "",
     );
 
     // Register upfront finalizer — stateTracker cleanup + queue shutdown.
     // Queue.shutdown signals the consumer fiber to exit cleanly.
-    Effect.runSync(Scope.addFinalizer(this.solverScope,
-      Effect.fn('cf.solver.scope.finalizer')({ self: this }, function*() {
-        yield* this.stateTracker.destroy();
-        yield* Queue.shutdown(this.cfQueue);
-      })(),
-    ));
+    Effect.runSync(
+      Scope.addFinalizer(
+        this.solverScope,
+        Effect.fn("cf.solver.scope.finalizer")({ self: this }, function* () {
+          yield* this.stateTracker.destroy();
+          yield* Queue.shutdown(this.cfQueue);
+        })(),
+      ),
+    );
 
     // Fork the queue consumer as a detached fiber in the solver scope.
     // It drains until Queue.shutdown is called in the scope finalizer.
-    Effect.runSync(
-      Effect.forkIn(pipeline.consumer, this.solverScope),
-    );
+    Effect.runSync(Effect.forkIn(pipeline.consumer, this.solverScope));
 
     // Build the Effect runtime with service layers
     this.runtime = ManagedRuntime.make(this.buildLayer());
@@ -156,14 +184,18 @@ export class CloudflareSolver {
     // Lift a Promise-based send function into Effect, mapping rejections to CdpSessionGone.
     const liftSend = (
       fn: SendCommand,
-      method: string, params: object | undefined, sessionId: CdpSessionId | undefined, timeoutMs: number | undefined,
+      method: string,
+      params: object | undefined,
+      sessionId: CdpSessionId | undefined,
+      timeoutMs: number | undefined,
     ) =>
       Effect.tryPromise({
         try: () => fn(method, params, sessionId, timeoutMs),
-        catch: () => new CdpSessionGone({
-          sessionId: sessionId ?? CdpSessionId.makeUnsafe(''),
-          method,
-        }),
+        catch: () =>
+          new CdpSessionGone({
+            sessionId: sessionId ?? CdpSessionId.makeUnsafe(""),
+            method,
+          }),
       });
 
     const proxyOrDirect: SendCommand = (...args) => (self.sendViaProxy || sendCommand)(...args);
@@ -171,170 +203,232 @@ export class CloudflareSolver {
     // Semaphore limits concurrent CDP commands to Chrome — prevents backpressure
     // when multiple tabs have active detection/solve loops firing simultaneously.
     const CDP_CONCURRENCY = 3;
-    const cdpSenderLayer = Layer.effect(CdpSender, Effect.gen(function*() {
-      const sem = yield* Semaphore.make(CDP_CONCURRENCY);
-      const throttle = <A, E>(effect: Effect.Effect<A, E>) => sem.withPermits(1)(effect);
-      return CdpSender.of({
-        send: (method, params, sessionId, timeoutMs) =>
-          throttle(liftSend(sendCommand, method, params, sessionId, timeoutMs)),
-        sendViaProxy: (method, params, sessionId, timeoutMs) =>
-          throttle(liftSend(proxyOrDirect, method, params, sessionId, timeoutMs)),
-        sendViaBrowser: (method, params, sessionId, timeoutMs) =>
-          throttle(liftSend(proxyOrDirect, method, params, sessionId, timeoutMs)),
-      });
-    }));
+    const cdpSenderLayer = Layer.effect(
+      CdpSender,
+      Effect.gen(function* () {
+        const sem = yield* Semaphore.make(CDP_CONCURRENCY);
+        const throttle = <A, E>(effect: Effect.Effect<A, E>) => sem.withPermits(1)(effect);
+        return CdpSender.of({
+          send: (method, params, sessionId, timeoutMs) =>
+            throttle(liftSend(sendCommand, method, params, sessionId, timeoutMs)),
+          sendViaProxy: (method, params, sessionId, timeoutMs) =>
+            throttle(liftSend(proxyOrDirect, method, params, sessionId, timeoutMs)),
+          sendViaBrowser: (method, params, sessionId, timeoutMs) =>
+            throttle(liftSend(proxyOrDirect, method, params, sessionId, timeoutMs)),
+        });
+      }),
+    );
 
-    const solverEventsLayer = Layer.succeed(SolverEvents, SolverEvents.of({
-      emitDetected: (active) => Effect.sync(() => cfPublish(CFEvent.Detected({ active }))),
-      emitProgress: (active, state, extra) => Effect.sync(() => cfPublish(CFEvent.Progress({ active, state, extra }))),
-      emitSolved: (active, result) => Effect.sync(() => cfPublish(CFEvent.Solved({ active, result }))),
-      emitFailed: (active, reason, duration, phaseLabel) =>
-        Effect.sync(() => cfPublish(CFEvent.Failed({ active, reason, duration: duration, phaseLabel }))),
-      marker: (targetId, tag, payload) => Effect.sync(() => cfPublish(CFEvent.Marker({ targetId, tag, payload }))),
-    }));
+    const solverEventsLayer = Layer.succeed(
+      SolverEvents,
+      SolverEvents.of({
+        emitDetected: (active) => Effect.sync(() => cfPublish(CFEvent.Detected({ active }))),
+        emitProgress: (active, state, extra) =>
+          Effect.sync(() => cfPublish(CFEvent.Progress({ active, state, extra }))),
+        emitSolved: (active, result) =>
+          Effect.sync(() => cfPublish(CFEvent.Solved({ active, result }))),
+        emitFailed: (active, reason, duration, phaseLabel) =>
+          Effect.sync(() =>
+            cfPublish(CFEvent.Failed({ active, reason, duration: duration, phaseLabel })),
+          ),
+        marker: (targetId, tag, payload) =>
+          Effect.sync(() => cfPublish(CFEvent.Marker({ targetId, tag, payload }))),
+      }),
+    );
 
     // SolveDeps needs OOPIFChecker for activity loops and CdpSender/SolverEvents
     // for findAndClickViaCDP — use Layer.effect to yield them from the runtime.
-    const solveDepsLayer = Layer.effect(SolveDeps, Effect.gen(function*() {
-      const oopifChecker = yield* OOPIFChecker;
-      const cdpSender = yield* CdpSender;
-      const solverEvents = yield* SolverEvents;
-      return SolveDeps.of({
-        findAndClickViaCDP: (active, attempt) => strategies.findAndClickViaCDP(active, attempt).pipe(
-          Effect.provideService(CdpSender, cdpSender),
-          Effect.provideService(SolverEvents, solverEvents),
-        ),
-        simulatePresence: (active) =>
-          Effect.tryPromise(() =>
-            simulateHumanPresence(sendCommand, active.pageCdpSessionId, 2.0 + Math.random() * 2.0),
-          ).pipe(Effect.ignore),
-        startActivityLoopEmbedded: (active) => stateTracker.activityLoopEmbedded(active).pipe(
-          Effect.provideService(OOPIFChecker, oopifChecker),
-        ),
-        startActivityLoopInterstitial: (active) => stateTracker.activityLoopInterstitial(active).pipe(
-          Effect.provideService(OOPIFChecker, oopifChecker),
-        ),
-        // Stubs — overridden per-dispatch in provideServices with active-scoped implementations
-        setClickDelivered: () => Effect.void,
-        markActivityLoopStarted: () => Effect.void,
-      });
-    }));
+    const solveDepsLayer = Layer.effect(
+      SolveDeps,
+      Effect.gen(function* () {
+        const oopifChecker = yield* OOPIFChecker;
+        const cdpSender = yield* CdpSender;
+        const solverEvents = yield* SolverEvents;
+        return SolveDeps.of({
+          findAndClickViaCDP: (active, attempt) =>
+            strategies
+              .findAndClickViaCDP(active, attempt)
+              .pipe(
+                Effect.provideService(CdpSender, cdpSender),
+                Effect.provideService(SolverEvents, solverEvents),
+              ),
+          simulatePresence: (active) =>
+            Effect.tryPromise(() =>
+              simulateHumanPresence(
+                sendCommand,
+                active.pageCdpSessionId,
+                2.0 + Math.random() * 2.0,
+              ),
+            ).pipe(Effect.ignore),
+          startActivityLoopEmbedded: (active) =>
+            stateTracker
+              .activityLoopEmbedded(active)
+              .pipe(Effect.provideService(OOPIFChecker, oopifChecker)),
+          startActivityLoopInterstitial: (active) =>
+            stateTracker
+              .activityLoopInterstitial(active)
+              .pipe(Effect.provideService(OOPIFChecker, oopifChecker)),
+          // Stubs — overridden per-dispatch in provideServices with active-scoped implementations
+          setClickDelivered: () => Effect.void,
+          markActivityLoopStarted: () => Effect.void,
+        });
+      }),
+    );
 
     // SolveDispatcher — routes solve attempts through the Effect solver.
     // Per-solve isolated WS: each solve gets its own WebSocket to Chrome.
     // Browser-level sends (originalSender) inherit the Semaphore from cdpSenderLayer.
-    const solveDispatcherLayer = Layer.effect(SolveDispatcher, Effect.gen(function*() {
-      const solverEvents = yield* SolverEvents;
-      const solveDeps = yield* SolveDeps;
-      const originalSender = yield* CdpSender;
+    const solveDispatcherLayer = Layer.effect(
+      SolveDispatcher,
+      Effect.gen(function* () {
+        const solverEvents = yield* SolverEvents;
+        const solveDeps = yield* SolveDeps;
+        const originalSender = yield* CdpSender;
 
-      const provideServices = (active: ActiveDetection, sender: Parameters<typeof CdpSender.of>[0]) => {
-        // Per-dispatch SolveDeps override — wire mutation methods to this active's DetectionContext
-        const perDispatchDeps = SolveDeps.of({
-          ...solveDeps,
-          setClickDelivered: (clickDeliveredAt) => Effect.sync(() => {
-            const ctx = self.stateTracker.registry.getContext(active.pageTargetId);
-            if (ctx) ctx.setClickDelivered(clickDeliveredAt);
-          }),
-          markActivityLoopStarted: () => Effect.sync(() => {
-            const ctx = self.stateTracker.registry.getContext(active.pageTargetId);
-            if (ctx) ctx.markActivityLoopStarted();
-          }),
+        const provideServices = (
+          active: ActiveDetection,
+          sender: Parameters<typeof CdpSender.of>[0],
+        ) => {
+          // Per-dispatch SolveDeps override — wire mutation methods to this active's DetectionContext
+          const perDispatchDeps = SolveDeps.of({
+            ...solveDeps,
+            setClickDelivered: (clickDeliveredAt) =>
+              Effect.sync(() => {
+                const ctx = self.stateTracker.registry.getContext(active.pageTargetId);
+                if (ctx) ctx.setClickDelivered(clickDeliveredAt);
+              }),
+            markActivityLoopStarted: () =>
+              Effect.sync(() => {
+                const ctx = self.stateTracker.registry.getContext(active.pageTargetId);
+                if (ctx) ctx.markActivityLoopStarted();
+              }),
+          });
+          return solveDetectionEffect(active).pipe(
+            Effect.provideService(SolverEvents, solverEvents),
+            Effect.provideService(SolveDeps, perDispatchDeps),
+            Effect.provideService(CdpSender, sender),
+          );
+        };
+
+        return SolveDispatcher.of({
+          dispatch: (active) => {
+            // Prefer scoped connection factory (structurally leak-proof).
+            // Fall back to legacy createIsolatedConn for backward compat,
+            // then to direct sender if no isolated connection is available.
+            if (self.createIsolatedConnScoped) {
+              const solveId = ++_solveIdCounter;
+              const tid = active.pageTargetId.slice(0, 8);
+              return self.createIsolatedConnScoped().pipe(
+                Effect.flatMap((isolated) =>
+                  provideServices(
+                    active,
+                    CdpSender.of({
+                      send: originalSender.send,
+                      sendViaProxy: (method, params, sessionId, timeoutMs) =>
+                        isolated.send(method, params, sessionId, timeoutMs),
+                      sendViaBrowser: originalSender.sendViaProxy,
+                    }),
+                  ),
+                ),
+                Effect.scoped,
+                // Catch WS open errors — connection refused, handshake timeout, etc.
+                Effect.catch((err: unknown) => {
+                  return Effect.logError("ws.debug.solver_isolated.error").pipe(
+                    Effect.annotateLogs({ solveId, tid, error: String(err) }),
+                    Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
+                  );
+                }),
+                // Structural kill switch: even if future code introduces blocking
+                // inside the scoped region, the budget timeout kills the scope.
+                // Prevents Bug #1 (blocking inside scoped region) structurally.
+                Effect.timeout(`${WS_SCOPE_BUDGET} millis`),
+                // Catch timeout error — budget exceeded returns 'aborted' + logs for Grafana
+                Effect.catch(() => {
+                  return incCounter(wsScopeBudgetExceeded, { type: "solver_isolated" }).pipe(
+                    Effect.andThen(
+                      Effect.logWarning("ws.scope_budget_exceeded").pipe(
+                        Effect.annotateLogs({
+                          label: "solver_isolated",
+                          budget_ms: WS_SCOPE_BUDGET,
+                          solveId,
+                          tid,
+                        }),
+                      ),
+                    ),
+                    Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
+                  );
+                }),
+              );
+            }
+
+            if (self.createIsolatedConn) {
+              // Legacy path — kept for backward compatibility during migration.
+              return Effect.acquireRelease(
+                Effect.gen(function* () {
+                  yield* incCounter(wsLifecycle, { type: "solver_isolated", action: "create" });
+                  return self.createIsolatedConn!();
+                }),
+                (c) =>
+                  Effect.fn("ws.release.solver_isolated")(function* () {
+                    c.cleanup();
+                    yield* incCounter(wsLifecycle, { type: "solver_isolated", action: "destroy" });
+                  })(),
+              ).pipe(
+                Effect.tap((isolated) => isolated.waitForOpen.pipe(Effect.ignore)),
+                Effect.flatMap((isolated) =>
+                  provideServices(
+                    active,
+                    CdpSender.of({
+                      send: originalSender.send,
+                      sendViaProxy: (method, params, sessionId, timeoutMs) =>
+                        isolated.conn.send(method, params, sessionId, timeoutMs),
+                      sendViaBrowser: originalSender.sendViaProxy,
+                    }),
+                  ),
+                ),
+                Effect.scoped,
+              );
+            }
+
+            return provideServices(active, originalSender);
+          },
         });
-        return solveDetectionEffect(active).pipe(
-          Effect.provideService(SolverEvents, solverEvents),
-          Effect.provideService(SolveDeps, perDispatchDeps),
-          Effect.provideService(CdpSender, sender),
-        );
-      };
-
-      return SolveDispatcher.of({
-        dispatch: (active) => {
-          // Prefer scoped connection factory (structurally leak-proof).
-          // Fall back to legacy createIsolatedConn for backward compat,
-          // then to direct sender if no isolated connection is available.
-          if (self.createIsolatedConnScoped) {
-            const solveId = ++_solveIdCounter;
-            const tid = active.pageTargetId.slice(0, 8);
-            return self.createIsolatedConnScoped().pipe(
-              Effect.flatMap((isolated) => provideServices(active, CdpSender.of({
-                send: originalSender.send,
-                sendViaProxy: (method, params, sessionId, timeoutMs) =>
-                  isolated.send(method, params, sessionId, timeoutMs),
-                sendViaBrowser: originalSender.sendViaProxy,
-              }))),
-              Effect.scoped,
-              // Catch WS open errors — connection refused, handshake timeout, etc.
-              Effect.catch((err: unknown) => {
-                return Effect.logError('ws.debug.solver_isolated.error').pipe(
-                  Effect.annotateLogs({ solveId, tid, error: String(err) }),
-                  Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
-                );
-              }),
-              // Structural kill switch: even if future code introduces blocking
-              // inside the scoped region, the budget timeout kills the scope.
-              // Prevents Bug #1 (blocking inside scoped region) structurally.
-              Effect.timeout(`${WS_SCOPE_BUDGET} millis`),
-              // Catch timeout error — budget exceeded returns 'aborted' + logs for Grafana
-              Effect.catch(() => {
-                return incCounter(wsScopeBudgetExceeded, { type: 'solver_isolated' }).pipe(
-                  Effect.andThen(Effect.logWarning('ws.scope_budget_exceeded').pipe(
-                    Effect.annotateLogs({ label: 'solver_isolated', budget_ms: WS_SCOPE_BUDGET, solveId, tid }),
-                  )),
-                  Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
-                );
-              }),
-            );
-          }
-
-          if (self.createIsolatedConn) {
-            // Legacy path — kept for backward compatibility during migration.
-            return Effect.acquireRelease(
-              Effect.gen(function*() {
-                yield* incCounter(wsLifecycle, { type: 'solver_isolated', action: 'create' });
-                return self.createIsolatedConn!();
-              }),
-              (c) => Effect.fn('ws.release.solver_isolated')(function*() {
-                c.cleanup();
-                yield* incCounter(wsLifecycle, { type: 'solver_isolated', action: 'destroy' });
-              })(),
-            ).pipe(
-              Effect.tap((isolated) => isolated.waitForOpen.pipe(Effect.ignore)),
-              Effect.flatMap((isolated) => provideServices(active, CdpSender.of({
-                send: originalSender.send,
-                sendViaProxy: (method, params, sessionId, timeoutMs) =>
-                  isolated.conn.send(method, params, sessionId, timeoutMs),
-                sendViaBrowser: originalSender.sendViaProxy,
-              }))),
-              Effect.scoped,
-            );
-          }
-
-          return provideServices(active, originalSender);
-        },
-      });
-    }));
+      }),
+    );
 
     // DetectionLoopStarter — starts detection fibers via FiberMap
-    const detectionStarterLayer = Layer.succeed(DetectionLoopStarter, DetectionLoopStarter.of({
-      start: (targetId, cdpSessionId) => Effect.sync(() => self.startDetectionFiber(targetId, cdpSessionId)),
-    }));
+    const detectionStarterLayer = Layer.succeed(
+      DetectionLoopStarter,
+      DetectionLoopStarter.of({
+        start: (targetId, cdpSessionId) =>
+          Effect.sync(() => self.startDetectionFiber(targetId, cdpSessionId)),
+      }),
+    );
 
     // OOPIFChecker — wired to strategies.checkOOPIFStateViaCDP.
     // checkOOPIFStateViaCDP now yields CdpSender — provide it here.
-    const oopifCheckerLayer = Layer.effect(OOPIFChecker, Effect.gen(function*() {
-      const cdpSender = yield* CdpSender;
-      return OOPIFChecker.of({
-        check: (iframeCdpSessionId) => strategies.checkOOPIFStateViaCDP(iframeCdpSessionId).pipe(
-          Effect.provideService(CdpSender, cdpSender),
-        ),
-      });
-    }));
+    const oopifCheckerLayer = Layer.effect(
+      OOPIFChecker,
+      Effect.gen(function* () {
+        const cdpSender = yield* CdpSender;
+        return OOPIFChecker.of({
+          check: (iframeCdpSessionId) =>
+            strategies
+              .checkOOPIFStateViaCDP(iframeCdpSessionId)
+              .pipe(Effect.provideService(CdpSender, cdpSender)),
+        });
+      }),
+    );
 
     // SolverConfig — defaults, overridden by enable() via stateTracker.config
-    const solverConfigLayer = Layer.succeed(SolverConfig, SolverConfig.of({
-      maxAttempts: 3, attemptTimeout: 30000, recordingMarkers: true,
-    }));
+    const solverConfigLayer = Layer.succeed(
+      SolverConfig,
+      SolverConfig.of({
+        maxAttempts: 3,
+        attemptTimeout: 30000,
+        recordingMarkers: true,
+      }),
+    );
 
     // lifecycleLayer REMOVED — replaced by eager solverScope + scope-bound FiberMap.
     // FiberMap is created in the constructor (never null), stateTracker cleanup
@@ -346,8 +440,10 @@ export class CloudflareSolver {
     // - solveDispatcherLayer needs SolverEvents + SolveDeps + CdpSender
     // Base layers (no deps) are merged first, then dependent layers are provided.
     const baseLayers = Layer.mergeAll(
-      cdpSenderLayer, solverEventsLayer,
-      detectionStarterLayer, solverConfigLayer,
+      cdpSenderLayer,
+      solverEventsLayer,
+      detectionStarterLayer,
+      solverConfigLayer,
       SharedTracerLayer,
     );
 
@@ -391,9 +487,7 @@ export class CloudflareSolver {
     if (parentCtx) {
       if (parentCtx.oopif && parentCtx.active.clickDelivered) {
         // Post-click: close OOPIF scope — finalizer propagates abort
-        Effect.runSync(
-          Scope.close(parentCtx.oopif.scope, Exit.void),
-        );
+        Effect.runSync(Scope.close(parentCtx.oopif.scope, Exit.void));
       } else if (parentCtx.oopif) {
         // Pre-click: OOPIF replaced by CF — clear stale binding so
         // replacement OOPIF can bind via onIframeAttached/onIframeNavigated
@@ -413,7 +507,7 @@ export class CloudflareSolver {
     const fibers = this.detectionFibers;
     const tracker = this.stateTracker;
     return this.runInSolver(
-      Effect.fn('cf.stopTargetDetection')(function*() {
+      Effect.fn("cf.stopTargetDetection")(function* () {
         yield* FiberMap.remove(fibers, targetId).pipe(Effect.ignore);
         yield* tracker.unregisterPage(targetId);
       })(),
@@ -430,7 +524,7 @@ export class CloudflareSolver {
     // the runtime boundary. The solver runtime doesn't see the session's interrupt.
     if (this.destroyedTargets.has(targetId)) {
       this.runtime.runFork(
-        Effect.logWarning('CF ghost prevented — tab destroyed during 500ms bridge sleep').pipe(
+        Effect.logWarning("CF ghost prevented — tab destroyed during 500ms bridge sleep").pipe(
           Effect.annotateLogs({
             target_id: targetId,
             session_id: this.sessionId,
@@ -443,9 +537,14 @@ export class CloudflareSolver {
     // Create per-tab state container — scalar fields, GC'd when entry is deleted.
     // pageFrameId is resolved later inside detectTurnstileWidgetEffect via CdpSender.
     if (!this.tabRuntimes.has(targetId)) {
-      this.tabRuntimes.set(targetId, makeTabRuntime({
-        targetId, cdpSessionId, pageFrameId: null,
-      }));
+      this.tabRuntimes.set(
+        targetId,
+        makeTabRuntime({
+          targetId,
+          cdpSessionId,
+          pageFrameId: null,
+        }),
+      );
     }
 
     // FiberMap.run auto-interrupts existing fiber for same key.
@@ -457,50 +556,60 @@ export class CloudflareSolver {
     const strategies = this.strategies;
     const guarded = this.detector.detectTurnstileWidgetEffect(targetId, cdpSessionId).pipe(
       // Provide per-tab services — baked-in filtering, impossible to bypass
-      Effect.provideServiceEffect(TabDetector, Effect.gen(function*() {
-        const cdpSender = yield* CdpSender;
-        return TabDetector.of({
-          detect: (excludeIds) => strategies.detectTurnstileViaCDP(
-            tab.cdpSessionId, excludeIds,
-          ).pipe(
-            Effect.provideService(CdpSender, cdpSender),
-            Effect.flatMap((detection) => {
-              if (detection._tag !== 'detected') return Effect.succeed(detection);
-              // STRUCTURAL FILTER: baked in, impossible to bypass
-              const owned = filterOwnedTargets(
-                detection.targets, tab.targetId, stateTracker.iframeToPage,
-              );
-              const filtered = tab.pageFrameId
-                ? owned.filter(t => !t.parentFrameId || t.parentFrameId === tab.pageFrameId)
-                : owned;
-              const result = filtered.length === 0
-                ? { _tag: 'not_detected' as const }
-                : { ...detection, targets: filtered };
-              // Ownership breakdown — visible in Tempo so cross-tab filtering
-              // is unambiguous without cross-referencing replay markers.
-              return Effect.annotateCurrentSpan({
-                'cf.detect.fresh_owned': filtered.length,
-                'cf.detect.fresh_cross_tab': detection.targets.length - filtered.length,
-              }).pipe(Effect.map(() => result));
-            }),
-            Effect.orElseSucceed(() => ({ _tag: 'not_detected' as const })),
-          ),
-        });
-      })),
-      Effect.provideService(TabSolverContext, TabSolverContext.of({
-        targetId: tab.targetId,
-        cdpSessionId: tab.cdpSessionId,
-        state: tab.state,
-        setPageFrameId: (id) => { tab.pageFrameId = id; },
-      })),
+      Effect.provideServiceEffect(
+        TabDetector,
+        Effect.gen(function* () {
+          const cdpSender = yield* CdpSender;
+          return TabDetector.of({
+            detect: (excludeIds) =>
+              strategies.detectTurnstileViaCDP(tab.cdpSessionId, excludeIds).pipe(
+                Effect.provideService(CdpSender, cdpSender),
+                Effect.flatMap((detection) => {
+                  if (detection._tag !== "detected") return Effect.succeed(detection);
+                  // STRUCTURAL FILTER: baked in, impossible to bypass
+                  const owned = filterOwnedTargets(
+                    detection.targets,
+                    tab.targetId,
+                    stateTracker.iframeToPage,
+                  );
+                  const filtered = tab.pageFrameId
+                    ? owned.filter((t) => !t.parentFrameId || t.parentFrameId === tab.pageFrameId)
+                    : owned;
+                  const result =
+                    filtered.length === 0
+                      ? { _tag: "not_detected" as const }
+                      : { ...detection, targets: filtered };
+                  // Ownership breakdown — visible in Tempo so cross-tab filtering
+                  // is unambiguous without cross-referencing replay markers.
+                  return Effect.annotateCurrentSpan({
+                    "cf.detect.fresh_owned": filtered.length,
+                    "cf.detect.fresh_cross_tab": detection.targets.length - filtered.length,
+                  }).pipe(Effect.map(() => result));
+                }),
+                Effect.orElseSucceed(() => ({ _tag: "not_detected" as const })),
+              ),
+          });
+        }),
+      ),
+      Effect.provideService(
+        TabSolverContext,
+        TabSolverContext.of({
+          targetId: tab.targetId,
+          cdpSessionId: tab.cdpSessionId,
+          state: tab.state,
+          setPageFrameId: (id) => {
+            tab.pageFrameId = id;
+          },
+        }),
+      ),
       Effect.catchCause((cause) =>
-        Effect.fn('cf.detectionFiberGuard')({ self: this }, function*() {
+        Effect.fn("cf.detectionFiberGuard")({ self: this }, function* () {
           // Interrupt = normal shutdown (target destroyed / FiberMap.remove).
           // The scope finalizer in unregisterPage handles fallback emission.
           if (Cause.hasInterruptsOnly(cause)) return;
 
           const pretty = Cause.pretty(cause);
-          yield* Effect.logError('Detection fiber crashed — emitting fallback failure').pipe(
+          yield* Effect.logError("Detection fiber crashed — emitting fallback failure").pipe(
             Effect.annotateLogs({ targetId, error: pretty }),
           );
           // Emit cf.failed so pydoll doesn't hang waiting for event #2
@@ -508,7 +617,9 @@ export class CloudflareSolver {
           if (crashCtx && !crashCtx.aborted) {
             const duration = Date.now() - crashCtx.active.startTime;
             yield* crashCtx.abort();
-            this.cfPublish(CFEvent.Failed({ active: crashCtx.active, reason: 'fiber_crash', duration }));
+            this.cfPublish(
+              CFEvent.Failed({ active: crashCtx.active, reason: "fiber_crash", duration }),
+            );
           }
         })(),
       ),
@@ -533,7 +644,9 @@ export class CloudflareSolver {
   }
 
   enable(config?: CloudflareConfig): void {
-    this.detector.enable(config, (targetId, cdpSessionId) => this.startDetectionFiber(targetId, cdpSessionId));
+    this.detector.enable(config, (targetId, cdpSessionId) =>
+      this.startDetectionFiber(targetId, cdpSessionId),
+    );
   }
 
   isEnabled(): boolean {
@@ -544,13 +657,22 @@ export class CloudflareSolver {
     return this.runInSolver(this.detector.onPageAttachedEffect(targetId, cdpSessionId, url));
   }
 
-  onPageNavigated(targetId: TargetId, cdpSessionId: CdpSessionId, url: string, title: string): Effect.Effect<void> {
-    return this.runInSolver(this.detector.onPageNavigatedEffect(targetId, cdpSessionId, url, title));
+  onPageNavigated(
+    targetId: TargetId,
+    cdpSessionId: CdpSessionId,
+    url: string,
+    title: string,
+  ): Effect.Effect<void> {
+    return this.runInSolver(
+      this.detector.onPageNavigatedEffect(targetId, cdpSessionId, url, title),
+    );
   }
 
   onIframeAttached(
-    iframeTargetId: TargetId, iframeCdpSessionId: CdpSessionId,
-    url: string, parentTargetId: TargetId,
+    iframeTargetId: TargetId,
+    iframeCdpSessionId: CdpSessionId,
+    url: string,
+    parentTargetId: TargetId,
   ): Effect.Effect<void> {
     return this.runInSolver(
       this.detector.onIframeAttachedEffect(iframeTargetId, iframeCdpSessionId, url, parentTargetId),
@@ -558,9 +680,13 @@ export class CloudflareSolver {
   }
 
   onIframeNavigated(
-    iframeTargetId: TargetId, iframeCdpSessionId: CdpSessionId, url: string,
+    iframeTargetId: TargetId,
+    iframeCdpSessionId: CdpSessionId,
+    url: string,
   ): Effect.Effect<void> {
-    return this.runInSolver(this.detector.onIframeNavigatedEffect(iframeTargetId, iframeCdpSessionId, url));
+    return this.runInSolver(
+      this.detector.onIframeNavigatedEffect(iframeTargetId, iframeCdpSessionId, url),
+    );
   }
 
   onBridgeEvent(targetId: TargetId, event: unknown): Effect.Effect<void> {
@@ -575,23 +701,33 @@ export class CloudflareSolver {
     const ctx = this.stateTracker.registry.getContext(targetId);
     if (!ctx) return; // Detection was already cleaned up — discard stale beacon
     const parented = withSessionSpan(effect, ctx.parentSpan);
-    await this.runtime.runPromise(parented)
-      .catch((e) => Effect.runSync(
-        Effect.logError('CF runtime defect').pipe(Effect.annotateLogs({ method: 'onBeaconSolved', error: String(e) })),
-      ));
+    await this.runtime
+      .runPromise(parented)
+      .catch((e) =>
+        Effect.runSync(
+          Effect.logError("CF runtime defect").pipe(
+            Effect.annotateLogs({ method: "onBeaconSolved", error: String(e) }),
+          ),
+        ),
+      );
   }
 
   async emitUnresolvedDetections(): Promise<void> {
-    await this.runtime.runPromise(this.stateTracker.emitUnresolvedDetections())
-      .catch((e) => Effect.runSync(
-        Effect.logError('CF runtime defect').pipe(Effect.annotateLogs({ method: 'emitUnresolvedDetections', error: String(e) })),
-      ));
+    await this.runtime
+      .runPromise(this.stateTracker.emitUnresolvedDetections())
+      .catch((e) =>
+        Effect.runSync(
+          Effect.logError("CF runtime defect").pipe(
+            Effect.annotateLogs({ method: "emitUnresolvedDetections", error: String(e) }),
+          ),
+        ),
+      );
   }
 
   /** Pure Effect disposal — callers yield* this directly. No boundary crossing. */
   get destroyEffect(): Effect.Effect<void> {
-    return Effect.fn('cf.solver.destroy')({ self: this }, function*() {
-      yield* Effect.logDebug('cf.solver.destroy.start');
+    return Effect.fn("cf.solver.destroy")({ self: this }, function* () {
+      yield* Effect.logDebug("cf.solver.destroy.start");
 
       // Clean up all per-tab state containers
       this.tabRuntimes.clear();
@@ -602,15 +738,15 @@ export class CloudflareSolver {
       // 3. Registry scope finalizers settle resolution + emit fallback
       const fiberCount = yield* FiberMap.size(this.detectionFibers);
       yield* Scope.close(this.solverScope, Exit.void).pipe(
-        Effect.timeout('10 seconds'),
+        Effect.timeout("10 seconds"),
         Effect.ignore,
       );
-      yield* Effect.logDebug('cf.solver.destroy.drained').pipe(
+      yield* Effect.logDebug("cf.solver.destroy.drained").pipe(
         Effect.annotateLogs({ fibers: fiberCount }),
       );
 
       yield* this.runtime.disposeEffect;
-      yield* Effect.logDebug('cf.solver.destroy.end');
+      yield* Effect.logDebug("cf.solver.destroy.end");
     })();
   }
 }

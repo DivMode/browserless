@@ -1,6 +1,6 @@
-import { IBrowserlessStats } from '@browserless.io/browserless';
+import { IBrowserlessStats } from "@browserless.io/browserless";
 
-import { EventEmitter } from 'events';
+import { EventEmitter } from "events";
 
 export class Metrics extends EventEmitter {
   protected sessionTimes: number[] = [];
@@ -58,7 +58,7 @@ export class Metrics extends EventEmitter {
     return this.running;
   }
 
-  public get(): Omit<IBrowserlessStats, 'cpu' | 'memory'> {
+  public get(): Omit<IBrowserlessStats, "cpu" | "memory"> {
     const currentStat = {
       error: this.error,
       maxConcurrent: this.concurrent,
@@ -95,16 +95,10 @@ export class Metrics extends EventEmitter {
   protected calculateStats(sessionTimes: number[]) {
     return {
       maxTime: Math.max(...sessionTimes) || 0,
-      meanTime: sessionTimes.reduce(
-        (avg, value, _, { length }) => avg + value / length,
-        0,
-      ),
+      meanTime: sessionTimes.reduce((avg, value, _, { length }) => avg + value / length, 0),
       minTime: Math.min(...sessionTimes) || 0,
       totalTime: sessionTimes.reduce((sum, value) => sum + value, 0),
-      units: sessionTimes.reduce(
-        (sum, value) => sum + Math.ceil(value / 30000),
-        0,
-      ),
+      units: sessionTimes.reduce((sum, value) => sum + Math.ceil(value / 30000), 0),
     };
   }
 

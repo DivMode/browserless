@@ -9,9 +9,9 @@ import {
   SystemQueryParameters,
   contentTypes,
   jsonResponse,
-} from '@browserless.io/browserless';
-import { ServerResponse } from 'http';
-import { Effect } from 'effect';
+} from "@browserless.io/browserless";
+import { ServerResponse } from "http";
+import { Effect } from "effect";
 
 export interface QuerySchema extends SystemQueryParameters {
   token?: string;
@@ -34,7 +34,7 @@ export default class SessionsGetRoute extends HTTPRoute {
   async handler(req: Request, res: ServerResponse): Promise<void> {
     const route = this;
     return Effect.runPromise(
-      Effect.fn('route.sessions.get')(function* () {
+      Effect.fn("route.sessions.get")(function* () {
         const trackingId = (req.queryParams.trackingId as string) || undefined;
         const browserManager = route.browserManager();
         const response: ResponseSchema = yield* Effect.promise(() =>

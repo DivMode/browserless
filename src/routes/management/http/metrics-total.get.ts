@@ -8,9 +8,9 @@ import {
   Request,
   contentTypes,
   writeResponse,
-} from '@browserless.io/browserless';
-import { ServerResponse } from 'http';
-import { Effect } from 'effect';
+} from "@browserless.io/browserless";
+import { ServerResponse } from "http";
+import { Effect } from "effect";
 
 export type ResponseSchema = IBrowserlessMetricTotals;
 
@@ -30,14 +30,12 @@ export default class MetricsTotalGetRoute extends HTTPRoute {
   async handler(_req: Request, res: ServerResponse): Promise<void> {
     const route = this;
     return Effect.runPromise(
-      Effect.fn('route.metrics-total.get')(function* () {
+      Effect.fn("route.metrics-total.get")(function* () {
         const fileSystem = route.fileSystem();
         const config = route.config();
-        const metrics = (
-          yield* Effect.promise(() =>
-            fileSystem.read(config.getMetricsJSONPath(), false),
-          )
-        ).map((m) => JSON.parse(m));
+        const metrics = (yield* Effect.promise(() =>
+          fileSystem.read(config.getMetricsJSONPath(), false),
+        )).map((m) => JSON.parse(m));
         const availableMetrics = metrics.length;
         const totals: IBrowserlessMetricTotals = metrics.reduce(
           (accum, metric) => ({
@@ -81,12 +79,7 @@ export default class MetricsTotalGetRoute extends HTTPRoute {
           totals.units / (availableMetrics / fiveMinuteIntervalsInAMonth),
         );
 
-        return writeResponse(
-          res,
-          200,
-          JSON.stringify(totals),
-          contentTypes.json,
-        );
+        return writeResponse(res, 200, JSON.stringify(totals), contentTypes.json);
       })(),
     );
   }

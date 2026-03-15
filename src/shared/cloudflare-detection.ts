@@ -10,7 +10,7 @@
  * - Type inference via typeof X.Type (identical to the old interfaces)
  * - JSON Schema generation for the Python codegen pipeline
  */
-import { Schema } from 'effect';
+import { Schema } from "effect";
 
 // ═══════════════════════════════════════════════════════════════════════
 // CDP branded identifiers — use .makeUnsafe() at boundaries
@@ -70,40 +70,40 @@ const PositiveInt = Schema.Finite.pipe(
 // but _cf_chl_opt is not exposed — we know a widget exists but not its mode.
 
 export const CloudflareType = Schema.Literals([
-  'managed',          // Official: Managed — may need click, may auto-pass
-  'non_interactive',  // Official: Non-Interactive — auto-solves, spinner visible
-  'invisible',        // Official: Invisible — auto-solves, nothing visible
-  'interstitial',     // CF challenge page (mode unknown, no cType available)
-  'turnstile',        // Turnstile iframe found but no cType (third-party embed, mode unknown)
-  'block',            // CF error page — not solvable
+  "managed", // Official: Managed — may need click, may auto-pass
+  "non_interactive", // Official: Non-Interactive — auto-solves, spinner visible
+  "invisible", // Official: Invisible — auto-solves, nothing visible
+  "interstitial", // CF challenge page (mode unknown, no cType available)
+  "turnstile", // Turnstile iframe found but no cType (third-party embed, mode unknown)
+  "block", // CF error page — not solvable
 ]);
 export type CloudflareType = typeof CloudflareType.Type;
 
 /** Page IS a CF challenge — Runtime.evaluate FORBIDDEN, bridge injection FORBIDDEN. */
-export type InterstitialCFType = 'interstitial' | 'managed';
+export type InterstitialCFType = "interstitial" | "managed";
 
 /** CF embedded on third-party page — Runtime.evaluate safe, bridge injection safe. */
-export type EmbeddedCFType = 'turnstile' | 'non_interactive' | 'invisible';
+export type EmbeddedCFType = "turnstile" | "non_interactive" | "invisible";
 
 export const isInterstitialType = (t: CloudflareType): t is InterstitialCFType =>
-  t === 'interstitial' || t === 'managed';
+  t === "interstitial" || t === "managed";
 
 export const isEmbeddedType = (t: CloudflareType): t is EmbeddedCFType =>
-  t === 'turnstile' || t === 'non_interactive' || t === 'invisible';
+  t === "turnstile" || t === "non_interactive" || t === "invisible";
 
 /** Known CF interstitial page title prefixes (zero-injection detection signal).
  *  Verified from production replays — 100% of Ahrefs CF interstitials use "Just a moment...".
  *  Others included for coverage of non-Ahrefs CF deployments. */
 export const CF_INTERSTITIAL_TITLE_PREFIXES = [
-  'Just a moment',          // Dominant (verified in 4/4 Ahrefs replays)
-  'Attention Required',     // CF captcha/block pages
-  'One more step',          // Legacy CF challenge
-  'Checking your browser',  // Explicit browser check
+  "Just a moment", // Dominant (verified in 4/4 Ahrefs replays)
+  "Attention Required", // CF captcha/block pages
+  "One more step", // Legacy CF challenge
+  "Checking your browser", // Explicit browser check
 ] as const;
 
 /** Returns true if the page title matches known CF interstitial patterns. */
 export const isCFInterstitialTitle = (title: string): boolean =>
-  CF_INTERSTITIAL_TITLE_PREFIXES.some(prefix => title.startsWith(prefix));
+  CF_INTERSTITIAL_TITLE_PREFIXES.some((prefix) => title.startsWith(prefix));
 
 export const CloudflareInfo = Schema.Struct({
   type: CloudflareType,
@@ -125,8 +125,9 @@ export const CloudflareConfig = Schema.Struct({
   attemptTimeout: Schema.optionalKey(PositiveInt),
   recordingMarkers: Schema.optionalKey(Schema.Boolean),
 }).annotate({
-  title: 'CloudflareConfig',
-  description: 'Optional solver configuration sent via Browserless.enableCloudflareSolver CDP command',
+  title: "CloudflareConfig",
+  description:
+    "Optional solver configuration sent via Browserless.enableCloudflareSolver CDP command",
 });
 export type CloudflareConfig = typeof CloudflareConfig.Type;
 
@@ -146,99 +147,102 @@ export type CloudflareResult = typeof CloudflareResult.Type;
 
 export const CloudflareSnapshot = Schema.Struct({
   detection_method: Schema.optionalKey(Schema.NullOr(Schema.String)).annotate({
-    description: 'How CF was detected: cf_chl_opt, title_interstitial, challenge_element, etc.',
+    description: "How CF was detected: cf_chl_opt, title_interstitial, challenge_element, etc.",
   }),
   cf_cray: Schema.optionalKey(Schema.NullOr(Schema.String)).annotate({
-    description: 'Cloudflare Ray ID from _cf_chl_opt.cRay',
+    description: "Cloudflare Ray ID from _cf_chl_opt.cRay",
   }),
   detection_poll_count: Schema.optionalKey(Int).annotate({
-    description: 'Number of 500ms polls before challenge detected (1-20)',
+    description: "Number of 500ms polls before challenge detected (1-20)",
     default: 0,
   }),
   widget_found: Schema.optionalKey(Schema.Boolean).annotate({
-    description: 'Whether the CF solver found the Turnstile widget element',
+    description: "Whether the CF solver found the Turnstile widget element",
     default: false,
   }),
   widget_find_method: Schema.optionalKey(Schema.NullOr(Schema.String)).annotate({
-    description: 'Which method found the widget: iframe-src, shadow-root-div, etc.',
+    description: "Which method found the widget: iframe-src, shadow-root-div, etc.",
   }),
   widget_find_methods: Schema.optionalKey(Schema.Array(Schema.String)).annotate({
-    description: 'All widget find methods tried across retries',
+    description: "All widget find methods tried across retries",
     default: [],
   }),
   widget_x: Schema.optionalKey(Schema.NullOr(Schema.Finite)).annotate({
-    description: 'Click target X coordinate',
+    description: "Click target X coordinate",
   }),
   widget_y: Schema.optionalKey(Schema.NullOr(Schema.Finite)).annotate({
-    description: 'Click target Y coordinate',
+    description: "Click target Y coordinate",
   }),
   clicked: Schema.optionalKey(Schema.Boolean).annotate({
-    description: 'Whether the CF solver\'s click caused the solve. False if CF auto-solved independently. See click_attempted for dispatch-level tracking.',
+    description:
+      "Whether the CF solver's click caused the solve. False if CF auto-solved independently. See click_attempted for dispatch-level tracking.",
     default: false,
   }),
   click_attempted: Schema.optionalKey(Schema.Boolean).annotate({
-    description: 'Whether the CF solver dispatched a click (regardless of outcome). Use for diagnostics. For attribution, use \'clicked\' which indicates the click caused the solve.',
+    description:
+      "Whether the CF solver dispatched a click (regardless of outcome). Use for diagnostics. For attribution, use 'clicked' which indicates the click caused the solve.",
     default: false,
   }),
   click_count: Schema.optionalKey(Int).annotate({
-    description: 'Number of times the widget was clicked',
+    description: "Number of times the widget was clicked",
     default: 0,
   }),
   click_x: Schema.optionalKey(Schema.NullOr(Schema.Finite)).annotate({
-    description: 'Actual click X coordinate (after mouse approach)',
+    description: "Actual click X coordinate (after mouse approach)",
   }),
   click_y: Schema.optionalKey(Schema.NullOr(Schema.Finite)).annotate({
-    description: 'Actual click Y coordinate',
+    description: "Actual click Y coordinate",
   }),
   checkbox_to_click_ms: Schema.optionalKey(Schema.NullOr(Int)).annotate({
-    description: 'Milliseconds from checkbox found to click dispatched',
+    description: "Milliseconds from checkbox found to click dispatched",
   }),
   phase4_duration_ms: Schema.optionalKey(Schema.NullOr(Int)).annotate({
-    description: 'Total Phase 4 duration in ms',
+    description: "Total Phase 4 duration in ms",
   }),
   presence_duration_ms: Schema.optionalKey(Int).annotate({
-    description: 'Human presence simulation duration in ms',
+    description: "Human presence simulation duration in ms",
     default: 0,
   }),
   presence_phases: Schema.optionalKey(Int).annotate({
-    description: 'Number of presence phases (>1 if retried)',
+    description: "Number of presence phases (>1 if retried)",
     default: 0,
   }),
   approach_phases: Schema.optionalKey(Int).annotate({
-    description: 'Number of approach phases (0 = auto-solved before approach)',
+    description: "Number of approach phases (0 = auto-solved before approach)",
     default: 0,
   }),
   activity_poll_count: Schema.optionalKey(Int).annotate({
-    description: 'Activity loop iterations (each 3-7s)',
+    description: "Activity loop iterations (each 3-7s)",
     default: 0,
   }),
   false_positive_count: Schema.optionalKey(Int).annotate({
-    description: 'False positive solve detections',
+    description: "False positive solve detections",
     default: 0,
   }),
   widget_error_count: Schema.optionalKey(Int).annotate({
-    description: 'Widget error state detections',
+    description: "Widget error state detections",
     default: 0,
   }),
   iframe_states: Schema.optionalKey(Schema.Array(Schema.String)).annotate({
-    description: 'Turnstile iframe state sequence: verifying, success, fail, etc.',
+    description: "Turnstile iframe state sequence: verifying, success, fail, etc.",
     default: [],
   }),
   widget_find_debug: Schema.optionalKey(
-    Schema.NullOr(Schema.Record(Schema.String, Schema.Any))
+    Schema.NullOr(Schema.Record(Schema.String, Schema.Any)),
   ).annotate({
-    description: 'JSON debug info from click target search (iframes, ts_els, forms, shadow_hosts)',
+    description: "JSON debug info from click target search (iframes, ts_els, forms, shadow_hosts)",
   }),
   widget_error_type: Schema.optionalKey(Schema.NullOr(Schema.String)).annotate({
-    description: 'Last error type: confirmed_error, error_text, iframe_error, expired',
+    description: "Last error type: confirmed_error, error_text, iframe_error, expired",
   }),
-  widget_diag: Schema.optionalKey(
-    Schema.NullOr(Schema.Record(Schema.String, Schema.Any))
-  ).annotate({
-    description: 'Shadow DOM diagnostic snapshot when checkbox not found (alive, cbI, inp, shadow, bodyLen)',
-  }),
+  widget_diag: Schema.optionalKey(Schema.NullOr(Schema.Record(Schema.String, Schema.Any))).annotate(
+    {
+      description:
+        "Shadow DOM diagnostic snapshot when checkbox not found (alive, cbI, inp, shadow, bodyLen)",
+    },
+  ),
 }).annotate({
-  title: 'CloudflareSnapshot',
-  description: 'Accumulated state for one CF solve phase, included in solved/failed events.',
+  title: "CloudflareSnapshot",
+  description: "Accumulated state for one CF solve phase, included in solved/failed events.",
 });
 export type CloudflareSnapshot = typeof CloudflareSnapshot.Type;

@@ -3,12 +3,8 @@ import {
   default as Function,
   QuerySchema,
   ResponseSchema,
-} from '../../../shared/function.http.js';
-import {
-  BrowserlessRoutes,
-  ChromeCDP,
-  HTTPRoutes,
-} from '@browserless.io/browserless';
+} from "../../../shared/function.http.js";
+import { BrowserlessRoutes, ChromeCDP, HTTPRoutes } from "@browserless.io/browserless";
 
 export default class ChromeFunctionPostRoute extends Function {
   name = BrowserlessRoutes.ChromeFunctionPostRoute;

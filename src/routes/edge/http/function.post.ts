@@ -1,15 +1,11 @@
-import {
-  BrowserlessRoutes,
-  EdgeCDP,
-  HTTPRoutes,
-} from '@browserless.io/browserless';
+import { BrowserlessRoutes, EdgeCDP, HTTPRoutes } from "@browserless.io/browserless";
 
 import {
   BodySchema,
   default as Function,
   QuerySchema,
   ResponseSchema,
-} from '../../../shared/function.http.js';
+} from "../../../shared/function.http.js";
 
 export default class EdgeFunctionPostRoute extends Function {
   name = BrowserlessRoutes.EdgeFunctionPostRoute;

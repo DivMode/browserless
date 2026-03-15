@@ -6,9 +6,9 @@
  *
  * Emits a unified report as a custom CDP event and replay marker.
  */
-import { Effect } from 'effect';
+import { Effect } from "effect";
 
-import { runForkInServer } from '../../otel-runtime.js';
+import { runForkInServer } from "../../otel-runtime.js";
 
 /** Browser-side evidence from antibot-detect.ts */
 interface BrowserEvidence {
@@ -27,7 +27,7 @@ interface BrowserDetection {
 
 /** The browser-side report pushed via __rrwebPush. */
 export interface AntibotBrowserReport {
-  type: 'antibot_report';
+  type: "antibot_report";
   detections: BrowserDetection[];
   hookCounts: Record<string, number>;
   timing: { hooksInstalledMs: number; analysisMs: number; totalMs: number };
@@ -35,155 +35,141 @@ export interface AntibotBrowserReport {
 
 /** Server-side evidence from Network.* CDP events. */
 interface ServerEvidence {
-  method: 'url' | 'header';
+  method: "url" | "header";
   detail: string;
   confidence: number;
 }
 
 /** URL pattern rules for server-side matching. */
-const URL_RULES: Array<{ detectorId: string; patterns: Array<{ pattern: string; confidence: number }> }> = [
+const URL_RULES: Array<{
+  detectorId: string;
+  patterns: Array<{ pattern: string; confidence: number }>;
+}> = [
   {
-    detectorId: 'detect-akamai',
+    detectorId: "detect-akamai",
     patterns: [
-      { pattern: '/akam/', confidence: 100 },
-      { pattern: '/.well-known/sbsd/', confidence: 100 },
-      { pattern: '_sec/sbsd/', confidence: 100 },
+      { pattern: "/akam/", confidence: 100 },
+      { pattern: "/.well-known/sbsd/", confidence: 100 },
+      { pattern: "_sec/sbsd/", confidence: 100 },
     ],
   },
   {
-    detectorId: 'detect-cloudflare',
+    detectorId: "detect-cloudflare",
     patterns: [
-      { pattern: 'cdn-cgi/challenge-platform', confidence: 90 },
-      { pattern: 'challenges.cloudflare.com', confidence: 100 },
+      { pattern: "cdn-cgi/challenge-platform", confidence: 90 },
+      { pattern: "challenges.cloudflare.com", confidence: 100 },
     ],
   },
   {
-    detectorId: 'detect-aws-waf',
+    detectorId: "detect-aws-waf",
     patterns: [
-      { pattern: '/challenge.js', confidence: 100 },
-      { pattern: 'awswaf', confidence: 85 },
+      { pattern: "/challenge.js", confidence: 100 },
+      { pattern: "awswaf", confidence: 85 },
     ],
   },
   {
-    detectorId: 'detect-datadome',
+    detectorId: "detect-datadome",
+    patterns: [{ pattern: "datadome.co", confidence: 100 }],
+  },
+  {
+    detectorId: "detect-incapsula",
     patterns: [
-      { pattern: 'datadome.co', confidence: 100 },
+      { pattern: "incapsula.com", confidence: 100 },
+      { pattern: "/_Incapsula_Resource", confidence: 100 },
     ],
   },
   {
-    detectorId: 'detect-incapsula',
+    detectorId: "detect-perimeterx",
+    patterns: [{ pattern: "perimeterx.net", confidence: 100 }],
+  },
+  {
+    detectorId: "detect-kasada",
+    patterns: [{ pattern: "ips.js", confidence: 95 }],
+  },
+  {
+    detectorId: "detect-recaptcha",
     patterns: [
-      { pattern: 'incapsula.com', confidence: 100 },
-      { pattern: '/_Incapsula_Resource', confidence: 100 },
+      { pattern: "recaptcha/api", confidence: 100 },
+      { pattern: "gstatic.com/recaptcha", confidence: 100 },
     ],
   },
   {
-    detectorId: 'detect-perimeterx',
+    detectorId: "detect-hcaptcha",
+    patterns: [{ pattern: "hcaptcha.com", confidence: 100 }],
+  },
+  {
+    detectorId: "detect-funcaptcha",
     patterns: [
-      { pattern: 'perimeterx.net', confidence: 100 },
+      { pattern: "client-api.arkoselabs.com", confidence: 100 },
+      { pattern: "api.funcaptcha.com", confidence: 100 },
     ],
   },
   {
-    detectorId: 'detect-kasada',
+    detectorId: "detect-geetest",
     patterns: [
-      { pattern: 'ips.js', confidence: 95 },
+      { pattern: "api.geetest.com", confidence: 100 },
+      { pattern: "static.geetest.com", confidence: 100 },
     ],
   },
   {
-    detectorId: 'detect-recaptcha',
+    detectorId: "detect-meetrics",
+    patterns: [{ pattern: "mxcdn.net/bb-mx/serve/mtrcs", confidence: 100 }],
+  },
+  {
+    detectorId: "detect-cheq",
     patterns: [
-      { pattern: 'recaptcha/api', confidence: 100 },
-      { pattern: 'gstatic.com/recaptcha', confidence: 100 },
+      { pattern: "clicktrue_invocation.js", confidence: 100 },
+      { pattern: "cheqzone.com", confidence: 100 },
     ],
   },
   {
-    detectorId: 'detect-hcaptcha',
-    patterns: [
-      { pattern: 'hcaptcha.com', confidence: 100 },
-    ],
+    detectorId: "detect-friendlycaptcha",
+    patterns: [{ pattern: "friendlycaptcha.com", confidence: 100 }],
   },
   {
-    detectorId: 'detect-funcaptcha',
-    patterns: [
-      { pattern: 'client-api.arkoselabs.com', confidence: 100 },
-      { pattern: 'api.funcaptcha.com', confidence: 100 },
-    ],
+    detectorId: "detect-captchaeu",
+    patterns: [{ pattern: "captcha.eu", confidence: 100 }],
   },
   {
-    detectorId: 'detect-geetest',
-    patterns: [
-      { pattern: 'api.geetest.com', confidence: 100 },
-      { pattern: 'static.geetest.com', confidence: 100 },
-    ],
-  },
-  {
-    detectorId: 'detect-meetrics',
-    patterns: [
-      { pattern: 'mxcdn.net/bb-mx/serve/mtrcs', confidence: 100 },
-    ],
-  },
-  {
-    detectorId: 'detect-cheq',
-    patterns: [
-      { pattern: 'clicktrue_invocation.js', confidence: 100 },
-      { pattern: 'cheqzone.com', confidence: 100 },
-    ],
-  },
-  {
-    detectorId: 'detect-friendlycaptcha',
-    patterns: [
-      { pattern: 'friendlycaptcha.com', confidence: 100 },
-    ],
-  },
-  {
-    detectorId: 'detect-captchaeu',
-    patterns: [
-      { pattern: 'captcha.eu', confidence: 100 },
-    ],
-  },
-  {
-    detectorId: 'detect-threatmetrix',
-    patterns: [
-      { pattern: 'fp/check.js', confidence: 95 },
-    ],
+    detectorId: "detect-threatmetrix",
+    patterns: [{ pattern: "fp/check.js", confidence: 95 }],
   },
 ];
 
 /** Header pattern rules for server-side matching. */
-const HEADER_RULES: Array<{ detectorId: string; patterns: Array<{ pattern: RegExp; confidence: number }> }> = [
+const HEADER_RULES: Array<{
+  detectorId: string;
+  patterns: Array<{ pattern: RegExp; confidence: number }>;
+}> = [
   {
-    detectorId: 'detect-datadome',
-    patterns: [
-      { pattern: /^x-datadome-cid$/i, confidence: 100 },
-    ],
+    detectorId: "detect-datadome",
+    patterns: [{ pattern: /^x-datadome-cid$/i, confidence: 100 }],
   },
   {
-    detectorId: 'detect-shapesecurity',
-    patterns: [
-      { pattern: /^x-[a-z0-9]{8}-[a-z]$/i, confidence: 100 },
-    ],
+    detectorId: "detect-shapesecurity",
+    patterns: [{ pattern: /^x-[a-z0-9]{8}-[a-z]$/i, confidence: 100 }],
   },
 ];
 
 /** Detector metadata for creating new detections from server-side evidence. */
 const DETECTOR_META: Record<string, { name: string; category: string }> = {
-  'detect-akamai': { name: 'Akamai Bot Manager', category: 'antibot' },
-  'detect-cloudflare': { name: 'Cloudflare Bot Management', category: 'antibot' },
-  'detect-aws-waf': { name: 'AWS WAF', category: 'antibot' },
-  'detect-datadome': { name: 'DataDome', category: 'antibot' },
-  'detect-incapsula': { name: 'Incapsula/Imperva', category: 'antibot' },
-  'detect-perimeterx': { name: 'PerimeterX', category: 'antibot' },
-  'detect-shapesecurity': { name: 'Shape Security', category: 'antibot' },
-  'detect-kasada': { name: 'Kasada', category: 'antibot' },
-  'detect-recaptcha': { name: 'Google reCAPTCHA', category: 'captcha' },
-  'detect-hcaptcha': { name: 'hCaptcha', category: 'captcha' },
-  'detect-funcaptcha': { name: 'FunCaptcha/Arkose Labs', category: 'captcha' },
-  'detect-geetest': { name: 'GeeTest', category: 'captcha' },
-  'detect-meetrics': { name: 'Meetrics', category: 'antibot' },
-  'detect-cheq': { name: 'Cheq', category: 'antibot' },
-  'detect-friendlycaptcha': { name: 'Friendly Captcha', category: 'captcha' },
-  'detect-captchaeu': { name: 'Captcha.eu', category: 'captcha' },
-  'detect-threatmetrix': { name: 'ThreatMetrix', category: 'antibot' },
+  "detect-akamai": { name: "Akamai Bot Manager", category: "antibot" },
+  "detect-cloudflare": { name: "Cloudflare Bot Management", category: "antibot" },
+  "detect-aws-waf": { name: "AWS WAF", category: "antibot" },
+  "detect-datadome": { name: "DataDome", category: "antibot" },
+  "detect-incapsula": { name: "Incapsula/Imperva", category: "antibot" },
+  "detect-perimeterx": { name: "PerimeterX", category: "antibot" },
+  "detect-shapesecurity": { name: "Shape Security", category: "antibot" },
+  "detect-kasada": { name: "Kasada", category: "antibot" },
+  "detect-recaptcha": { name: "Google reCAPTCHA", category: "captcha" },
+  "detect-hcaptcha": { name: "hCaptcha", category: "captcha" },
+  "detect-funcaptcha": { name: "FunCaptcha/Arkose Labs", category: "captcha" },
+  "detect-geetest": { name: "GeeTest", category: "captcha" },
+  "detect-meetrics": { name: "Meetrics", category: "antibot" },
+  "detect-cheq": { name: "Cheq", category: "antibot" },
+  "detect-friendlycaptcha": { name: "Friendly Captcha", category: "captcha" },
+  "detect-captchaeu": { name: "Captcha.eu", category: "captcha" },
+  "detect-threatmetrix": { name: "ThreatMetrix", category: "antibot" },
 };
 
 /** Final unified detection result. */
@@ -241,7 +227,7 @@ export class AntibotHandler {
       const existing = detectionsMap.get(detectorId);
       if (existing) {
         existing.evidence.push(...evidence);
-        existing.confidence = Math.max(existing.confidence, ...evidence.map(e => e.confidence));
+        existing.confidence = Math.max(existing.confidence, ...evidence.map((e) => e.confidence));
       } else {
         const meta = DETECTOR_META[detectorId];
         if (meta) {
@@ -249,7 +235,7 @@ export class AntibotHandler {
             id: detectorId,
             name: meta.name,
             category: meta.category,
-            confidence: Math.max(...evidence.map(e => e.confidence)),
+            confidence: Math.max(...evidence.map((e) => e.confidence)),
             evidence,
           });
         }
@@ -262,7 +248,7 @@ export class AntibotHandler {
       const existing = detectionsMap.get(detectorId);
       if (existing) {
         existing.evidence.push(...evidence);
-        existing.confidence = Math.max(existing.confidence, ...evidence.map(e => e.confidence));
+        existing.confidence = Math.max(existing.confidence, ...evidence.map((e) => e.confidence));
       } else {
         const meta = DETECTOR_META[detectorId];
         if (meta) {
@@ -270,7 +256,7 @@ export class AntibotHandler {
             id: detectorId,
             name: meta.name,
             category: meta.category,
-            confidence: Math.max(...evidence.map(e => e.confidence)),
+            confidence: Math.max(...evidence.map((e) => e.confidence)),
             evidence,
           });
         }
@@ -288,18 +274,18 @@ export class AntibotHandler {
     // Chrome calls certain APIs internally on every page load. Calls at or below these
     // thresholds are noise from the browser itself, not from page scripts fingerprinting.
     const HOOK_NOISE_FLOOR: Record<string, number> = {
-      'Performance.prototype.now': 5,
-      'Performance.prototype.getEntriesByType': 25,
-      'Performance.prototype.memory': 1,
-      'Document.prototype.fonts': 2,
+      "Performance.prototype.now": 5,
+      "Performance.prototype.getEntriesByType": 25,
+      "Performance.prototype.memory": 1,
+      "Document.prototype.fonts": 2,
     };
 
     for (const [id, det] of detectionsMap) {
-      if (det.category !== 'fingerprint') continue;
+      if (det.category !== "fingerprint") continue;
 
-      const hasStrongEvidence = det.evidence.some(e => {
-        if (e.method === 'window') return false; // always-present browser APIs
-        if (e.method === 'js_hook') {
+      const hasStrongEvidence = det.evidence.some((e) => {
+        if (e.method === "window") return false; // always-present browser APIs
+        if (e.method === "js_hook") {
           const match = e.detail.match(/^(.+?)\s+\((\d+)\s+calls?\)$/);
           if (match) {
             const target = match[1];
@@ -329,14 +315,16 @@ export class AntibotHandler {
       timing: report.timing,
     };
 
-    runForkInServer(Effect.logInfo(
-      `Antibot report: ${detections.length} detections ` +
-      `(${detections.filter(d => d.category === 'antibot').length} antibot, ` +
-      `${detections.filter(d => d.category === 'captcha').length} captcha, ` +
-      `${detections.filter(d => d.category === 'fingerprint').length} fingerprint) ` +
-      `hooks=${Object.keys(report.hookCounts).length} ` +
-      `timing=${report.timing.totalMs.toFixed(0)}ms`,
-    ));
+    runForkInServer(
+      Effect.logInfo(
+        `Antibot report: ${detections.length} detections ` +
+          `(${detections.filter((d) => d.category === "antibot").length} antibot, ` +
+          `${detections.filter((d) => d.category === "captcha").length} captcha, ` +
+          `${detections.filter((d) => d.category === "fingerprint").length} fingerprint) ` +
+          `hooks=${Object.keys(report.hookCounts).length} ` +
+          `timing=${report.timing.totalMs.toFixed(0)}ms`,
+      ),
+    );
 
     return this.result;
   }
@@ -353,7 +341,7 @@ export class AntibotHandler {
           if (url.toLowerCase().includes(p.pattern.toLowerCase())) {
             const existing = matches.get(rule.detectorId) ?? [];
             existing.push({
-              method: 'url',
+              method: "url",
               detail: `[server] ${p.pattern} → ${url.slice(0, 120)}`,
               confidence: p.confidence,
             });
@@ -375,7 +363,7 @@ export class AntibotHandler {
             if (p.pattern.test(name)) {
               const existing = matches.get(rule.detectorId) ?? [];
               existing.push({
-                method: 'header',
+                method: "header",
                 detail: `[server] ${name} on ${url.slice(0, 80)}`,
                 confidence: p.confidence,
               });

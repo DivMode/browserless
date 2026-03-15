@@ -4,7 +4,7 @@
  * Full types are available at runtime when using Bun.
  */
 
-declare module 'bun:sqlite' {
+declare module "bun:sqlite" {
   export interface RunResult {
     changes: number;
     lastInsertRowid: number;

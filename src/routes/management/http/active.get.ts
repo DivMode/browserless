@@ -8,8 +8,8 @@ import {
   contentTypes,
   dedent,
   writeResponse,
-} from '@browserless.io/browserless';
-import { ServerResponse } from 'http';
+} from "@browserless.io/browserless";
+import { ServerResponse } from "http";
 
 export default class ActiveGetRoute extends HTTPRoute {
   name = BrowserlessRoutes.ActiveGetRoute;
@@ -26,6 +26,6 @@ export default class ActiveGetRoute extends HTTPRoute {
   path = HTTPManagementRoutes.active;
   tags = [APITags.management];
   async handler(_req: Request, res: ServerResponse): Promise<void> {
-    return writeResponse(res, 204, '', contentTypes.text);
+    return writeResponse(res, 204, "", contentTypes.text);
   }
 }

@@ -1,7 +1,7 @@
-import type { CdpSessionId, TargetId } from '../shared/cloudflare-detection.js';
-import type { StopTabRecordingResult } from './cdp-session-types.js';
-import { Effect } from 'effect';
-import { incCounter, wsLifecycle } from '../effect-metrics.js';
+import type { CdpSessionId, TargetId } from "../shared/cloudflare-detection.js";
+import type { StopTabRecordingResult } from "./cdp-session-types.js";
+import { Effect } from "effect";
+import { incCounter, wsLifecycle } from "../effect-metrics.js";
 
 /** All state for a single tracked CDP page target. */
 export class TargetState {
@@ -30,7 +30,7 @@ export class TargetRegistry {
   private readonly byCdpSessionId = new Map<CdpSessionId, TargetState>();
 
   // Iframe tracking (separate concern — iframes aren't full targets)
-  private readonly iframeToCdpSession = new Map<CdpSessionId, CdpSessionId>();       // iframe cdpSid → page cdpSid
+  private readonly iframeToCdpSession = new Map<CdpSessionId, CdpSessionId>(); // iframe cdpSid → page cdpSid
   private readonly iframeTargetToCdpSession = new Map<TargetId, CdpSessionId>(); // iframe targetId → iframe cdpSid
 
   add(targetId: TargetId, cdpSessionId: CdpSessionId): TargetState {
@@ -60,9 +60,12 @@ export class TargetRegistry {
     this.byCdpSessionId.delete(state.cdpSessionId);
     // Close per-page WS if open (keepalive fiber auto-interrupts on runtime dispose)
     if (state.pageWebSocket) {
-      try { state.pageWebSocket.removeAllListeners(); state.pageWebSocket.terminate(); } catch {}
+      try {
+        state.pageWebSocket.removeAllListeners();
+        state.pageWebSocket.terminate();
+      } catch {}
       state.pageWebSocket = null;
-      Effect.runSync(incCounter(wsLifecycle, { type: 'page_registry', action: 'destroy' }));
+      Effect.runSync(incCounter(wsLifecycle, { type: "page_registry", action: "destroy" }));
     }
     // Clean iframe refs that reference this target's cdpSessionId
     this.iframeToCdpSession.delete(state.cdpSessionId);
@@ -162,7 +165,10 @@ export class TargetRegistry {
   clear(): void {
     for (const state of this.byTargetId.values()) {
       if (state.pageWebSocket) {
-        try { state.pageWebSocket.removeAllListeners(); state.pageWebSocket.terminate(); } catch {}
+        try {
+          state.pageWebSocket.removeAllListeners();
+          state.pageWebSocket.terminate();
+        } catch {}
       }
     }
     this.byTargetId.clear();

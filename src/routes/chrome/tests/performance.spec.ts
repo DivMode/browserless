@@ -1,7 +1,7 @@
-import { Browserless, Config, Metrics } from '@browserless.io/browserless';
-import { expect } from 'chai';
+import { Browserless, Config, Metrics } from "@browserless.io/browserless";
+import { expect } from "chai";
 
-describe('/chrome/performance API', function () {
+describe("/chrome/performance API", function () {
   let browserless: Browserless;
 
   const start = ({
@@ -16,139 +16,129 @@ describe('/chrome/performance API', function () {
     await browserless.stop();
   });
 
-  it('allows requests', async () => {
+  it("allows requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
     };
 
-    await fetch('http://localhost:3000/chrome/performance?token=browserless', {
+    await fetch("http://localhost:3000/chrome/performance?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then((res) => {
-      expect(res.headers.get('content-type')).to.equal(
-        'application/json; charset=UTF-8',
-      );
+      expect(res.headers.get("content-type")).to.equal("application/json; charset=UTF-8");
       expect(res.status).to.equal(200);
     });
   });
 
-  it('404s GET requests', async () => {
+  it("404s GET requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
-    await fetch(
-      'http://localhost:3000/chrome/performance?token=browserless',
-    ).then((res) => {
-      expect(res.headers.get('content-type')).to.equal(
-        'text/plain; charset=UTF-8',
-      );
+    await fetch("http://localhost:3000/chrome/performance?token=browserless").then((res) => {
+      expect(res.headers.get("content-type")).to.equal("text/plain; charset=UTF-8");
       expect(res.status).not.to.equal(200);
     });
   });
 
-  it('allows setting config', async () => {
+  it("allows setting config", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
       config: {
-        extends: 'lighthouse:default',
+        extends: "lighthouse:default",
         settings: {
-          onlyAudits: ['unminified-css'],
+          onlyAudits: ["unminified-css"],
         },
       },
-      url: 'https://browserless.io',
+      url: "https://browserless.io",
     };
 
-    await fetch('http://localhost:3000/chrome/performance?token=browserless', {
+    await fetch("http://localhost:3000/chrome/performance?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then(async (res) => {
-      expect(res.headers.get('content-type')).to.equal(
-        'application/json; charset=UTF-8',
-      );
+      expect(res.headers.get("content-type")).to.equal("application/json; charset=UTF-8");
       expect(res.status).to.equal(200);
 
       const json = await res.json();
-      expect(json).to.have.property('data');
-      expect(json.data.audits).to.have.all.keys('unminified-css');
+      expect(json).to.have.property("data");
+      expect(json.data.audits).to.have.all.keys("unminified-css");
     });
   });
 
-  it('times out request', async () => {
+  it("times out request", async () => {
     const config = new Config();
     config.setTimeout(10);
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
     const body = {
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
     };
 
-    await fetch('http://localhost:3000/chrome/performance?token=browserless', {
+    await fetch("http://localhost:3000/chrome/performance?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then((res) => {
       expect(res.status).to.equal(408);
     });
   });
 
-  it('rejects requests', async () => {
+  it("rejects requests", async () => {
     const config = new Config();
     const metrics = new Metrics();
     config.setConcurrent(0);
     config.setQueued(0);
-    config.setToken('browserless');
+    config.setToken("browserless");
     await start({ config, metrics });
 
     const body = {
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
     };
 
-    await fetch('http://localhost:3000/chrome/performance?token=browserless', {
+    await fetch("http://localhost:3000/chrome/performance?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then((res) => {
       expect(res.status).to.equal(429);
     });
   });
 
-  it('allows requests without token when auth token is not set', async () => {
+  it("allows requests without token when auth token is not set", async () => {
     await start();
     const body = {
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
     };
 
-    await fetch('http://localhost:3000/chrome/performance', {
+    await fetch("http://localhost:3000/chrome/performance", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then((res) => {
-      expect(res.headers.get('content-type')).to.equal(
-        'application/json; charset=UTF-8',
-      );
+      expect(res.headers.get("content-type")).to.equal("application/json; charset=UTF-8");
       expect(res.status).to.equal(200);
     });
   });

@@ -10,7 +10,7 @@ import {
   contentTypes,
   dedent,
   jsonResponse,
-} from '@browserless.io/browserless';
+} from "@browserless.io/browserless";
 
 export type ResponseSchema = Array<CDPJSONPayload>;
 

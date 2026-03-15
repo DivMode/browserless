@@ -1,6 +1,6 @@
-import { Config, decrypt, encrypt } from '@browserless.io/browserless';
-import { readFile, writeFile } from 'fs/promises';
-import { EventEmitter } from 'events';
+import { Config, decrypt, encrypt } from "@browserless.io/browserless";
+import { readFile, writeFile } from "fs/promises";
+import { EventEmitter } from "events";
 
 export class FileSystem extends EventEmitter {
   protected fsMap: Map<string, string[]> = new Map();
@@ -20,19 +20,15 @@ export class FileSystem extends EventEmitter {
    * @param newContent A string of new content to add to the file
    * @returns void
    */
-  public async append(
-    path: string,
-    newContent: string,
-    shouldEncode: boolean,
-  ): Promise<void> {
+  public async append(path: string, newContent: string, shouldEncode: boolean): Promise<void> {
     const contents = await this.read(path, shouldEncode);
 
     contents.push(newContent);
     this.fsMap.set(path, contents);
 
     const encoded = shouldEncode
-      ? await encrypt(contents.join('\n'), this.currentAESKey)
-      : contents.join('\n');
+      ? await encrypt(contents.join("\n"), this.currentAESKey)
+      : contents.join("\n");
 
     return writeFile(path, encoded.toString());
   }
@@ -50,12 +46,10 @@ export class FileSystem extends EventEmitter {
     if (hasKey) {
       return this.fsMap.get(path) as string[];
     }
-    const contents = (await readFile(path).catch(() => '')).toString();
+    const contents = (await readFile(path).catch(() => "")).toString();
     const decoded =
-      encoded && contents.length
-        ? await decrypt(contents, this.currentAESKey)
-        : contents;
-    const splitContents = decoded.length ? decoded.split('\n') : [];
+      encoded && contents.length ? await decrypt(contents, this.currentAESKey) : contents;
+    const splitContents = decoded.length ? decoded.split("\n") : [];
 
     this.fsMap.set(path, splitContents);
 

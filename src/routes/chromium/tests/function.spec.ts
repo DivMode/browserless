@@ -1,7 +1,7 @@
-import { Browserless, Config, Metrics } from '@browserless.io/browserless';
-import { expect } from 'chai';
+import { Browserless, Config, Metrics } from "@browserless.io/browserless";
+import { expect } from "chai";
 
-describe('/chromium/function API', function () {
+describe("/chromium/function API", function () {
   let browserless: Browserless;
 
   const start = ({
@@ -16,9 +16,9 @@ describe('/chromium/function API', function () {
     await browserless.stop();
   });
 
-  it('runs functions', async () => {
+  it("runs functions", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
@@ -31,24 +31,24 @@ describe('/chromium/function API', function () {
       context: {},
     };
 
-    await fetch('http://localhost:3000/chromium/function?token=browserless', {
+    await fetch("http://localhost:3000/chromium/function?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json; charset=utf-8',
+        "content-type": "application/json; charset=utf-8",
       },
-      method: 'POST',
+      method: "POST",
     }).then(async (res) => {
       const json = await res.json();
 
-      expect(json).to.have.property('data');
-      expect(json.data).to.equal('ok');
+      expect(json).to.have.property("data");
+      expect(json.data).to.equal("ok");
       expect(res.status).to.equal(200);
     });
   });
 
   it('runs "application/javascript" functions', async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = `export default async function ({ page }) {
@@ -58,22 +58,22 @@ describe('/chromium/function API', function () {
       });
     }`;
 
-    await fetch('http://localhost:3000/chromium/function?token=browserless', {
+    await fetch("http://localhost:3000/chromium/function?token=browserless", {
       body,
-      headers: { 'Content-Type': 'application/javascript' },
-      method: 'POST',
+      headers: { "Content-Type": "application/javascript" },
+      method: "POST",
     }).then(async (res) => {
       const json = await res.json();
-      expect(json).to.have.property('data');
-      expect(json.data).to.equal('ok');
-      expect(json.type).to.equal('application/text');
+      expect(json).to.have.property("data");
+      expect(json.data).to.equal("ok");
+      expect(json.type).to.equal("application/text");
       expect(res.status).to.equal(200);
     });
   });
 
-  it('runs functions that import libraries', async () => {
+  it("runs functions that import libraries", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
@@ -87,24 +87,24 @@ describe('/chromium/function API', function () {
       context: {},
     };
 
-    await fetch('http://localhost:3000/chromium/function?token=browserless', {
+    await fetch("http://localhost:3000/chromium/function?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then(async (res) => {
       const json = await res.json();
 
-      expect(json).to.have.property('data');
-      expect(json.data).to.equal('function');
+      expect(json).to.have.property("data");
+      expect(json.data).to.equal("function");
       expect(res.status).to.equal(200);
     });
   });
 
-  it('runs functions with custom return types', async () => {
+  it("runs functions with custom return types", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
@@ -119,26 +119,24 @@ describe('/chromium/function API', function () {
       context: {},
     };
 
-    await fetch('http://localhost:3000/chromium/function?token=browserless', {
+    await fetch("http://localhost:3000/chromium/function?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then(async (res) => {
       const json = await res.json();
 
-      expect(res.headers.get('content-type')).to.equal(
-        `application/json; charset=UTF-8`,
-      );
-      expect(json).to.have.property('data');
+      expect(res.headers.get("content-type")).to.equal(`application/json; charset=UTF-8`);
+      expect(json).to.have.property("data");
       expect(res.status).to.equal(200);
     });
   });
 
-  it('times out requests', async () => {
+  it("times out requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
@@ -151,25 +149,22 @@ describe('/chromium/function API', function () {
       context: {},
     };
 
-    await fetch(
-      'http://localhost:3000/chromium/function?token=browserless&timeout=10',
-      {
-        body: JSON.stringify(body),
-        headers: {
-          'content-type': 'application/json',
-        },
-        method: 'POST',
+    await fetch("http://localhost:3000/chromium/function?token=browserless&timeout=10", {
+      body: JSON.stringify(body),
+      headers: {
+        "content-type": "application/json",
       },
-    ).then((res) => {
+      method: "POST",
+    }).then((res) => {
       expect(res.status).to.equal(408);
     });
   });
 
-  it('rejects requests with bad content-types', async () => {
+  it("rejects requests with bad content-types", async () => {
     const config = new Config();
     config.setConcurrent(0);
     config.setQueued(0);
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -183,22 +178,22 @@ describe('/chromium/function API', function () {
       context: {},
     };
 
-    await fetch('http://localhost:3000/chromium/function?token=browserless', {
+    await fetch("http://localhost:3000/chromium/function?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'joelson',
+        "content-type": "joelson",
       },
-      method: 'POST',
+      method: "POST",
     }).then(async (res) => {
       return expect(res.status).to.equal(404);
     });
   });
 
-  it('rejects requests with 429', async () => {
+  it("rejects requests with 429", async () => {
     const config = new Config();
     config.setConcurrent(0);
     config.setQueued(0);
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -212,20 +207,20 @@ describe('/chromium/function API', function () {
       context: {},
     };
 
-    await fetch('http://localhost:3000/chromium/function?token=browserless', {
+    await fetch("http://localhost:3000/chromium/function?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then(async (res) => {
       return expect(res.status).to.equal(429);
     });
   });
 
-  it('rejects requests that are unauthorized', async () => {
+  it("rejects requests that are unauthorized", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -239,18 +234,18 @@ describe('/chromium/function API', function () {
       context: {},
     };
 
-    await fetch('http://localhost:3000/chromium/function?token=bless', {
+    await fetch("http://localhost:3000/chromium/function?token=bless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then(async (res) => {
       return expect(res.status).to.equal(401);
     });
   });
 
-  it('allows requests without token when auth token is not set', async () => {
+  it("allows requests without token when auth token is not set", async () => {
     const config = new Config();
     const metrics = new Metrics();
     await start({ config, metrics });
@@ -265,23 +260,23 @@ describe('/chromium/function API', function () {
       context: {},
     };
 
-    await fetch('http://localhost:3000/chromium/function', {
+    await fetch("http://localhost:3000/chromium/function", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then(async (res) => {
       const json = await res.json();
 
-      expect(json).to.have.property('data');
-      expect(json.data).to.equal('ok');
+      expect(json).to.have.property("data");
+      expect(json.data).to.equal("ok");
       expect(res.status).to.equal(200);
     });
   });
-  it('allows --proxy-server query parameter', async () => {
+  it("allows --proxy-server query parameter", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
@@ -295,18 +290,18 @@ describe('/chromium/function API', function () {
     };
 
     await fetch(
-      'http://localhost:3000/chromium/function?--proxy-server=test.proxy.com:8080&token=browserless',
+      "http://localhost:3000/chromium/function?--proxy-server=test.proxy.com:8080&token=browserless",
       {
         body: JSON.stringify(body),
         headers: {
-          'content-type': 'application/json',
+          "content-type": "application/json",
         },
-        method: 'POST',
+        method: "POST",
       },
     ).then(async (res) => {
       const json = await res.json();
-      expect(json).to.have.property('data');
-      expect(json.data).to.equal('ok');
+      expect(json).to.have.property("data");
+      expect(json.data).to.equal("ok");
       expect(res.status).to.equal(200);
     });
   });

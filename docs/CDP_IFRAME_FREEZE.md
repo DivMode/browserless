@@ -19,9 +19,9 @@ The replay-coordinator connects a separate WebSocket to Chrome's browser-level C
 ```typescript
 Target.setAutoAttach({
   autoAttach: true,
-  waitForDebuggerOnStart: true,  // THE PROBLEM
+  waitForDebuggerOnStart: true, // THE PROBLEM
   flatten: true,
-})
+});
 ```
 
 This pauses ALL new targets in the browser's scope — including iframe targets. The browser-level `setAutoAttach` doesn't fire `attachedToTarget` for iframe targets (iframes are children of pages, not the browser), so the replay-coordinator never sees them and never resumes them via `Runtime.runIfWaitingForDebugger`.
@@ -33,6 +33,7 @@ Additionally, puppeteer's TargetManager (created by `puppeteer.launch()`) calls 
 ## Why It's Not Visible
 
 The iframe target doesn't generate a `Target.attachedToTarget` event on the browser-level CDP connection because:
+
 1. Browser-level auto-attach only notifies about **direct children of the browser** (pages, workers)
 2. Iframes are children of pages, so `attachedToTarget` only fires on page-level sessions
 3. The replay-coordinator had page-level `setAutoAttach` with `waitForDebuggerOnStart: false` — correct, but irrelevant since the browser-level session already paused the target
@@ -41,7 +42,7 @@ Chrome's behavior: when ANY CDP session's auto-attach has `waitForDebuggerOnStar
 
 ## Why Ahrefs Works But Botcheck Didn't
 
-**Timing.** Ahrefs's Turnstile iframe (`challenges.cloudflare.com`) loads dynamically AFTER page load completes — by the time the iframe creates an in-process target, pydoll's `Runtime.evaluate` has already returned. The V8 freeze only blocks *in-flight* evaluations.
+**Timing.** Ahrefs's Turnstile iframe (`challenges.cloudflare.com`) loads dynamically AFTER page load completes — by the time the iframe creates an in-process target, pydoll's `Runtime.evaluate` has already returned. The V8 freeze only blocks _in-flight_ evaluations.
 
 Botcheck's iframe is created by JavaScript in the initial page HTML (`document.createElement("iframe")` with `sandbox="allow-scripts"`). It loads DURING the page's initial JavaScript execution, before `document.readyState` reaches "complete". Pydoll's `_wait_page_load` polls `Runtime.evaluate('document.readyState')` in a loop — the in-flight evaluate gets frozen when the iframe target is paused.
 
@@ -52,15 +53,15 @@ Botcheck's iframe is created by JavaScript in the initial page HTML (`document.c
 Add a `filter` to the browser-level `Target.setAutoAttach` to exclude iframe targets from being paused:
 
 ```typescript
-await sendCommand('Target.setAutoAttach', {
+await sendCommand("Target.setAutoAttach", {
   autoAttach: true,
   waitForDebuggerOnStart: true,
   flatten: true,
   filter: [
-    { type: 'browser', exclude: true },  // Required: Chrome forbids tab+page overlap
-    { type: 'tab', exclude: true },       // Required: pages attach via tabs internally
-    { type: 'iframe', exclude: true },    // Don't pause iframes (V8 isolate freeze)
-    {},  // Include everything else (pages, workers, etc.)
+    { type: "browser", exclude: true }, // Required: Chrome forbids tab+page overlap
+    { type: "tab", exclude: true }, // Required: pages attach via tabs internally
+    { type: "iframe", exclude: true }, // Don't pause iframes (V8 isolate freeze)
+    {}, // Include everything else (pages, workers, etc.)
   ],
 });
 ```
@@ -70,7 +71,7 @@ await sendCommand('Target.setAutoAttach', {
 Chrome's `Target.setAutoAttach` filter is evaluated sequentially — the first matching entry wins. When no filter is specified, Chrome uses this default:
 
 ```typescript
-[{type: "browser", exclude: true}, {type: "tab", exclude: true}, {}]
+[{ type: "browser", exclude: true }, { type: "tab", exclude: true }, {}];
 ```
 
 Chrome enforces a strict rule: **a filter must not simultaneously allow both `tab` and `page` target types**. This is because pages are internally attached via tabs (browser → tab → page hierarchy). If a catch-all `{}` entry matches without prior `browser`/`tab` exclusions, it matches ALL types including both `tab` and `page`, and Chrome rejects the entire `setAutoAttach` call with:
@@ -81,11 +82,11 @@ When the call fails, it falls into the catch block and **no targets are auto-att
 
 ### Three `setAutoAttach` calls in replay-coordinator.ts
 
-| Location | Scope | `waitForDebuggerOnStart` | Filter | Purpose |
-|----------|-------|--------------------------|--------|---------|
-| ~line 718 | Browser-level | `true` | `iframe` excluded | Pause new **pages** for rrweb pre-injection |
-| ~line 442 | Page-level (initial) | `false` | none | Detect **iframe** children for rrweb injection |
-| ~line 684 | Page-level (nav re-setup) | `false` | none | Re-detect iframes after page navigation |
+| Location  | Scope                     | `waitForDebuggerOnStart` | Filter            | Purpose                                        |
+| --------- | ------------------------- | ------------------------ | ----------------- | ---------------------------------------------- |
+| ~line 718 | Browser-level             | `true`                   | `iframe` excluded | Pause new **pages** for rrweb pre-injection    |
+| ~line 442 | Page-level (initial)      | `false`                  | none              | Detect **iframe** children for rrweb injection |
+| ~line 684 | Page-level (nav re-setup) | `false`                  | none              | Re-detect iframes after page navigation        |
 
 All three are necessary:
 
@@ -112,15 +113,15 @@ Two changes:
 **Browser-level** `setAutoAttach` (~line 718): Added `filter: [{type: 'iframe', exclude: true}]` to exclude iframe targets from being paused. Chrome's `waitForDebuggerOnStart: true` pauses ALL targets in a session's scope — including iframe targets that the browser-level session doesn't fire `attachedToTarget` for. Without the filter, iframes are paused with nobody to resume them.
 
 ```typescript
-await sendCommand('Target.setAutoAttach', {
+await sendCommand("Target.setAutoAttach", {
   autoAttach: true,
   waitForDebuggerOnStart: true,
   flatten: true,
   filter: [
-    { type: 'browser', exclude: true },
-    { type: 'tab', exclude: true },
-    { type: 'iframe', exclude: true },
-    {},  // Include everything else (pages, workers, etc.)
+    { type: "browser", exclude: true },
+    { type: "tab", exclude: true },
+    { type: "iframe", exclude: true },
+    {}, // Include everything else (pages, workers, etc.)
   ],
 });
 ```
@@ -141,7 +142,7 @@ Both `puppeteer.launch()` and `puppeteerStealth.launch()` create a `TargetManage
 this.browser = await launch({
   ...finalOptions,
   targetFilter: (target: Target) => {
-    if (target.type() !== 'page') return true;
+    if (target.type() !== "page") return true;
     return this.pendingInternalPage;
   },
 });
@@ -212,6 +213,7 @@ ws_url = "ws://192.168.4.200:3000?timeout=180000"
 ```
 
 **Comparative test**: Navigate to pages with and without iframes on the same session:
+
 - `example.com` — works (no iframes)
 - `webscraper.io` homepage — works (no cross-origin sandboxed iframes)
 - `webscraper.io/bot-check` — hangs (creates sandboxed cross-origin iframe)

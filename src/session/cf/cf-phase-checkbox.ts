@@ -7,11 +7,11 @@
  *   2. Runtime.callFunctionOn (DOM.getDocument → resolveNode → callFunctionOn)
  *   3. DOM tree walk (DOM.getDocument depth=-1 pierce=true → recursive walk)
  */
-import { Effect } from 'effect';
-import type { CdpSessionId } from '../../shared/cloudflare-detection.js';
-import type { ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
-import { SolverEvents } from './cf-services.js';
-import { CDP_CALL_TIMEOUT, MAX_CHECKBOX_POLLS, CHECKBOX_POLL_INTERVAL_MS } from './cf-schedules.js';
+import { Effect } from "effect";
+import type { CdpSessionId } from "../../shared/cloudflare-detection.js";
+import type { ReadonlyActiveDetection } from "./cloudflare-event-emitter.js";
+import { SolverEvents } from "./cf-services.js";
+import { CDP_CALL_TIMEOUT, MAX_CHECKBOX_POLLS, CHECKBOX_POLL_INTERVAL_MS } from "./cf-schedules.js";
 
 /** Effect-returning CDP sender — eliminates the Promise bridge. */
 type EffectSend = (
@@ -55,30 +55,51 @@ export function findCheckboxViaIsolatedWorld(
   oopifSessionId: CdpSessionId,
   contextId: number,
 ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
-  return Effect.fn('cf.findCheckboxViaIsolatedWorld')(function*() {
-    yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId, 'cf.via': 'isolated_world' });
+  return Effect.fn("cf.findCheckboxViaIsolatedWorld")(function* () {
+    yield* Effect.annotateCurrentSpan({
+      "cf.target_id": oopifSessionId,
+      "cf.via": "isolated_world",
+    });
     // Get document root in the isolated world
-    const docResult = yield* cdpCall(send('Runtime.evaluate', {
-      expression: 'document.documentElement',
-      contextId,
-      returnByValue: false,
-    }, oopifSessionId));
+    const docResult = yield* cdpCall(
+      send(
+        "Runtime.evaluate",
+        {
+          expression: "document.documentElement",
+          contextId,
+          returnByValue: false,
+        },
+        oopifSessionId,
+      ),
+    );
     if (!docResult?.result?.objectId) return null;
 
     // Find body
-    const bodyResult = yield* cdpCall(send('Runtime.callFunctionOn', {
-      objectId: docResult.result.objectId,
-      functionDeclaration: `function() { return this.querySelector('body'); }`,
-      returnByValue: false,
-    }, oopifSessionId));
+    const bodyResult = yield* cdpCall(
+      send(
+        "Runtime.callFunctionOn",
+        {
+          objectId: docResult.result.objectId,
+          functionDeclaration: `function() { return this.querySelector('body'); }`,
+          returnByValue: false,
+        },
+        oopifSessionId,
+      ),
+    );
     if (!bodyResult?.result?.objectId) return null;
 
     // Describe body with pierce to get shadow roots
-    const bodyDesc = yield* cdpCall(send('DOM.describeNode', {
-      objectId: bodyResult.result.objectId,
-      pierce: true,
-      depth: 1,
-    }, oopifSessionId));
+    const bodyDesc = yield* cdpCall(
+      send(
+        "DOM.describeNode",
+        {
+          objectId: bodyResult.result.objectId,
+          pierce: true,
+          depth: 1,
+        },
+        oopifSessionId,
+      ),
+    );
 
     const shadowRoots = bodyDesc?.node?.shadowRoots;
     if (shadowRoots?.length) {
@@ -92,11 +113,17 @@ export function findCheckboxViaIsolatedWorld(
     const children = bodyDesc?.node?.children;
     if (children?.length) {
       for (const child of children) {
-        const childDesc = yield* cdpCall(send('DOM.describeNode', {
-          backendNodeId: child.backendNodeId,
-          pierce: true,
-          depth: 1,
-        }, oopifSessionId));
+        const childDesc = yield* cdpCall(
+          send(
+            "DOM.describeNode",
+            {
+              backendNodeId: child.backendNodeId,
+              pierce: true,
+              depth: 1,
+            },
+            oopifSessionId,
+          ),
+        );
         if (childDesc?.node?.shadowRoots?.length) {
           for (const sr of childDesc.node.shadowRoots) {
             const found = yield* queryCheckboxInShadow(send, oopifSessionId, sr.backendNodeId);
@@ -107,9 +134,7 @@ export function findCheckboxViaIsolatedWorld(
     }
 
     return null;
-  })().pipe(
-    Effect.catch(() => Effect.succeed(null)),
-  );
+  })().pipe(Effect.catch(() => Effect.succeed(null)));
 }
 
 /**
@@ -120,34 +145,58 @@ export function findCheckboxViaRuntime(
   send: EffectSend,
   oopifSessionId: CdpSessionId,
 ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
-  return Effect.fn('cf.findCheckboxViaRuntime')(function*() {
-    yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId, 'cf.via': 'runtime' });
+  return Effect.fn("cf.findCheckboxViaRuntime")(function* () {
+    yield* Effect.annotateCurrentSpan({ "cf.target_id": oopifSessionId, "cf.via": "runtime" });
     // Step 1: Get document node
-    const doc = yield* cdpCall(send('DOM.getDocument', {
-      depth: 0,
-    }, oopifSessionId));
+    const doc = yield* cdpCall(
+      send(
+        "DOM.getDocument",
+        {
+          depth: 0,
+        },
+        oopifSessionId,
+      ),
+    );
     if (!doc?.root) return null;
 
     // Step 2: Resolve document to get its objectId
-    const resolved = yield* cdpCall(send('DOM.resolveNode', {
-      nodeId: doc.root.nodeId,
-    }, oopifSessionId));
+    const resolved = yield* cdpCall(
+      send(
+        "DOM.resolveNode",
+        {
+          nodeId: doc.root.nodeId,
+        },
+        oopifSessionId,
+      ),
+    );
     if (!resolved?.object?.objectId) return null;
 
     // Step 3: Find body element via Runtime.callFunctionOn
-    const bodyResult = yield* cdpCall(send('Runtime.callFunctionOn', {
-      objectId: resolved.object.objectId,
-      functionDeclaration: `function() { return this.querySelector('body'); }`,
-      returnByValue: false,
-    }, oopifSessionId));
+    const bodyResult = yield* cdpCall(
+      send(
+        "Runtime.callFunctionOn",
+        {
+          objectId: resolved.object.objectId,
+          functionDeclaration: `function() { return this.querySelector('body'); }`,
+          returnByValue: false,
+        },
+        oopifSessionId,
+      ),
+    );
     if (!bodyResult?.result?.objectId) return null;
 
     // Step 4: Describe body node with pierce=true to get shadow root
-    const bodyDesc = yield* cdpCall(send('DOM.describeNode', {
-      objectId: bodyResult.result.objectId,
-      pierce: true,
-      depth: 1,
-    }, oopifSessionId));
+    const bodyDesc = yield* cdpCall(
+      send(
+        "DOM.describeNode",
+        {
+          objectId: bodyResult.result.objectId,
+          pierce: true,
+          depth: 1,
+        },
+        oopifSessionId,
+      ),
+    );
 
     const shadowRoots = bodyDesc?.node?.shadowRoots;
 
@@ -162,11 +211,17 @@ export function findCheckboxViaRuntime(
     const children = bodyDesc?.node?.children;
     if (children?.length) {
       for (const child of children) {
-        const childDesc = yield* cdpCall(send('DOM.describeNode', {
-          backendNodeId: child.backendNodeId,
-          pierce: true,
-          depth: 1,
-        }, oopifSessionId));
+        const childDesc = yield* cdpCall(
+          send(
+            "DOM.describeNode",
+            {
+              backendNodeId: child.backendNodeId,
+              pierce: true,
+              depth: 1,
+            },
+            oopifSessionId,
+          ),
+        );
         if (childDesc?.node?.shadowRoots?.length) {
           for (const sr of childDesc.node.shadowRoots) {
             const found = yield* queryCheckboxInShadow(send, oopifSessionId, sr.backendNodeId);
@@ -177,9 +232,7 @@ export function findCheckboxViaRuntime(
     }
 
     return null;
-  })().pipe(
-    Effect.catch(() => Effect.succeed(null)),
-  );
+  })().pipe(Effect.catch(() => Effect.succeed(null)));
 }
 
 /** Query checkbox inside a resolved shadow root. */
@@ -188,27 +241,45 @@ function queryCheckboxInShadow(
   oopifSessionId: CdpSessionId,
   shadowBackendNodeId: number,
 ): Effect.Effect<{ objectId: string; backendNodeId: number } | null> {
-  return Effect.fn('cf.queryCheckboxInShadow')(function*() {
-    yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId });
+  return Effect.fn("cf.queryCheckboxInShadow")(function* () {
+    yield* Effect.annotateCurrentSpan({ "cf.target_id": oopifSessionId });
     // Resolve shadow root to objectId
-    const shadowResolved = yield* cdpCall(send('DOM.resolveNode', {
-      backendNodeId: shadowBackendNodeId,
-    }, oopifSessionId));
+    const shadowResolved = yield* cdpCall(
+      send(
+        "DOM.resolveNode",
+        {
+          backendNodeId: shadowBackendNodeId,
+        },
+        oopifSessionId,
+      ),
+    );
     if (!shadowResolved?.object?.objectId) return null;
 
     // Try span.cb-i first (Turnstile's primary checkbox indicator)
-    const cbResult = yield* cdpCall(send('Runtime.callFunctionOn', {
-      objectId: shadowResolved.object.objectId,
-      functionDeclaration: `function() { return this.querySelector('span.cb-i') || this.querySelector('input[type="checkbox"]'); }`,
-      returnByValue: false,
-    }, oopifSessionId));
+    const cbResult = yield* cdpCall(
+      send(
+        "Runtime.callFunctionOn",
+        {
+          objectId: shadowResolved.object.objectId,
+          functionDeclaration: `function() { return this.querySelector('span.cb-i') || this.querySelector('input[type="checkbox"]'); }`,
+          returnByValue: false,
+        },
+        oopifSessionId,
+      ),
+    );
 
-    if (!cbResult?.result?.objectId || cbResult.result.subtype === 'null') return null;
+    if (!cbResult?.result?.objectId || cbResult.result.subtype === "null") return null;
 
     // Get the backendNodeId for the checkbox (needed for getBoxModel)
-    const cbDesc = yield* cdpCall(send('DOM.describeNode', {
-      objectId: cbResult.result.objectId,
-    }, oopifSessionId));
+    const cbDesc = yield* cdpCall(
+      send(
+        "DOM.describeNode",
+        {
+          objectId: cbResult.result.objectId,
+        },
+        oopifSessionId,
+      ),
+    );
 
     if (!cbDesc?.node?.backendNodeId) return null;
 
@@ -234,28 +305,35 @@ export function phase3CheckboxFind(
   active: ReadonlyActiveDetection,
   via: string,
   solveStart: number,
-): Effect.Effect<{ checkbox: { objectId: string; backendNodeId: number }; method: string } | null, never, typeof SolverEvents.Identifier> {
+): Effect.Effect<
+  { checkbox: { objectId: string; backendNodeId: number }; method: string } | null,
+  never,
+  typeof SolverEvents.Identifier
+> {
   const pageTargetId = active.pageTargetId;
-  return Effect.fn('cf.phase3CheckboxFind')(function*() {
+  return Effect.fn("cf.phase3CheckboxFind")(function* () {
     yield* Effect.annotateCurrentSpan({
-      'cf.type': active.info.type,
-      'cf.target_id': pageTargetId,
-      'cf.via': via,
+      "cf.type": active.info.type,
+      "cf.target_id": pageTargetId,
+      "cf.via": via,
     });
     const events = yield* SolverEvents;
 
     const phase3Start = Date.now();
-    yield* events.marker(pageTargetId, 'cf.phase3_start', {
-      via, oopif_session: oopifSessionId.substring(0, 20),
+    yield* events.marker(pageTargetId, "cf.phase3_start", {
+      via,
+      oopif_session: oopifSessionId.substring(0, 20),
     });
 
-    yield* events.marker(pageTargetId, 'cf.cdp_dom_session', {
-      using_iframe: true, type: active.info.type, via,
+    yield* events.marker(pageTargetId, "cf.cdp_dom_session", {
+      using_iframe: true,
+      type: active.info.type,
+      via,
     });
 
     // Find checkbox with polling
     let checkbox: { objectId: string; backendNodeId: number } | null = null;
-    let method = 'none';
+    let method = "none";
     let pollCount = 0;
 
     const maxPolls = MAX_CHECKBOX_POLLS;
@@ -267,57 +345,83 @@ export function phase3CheckboxFind(
 
       // Strategy 3 FIRST — single CDP call, most resilient under concurrent load
       const s3Start = Date.now();
-      const doc = yield* cdpCall(send('DOM.getDocument', {
-        depth: -1, pierce: true,
-      }, oopifSessionId));
+      const doc = yield* cdpCall(
+        send(
+          "DOM.getDocument",
+          {
+            depth: -1,
+            pierce: true,
+          },
+          oopifSessionId,
+        ),
+      );
       if (doc?.root) {
         const node = findCheckboxInTree(doc.root);
         if (node) {
-          checkbox = { objectId: '', backendNodeId: node.backendNodeId };
-          method = 'dom_tree_walk';
-          yield* events.marker(pageTargetId, 'cf.phase3_strategy', {
-            strategy: 'dom_tree_walk', poll, elapsed_ms: Date.now() - s3Start,
-            found: true, doc_root: true,
+          checkbox = { objectId: "", backendNodeId: node.backendNodeId };
+          method = "dom_tree_walk";
+          yield* events.marker(pageTargetId, "cf.phase3_strategy", {
+            strategy: "dom_tree_walk",
+            poll,
+            elapsed_ms: Date.now() - s3Start,
+            found: true,
+            doc_root: true,
           });
           break;
         }
       }
-      yield* events.marker(pageTargetId, 'cf.phase3_strategy', {
-        strategy: 'dom_tree_walk', poll, elapsed_ms: Date.now() - s3Start,
-        found: false, doc_root: !!doc?.root,
+      yield* events.marker(pageTargetId, "cf.phase3_strategy", {
+        strategy: "dom_tree_walk",
+        poll,
+        elapsed_ms: Date.now() - s3Start,
+        found: false,
+        doc_root: !!doc?.root,
       });
 
       // Checkbox not found yet — wait and retry (matching pydoll's polling)
       yield* Effect.sleep(`${pollInterval} millis`).pipe(
-        Effect.withSpan('cf.phase3.pollSleep', { attributes: { 'cf.poll': poll } }),
+        Effect.withSpan("cf.phase3.pollSleep", { attributes: { "cf.poll": poll } }),
       );
     }
 
     if (!checkbox) {
-      yield* Effect.annotateCurrentSpan({ 'cf.checkbox_found': false, 'cf.poll_count': pollCount });
+      yield* Effect.annotateCurrentSpan({ "cf.checkbox_found": false, "cf.poll_count": pollCount });
       // Snapshot shadow DOM state for diagnostics
       const diag = yield* diagnoseShadowDOM(send, oopifSessionId);
-      yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox', { via, polls: pollCount, diag });
-      yield* events.emitProgress(active, 'widget_error', {
-        error_type: 'no_checkbox',
+      yield* events.marker(pageTargetId, "cf.cdp_no_checkbox", { via, polls: pollCount, diag });
+      yield* events.emitProgress(active, "widget_error", {
+        error_type: "no_checkbox",
         diag_alive: diag.alive,
         diag_body_len: diag.bodyLen,
         diag_shadow: diag.shadow,
         diag_cbI: diag.cbI,
         diag_inp: diag.inp,
       });
-      yield* events.marker(pageTargetId, 'cf.phase3_end', { found: false, elapsed_ms: Date.now() - phase3Start });
+      yield* events.marker(pageTargetId, "cf.phase3_end", {
+        found: false,
+        elapsed_ms: Date.now() - phase3Start,
+      });
       return null;
     }
 
-    yield* Effect.annotateCurrentSpan({ 'cf.checkbox_found': true, 'cf.poll_count': pollCount, 'cf.checkbox_method': method });
-    yield* events.marker(pageTargetId, 'cf.cdp_checkbox_found', {
-      method, backendNodeId: checkbox.backendNodeId,
-      has_objectId: !!checkbox.objectId, via, polls: pollCount,
+    yield* Effect.annotateCurrentSpan({
+      "cf.checkbox_found": true,
+      "cf.poll_count": pollCount,
+      "cf.checkbox_method": method,
+    });
+    yield* events.marker(pageTargetId, "cf.cdp_checkbox_found", {
+      method,
+      backendNodeId: checkbox.backendNodeId,
+      has_objectId: !!checkbox.objectId,
+      via,
+      polls: pollCount,
       checkbox_found_ms: Date.now() - solveStart,
     });
-    yield* events.emitProgress(active, 'widget_found', { method, x: 0, y: 0 });
-    yield* events.marker(pageTargetId, 'cf.phase3_end', { found: true, elapsed_ms: Date.now() - phase3Start });
+    yield* events.emitProgress(active, "widget_found", { method, x: 0, y: 0 });
+    yield* events.marker(pageTargetId, "cf.phase3_end", {
+      found: true,
+      elapsed_ms: Date.now() - phase3Start,
+    });
 
     return { checkbox, method };
   })();
@@ -334,13 +438,26 @@ function diagnoseShadowDOM(
   send: EffectSend,
   oopifSessionId: CdpSessionId,
 ): Effect.Effect<Record<string, unknown>> {
-  return Effect.fn('cf.diagnoseShadowDOM')(function*() {
-    yield* Effect.annotateCurrentSpan({ 'cf.target_id': oopifSessionId });
-    const result: Record<string, unknown> = { alive: false, cbI: false, inp: false, shadow: 0, bodyLen: 0 };
+  return Effect.fn("cf.diagnoseShadowDOM")(function* () {
+    yield* Effect.annotateCurrentSpan({ "cf.target_id": oopifSessionId });
+    const result: Record<string, unknown> = {
+      alive: false,
+      cbI: false,
+      inp: false,
+      shadow: 0,
+      bodyLen: 0,
+    };
 
-    const doc = yield* cdpCall(send('DOM.getDocument', {
-      depth: -1, pierce: true,
-    }, oopifSessionId));
+    const doc = yield* cdpCall(
+      send(
+        "DOM.getDocument",
+        {
+          depth: -1,
+          pierce: true,
+        },
+        oopifSessionId,
+      ),
+    );
 
     if (!doc?.root) return result;
     result.alive = true;
@@ -359,7 +476,7 @@ function diagnoseShadowDOM(
         shadowCount += n.shadowRoots.length;
         n.shadowRoots.forEach(walk);
       }
-      if (n.localName === 'input' && getAttr(n, 'type') === 'checkbox') {
+      if (n.localName === "input" && getAttr(n, "type") === "checkbox") {
         hasInput = true;
       }
       n.children?.forEach(walk);
@@ -371,7 +488,7 @@ function diagnoseShadowDOM(
     result.bodyLen = nodeCount;
 
     return result;
-  })().pipe(Effect.orElseSucceed(() => ({ error: 'diag_failed' } as Record<string, unknown>)));
+  })().pipe(Effect.orElseSucceed(() => ({ error: "diag_failed" }) as Record<string, unknown>));
 }
 
 // ── DOM tree walking ─────────────────────────────────────────────────
@@ -410,15 +527,15 @@ function isCheckboxTarget(node: CDPNode): boolean {
   const name = node.localName || node.nodeName?.toLowerCase();
   if (!name) return false;
 
-  if (name === 'span' && hasClass(node, 'cb-i')) return true;
-  if (name === 'input' && getAttr(node, 'type') === 'checkbox') return true;
+  if (name === "span" && hasClass(node, "cb-i")) return true;
+  if (name === "input" && getAttr(node, "type") === "checkbox") return true;
 
   return false;
 }
 
 /** Check if node has a specific CSS class. */
 function hasClass(node: CDPNode, className: string): boolean {
-  const classAttr = getAttr(node, 'class');
+  const classAttr = getAttr(node, "class");
   if (!classAttr) return false;
   return classAttr.split(/\s+/).includes(className);
 }

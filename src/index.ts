@@ -1,6 +1,6 @@
-import Pyroscope from '@pyroscope/nodejs';
-import { Browserless } from '@browserless.io/browserless';
-import { Effect } from 'effect';
+import Pyroscope from "@pyroscope/nodejs";
+import { Browserless } from "@browserless.io/browserless";
+import { Effect } from "effect";
 
 // ── Continuous profiling (Pyroscope) ─────────────────────────────────
 // Must init before any other code to capture full startup profile.
@@ -8,13 +8,13 @@ import { Effect } from 'effect';
 if (process.env.PYROSCOPE_SERVER_ADDRESS) {
   Pyroscope.init({
     serverAddress: process.env.PYROSCOPE_SERVER_ADDRESS,
-    appName: process.env.OTEL_SERVICE_NAME ?? 'browserless',
-    basicAuthUser: process.env.PYROSCOPE_BASIC_AUTH_USER ?? '',
-    basicAuthPassword: process.env.PYROSCOPE_BASIC_AUTH_PASSWORD ?? '',
+    appName: process.env.OTEL_SERVICE_NAME ?? "browserless",
+    basicAuthUser: process.env.PYROSCOPE_BASIC_AUTH_USER ?? "",
+    basicAuthPassword: process.env.PYROSCOPE_BASIC_AUTH_PASSWORD ?? "",
     wall: { collectCpuTime: true },
     tags: {
-      env: process.env.OTEL_DEPLOYMENT_ENVIRONMENT ?? 'production',
-      server: 'flatcar',
+      env: process.env.OTEL_DEPLOYMENT_ENVIRONMENT ?? "production",
+      server: "flatcar",
     },
   });
   Pyroscope.start();
@@ -26,7 +26,7 @@ if (process.env.PYROSCOPE_SERVER_ADDRESS) {
 // silently boots and steals connections — all replays fail with no error.
 // See: 2026-03-04 incident — 2 hours debugging phantom replay failures
 // caused by a zombie `node --watch` process with empty env.
-const REQUIRED_ENV = ['REPLAY_INGEST_URL'] as const;
+const REQUIRED_ENV = ["REPLAY_INGEST_URL"] as const;
 for (const key of REQUIRED_ENV) {
   if (!process.env[key]) {
     console.error(`\n  FATAL: Missing required env var: ${key}`);
@@ -35,7 +35,7 @@ for (const key of REQUIRED_ENV) {
   }
 }
 
-const program = Effect.fn('browserless.main')(function* () {
+const program = Effect.fn("browserless.main")(function* () {
   const browserless = new Browserless();
 
   yield* Effect.promise(() => browserless.start());
@@ -46,34 +46,42 @@ const program = Effect.fn('browserless.main')(function* () {
         // 25s — enough for session cleanup (replay flush + browser close) + OTLP export.
         // Docker stop_timeout must be > this (set to 30s in infra config).
         // Previous 10s timeout killed the process during replay flush, losing root spans.
-        Effect.timeout('25 seconds'),
+        Effect.timeout("25 seconds"),
         Effect.catch(() => Effect.void),
       ),
     ).finally(() => process.exit(code));
 
   process
-    .once('SIGTERM', () => {
-      console.error(JSON.stringify({ message: 'SIGTERM received, saving and closing down', level: 'info' }));
-      shutdown('SIGTERM', 0);
+    .once("SIGTERM", () => {
+      console.error(
+        JSON.stringify({ message: "SIGTERM received, saving and closing down", level: "info" }),
+      );
+      shutdown("SIGTERM", 0);
     })
-    .once('SIGINT', () => {
-      console.error(JSON.stringify({ message: 'SIGINT received, saving and closing down', level: 'info' }));
-      shutdown('SIGINT', 0);
+    .once("SIGINT", () => {
+      console.error(
+        JSON.stringify({ message: "SIGINT received, saving and closing down", level: "info" }),
+      );
+      shutdown("SIGINT", 0);
     })
-    .once('SIGHUP', () => {
-      console.error(JSON.stringify({ message: 'SIGHUP received, saving and closing down', level: 'info' }));
-      shutdown('SIGHUP', 0);
+    .once("SIGHUP", () => {
+      console.error(
+        JSON.stringify({ message: "SIGHUP received, saving and closing down", level: "info" }),
+      );
+      shutdown("SIGHUP", 0);
     })
-    .once('SIGUSR2', () => {
-      console.error(JSON.stringify({ message: 'SIGUSR2 received, saving and closing down', level: 'info' }));
-      shutdown('SIGUSR2', 0);
+    .once("SIGUSR2", () => {
+      console.error(
+        JSON.stringify({ message: "SIGUSR2 received, saving and closing down", level: "info" }),
+      );
+      shutdown("SIGUSR2", 0);
     })
-    .once('uncaughtException', (err, origin) => {
-      console.error('Unhandled exception at:', origin, 'error:', err);
-      shutdown('uncaughtException', 1);
+    .once("uncaughtException", (err, origin) => {
+      console.error("Unhandled exception at:", origin, "error:", err);
+      shutdown("uncaughtException", 1);
     })
-    .on('unhandledRejection', (reason, promise) => {
-      console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    .on("unhandledRejection", (reason, promise) => {
+      console.error("Unhandled Rejection at:", promise, "reason:", reason);
     });
 
   // Keep the process alive — the HTTP server listener keeps the event loop running.

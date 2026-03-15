@@ -6,7 +6,7 @@
  * cross-tab contamination is structurally impossible — there's no
  * targetId key to mix up.
  */
-import type { CdpSessionId, TargetId } from '../../shared/cloudflare-detection.js';
+import type { CdpSessionId, TargetId } from "../../shared/cloudflare-detection.js";
 
 export class TabSolverState {
   /** Whether the CF bridge push has already fired a solved event for this tab. */

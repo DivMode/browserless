@@ -1,15 +1,15 @@
-import { Browserless, Config, Metrics } from '@browserless.io/browserless';
-import { expect } from 'chai';
-import puppeteer from 'puppeteer-core';
+import { Browserless, Config, Metrics } from "@browserless.io/browserless";
+import { expect } from "chai";
+import puppeteer from "puppeteer-core";
 
-describe('/kill API', function () {
+describe("/kill API", function () {
   let browserless: Browserless;
 
   const start = ({
     config = new Config(),
     metrics = new Metrics(),
   }: { config?: Config; metrics?: Metrics } = {}) => {
-    config.setToken('6R0W53R135510');
+    config.setToken("6R0W53R135510");
     browserless = new Browserless({ config, metrics });
     return browserless.start();
   };
@@ -18,7 +18,7 @@ describe('/kill API', function () {
     await browserless.stop();
   });
 
-  it('Kill all sessions', async () => {
+  it("Kill all sessions", async () => {
     await start();
     const browser1 = await puppeteer.connect({
       browserWSEndpoint: `ws://localhost:3000/edge?token=6R0W53R135510`,
@@ -27,11 +27,9 @@ describe('/kill API', function () {
       browserWSEndpoint: `ws://localhost:3000/edge?token=6R0W53R135510`,
     });
 
-    await fetch('http://localhost:3000/kill/all?token=6R0W53R135510').then(
-      async (res) => {
-        expect(res.status).to.equal(204);
-      },
-    );
+    await fetch("http://localhost:3000/kill/all?token=6R0W53R135510").then(async (res) => {
+      expect(res.status).to.equal(204);
+    });
 
     let errorThrown1;
     try {
@@ -45,27 +43,25 @@ describe('/kill API', function () {
     } catch (e) {
       errorThrown2 = e;
     }
-    expect((errorThrown1 as Error).message).contains('closed');
-    expect((errorThrown2 as Error).message).contains('closed');
+    expect((errorThrown1 as Error).message).contains("closed");
+    expect((errorThrown2 as Error).message).contains("closed");
   });
 
-  it('Kill session by browserId', async () => {
+  it("Kill session by browserId", async () => {
     await start();
     const browser = await puppeteer.connect({
       browserWSEndpoint: `ws://localhost:3000/edge?token=6R0W53R135510`,
     });
 
-    await fetch('http://localhost:3000/sessions?token=6R0W53R135510').then(
-      async (res) => {
-        const sessions = await res.json();
-        const browserId = sessions[0].browserId;
-        await fetch(
-          `http://localhost:3000/kill/${browserId}?token=6R0W53R135510`,
-        ).then(async (res) => {
+    await fetch("http://localhost:3000/sessions?token=6R0W53R135510").then(async (res) => {
+      const sessions = await res.json();
+      const browserId = sessions[0].browserId;
+      await fetch(`http://localhost:3000/kill/${browserId}?token=6R0W53R135510`).then(
+        async (res) => {
           expect(res.status).to.equal(204);
-        });
-      },
-    );
+        },
+      );
+    });
 
     let errorThrown;
     try {
@@ -73,18 +69,16 @@ describe('/kill API', function () {
     } catch (e) {
       errorThrown = e;
     }
-    expect((errorThrown as Error).message).contains('closed');
+    expect((errorThrown as Error).message).contains("closed");
   });
 
-  it('Kill session by trackingId', async () => {
+  it("Kill session by trackingId", async () => {
     await start();
     const browser = await puppeteer.connect({
       browserWSEndpoint: `ws://localhost:3000/edge?token=6R0W53R135510&trackingId=session-1`,
     });
 
-    await fetch(
-      'http://localhost:3000/kill/session-1?token=6R0W53R135510',
-    ).then(async (res) => {
+    await fetch("http://localhost:3000/kill/session-1?token=6R0W53R135510").then(async (res) => {
       expect(res.status).to.equal(204);
     });
 
@@ -94,6 +88,6 @@ describe('/kill API', function () {
     } catch (e) {
       errorThrown = e;
     }
-    expect((errorThrown as Error).message).contains('closed');
+    expect((errorThrown as Error).message).contains("closed");
   });
 });

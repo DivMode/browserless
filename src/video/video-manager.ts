@@ -1,13 +1,11 @@
-import { rm } from 'fs/promises';
-import path from 'path';
+import { rm } from "fs/promises";
+import path from "path";
 
-import {
-  exists,
-} from '@browserless.io/browserless';
-import { Effect } from 'effect';
+import { exists } from "@browserless.io/browserless";
+import { Effect } from "effect";
 
-import { runForkInServer } from '../otel-runtime.js';
-import type { VideoEncoder } from './encoder.js';
+import { runForkInServer } from "../otel-runtime.js";
+import type { VideoEncoder } from "./encoder.js";
 
 /**
  * VideoManager owns all video-specific lifecycle operations.
@@ -26,7 +24,7 @@ export class VideoManager {
   private videosDir: string;
 
   constructor(videosDir?: string) {
-    this.videosDir = videosDir ?? '/tmp/browserless-videos';
+    this.videosDir = videosDir ?? "/tmp/browserless-videos";
   }
 
   /**
@@ -61,13 +59,13 @@ export class VideoManager {
 
     try {
       // Delete frames/ subdirectory (raw PNGs)
-      const framesDir = path.join(sessionDir, 'frames');
+      const framesDir = path.join(sessionDir, "frames");
       if (await exists(framesDir)) {
         await rm(framesDir, { recursive: true });
         deleted = true;
       }
       // Delete HLS directory (encoded segments)
-      const hlsDir = path.join(sessionDir, 'hls');
+      const hlsDir = path.join(sessionDir, "hls");
       if (await exists(hlsDir)) {
         await rm(hlsDir, { recursive: true });
         deleted = true;

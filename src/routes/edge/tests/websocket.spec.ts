@@ -6,13 +6,13 @@ import {
   exists,
   fetchJson,
   sleep,
-} from '@browserless.io/browserless';
-import { chromium } from 'playwright-core';
-import { deleteAsync } from 'del';
-import { expect } from 'chai';
-import puppeteer from 'puppeteer-core';
+} from "@browserless.io/browserless";
+import { chromium } from "playwright-core";
+import { deleteAsync } from "del";
+import { expect } from "chai";
+import puppeteer from "puppeteer-core";
 
-describe('Edge WebSocket API', function () {
+describe("Edge WebSocket API", function () {
   let browserless: Browserless;
 
   const start = ({
@@ -27,9 +27,9 @@ describe('Edge WebSocket API', function () {
     await browserless.stop();
   });
 
-  it('runs edge websocket requests', async () => {
+  it("runs edge websocket requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -40,24 +40,22 @@ describe('Edge WebSocket API', function () {
     await browser.close();
   });
 
-  it('runs edge Playwright-CDP requests', async () => {
+  it("runs edge Playwright-CDP requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
-    const browser = await chromium.connectOverCDP(
-      `ws://localhost:3000/edge?token=browserless`,
-    );
+    const browser = await chromium.connectOverCDP(`ws://localhost:3000/edge?token=browserless`);
     const context = await browser.newContext();
     await context.newPage();
 
     await browser.close();
   });
 
-  it('runs multiple websocket requests', async () => {
+  it("runs multiple websocket requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -72,9 +70,9 @@ describe('Edge WebSocket API', function () {
     await Promise.all([browser.close(), browserTwo.close()]);
   });
 
-  it('does not close browsers when multiple clients are connected', async () => {
+  it("does not close browsers when multiple clients are connected", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -84,7 +82,7 @@ describe('Edge WebSocket API', function () {
     });
     await sleep(100);
     const [session] = (await fetchJson(
-      'http://localhost:3000/sessions?token=browserless',
+      "http://localhost:3000/sessions?token=browserless",
     )) as BrowserlessSessionJSON[];
     expect(session.numbConnected).to.equal(1);
 
@@ -94,7 +92,7 @@ describe('Edge WebSocket API', function () {
     });
     await sleep(100);
     const [twoSessions] = (await fetchJson(
-      'http://localhost:3000/sessions?token=browserless',
+      "http://localhost:3000/sessions?token=browserless",
     )) as BrowserlessSessionJSON[];
     expect(twoSessions.numbConnected).to.equal(2);
 
@@ -102,7 +100,7 @@ describe('Edge WebSocket API', function () {
     await browser.disconnect();
     await sleep(100);
     const [oneSession] = (await fetchJson(
-      'http://localhost:3000/sessions?token=browserless',
+      "http://localhost:3000/sessions?token=browserless",
     )) as BrowserlessSessionJSON[];
     expect(oneSession.numbConnected).to.equal(1);
 
@@ -110,14 +108,14 @@ describe('Edge WebSocket API', function () {
     await browserTwo.disconnect();
     await sleep(100);
     const sessionsFinal = (await fetchJson(
-      'http://localhost:3000/sessions?token=browserless',
+      "http://localhost:3000/sessions?token=browserless",
     )) as BrowserlessSessionJSON[];
     expect(sessionsFinal).to.have.length(0);
   });
 
-  it('disconnects all clients when the timeout is reached', async () => {
+  it("disconnects all clients when the timeout is reached", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     config.setTimeout(1000);
     config.setConcurrent(2);
     const metrics = new Metrics();
@@ -126,7 +124,7 @@ describe('Edge WebSocket API', function () {
       browserWSEndpoint: `ws://localhost:3000/edge?token=browserless`,
     });
     const [session] = (await fetchJson(
-      'http://localhost:3000/sessions?token=browserless',
+      "http://localhost:3000/sessions?token=browserless",
     )) as BrowserlessSessionJSON[];
     const browserTwo = await puppeteer.connect({
       browserWSEndpoint: `ws://localhost:3000/devtools/browser/${session.browserId}?token=browserless`,
@@ -138,9 +136,9 @@ describe('Edge WebSocket API', function () {
     expect(browserTwo.connected).to.be.false;
   });
 
-  it('rejects websocket requests', async () => {
+  it("rejects websocket requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -154,9 +152,9 @@ describe('Edge WebSocket API', function () {
     expect(didError).to.be.true;
   });
 
-  it('rejects file protocol requests', async () => {
+  it("rejects file protocol requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -166,7 +164,7 @@ describe('Edge WebSocket API', function () {
       })
       .then(async (b) => {
         const page = await b.newPage();
-        await page.goto('file:///etc/passwd');
+        await page.goto("file:///etc/passwd");
         await page.content();
         await b.disconnect();
         return false;
@@ -176,9 +174,9 @@ describe('Edge WebSocket API', function () {
     expect(didError).to.be.true;
   });
 
-  it.skip('runs with ignored arguments', async () => {
+  it.skip("runs with ignored arguments", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const args = {
@@ -202,9 +200,9 @@ describe('Edge WebSocket API', function () {
     expect(success).to.be.true;
   });
 
-  it('deletes user-data-dirs when not specified', async () => {
+  it("deletes user-data-dirs when not specified", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -212,9 +210,9 @@ describe('Edge WebSocket API', function () {
       browserWSEndpoint: `ws://localhost:3000/edge?token=browserless`,
     });
 
-    const [{ userDataDir }] = await fetch(
-      'http://localhost:3000/sessions?token=browserless',
-    ).then((r) => r.json());
+    const [{ userDataDir }] = await fetch("http://localhost:3000/sessions?token=browserless").then(
+      (r) => r.json(),
+    );
     expect(await exists(userDataDir)).to.be.true;
 
     await browser.disconnect();
@@ -223,10 +221,10 @@ describe('Edge WebSocket API', function () {
     expect(await exists(userDataDir)).to.be.false;
   });
 
-  it.skip('allows specified user-data-dirs', async () => {
-    const dataDir = '/tmp/data-dir';
+  it.skip("allows specified user-data-dirs", async () => {
+    const dataDir = "/tmp/data-dir";
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const launch = JSON.stringify({
@@ -237,9 +235,9 @@ describe('Edge WebSocket API', function () {
       browserWSEndpoint: `ws://localhost:3000/edge?token=browserless&launch=${launch}`,
     });
 
-    const [{ userDataDir }] = await fetch(
-      'http://localhost:3000/sessions?token=browserless',
-    ).then((r) => r.json());
+    const [{ userDataDir }] = await fetch("http://localhost:3000/sessions?token=browserless").then(
+      (r) => r.json(),
+    );
 
     expect(await exists(userDataDir)).to.be.true;
     expect(userDataDir).to.equal(dataDir);
@@ -250,13 +248,13 @@ describe('Edge WebSocket API', function () {
     expect(await exists(userDataDir)).to.be.true;
   });
 
-  it('creates user-data-dirs with userDataDir options', async () => {
-    const dataDirLocation = '/tmp/browserless-test-dir';
+  it("creates user-data-dirs with userDataDir options", async () => {
+    const dataDirLocation = "/tmp/browserless-test-dir";
     const launch = JSON.stringify({
       userDataDir: dataDirLocation,
     });
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -264,9 +262,9 @@ describe('Edge WebSocket API', function () {
       browserWSEndpoint: `ws://localhost:3000/edge?token=browserless&launch=${launch}`,
     });
 
-    const [{ userDataDir }] = await fetch(
-      'http://localhost:3000/sessions?token=browserless',
-    ).then((r) => r.json());
+    const [{ userDataDir }] = await fetch("http://localhost:3000/sessions?token=browserless").then(
+      (r) => r.json(),
+    );
 
     expect(userDataDir === dataDirLocation).to.be.true;
     expect(await exists(userDataDir)).to.be.true;
@@ -278,13 +276,13 @@ describe('Edge WebSocket API', function () {
     await deleteAsync(userDataDir, { force: true });
   });
 
-  it('creates user-data-dirs with CLI flags', async () => {
-    const dataDirLocation = '/tmp/browserless-test-dir';
+  it("creates user-data-dirs with CLI flags", async () => {
+    const dataDirLocation = "/tmp/browserless-test-dir";
     const launch = JSON.stringify({
       args: [`--user-data-dir=${dataDirLocation}`],
     });
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -292,9 +290,9 @@ describe('Edge WebSocket API', function () {
       browserWSEndpoint: `ws://localhost:3000/edge?token=browserless&launch=${launch}`,
     });
 
-    const [{ userDataDir }] = await fetch(
-      'http://localhost:3000/sessions?token=browserless',
-    ).then((r) => r.json());
+    const [{ userDataDir }] = await fetch("http://localhost:3000/sessions?token=browserless").then(
+      (r) => r.json(),
+    );
 
     expect(userDataDir === dataDirLocation).to.be.true;
     expect(await exists(userDataDir)).to.be.true;
@@ -306,9 +304,9 @@ describe('Edge WebSocket API', function () {
     await deleteAsync(userDataDir, { force: true });
   });
 
-  it('runs with job-based timeouts', async () => {
+  it("runs with job-based timeouts", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     config.setTimeout(-1); // No timeout
     const metrics = new Metrics();
     await start({ config, metrics });
@@ -323,10 +321,10 @@ describe('Edge WebSocket API', function () {
     expect(browser.connected).to.be.false;
   });
 
-  it('allows the file-chooser', async () =>
+  it("allows the file-chooser", async () =>
     new Promise(async (done) => {
       const config = new Config();
-      config.setToken('browserless');
+      config.setToken("browserless");
       const metrics = new Metrics();
       await start({ config, metrics });
       const job = async () => {
@@ -343,7 +341,7 @@ describe('Edge WebSocket API', function () {
         if (page.waitForFileChooser) {
           const [fileChooser] = await Promise.all([
             page.waitForFileChooser(),
-            page.click('#avatar'),
+            page.click("#avatar"),
           ]);
           expect(fileChooser).to.not.be.undefined;
           expect(fileChooser).to.not.be.null;
@@ -355,9 +353,9 @@ describe('Edge WebSocket API', function () {
       job();
     }));
 
-  it('queues requests', async () => {
+  it("queues requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     config.setConcurrent(1);
     const metrics = new Metrics();
     await start({ config, metrics });
@@ -381,9 +379,9 @@ describe('Edge WebSocket API', function () {
     expect(results.queued).to.equal(1);
   });
 
-  it('fails requests', async () => {
+  it("fails requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     config.setConcurrent(0);
     config.setQueued(0);
     const metrics = new Metrics();
@@ -402,9 +400,9 @@ describe('Edge WebSocket API', function () {
       });
   });
 
-  it('fails requests without tokens', async () => {
+  it("fails requests without tokens", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -419,15 +417,13 @@ describe('Edge WebSocket API', function () {
       });
   });
 
-  it('runs playwright', async () => {
+  it("runs playwright", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
-    const browser = await chromium.connect(
-      `ws://localhost:3000/edge/playwright?token=browserless`,
-    );
+    const browser = await chromium.connect(`ws://localhost:3000/edge/playwright?token=browserless`);
 
     await browser.close();
     await sleep(100);
@@ -439,15 +435,13 @@ describe('Edge WebSocket API', function () {
     expect(results.queued).to.equal(0);
   });
 
-  it('runs playwright over CDP', async () => {
+  it("runs playwright over CDP", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
-    const browser = await chromium.connectOverCDP(
-      `ws://localhost:3000/edge?token=browserless`,
-    );
+    const browser = await chromium.connectOverCDP(`ws://localhost:3000/edge?token=browserless`);
 
     await browser.close();
     await sleep(100);
@@ -459,9 +453,9 @@ describe('Edge WebSocket API', function () {
     expect(results.queued).to.equal(0);
   });
 
-  it('runs multiple versions of playwright', async () => {
+  it("runs multiple versions of playwright", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
@@ -484,15 +478,15 @@ describe('Edge WebSocket API', function () {
     expect(results.queued).to.equal(0);
   });
 
-  it('rejects playwright without tokens', async () => {
+  it("rejects playwright without tokens", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
     await chromium.connect(`ws://localhost:3000/edge/playwright`).catch((e) => {
       const results = metrics.get();
-      expect(e.message).to.include('Bad or missing authentication');
+      expect(e.message).to.include("Bad or missing authentication");
       expect(results.timedout).to.equal(0);
       expect(results.successful).to.equal(0);
       expect(results.unauthorized).to.equal(1);
@@ -500,7 +494,7 @@ describe('Edge WebSocket API', function () {
     });
   });
 
-  it('allows requests without token when auth token is not set', async () => {
+  it("allows requests without token when auth token is not set", async () => {
     await start();
 
     const browser = await puppeteer.connect({
@@ -510,14 +504,14 @@ describe('Edge WebSocket API', function () {
     await browser.disconnect();
   });
 
-  it('launches headless correctly', async () => {
+  it("launches headless correctly", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
     const getVersion = () => {
-      return document.querySelector('#command_line')?.textContent;
+      return document.querySelector("#command_line")?.textContent;
     };
 
     const runPlaywright = async (launch: string) => {
@@ -526,7 +520,7 @@ describe('Edge WebSocket API', function () {
       );
 
       const page = await browser.newPage();
-      await page.goto('edge://version/');
+      await page.goto("edge://version/");
       const command = await page.evaluate(getVersion);
       await browser.close();
 
@@ -535,12 +529,12 @@ describe('Edge WebSocket API', function () {
 
     // Test headless=new
     let launch = JSON.stringify({
-      args: ['--headless=new'],
+      args: ["--headless=new"],
     });
 
     let pwCommand = await runPlaywright(launch);
 
-    expect(pwCommand).to.include('--headless=new');
+    expect(pwCommand).to.include("--headless=new");
 
     // Test headless false
     launch = JSON.stringify({
@@ -548,7 +542,7 @@ describe('Edge WebSocket API', function () {
     });
     pwCommand = await runPlaywright(launch);
 
-    expect(pwCommand).not.to.include('--headless');
+    expect(pwCommand).not.to.include("--headless");
 
     launch = JSON.stringify({
       headless: true,
@@ -556,6 +550,6 @@ describe('Edge WebSocket API', function () {
 
     pwCommand = await runPlaywright(launch);
 
-    expect(pwCommand).to.include('--headless');
+    expect(pwCommand).to.include("--headless");
   });
 });

@@ -1,1 +1,1 @@
-export { default, QuerySchema } from '../../../shared/page.ws.js';
+export { default, QuerySchema } from "../../../shared/page.ws.js";

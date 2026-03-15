@@ -8,34 +8,34 @@ import {
   Router,
   Token,
   WebHooks,
-} from '@browserless.io/browserless';
+} from "@browserless.io/browserless";
 
-import { ServiceContainer } from './container.js';
-import { BrowserManager } from '../browsers/index.js';
-import { SessionRegistry } from '../session/session-registry.js';
-import { SessionCoordinator } from '../session/session-coordinator.js';
-import { VideoManager } from '../video/video-manager.js';
+import { ServiceContainer } from "./container.js";
+import { BrowserManager } from "../browsers/index.js";
+import { SessionRegistry } from "../session/session-registry.js";
+import { SessionCoordinator } from "../session/session-coordinator.js";
+import { VideoManager } from "../video/video-manager.js";
 
 /**
  * Service names for type-safe resolution.
  */
 export const Services = {
-  Config: 'config',
-  Metrics: 'metrics',
-  Token: 'token',
-  Hooks: 'hooks',
-  WebHooks: 'webhooks',
-  Monitoring: 'monitoring',
-  FileSystem: 'fileSystem',
-  SessionRegistry: 'sessionRegistry',
-  SessionCoordinator: 'sessionCoordinator',
-  VideoManager: 'videoManager',
-  BrowserManager: 'browserManager',
-  Limiter: 'limiter',
-  Router: 'router',
+  Config: "config",
+  Metrics: "metrics",
+  Token: "token",
+  Hooks: "hooks",
+  WebHooks: "webhooks",
+  Monitoring: "monitoring",
+  FileSystem: "fileSystem",
+  SessionRegistry: "sessionRegistry",
+  SessionCoordinator: "sessionCoordinator",
+  VideoManager: "videoManager",
+  BrowserManager: "browserManager",
+  Limiter: "limiter",
+  Router: "router",
 } as const;
 
-export type ServiceName = typeof Services[keyof typeof Services];
+export type ServiceName = (typeof Services)[keyof typeof Services];
 
 /**
  * Options for creating a container.
@@ -67,51 +67,46 @@ export function createContainer(options: ContainerOptions = {}): ServiceContaine
   const container = new ServiceContainer();
 
   // Core configuration - no dependencies
-  container.registerSingleton(Services.Config, () =>
-    options.config ?? new Config()
-  );
+  container.registerSingleton(Services.Config, () => options.config ?? new Config());
 
   // Metrics - no dependencies
-  container.registerSingleton(Services.Metrics, () =>
-    options.metrics ?? new Metrics()
-  );
+  container.registerSingleton(Services.Metrics, () => options.metrics ?? new Metrics());
 
   // Token - depends on config
   container.registerSingleton(
     Services.Token,
     (c) => options.token ?? new Token(c.resolve<Config>(Services.Config)),
-    [Services.Config]
+    [Services.Config],
   );
 
   // Hooks - no dependencies
-  container.registerSingleton(Services.Hooks, () =>
-    options.hooks ?? new Hooks()
-  );
+  container.registerSingleton(Services.Hooks, () => options.hooks ?? new Hooks());
 
   // WebHooks - depends on config
   container.registerSingleton(
     Services.WebHooks,
     (c) => options.webhooks ?? new WebHooks(c.resolve<Config>(Services.Config)),
-    [Services.Config]
+    [Services.Config],
   );
 
   // Monitoring - depends on config
   container.registerSingleton(
     Services.Monitoring,
     (c) => options.monitoring ?? new Monitoring(c.resolve<Config>(Services.Config)),
-    [Services.Config]
+    [Services.Config],
   );
 
   // FileSystem - depends on config
   container.registerSingleton(
     Services.FileSystem,
     (c) => options.fileSystem ?? new FileSystem(c.resolve<Config>(Services.Config)),
-    [Services.Config]
+    [Services.Config],
   );
 
   // SessionRegistry - no dependencies (pure data structure)
-  container.registerSingleton(Services.SessionRegistry, () =>
-    options.sessionRegistry ?? new SessionRegistry()
+  container.registerSingleton(
+    Services.SessionRegistry,
+    () => options.sessionRegistry ?? new SessionRegistry(),
   );
 
   // VideoManager - no dependencies (video encoding only)
@@ -123,10 +118,10 @@ export function createContainer(options: ContainerOptions = {}): ServiceContaine
   // SessionCoordinator - depends on videoManager
   container.registerSingleton(
     Services.SessionCoordinator,
-    (c) => options.sessionCoordinator ?? new SessionCoordinator(
-      c.resolve<VideoManager>(Services.VideoManager),
-    ),
-    [Services.VideoManager]
+    (c) =>
+      options.sessionCoordinator ??
+      new SessionCoordinator(c.resolve<VideoManager>(Services.VideoManager)),
+    [Services.VideoManager],
   );
 
   // BrowserManager - depends on config, hooks, fileSystem, videoManager
@@ -140,7 +135,7 @@ export function createContainer(options: ContainerOptions = {}): ServiceContaine
         c.resolve<FileSystem>(Services.FileSystem),
         c.resolve<VideoManager>(Services.VideoManager),
       ),
-    [Services.Config, Services.Hooks, Services.FileSystem, Services.VideoManager]
+    [Services.Config, Services.Hooks, Services.FileSystem, Services.VideoManager],
   );
 
   // Limiter - depends on config, metrics, monitoring, webhooks, hooks
@@ -153,9 +148,9 @@ export function createContainer(options: ContainerOptions = {}): ServiceContaine
         c.resolve<Metrics>(Services.Metrics),
         c.resolve<Monitoring>(Services.Monitoring),
         c.resolve<WebHooks>(Services.WebHooks),
-        c.resolve<Hooks>(Services.Hooks)
+        c.resolve<Hooks>(Services.Hooks),
       ),
-    [Services.Config, Services.Metrics, Services.Monitoring, Services.WebHooks, Services.Hooks]
+    [Services.Config, Services.Metrics, Services.Monitoring, Services.WebHooks, Services.Hooks],
   );
 
   // Router - depends on config, browserManager, limiter
@@ -168,7 +163,7 @@ export function createContainer(options: ContainerOptions = {}): ServiceContaine
         c.resolve<BrowserManager>(Services.BrowserManager),
         c.resolve<Limiter>(Services.Limiter),
       ),
-    [Services.Config, Services.BrowserManager, Services.Limiter]
+    [Services.Config, Services.BrowserManager, Services.Limiter],
   );
 
   return container;

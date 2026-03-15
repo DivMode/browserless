@@ -8,30 +8,36 @@
  * The CloudflareSolver bridge (cloudflare-solver.ts) provides the services
  * via ManagedRuntime and calls these via runtime.runPromise().
  */
-import { Cause, Data, Effect, Match, pipe } from 'effect';
-import { SolveOutcome } from './cloudflare-solve-strategies.js';
-import { DetectionContext } from './cf-detection-context.js';
-import { ClickResult } from './cloudflare-solve-strategies.js';
-import type { ReadonlyActiveDetection, SolverActiveDetection, SolverInterstitialDetection, SolverEmbeddedDetection } from './cloudflare-event-emitter.js';
-import { SolverEvents, SolveDeps } from './cf-services.js';
+import { Cause, Data, Effect, Match, pipe } from "effect";
+import { SolveOutcome } from "./cloudflare-solve-strategies.js";
+import { DetectionContext } from "./cf-detection-context.js";
+import { ClickResult } from "./cloudflare-solve-strategies.js";
+import type {
+  ReadonlyActiveDetection,
+  SolverActiveDetection,
+  SolverInterstitialDetection,
+  SolverEmbeddedDetection,
+} from "./cloudflare-event-emitter.js";
+import { SolverEvents, SolveDeps } from "./cf-services.js";
 
 const SO = SolveOutcome;
 
-
 /** Annotate the current span with ActiveDetection context for Tempo filtering. */
 const annotateActive = (active: ReadonlyActiveDetection) => {
-  let domain = 'unknown';
+  let domain = "unknown";
   try {
     if (active.info.url) domain = new URL(active.info.url).hostname;
-  } catch { /* malformed URL */ }
+  } catch {
+    /* malformed URL */
+  }
   return Effect.annotateCurrentSpan({
-    ...(active.sessionId ? { 'session.id': active.sessionId } : {}),
-    'cf.target_id': active.pageTargetId,
-    'cf.domain': domain,
-    ...(active.detectionId ? { 'cf.detection_id': active.detectionId } : {}),
-    'cf.type': active.info.type,
-    'cf.detection_method': active.info.detectionMethod ?? 'unknown',
-    ...(active.info.url ? { 'cf.url': active.info.url.substring(0, 200) } : {}),
+    ...(active.sessionId ? { "session.id": active.sessionId } : {}),
+    "cf.target_id": active.pageTargetId,
+    "cf.domain": domain,
+    ...(active.detectionId ? { "cf.detection_id": active.detectionId } : {}),
+    "cf.type": active.info.type,
+    "cf.detection_method": active.info.detectionMethod ?? "unknown",
+    ...(active.info.url ? { "cf.url": active.info.url.substring(0, 200) } : {}),
   });
 };
 
@@ -42,7 +48,7 @@ import {
   CLICK_RETRY_DELAY,
   MAX_CLICK_ATTEMPTS,
   MAX_NO_CHECKBOX_BEFORE_BAILOUT,
-} from './cf-schedules.js';
+} from "./cf-schedules.js";
 
 // ═══════════════════════════════════════════════════════════════════════
 // startActivityLoop — deduplicated from 3 call sites
@@ -52,12 +58,13 @@ import {
 const startActivityLoop = (
   active: SolverActiveDetection,
   deps: SolveDepsI,
-  variant: 'interstitial' | 'embedded',
+  variant: "interstitial" | "embedded",
 ): Effect.Effect<void> => {
   if (active.activityLoopStarted) return Effect.void;
-  const loop = variant === 'interstitial'
-    ? deps.startActivityLoopInterstitial(active as SolverInterstitialDetection)
-    : deps.startActivityLoopEmbedded(active as SolverEmbeddedDetection);
+  const loop =
+    variant === "interstitial"
+      ? deps.startActivityLoopInterstitial(active as SolverInterstitialDetection)
+      : deps.startActivityLoopEmbedded(active as SolverEmbeddedDetection);
   return Effect.all([deps.markActivityLoopStarted(), loop.pipe(Effect.forkChild)]).pipe(
     Effect.asVoid,
   );
@@ -76,10 +83,8 @@ const startActivityLoop = (
 /** Return type of solveDetection — SolveOutcome for interstitial/auto, TurnstileResult for turnstile. */
 export type SolveDetectionResult = SolveOutcome | TurnstileResult;
 
-export const solveDetection = (
-  active: SolverActiveDetection,
-) =>
-  Effect.fn('cf.solveDetection')(function*() {
+export const solveDetection = (active: SolverActiveDetection) =>
+  Effect.fn("cf.solveDetection")(function* () {
     yield* annotateActive(active);
     if (active.aborted) return SO.Aborted();
 
@@ -87,10 +92,10 @@ export const solveDetection = (
     const deps = yield* SolveDeps;
 
     return yield* Match.value(active.info.type).pipe(
-      Match.whenOr('managed', 'interstitial', () =>
-        Effect.fn('cf.solveInterstitial')(function*() {
+      Match.whenOr("managed", "interstitial", () =>
+        Effect.fn("cf.solveInterstitial")(function* () {
           // Interstitial activity loop — NO Runtime.evaluate (page IS the CF challenge)
-          yield* startActivityLoop(active, deps, 'interstitial');
+          yield* startActivityLoop(active, deps, "interstitial");
 
           // Race click attempts against auto-solve detection.
           // Managed interstitials may auto-solve without a clickable checkbox —
@@ -103,7 +108,7 @@ export const solveDetection = (
           if (active.aborted) return SO.Aborted() as SolveDetectionResult;
           if (clicked) return SO.ClickDispatched() as SolveDetectionResult;
 
-          yield* events.marker(active.pageTargetId, 'cf.waiting_auto_nav', {
+          yield* events.marker(active.pageTargetId, "cf.waiting_auto_nav", {
             type: active.info.type,
             attempts_exhausted: true,
           });
@@ -112,10 +117,10 @@ export const solveDetection = (
           return (active.aborted ? SO.Aborted() : SO.NoClick()) as SolveDetectionResult;
         })(),
       ),
-      Match.when('turnstile', () =>
-        Effect.fn('cf.solveTurnstileDispatch')(function*() {
+      Match.when("turnstile", () =>
+        Effect.fn("cf.solveTurnstileDispatch")(function* () {
           // Embedded activity loop — Runtime.evaluate is safe (page is embedding site)
-          yield* startActivityLoop(active, deps, 'embedded');
+          yield* startActivityLoop(active, deps, "embedded");
 
           // No outer timeout. All paths wait for push signal or session close:
           // - Clicked: pure push, no timeout (session close is structural bound)
@@ -126,17 +131,17 @@ export const solveDetection = (
           return result as SolveDetectionResult;
         })(),
       ),
-      Match.whenOr('non_interactive', 'invisible', () =>
-        Effect.fn('cf.solveAutoDispatch')(function*() {
+      Match.whenOr("non_interactive", "invisible", () =>
+        Effect.fn("cf.solveAutoDispatch")(function* () {
           // Embedded activity loop — Runtime.evaluate is safe (page is embedding site)
-          yield* startActivityLoop(active, deps, 'embedded');
+          yield* startActivityLoop(active, deps, "embedded");
 
           yield* solveAutomatic(active, deps);
           return (active.aborted ? SO.Aborted() : SO.AutoHandled()) as SolveDetectionResult;
         })(),
       ),
-      Match.when('block', () =>
-        Effect.die(new Error('block type should not reach solveDetection')),
+      Match.when("block", () =>
+        Effect.die(new Error("block type should not reach solveDetection")),
       ),
       Match.exhaustive,
     );
@@ -147,16 +152,18 @@ export const solveDetection = (
       if (Cause.hasInterruptsOnly(cause)) return Effect.succeed(SO.Aborted());
 
       const err = Cause.squash(cause);
-      return Effect.logError('cf.solveDetection defect').pipe(
+      return Effect.logError("cf.solveDetection defect").pipe(
         Effect.annotateLogs({ error: String(err), type: active.info.type }),
-        Effect.andThen(Effect.fn('cf.solveDetection.errorFallback')(function*() {
-          if (!active.aborted) {
-            const events = yield* SolverEvents;
-            yield* events.emitFailed(active, 'solve_exception', Date.now() - active.startTime);
-            DetectionContext.setAborted(active);
-          }
-          return SO.Aborted();
-        })()),
+        Effect.andThen(
+          Effect.fn("cf.solveDetection.errorFallback")(function* () {
+            if (!active.aborted) {
+              const events = yield* SolverEvents;
+              yield* events.emitFailed(active, "solve_exception", Date.now() - active.startTime);
+              DetectionContext.setAborted(active);
+            }
+            return SO.Aborted();
+          })(),
+        ),
       );
     }),
   );
@@ -167,11 +174,8 @@ export const solveDetection = (
 // No Runtime.evaluate — click only, push-based resolution via bridge.
 // ═══════════════════════════════════════════════════════════════════════
 
-const solveByClicking = (
-  active: SolverActiveDetection,
-  deps: SolveDepsI,
-) =>
-  Effect.fn('cf.solveByClicking')(function*() {
+const solveByClicking = (active: SolverActiveDetection, deps: SolveDepsI) =>
+  Effect.fn("cf.solveByClicking")(function* () {
     yield* annotateActive(active);
     // Phase 1: Try to click the checkbox
     if (active.aborted) return false;
@@ -181,29 +185,35 @@ const solveByClicking = (
     for (let attempt = 0; attempt < MAX_CLICK_ATTEMPTS; attempt++) {
       if (active.aborted) return false;
 
-      if (attempt > 0) yield* Effect.sleep(CLICK_RETRY_DELAY).pipe(
-        Effect.withSpan('cf.clickRetry.sleep', { attributes: { 'cf.attempt': attempt } }),
-      );
+      if (attempt > 0)
+        yield* Effect.sleep(CLICK_RETRY_DELAY).pipe(
+          Effect.withSpan("cf.clickRetry.sleep", { attributes: { "cf.attempt": attempt } }),
+        );
 
-      const result = yield* deps.findAndClickViaCDP(active, attempt).pipe(
-        Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
-      );
+      const result = yield* deps
+        .findAndClickViaCDP(active, attempt)
+        .pipe(Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())));
 
       const exit: boolean | null = yield* pipe(
         Match.value(result),
-        Match.tag('Verified', (r) =>
+        Match.tag("Verified", (r) =>
           deps.setClickDelivered(r.clickDeliveredAt).pipe(
-            Effect.andThen(events.emitProgress(active, 'cdp_click_complete', { success: true, attempt })),
-            Effect.map((): boolean | null => { consecutiveNoCheckbox = 0; return true; }),
+            Effect.andThen(
+              events.emitProgress(active, "cdp_click_complete", { success: true, attempt }),
+            ),
+            Effect.map((): boolean | null => {
+              consecutiveNoCheckbox = 0;
+              return true;
+            }),
           ),
         ),
-        Match.tag('NotVerified', (r) => {
+        Match.tag("NotVerified", (r) => {
           consecutiveNoCheckbox = 0;
-          if (r.reason === 'oopif_gone') {
+          if (r.reason === "oopif_gone") {
             // OOPIF dead — break loop, fall through to waitForAutoNav
-            return events.marker(active.pageTargetId, 'cf.oopif_dead_interstitial', { attempt }).pipe(
-              Effect.map((): boolean | null => false),
-            );
+            return events
+              .marker(active.pageTargetId, "cf.oopif_dead_interstitial", { attempt })
+              .pipe(Effect.map((): boolean | null => false));
           }
           return Effect.succeed(null as boolean | null);
         }),
@@ -214,20 +224,29 @@ const solveByClicking = (
             // auto-solve without a checkbox. Burning all 6 attempts wastes ~19s and
             // can push past the 45s WS scope budget.
             if (consecutiveNoCheckbox >= MAX_NO_CHECKBOX_BEFORE_BAILOUT) {
-              return events.marker(active.pageTargetId, 'cf.no_checkbox_bailout', {
-                attempts: attempt + 1, consecutive: consecutiveNoCheckbox,
-              }).pipe(Effect.map((): boolean | null => false));
+              return events
+                .marker(active.pageTargetId, "cf.no_checkbox_bailout", {
+                  attempts: attempt + 1,
+                  consecutive: consecutiveNoCheckbox,
+                })
+                .pipe(Effect.map((): boolean | null => false));
             }
             return Effect.succeed(null as boolean | null);
           },
-          ClickFailed: () => { consecutiveNoCheckbox = 0; return Effect.succeed(null as boolean | null); },
+          ClickFailed: () => {
+            consecutiveNoCheckbox = 0;
+            return Effect.succeed(null as boolean | null);
+          },
         }),
         Match.exhaustive,
       );
       if (exit !== null) return exit;
     }
 
-    yield* events.emitProgress(active, 'cdp_click_complete', { success: false, attempts: MAX_CLICK_ATTEMPTS });
+    yield* events.emitProgress(active, "cdp_click_complete", {
+      success: false,
+      attempts: MAX_CLICK_ATTEMPTS,
+    });
     return false;
   })();
 
@@ -239,11 +258,11 @@ const solveByClicking = (
 // ═══════════════════════════════════════════════════════════════════════
 
 export type TurnstileResult = Data.TaggedEnum<{
-  TokenFound: { readonly pollCount: number; readonly tokenLength: number; readonly token: string }
-  Clicked: { readonly attempt: number }
-  NoClick: {}
-  OopifDead: { readonly attempt: number }
-  Aborted: {}
+  TokenFound: { readonly pollCount: number; readonly tokenLength: number; readonly token: string };
+  Clicked: { readonly attempt: number };
+  NoClick: {};
+  OopifDead: { readonly attempt: number };
+  Aborted: {};
 }>;
 export const TurnstileResult = Data.taggedEnum<TurnstileResult>();
 const TR = TurnstileResult;
@@ -258,11 +277,8 @@ const TR = TurnstileResult;
 // Race: clickLoop vs abortLatch.await (bridge push opens abortLatch)
 // ═══════════════════════════════════════════════════════════════════════
 
-const solveTurnstile = (
-  active: SolverActiveDetection,
-  deps: SolveDepsI,
-) =>
-  Effect.fn('cf.solveTurnstile')(function*() {
+const solveTurnstile = (active: SolverActiveDetection, deps: SolveDepsI) =>
+  Effect.fn("cf.solveTurnstile")(function* () {
     yield* annotateActive(active);
     if (active.aborted) return TR.Aborted();
 
@@ -271,59 +287,68 @@ const solveTurnstile = (
 
     const solveEntryMs = Date.now();
     yield* Effect.annotateCurrentSpan({
-      'cf.sitekey': active.oopifMeta?.sitekey ?? 'none',
-      'cf.oopif_mode': active.oopifMeta?.mode ?? 'none',
-      'cf.elapsed_since_detection_ms': solveEntryMs - active.startTime,
+      "cf.sitekey": active.oopifMeta?.sitekey ?? "none",
+      "cf.oopif_mode": active.oopifMeta?.mode ?? "none",
+      "cf.elapsed_since_detection_ms": solveEntryMs - active.startTime,
     });
 
     // Check if bridge already resolved (auto-solve before solver started)
     if (active.resolution.isDone) {
-      yield* events.marker(pageTargetId, 'cf.bridge_pre_resolved');
+      yield* events.marker(pageTargetId, "cf.bridge_pre_resolved");
       return TR.Aborted();
     }
 
     // Click loop — try to find and click the Turnstile checkbox.
     // Non-interactive widgets never render a checkbox.
-    const handleClickResult = (result: ClickResult, attempt: number): Effect.Effect<TurnstileResult | null> =>
-      Effect.fn('cf.handleClickResult')(function*() {
+    const handleClickResult = (
+      result: ClickResult,
+      attempt: number,
+    ): Effect.Effect<TurnstileResult | null> =>
+      Effect.fn("cf.handleClickResult")(function* () {
         return yield* pipe(
           Match.value(result),
-          Match.tag('Verified', (r) =>
+          Match.tag("Verified", (r) =>
             deps.setClickDelivered(r.clickDeliveredAt).pipe(
-              Effect.andThen(events.emitProgress(active, 'cdp_click_complete', { success: true, attempt })),
+              Effect.andThen(
+                events.emitProgress(active, "cdp_click_complete", { success: true, attempt }),
+              ),
               Effect.map((): TurnstileResult | null => TR.Clicked({ attempt })),
             ),
           ),
-          Match.tag('NotVerified', (r) => {
-            if (r.reason === 'oopif_gone') {
-              return events.marker(pageTargetId, 'cf.oopif_dead_on_verify', { attempt }).pipe(
-                Effect.map((): TurnstileResult | null => TR.OopifDead({ attempt })),
-              );
+          Match.tag("NotVerified", (r) => {
+            if (r.reason === "oopif_gone") {
+              return events
+                .marker(pageTargetId, "cf.oopif_dead_on_verify", { attempt })
+                .pipe(Effect.map((): TurnstileResult | null => TR.OopifDead({ attempt })));
             }
             return Effect.succeed(null as TurnstileResult | null);
           }),
-          Match.tags({ NoCheckbox: () => Effect.succeed(null as TurnstileResult | null), ClickFailed: () => Effect.succeed(null as TurnstileResult | null) }),
+          Match.tags({
+            NoCheckbox: () => Effect.succeed(null as TurnstileResult | null),
+            ClickFailed: () => Effect.succeed(null as TurnstileResult | null),
+          }),
           Match.exhaustive,
         );
       })();
 
-    const clickLoop = Effect.fn('cf.clickLoop')(function*() {
+    const clickLoop = Effect.fn("cf.clickLoop")(function* () {
       const clickLoopStart = Date.now();
 
-      const firstResult = yield* deps.findAndClickViaCDP(active, 0).pipe(
-        Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
-      );
+      const firstResult = yield* deps
+        .findAndClickViaCDP(active, 0)
+        .pipe(Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())));
       const firstExit = yield* handleClickResult(firstResult, 0);
       if (firstExit) return firstExit;
 
-      const shouldReduce = firstResult._tag === 'NoCheckbox' || firstResult._tag === 'ClickFailed';
+      const shouldReduce = firstResult._tag === "NoCheckbox" || firstResult._tag === "ClickFailed";
       const remainingAttempts = shouldReduce ? 1 : MAX_CLICK_ATTEMPTS - 1;
 
       if (shouldReduce) {
-        yield* events.marker(pageTargetId, 'cf.reduced_attempts', {
-          reason: firstResult._tag === 'NoCheckbox'
-            ? 'first_attempt_no_checkbox'
-            : 'first_attempt_cdp_error',
+        yield* events.marker(pageTargetId, "cf.reduced_attempts", {
+          reason:
+            firstResult._tag === "NoCheckbox"
+              ? "first_attempt_no_checkbox"
+              : "first_attempt_cdp_error",
           original: MAX_CLICK_ATTEMPTS,
           reduced_to: remainingAttempts + 1,
         });
@@ -331,21 +356,26 @@ const solveTurnstile = (
 
       for (let attempt = 1; attempt <= remainingAttempts; attempt++) {
         yield* Effect.sleep(CLICK_RETRY_DELAY).pipe(
-          Effect.withSpan('cf.turnstile.clickRetry.sleep', { attributes: { 'cf.attempt': attempt } }),
+          Effect.withSpan("cf.turnstile.clickRetry.sleep", {
+            attributes: { "cf.attempt": attempt },
+          }),
         );
-        const result = yield* deps.findAndClickViaCDP(active, attempt).pipe(
-          Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())),
-        );
+        const result = yield* deps
+          .findAndClickViaCDP(active, attempt)
+          .pipe(Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())));
         const exit = yield* handleClickResult(result, attempt);
         if (exit) return exit;
       }
 
       const totalAttempts = remainingAttempts + 1;
       yield* Effect.annotateCurrentSpan({
-        'cf.click_loop_ms': Date.now() - clickLoopStart,
-        'cf.max_attempts': totalAttempts,
+        "cf.click_loop_ms": Date.now() - clickLoopStart,
+        "cf.max_attempts": totalAttempts,
       });
-      yield* events.emitProgress(active, 'cdp_click_complete', { success: false, attempts: totalAttempts });
+      yield* events.emitProgress(active, "cdp_click_complete", {
+        success: false,
+        attempts: totalAttempts,
+      });
       return TR.NoClick();
     })();
 
@@ -357,15 +387,15 @@ const solveTurnstile = (
 
     const raceElapsedMs = Date.now() - solveEntryMs;
     yield* Effect.annotateCurrentSpan({
-      'cf.race_result': raceResult._tag,
-      'cf.race_duration_ms': raceElapsedMs,
+      "cf.race_result": raceResult._tag,
+      "cf.race_duration_ms": raceElapsedMs,
     });
-    yield* events.marker(pageTargetId, 'cf.race_winner', {
+    yield* events.marker(pageTargetId, "cf.race_winner", {
       winner: raceResult._tag,
       elapsed_ms: raceElapsedMs,
     });
 
-    if (raceResult._tag === 'Aborted') {
+    if (raceResult._tag === "Aborted") {
       return TR.Aborted();
     }
 
@@ -375,17 +405,17 @@ const solveTurnstile = (
     // lifetime, leaking ~40-50% of WS connections. The detection fiber
     // already awaits Resolution independently after dispatch returns.
     yield* Effect.annotateCurrentSpan({
-      'cf.solve_total_ms': Date.now() - solveEntryMs,
-      'cf.race_result_tag': raceResult._tag,
+      "cf.solve_total_ms": Date.now() - solveEntryMs,
+      "cf.race_result_tag": raceResult._tag,
     });
 
-    if (raceResult._tag === 'OopifDead') {
-      yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox', { oopif_dead: true });
+    if (raceResult._tag === "OopifDead") {
+      yield* events.marker(pageTargetId, "cf.cdp_no_checkbox", { oopif_dead: true });
       return raceResult;
     }
 
-    if (raceResult._tag === 'NoClick') {
-      yield* events.marker(pageTargetId, 'cf.cdp_no_checkbox');
+    if (raceResult._tag === "NoClick") {
+      yield* events.marker(pageTargetId, "cf.cdp_no_checkbox");
       return TR.NoClick();
     }
 
@@ -401,30 +431,22 @@ const solveTurnstile = (
 // ═══════════════════════════════════════════════════════════════════════
 
 const waitForAutoNav = (active: SolverActiveDetection) =>
-  Effect.fn('cf.waitForAutoNav')(function*() {
+  Effect.fn("cf.waitForAutoNav")(function* () {
     yield* annotateActive(active);
     if (active.aborted) return;
 
-    yield* active.abortLatch.await.pipe(
-      Effect.timeout('30 seconds'),
-      Effect.ignore,
-    );
+    yield* active.abortLatch.await.pipe(Effect.timeout("30 seconds"), Effect.ignore);
   })();
 
 // ═══════════════════════════════════════════════════════════════════════
 // solveAutomatic — non-interactive/invisible types
 // ═══════════════════════════════════════════════════════════════════════
 
-const solveAutomatic = (
-  active: SolverActiveDetection,
-  deps: SolveDepsI,
-) =>
-  Effect.fn('cf.solveAutomatic')(function*() {
+const solveAutomatic = (active: SolverActiveDetection, deps: SolveDepsI) =>
+  Effect.fn("cf.solveAutomatic")(function* () {
     yield* annotateActive(active);
     if (active.aborted) return;
     const events = yield* SolverEvents;
-    yield* events.marker(active.pageTargetId, 'cf.presence_start', { type: active.info.type });
-    yield* deps.simulatePresence(active).pipe(
-      Effect.orElseSucceed(() => undefined),
-    );
+    yield* events.marker(active.pageTargetId, "cf.presence_start", { type: active.info.type });
+    yield* deps.simulatePresence(active).pipe(Effect.orElseSucceed(() => undefined));
   })();

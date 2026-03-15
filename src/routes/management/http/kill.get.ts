@@ -11,9 +11,9 @@ import {
   getFinalPathSegment,
   jsonResponse,
   writeResponse,
-} from '@browserless.io/browserless';
-import { ServerResponse } from 'http';
-import { Effect } from 'effect';
+} from "@browserless.io/browserless";
+import { ServerResponse } from "http";
+import { Effect } from "effect";
 
 export type ResponseSchema = ReplayCompleteParams[];
 
@@ -38,16 +38,14 @@ export default class KillGetRoute extends HTTPRoute {
   async handler(req: Request, res: ServerResponse): Promise<void> {
     const route = this;
     return Effect.runPromise(
-      Effect.fn('route.kill.get')(function* () {
+      Effect.fn("route.kill.get")(function* () {
         const target = getFinalPathSegment(req.parsed.pathname)!;
         const browserManager = route.browserManager();
         try {
-          const recordings = yield* Effect.promise(() =>
-            browserManager.killSessions(target),
-          );
+          const recordings = yield* Effect.promise(() => browserManager.killSessions(target));
           return jsonResponse(res, 200, recordings);
         } catch {
-          return writeResponse(res, 404, '');
+          return writeResponse(res, 404, "");
         }
       })(),
     );

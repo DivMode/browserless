@@ -1,19 +1,23 @@
-import WebSocket from 'ws';
+import WebSocket from "ws";
 // ws is CJS — Server lives on default export at runtime but TS types don't expose it
-const WebSocketServer = (WebSocket as any).Server as typeof import('ws').WebSocketServer;
-import { Duplex } from 'stream';
-import { IncomingMessage } from 'http';
-import { Config } from '@browserless.io/browserless';
-import { Duration, Effect, Exit, FiberSet, Queue, Schedule, Schema, Scope, Stream } from 'effect';
+const WebSocketServer = (WebSocket as any).Server as typeof import("ws").WebSocketServer;
+import { Duplex } from "stream";
+import { IncomingMessage } from "http";
+import { Config } from "@browserless.io/browserless";
+import { Duration, Effect, Exit, FiberSet, Queue, Schedule, Schema, Scope, Stream } from "effect";
 
-import { incCounter, proxyDroppedMessages, wsLifecycle } from './effect-metrics.js';
-import { runForkInServer } from './otel-runtime.js';
-import { CloudflareConfig } from './shared/cloudflare-detection.js';
-import { CdpSessionId, TargetId } from './shared/cloudflare-detection.js';
-import { BROWSER_WS_PING_INTERVAL, BROWSER_WS_PONG_TIMEOUT_MS } from './session/cf/cf-schedules.js';
-import { decodeCDPCommand, decodeCDPMessage, decodeAddReplayMarkerParams } from './shared/cdp-schemas.js';
-import { CdpConnection } from './shared/cdp-rpc.js';
-import { openScopedWs } from './session/cf/cf-ws-resource.js';
+import { incCounter, proxyDroppedMessages, wsLifecycle } from "./effect-metrics.js";
+import { runForkInServer } from "./otel-runtime.js";
+import { CloudflareConfig } from "./shared/cloudflare-detection.js";
+import { CdpSessionId, TargetId } from "./shared/cloudflare-detection.js";
+import { BROWSER_WS_PING_INTERVAL, BROWSER_WS_PONG_TIMEOUT_MS } from "./session/cf/cf-schedules.js";
+import {
+  decodeCDPCommand,
+  decodeCDPMessage,
+  decodeAddReplayMarkerParams,
+} from "./shared/cdp-schemas.js";
+import { CdpConnection } from "./shared/cdp-rpc.js";
+import { openScopedWs } from "./session/cf/cf-ws-resource.js";
 
 /**
  * Replay metadata sent via CDP event.
@@ -61,14 +65,14 @@ export interface ReplayCapableBrowser {
  */
 export function isReplayCapable(browser: unknown): browser is ReplayCapableBrowser {
   return (
-    typeof browser === 'object' &&
+    typeof browser === "object" &&
     browser !== null &&
-    'setOnBeforeClose' in browser &&
-    typeof (browser as Record<string, unknown>).setOnBeforeClose === 'function' &&
-    'sendReplayComplete' in browser &&
-    typeof (browser as Record<string, unknown>).sendReplayComplete === 'function' &&
-    'sendTabReplayComplete' in browser &&
-    typeof (browser as Record<string, unknown>).sendTabReplayComplete === 'function'
+    "setOnBeforeClose" in browser &&
+    typeof (browser as Record<string, unknown>).setOnBeforeClose === "function" &&
+    "sendReplayComplete" in browser &&
+    typeof (browser as Record<string, unknown>).sendReplayComplete === "function" &&
+    "sendTabReplayComplete" in browser &&
+    typeof (browser as Record<string, unknown>).sendTabReplayComplete === "function"
   );
 }
 
@@ -118,9 +122,7 @@ export class CDPProxy {
   private getTabCount?: () => number;
   private readonly proxyScope = Scope.makeUnsafe();
   private readonly fibers = Effect.runSync(
-    FiberSet.make<void, unknown>().pipe(
-      Effect.provideService(Scope.Scope, this.proxyScope),
-    ),
+    FiberSet.make<void, unknown>().pipe(Effect.provideService(Scope.Scope, this.proxyScope)),
   );
 
   /**
@@ -154,51 +156,60 @@ export class CDPProxy {
   async connect(): Promise<void> {
     // Register scope finalizer UPFRONT — safe even if connect() fails halfway
     // (all fields are null-checked, so partially-created state is handled)
-    Effect.runSync(Scope.addFinalizer(this.proxyScope, Effect.sync(() => {
-      // 1. Drain proxy connection (pending commands get error callbacks)
-      this.proxyConn?.drainPending('scope_close');
-      this.proxyConn?.dispose();
-      this.proxyConn = null;
-      // 2. Close client WS
-      if (this.clientWs) {
-        this.clientWs.removeAllListeners();
-        this.clientWs.terminate();
-        this.clientWs = null;
-        Effect.runSync(incCounter(wsLifecycle, { type: 'proxy_client', action: 'destroy' }));
-      }
-      (this as any).clientSocket = null;
-      // 3. Close browser WS last
-      if (this.browserWs) {
-        this.browserWs.removeAllListeners();
-        this.browserWs.terminate();
-        this.browserWs = null;
-        Effect.runSync(incCounter(wsLifecycle, { type: 'proxy_browser', action: 'destroy' }));
-      }
-    })));
+    Effect.runSync(
+      Scope.addFinalizer(
+        this.proxyScope,
+        Effect.sync(() => {
+          // 1. Drain proxy connection (pending commands get error callbacks)
+          this.proxyConn?.drainPending("scope_close");
+          this.proxyConn?.dispose();
+          this.proxyConn = null;
+          // 2. Close client WS
+          if (this.clientWs) {
+            this.clientWs.removeAllListeners();
+            this.clientWs.terminate();
+            this.clientWs = null;
+            Effect.runSync(incCounter(wsLifecycle, { type: "proxy_client", action: "destroy" }));
+          }
+          (this as any).clientSocket = null;
+          // 3. Close browser WS last
+          if (this.browserWs) {
+            this.browserWs.removeAllListeners();
+            this.browserWs.terminate();
+            this.browserWs = null;
+            Effect.runSync(incCounter(wsLifecycle, { type: "proxy_browser", action: "destroy" }));
+          }
+        }),
+      ),
+    );
 
     // Single Effect.fn pipeline: traced span, one fiber, proper composition.
     // Effect.callback's resume is one-shot (source: effect.ts:1049 — `if (resumed) return`).
     // No cleanup Effects returned — this is a root fiber (Effect.runPromise),
     // so asyncFinalizer is skipped (source: effect.ts:1064 optimization).
     await Effect.runPromise(
-      Effect.fn('cdp.connect')({ self: this }, function*() {
+      Effect.fn("cdp.connect")({ self: this }, function* () {
         // Step 1: Connect to Chrome's CDP endpoint FIRST
         this.browserWs = new WebSocket(this.browserWsEndpoint);
-        Effect.runSync(incCounter(wsLifecycle, { type: 'proxy_browser', action: 'create' }));
+        Effect.runSync(incCounter(wsLifecycle, { type: "proxy_browser", action: "create" }));
 
         yield* Effect.callback<void, Error>((resume) => {
           const ws = this.browserWs!;
           const onOpen = () => {
-            ws.removeListener('error', onError);
-            runForkInServer(Effect.logDebug('Connected to browser').pipe(Effect.annotateLogs({ endpoint: this.browserWsEndpoint })));
+            ws.removeListener("error", onError);
+            runForkInServer(
+              Effect.logDebug("Connected to browser").pipe(
+                Effect.annotateLogs({ endpoint: this.browserWsEndpoint }),
+              ),
+            );
             resume(Effect.void);
           };
           const onError = (err: Error) => {
-            ws.removeListener('open', onOpen);
+            ws.removeListener("open", onOpen);
             resume(Effect.fail(err));
           };
-          ws.once('open', onOpen);
-          ws.once('error', onError);
+          ws.once("open", onOpen);
+          ws.once("error", onError);
         });
 
         // Step 2: Upgrade client socket
@@ -206,60 +217,68 @@ export class CDPProxy {
           const wss = new WebSocketServer({ noServer: true });
           const onSocketError = (err: Error) => resume(Effect.fail(err));
 
-          wss.handleUpgrade(
-            this.clientRequest,
-            this.clientSocket,
-            this.clientHead,
-            (ws) => {
-              this.clientSocket.removeListener('error', onSocketError);
-              resume(Effect.succeed(ws));
-            },
-          );
+          wss.handleUpgrade(this.clientRequest, this.clientSocket, this.clientHead, (ws) => {
+            this.clientSocket.removeListener("error", onSocketError);
+            resume(Effect.succeed(ws));
+          });
 
-          this.clientSocket.once('error', onSocketError);
+          this.clientSocket.once("error", onSocketError);
         });
 
         // Setup AFTER successful upgrade
         this.clientWs = clientWs;
-        Effect.runSync(incCounter(wsLifecycle, { type: 'proxy_client', action: 'create' }));
-        runForkInServer(Effect.logDebug('Client WebSocket upgraded'));
+        Effect.runSync(incCounter(wsLifecycle, { type: "proxy_client", action: "create" }));
+        runForkInServer(Effect.logDebug("Client WebSocket upgraded"));
 
         // Scope-bound outbound queue: all client WS sends go through here.
         this.clientOutbound = Effect.runSync(Queue.unbounded<ClientOutboundMessage>());
 
-        Effect.runSync(Scope.addFinalizer(this.proxyScope,
-          this.clientOutbound ? Queue.shutdown(this.clientOutbound) : Effect.void,
-        ));
+        Effect.runSync(
+          Scope.addFinalizer(
+            this.proxyScope,
+            this.clientOutbound ? Queue.shutdown(this.clientOutbound) : Effect.void,
+          ),
+        );
 
         // Consumer fiber: the ONLY code that calls clientWs.send()
         this.forkManaged(
-          Effect.fn('cdp.clientOutbound')({ self: this }, function*() {
+          Effect.fn("cdp.clientOutbound")({ self: this }, function* () {
             yield* Stream.fromQueue(this.clientOutbound!).pipe(
-              Stream.runForEach((msg) => Effect.sync(() => {
-                try {
-                  this.clientWs?.send(msg.data, { binary: msg.binary ?? false }, (err) => {
-                    if (err) msg.onError?.(err);
-                    else msg.onSent?.();
-                  });
-                } catch (e) {
-                  msg.onError?.(e instanceof Error ? e : new Error(String(e)));
-                }
-              })),
+              Stream.runForEach((msg) =>
+                Effect.sync(() => {
+                  try {
+                    this.clientWs?.send(msg.data, { binary: msg.binary ?? false }, (err) => {
+                      if (err) msg.onError?.(err);
+                      else msg.onSent?.();
+                    });
+                  } catch (e) {
+                    msg.onError?.(e instanceof Error ? e : new Error(String(e)));
+                  }
+                }),
+              ),
             );
           })(),
         );
 
         this.setupProxy();
 
-        const sessionId = this.browserWsEndpoint.split('/').pop() || '';
+        const sessionId = this.browserWsEndpoint.split("/").pop() || "";
         if (sessionId) {
-          this.emitClientEvent('Browserless.sessionInfo', { sessionId }).catch((e) => {
-            runForkInServer(Effect.logDebug('Failed to emit sessionInfo').pipe(Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e) })));
+          this.emitClientEvent("Browserless.sessionInfo", { sessionId }).catch((e) => {
+            runForkInServer(
+              Effect.logDebug("Failed to emit sessionInfo").pipe(
+                Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e) }),
+              ),
+            );
           });
         }
 
-        clientWs.on('error', (err: Error) => {
-          runForkInServer(Effect.logWarning('Client WebSocket error').pipe(Effect.annotateLogs({ error: err.message })));
+        clientWs.on("error", (err: Error) => {
+          runForkInServer(
+            Effect.logWarning("Client WebSocket error").pipe(
+              Effect.annotateLogs({ error: err.message }),
+            ),
+          );
           this.handleClose();
         });
       })(),
@@ -273,12 +292,12 @@ export class CDPProxy {
     if (!this.clientWs || !this.browserWs) return;
 
     // Forward client messages to browser
-    this.clientWs.on('message', (data, isBinary) => {
+    this.clientWs.on("message", (data, isBinary) => {
       if (!isBinary) {
         try {
-          const raw = typeof data === 'string' ? data : data.toString();
+          const raw = typeof data === "string" ? data : data.toString();
           const cmdExit = decodeCDPCommand(JSON.parse(raw));
-          if (cmdExit._tag === 'Failure') {
+          if (cmdExit._tag === "Failure") {
             // Not a valid CDP command — forward raw to browser
             this.sendToBrowser(data, isBinary);
             return;
@@ -286,26 +305,26 @@ export class CDPProxy {
           const msg = cmdExit.value;
 
           // Intercept Browserless.getSessionInfo — respond with session ID directly
-          if (msg.method === 'Browserless.getSessionInfo') {
-            const sessionId = this.browserWsEndpoint.split('/').pop() || '';
+          if (msg.method === "Browserless.getSessionInfo") {
+            const sessionId = this.browserWsEndpoint.split("/").pop() || "";
             void this.sendClientResponse(msg.id, { sessionId });
             return;
           }
 
           // Gate Browserless.enableCloudflareSolver behind ENABLE_CLOUDFLARE_SOLVER flag
-          if (msg.method === 'Browserless.enableCloudflareSolver') {
+          if (msg.method === "Browserless.enableCloudflareSolver") {
             if (!this.config.getEnableCloudflareSolver()) {
               void this.sendClientResponse(msg.id, {
                 enabled: false,
-                error: 'Cloudflare solver is not enabled on this instance',
+                error: "Cloudflare solver is not enabled on this instance",
               });
               return;
             }
             if (this.onEnableCloudflareSolver) {
               const exit = Schema.decodeExit(CloudflareConfig)(msg.params || {}, {
-                onExcessProperty: 'ignore',
+                onExcessProperty: "ignore",
               });
-              if (exit._tag === 'Failure') {
+              if (exit._tag === "Failure") {
                 void this.sendClientResponse(msg.id, {
                   enabled: false,
                   error: `Invalid config: ${exit.cause.toString()}`,
@@ -319,36 +338,40 @@ export class CDPProxy {
           }
 
           // Intercept Browserless.addReplayMarker — inject custom marker into replay
-          if (msg.method === 'Browserless.addReplayMarker') {
+          if (msg.method === "Browserless.addReplayMarker") {
             if (this.onAddReplayMarker) {
               const markerExit = decodeAddReplayMarkerParams(msg.params || {});
-              if (markerExit._tag === 'Failure') {
-                void this.sendClientResponse(msg.id, { error: `Invalid params: ${markerExit.cause.toString()}` });
+              if (markerExit._tag === "Failure") {
+                void this.sendClientResponse(msg.id, {
+                  error: `Invalid params: ${markerExit.cause.toString()}`,
+                });
                 return;
               }
               const { targetId, tag, payload } = markerExit.value;
-              this.onAddReplayMarker(TargetId.makeUnsafe(targetId || ''), tag, payload);
+              this.onAddReplayMarker(TargetId.makeUnsafe(targetId || ""), tag, payload);
               void this.sendClientResponse(msg.id, { success: true });
             } else {
-              void this.sendClientResponse(msg.id, { error: 'Replay not enabled' });
+              void this.sendClientResponse(msg.id, { error: "Replay not enabled" });
             }
             return;
           }
 
           // Delay Page.close to flush pending screencast frames + event collection
-          if (msg.method === 'Page.close') {
+          if (msg.method === "Page.close") {
             this.forkManaged(
-              Effect.sleep('250 millis').pipe(
-                Effect.andThen(Effect.sync(() => {
-                  this.sendToBrowser(data, isBinary);
-                })),
+              Effect.sleep("250 millis").pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    this.sendToBrowser(data, isBinary);
+                  }),
+                ),
               ),
             );
             return;
           }
 
           // Intercept Browser.close to emit replayComplete before socket closes
-          if (msg.method === 'Browser.close' && this.onBeforeClose && !this.closeRequested) {
+          if (msg.method === "Browser.close" && this.onBeforeClose && !this.closeRequested) {
             this.closeRequested = true;
             // Run onBeforeClose FIRST (saves replay, emits tabReplayComplete),
             // THEN send the Browser.close response so client WS stays open.
@@ -359,15 +382,23 @@ export class CDPProxy {
           // Reject Target.createTarget when tab count exceeds limit.
           // Sync path: getTabCount callback (from CdpSession target registry).
           // Async path: queries Chrome's Target.getTargets, must intercept + defer forwarding.
-          if (msg.method === 'Target.createTarget') {
+          if (msg.method === "Target.createTarget") {
             const limit = this.config.getMaxTabsPerSession();
             if (limit > 0) {
               if (this.getTabCount) {
                 // Sync check — fast path when CdpSession is tracking targets
                 const count = this.getTabCount();
                 if (count >= limit) {
-                  runForkInServer(Effect.logWarning('Tab limit reached, rejecting Target.createTarget').pipe(Effect.annotateLogs({ count: String(count), limit: String(limit) })));
-                  void this.sendClientError(msg.id, -32000, `Tab limit exceeded (${count}/${limit})`);
+                  runForkInServer(
+                    Effect.logWarning("Tab limit reached, rejecting Target.createTarget").pipe(
+                      Effect.annotateLogs({ count: String(count), limit: String(limit) }),
+                    ),
+                  );
+                  void this.sendClientError(
+                    msg.id,
+                    -32000,
+                    `Tab limit exceeded (${count}/${limit})`,
+                  );
                   return;
                 }
               } else {
@@ -381,19 +412,27 @@ export class CDPProxy {
           // Instrument: log ALL Input.dispatchMouseEvent from client (pydoll)
           // Browserless solver clicks bypass the proxy (direct WS to Chrome),
           // so any mouse event here is from pydoll's CDP connection.
-          if (msg.method === 'Input.dispatchMouseEvent') {
+          if (msg.method === "Input.dispatchMouseEvent") {
             const p = msg.params as Record<string, unknown> | undefined;
-            const type = p?.type ?? '';
+            const type = p?.type ?? "";
             const x = p?.x ?? 0;
             const y = p?.y ?? 0;
-            const button = p?.button ?? '';
+            const button = p?.button ?? "";
             const clickCount = p?.clickCount ?? 0;
             // Full CDP sessionId — maps to a specific target (tab/OOPIF)
-            const cdpSessionId = msg.sessionId ?? 'page';
-            runForkInServer(Effect.logWarning('[PYDOLL-MOUSE] dispatch').pipe(Effect.annotateLogs({
-              type: String(type), x: String(x), y: String(y), button: String(button),
-              clickCount: String(clickCount), cdpSession: String(cdpSessionId),
-            })));
+            const cdpSessionId = msg.sessionId ?? "page";
+            runForkInServer(
+              Effect.logWarning("[PYDOLL-MOUSE] dispatch").pipe(
+                Effect.annotateLogs({
+                  type: String(type),
+                  x: String(x),
+                  y: String(y),
+                  button: String(button),
+                  clickCount: String(clickCount),
+                  cdpSession: String(cdpSessionId),
+                }),
+              ),
+            );
           }
         } catch {
           // ignore parse errors
@@ -403,26 +442,37 @@ export class CDPProxy {
       // Debug: log client→browser commands
       if (this.cdpDebug && !isBinary) {
         try {
-          const raw = typeof data === 'string' ? data : data.toString();
+          const raw = typeof data === "string" ? data : data.toString();
           const msg = JSON.parse(raw);
           if (msg.method) {
-            const sid = msg.sessionId ? ` [sid=${msg.sessionId.substring(0, 16)}]` : '';
-            const params = msg.params ? JSON.stringify(msg.params).substring(0, 200) : '{}';
-            runForkInServer(Effect.logInfo('[CDP→Chrome]').pipe(Effect.annotateLogs({ id: String(msg.id), method: msg.method, sid: sid.trim(), params })));
+            const sid = msg.sessionId ? ` [sid=${msg.sessionId.substring(0, 16)}]` : "";
+            const params = msg.params ? JSON.stringify(msg.params).substring(0, 200) : "{}";
+            runForkInServer(
+              Effect.logInfo("[CDP→Chrome]").pipe(
+                Effect.annotateLogs({
+                  id: String(msg.id),
+                  method: msg.method,
+                  sid: sid.trim(),
+                  params,
+                }),
+              ),
+            );
           }
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
 
       this.sendToBrowser(data, isBinary);
     });
 
     // Forward browser messages to client (intercept proxy-injected command responses)
-    this.browserWs.on('message', (data, isBinary) => {
+    this.browserWs.on("message", (data, isBinary) => {
       if (!isBinary) {
         try {
-          const raw = typeof data === 'string' ? data : data.toString();
+          const raw = typeof data === "string" ? data : data.toString();
           const msgExit = decodeCDPMessage(JSON.parse(raw));
-          if (msgExit._tag !== 'Failure') {
+          if (msgExit._tag !== "Failure") {
             const msg = msgExit.value;
 
             // Check if this is a response to a proxy-injected command
@@ -430,12 +480,18 @@ export class CDPProxy {
 
             // Debug: log browser→client events (not responses)
             if (this.cdpDebug && msg.method) {
-              const sid = msg.sessionId ? ` [sid=${msg.sessionId.substring(0, 16)}]` : '';
-              const params = msg.params ? JSON.stringify(msg.params).substring(0, 150) : '{}';
-              runForkInServer(Effect.logInfo('[Chrome→CDP]').pipe(Effect.annotateLogs({ method: msg.method, sid: sid.trim(), params })));
+              const sid = msg.sessionId ? ` [sid=${msg.sessionId.substring(0, 16)}]` : "";
+              const params = msg.params ? JSON.stringify(msg.params).substring(0, 150) : "{}";
+              runForkInServer(
+                Effect.logInfo("[Chrome→CDP]").pipe(
+                  Effect.annotateLogs({ method: msg.method, sid: sid.trim(), params }),
+                ),
+              );
             }
           }
-        } catch { /* ignore parse errors */ }
+        } catch {
+          /* ignore parse errors */
+        }
       }
       if (this.clientOutbound) {
         Queue.offerUnsafe(this.clientOutbound, { data: data as string | Buffer, binary: isBinary });
@@ -443,13 +499,13 @@ export class CDPProxy {
     });
 
     // Handle close from either side
-    this.clientWs.on('close', () => {
-      runForkInServer(Effect.logDebug('Client WebSocket closed'));
+    this.clientWs.on("close", () => {
+      runForkInServer(Effect.logDebug("Client WebSocket closed"));
       this.handleClose();
     });
 
-    this.browserWs.on('close', () => {
-      runForkInServer(Effect.logDebug('Browser WebSocket closed'));
+    this.browserWs.on("close", () => {
+      runForkInServer(Effect.logDebug("Browser WebSocket closed"));
       this.handleClose();
     });
 
@@ -469,15 +525,21 @@ export class CDPProxy {
       await Effect.runPromise(
         Effect.tryPromise(() => this.onBeforeClose!()).pipe(
           Effect.timeout(Duration.millis(ON_BEFORE_CLOSE_TIMEOUT_MS)),
-          Effect.catch((e) => Effect.sync(() => {
-            runForkInServer(Effect.logWarning('onBeforeClose failed').pipe(Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e) })));
-          })),
+          Effect.catch((e) =>
+            Effect.sync(() => {
+              runForkInServer(
+                Effect.logWarning("onBeforeClose failed").pipe(
+                  Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e) }),
+                ),
+              );
+            }),
+          ),
         ),
       );
     }
 
     // Send Browser.close response AFTER onBeforeClose (replay events already sent)
-    if (typeof clientMsgId === 'number') {
+    if (typeof clientMsgId === "number") {
       await this.sendClientResponse(clientMsgId);
     }
 
@@ -488,12 +550,21 @@ export class CDPProxy {
     if (!this.clientOutbound) return;
     const message = JSON.stringify({ id, result });
     return new Promise<void>((resolve, reject) => {
-      if (!Queue.offerUnsafe(this.clientOutbound!, {
-        data: message,
-        onSent: resolve,
-        onError: (err) => { runForkInServer(Effect.logWarning('Failed to send CDP response').pipe(Effect.annotateLogs({ id: String(id), error: err.message }))); reject(err); },
-      })) {
-        Effect.runSync(incCounter(proxyDroppedMessages, { direction: 'client' }));
+      if (
+        !Queue.offerUnsafe(this.clientOutbound!, {
+          data: message,
+          onSent: resolve,
+          onError: (err) => {
+            runForkInServer(
+              Effect.logWarning("Failed to send CDP response").pipe(
+                Effect.annotateLogs({ id: String(id), error: err.message }),
+              ),
+            );
+            reject(err);
+          },
+        })
+      ) {
+        Effect.runSync(incCounter(proxyDroppedMessages, { direction: "client" }));
         resolve();
       }
     });
@@ -503,12 +574,21 @@ export class CDPProxy {
     if (!this.clientOutbound) return;
     const payload = JSON.stringify({ id, error: { code, message } });
     return new Promise<void>((resolve, reject) => {
-      if (!Queue.offerUnsafe(this.clientOutbound!, {
-        data: payload,
-        onSent: resolve,
-        onError: (err) => { runForkInServer(Effect.logWarning('Failed to send CDP error').pipe(Effect.annotateLogs({ id: String(id), error: err.message }))); reject(err); },
-      })) {
-        Effect.runSync(incCounter(proxyDroppedMessages, { direction: 'client' }));
+      if (
+        !Queue.offerUnsafe(this.clientOutbound!, {
+          data: payload,
+          onSent: resolve,
+          onError: (err) => {
+            runForkInServer(
+              Effect.logWarning("Failed to send CDP error").pipe(
+                Effect.annotateLogs({ id: String(id), error: err.message }),
+              ),
+            );
+            reject(err);
+          },
+        })
+      ) {
+        Effect.runSync(incCounter(proxyDroppedMessages, { direction: "client" }));
         resolve();
       }
     });
@@ -525,17 +605,25 @@ export class CDPProxy {
     isBinary: boolean,
   ): Promise<void> {
     try {
-      const result = await this.sendViaBrowserWs('Target.getTargets', {}, undefined, 5000);
+      const result = await this.sendViaBrowserWs("Target.getTargets", {}, undefined, 5000);
       const targets: Array<{ type: string }> = result?.targetInfos ?? [];
-      const count = targets.filter(t => t.type === 'page').length;
+      const count = targets.filter((t) => t.type === "page").length;
       if (count >= limit) {
-        runForkInServer(Effect.logWarning('Tab limit reached, rejecting Target.createTarget').pipe(Effect.annotateLogs({ count: String(count), limit: String(limit) })));
+        runForkInServer(
+          Effect.logWarning("Tab limit reached, rejecting Target.createTarget").pipe(
+            Effect.annotateLogs({ count: String(count), limit: String(limit) }),
+          ),
+        );
         void this.sendClientError(msgId, -32000, `Tab limit exceeded (${count}/${limit})`);
         return;
       }
     } catch (e) {
       // If we can't determine tab count, allow the request through
-      runForkInServer(Effect.logDebug('Tab count check failed, allowing Target.createTarget').pipe(Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e) })));
+      runForkInServer(
+        Effect.logDebug("Tab count check failed, allowing Target.createTarget").pipe(
+          Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e) }),
+        ),
+      );
     }
     // Under limit or check failed — forward to browser
     this.sendToBrowser(data, isBinary);
@@ -550,18 +638,34 @@ export class CDPProxy {
    */
   async emitClientEvent(method: string, params: object): Promise<void> {
     if (!this.clientOutbound) {
-      runForkInServer(Effect.logWarning('Cannot inject event: queue not initialized').pipe(Effect.annotateLogs({ method })));
+      runForkInServer(
+        Effect.logWarning("Cannot inject event: queue not initialized").pipe(
+          Effect.annotateLogs({ method }),
+        ),
+      );
       return;
     }
     const message = JSON.stringify({ method, params });
     return new Promise<void>((resolve, reject) => {
       const offered = Queue.offerUnsafe(this.clientOutbound!, {
         data: message,
-        onSent: () => { runForkInServer(Effect.logDebug('Injected CDP event').pipe(Effect.annotateLogs({ method }))); resolve(); },
-        onError: (err) => { runForkInServer(Effect.logWarning('Failed to inject CDP event').pipe(Effect.annotateLogs({ method, error: err.message }))); reject(err); },
+        onSent: () => {
+          runForkInServer(
+            Effect.logDebug("Injected CDP event").pipe(Effect.annotateLogs({ method })),
+          );
+          resolve();
+        },
+        onError: (err) => {
+          runForkInServer(
+            Effect.logWarning("Failed to inject CDP event").pipe(
+              Effect.annotateLogs({ method, error: err.message }),
+            ),
+          );
+          reject(err);
+        },
       });
       if (!offered) {
-        Effect.runSync(incCounter(proxyDroppedMessages, { direction: 'client' }));
+        Effect.runSync(incCounter(proxyDroppedMessages, { direction: "client" }));
         resolve(); // Silent no-op during shutdown
       }
     });
@@ -584,14 +688,23 @@ export class CDPProxy {
     return this.proxyConn;
   }
 
-  sendViaBrowserWs(method: string, params: object = {}, sessionId?: CdpSessionId, timeoutMs: number = 30_000): Promise<any> {
+  sendViaBrowserWs(
+    method: string,
+    params: object = {},
+    sessionId?: CdpSessionId,
+    timeoutMs: number = 30_000,
+  ): Promise<any> {
     const conn = this.getProxyConn();
-    if (!conn) return Promise.reject(new Error('Browser WS not open'));
+    if (!conn) return Promise.reject(new Error("Browser WS not open"));
 
     if (this.cdpDebug) {
-      const sid = sessionId ? ` [sid=${sessionId.substring(0, 16)}]` : '';
+      const sid = sessionId ? ` [sid=${sessionId.substring(0, 16)}]` : "";
       const p = JSON.stringify(params).substring(0, 200);
-      runForkInServer(Effect.logInfo('[SOLVER→Chrome]').pipe(Effect.annotateLogs({ method, sid: sid.trim(), params: p })));
+      runForkInServer(
+        Effect.logInfo("[SOLVER→Chrome]").pipe(
+          Effect.annotateLogs({ method, sid: sid.trim(), params: p }),
+        ),
+      );
     }
 
     return conn.sendPromise(method, params, sessionId, timeoutMs);
@@ -616,32 +729,39 @@ export class CDPProxy {
   } {
     const endpoint = this.browserWsEndpoint;
     const ws = new WebSocket(endpoint);
-    Effect.runSync(incCounter(wsLifecycle, { type: 'proxy_isolated', action: 'create' }));
+    Effect.runSync(incCounter(wsLifecycle, { type: "proxy_isolated", action: "create" }));
     const conn = new CdpConnection(ws, { startId: 300_000, defaultTimeout: 30_000 });
     let connected = false;
     const openPromise = new Promise<void>((resolve, reject) => {
-      ws.once('open', () => { connected = true; resolve(); });
-      ws.once('error', (err) => { if (!connected) reject(err); });
+      ws.once("open", () => {
+        connected = true;
+        resolve();
+      });
+      ws.once("error", (err) => {
+        if (!connected) reject(err);
+      });
     });
 
-    ws.on('message', (data) => {
+    ws.on("message", (data) => {
       try {
         const msg = JSON.parse(data.toString());
         conn.handleResponse(msg);
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     });
 
     const waitForOpen = Effect.tryPromise({
       try: () => openPromise,
-      catch: (err) => err instanceof Error ? err : new Error(String(err)),
+      catch: (err) => (err instanceof Error ? err : new Error(String(err))),
     });
 
     const cleanup = () => {
-      conn.drainPending('isolated_cleanup');
+      conn.drainPending("isolated_cleanup");
       conn.dispose();
       ws.removeAllListeners();
       ws.terminate();
-      Effect.runSync(incCounter(wsLifecycle, { type: 'proxy_isolated', action: 'destroy' }));
+      Effect.runSync(incCounter(wsLifecycle, { type: "proxy_isolated", action: "destroy" }));
     };
 
     return { conn, ws, waitForOpen, cleanup };
@@ -660,7 +780,7 @@ export class CDPProxy {
    * @deprecated Use this instead of createIsolatedConnection() for new code.
    */
   createIsolatedConnectionScoped(): Effect.Effect<CdpConnection, Error, Scope.Scope> {
-    return openScopedWs('solver_isolated', this.browserWsEndpoint, {
+    return openScopedWs("solver_isolated", this.browserWsEndpoint, {
       startId: 300_000,
       defaultTimeout: 30_000,
     });
@@ -678,13 +798,21 @@ export class CDPProxy {
    * Called by SessionLifecycleManager after stopReplay() returns metadata.
    */
   async sendReplayComplete(metadata: ReplayCompleteParams): Promise<void> {
-    await this.emitClientEvent('Browserless.replayComplete', metadata);
-    runForkInServer(Effect.logInfo('Sent replay complete event').pipe(Effect.annotateLogs({ replay_id: metadata.id })));
+    await this.emitClientEvent("Browserless.replayComplete", metadata);
+    runForkInServer(
+      Effect.logInfo("Sent replay complete event").pipe(
+        Effect.annotateLogs({ replay_id: metadata.id }),
+      ),
+    );
   }
 
   async sendTabReplayComplete(metadata: TabReplayCompleteParams): Promise<void> {
-    await this.emitClientEvent('Browserless.tabReplayComplete', metadata);
-    runForkInServer(Effect.logInfo('Sent tab replay complete event').pipe(Effect.annotateLogs({ targetId: metadata.targetId })));
+    await this.emitClientEvent("Browserless.tabReplayComplete", metadata);
+    runForkInServer(
+      Effect.logInfo("Sent tab replay complete event").pipe(
+        Effect.annotateLogs({ targetId: metadata.targetId }),
+      ),
+    );
   }
 
   /**
@@ -697,14 +825,14 @@ export class CDPProxy {
   private startHeartbeat(): void {
     if (!this.browserWs) return;
 
-    const tick = Effect.fn('cdp.heartbeat')({ self: this }, function*() {
+    const tick = Effect.fn("cdp.heartbeat")({ self: this }, function* () {
       const ws = this.browserWs;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
       // Send ping
       yield* Effect.try({
         try: () => ws.ping(),
-        catch: () => new Error('ping_failed'),
+        catch: () => new Error("ping_failed"),
       });
 
       // Wait for pong with timeout
@@ -713,7 +841,7 @@ export class CDPProxy {
         const timeout = setTimeout(() => {
           if (settled) return;
           settled = true;
-          ws.removeListener('pong', onPong);
+          ws.removeListener("pong", onPong);
           resume(Effect.succeed(false));
         }, BROWSER_WS_PONG_TIMEOUT_MS);
         const onPong = () => {
@@ -722,28 +850,38 @@ export class CDPProxy {
           clearTimeout(timeout);
           resume(Effect.succeed(true));
         };
-        ws.once('pong', onPong);
+        ws.once("pong", onPong);
         return Effect.sync(() => {
           if (!settled) {
             settled = true;
             clearTimeout(timeout);
-            ws.removeListener('pong', onPong);
+            ws.removeListener("pong", onPong);
           }
         });
       });
 
       if (!gotPong) {
-        runForkInServer(Effect.logWarning('Browser WS heartbeat timeout — Chrome not responding, closing session'));
+        runForkInServer(
+          Effect.logWarning(
+            "Browser WS heartbeat timeout — Chrome not responding, closing session",
+          ),
+        );
         this.handleClose();
       }
     });
 
     this.forkManaged(
       tick().pipe(
-        Effect.catch((e) => Effect.sync(() => {
-          runForkInServer(Effect.logWarning('Browser WS ping failed, closing session').pipe(Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e) })));
-          this.handleClose();
-        })),
+        Effect.catch((e) =>
+          Effect.sync(() => {
+            runForkInServer(
+              Effect.logWarning("Browser WS ping failed, closing session").pipe(
+                Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e) }),
+              ),
+            );
+            this.handleClose();
+          }),
+        ),
         Effect.repeat(Schedule.fixed(BROWSER_WS_PING_INTERVAL)),
       ),
     );
@@ -752,13 +890,13 @@ export class CDPProxy {
   /** Send data to Chrome. No-op after handleClose(). */
   private sendToBrowser(data: WebSocket.RawData, binary: boolean): void {
     if (this.isClosing || this.browserWs?.readyState !== WebSocket.OPEN) {
-      Effect.runSync(incCounter(proxyDroppedMessages, { direction: 'browser' }));
+      Effect.runSync(incCounter(proxyDroppedMessages, { direction: "browser" }));
       return;
     }
     try {
       this.browserWs.send(data, { binary });
     } catch {
-      Effect.runSync(incCounter(proxyDroppedMessages, { direction: 'browser' }));
+      Effect.runSync(incCounter(proxyDroppedMessages, { direction: "browser" }));
     }
   }
 
@@ -780,15 +918,21 @@ export class CDPProxy {
 
     const clientState = this.clientWs?.readyState;
     const browserState = this.browserWs?.readyState;
-    runForkInServer(Effect.logInfo('CDPProxy closing').pipe(Effect.annotateLogs({
-      clientWs: clientState === WebSocket.OPEN ? 'OPEN' : String(clientState),
-      browserWs: browserState === WebSocket.OPEN ? 'OPEN' : String(browserState),
-    })));
+    runForkInServer(
+      Effect.logInfo("CDPProxy closing").pipe(
+        Effect.annotateLogs({
+          clientWs: clientState === WebSocket.OPEN ? "OPEN" : String(clientState),
+          browserWs: browserState === WebSocket.OPEN ? "OPEN" : String(browserState),
+        }),
+      ),
+    );
 
     // Await scope close so all acquireRelease finalizers fire before onClose
     this.closePromise = Effect.runPromise(Scope.close(this.proxyScope, Exit.void))
       .catch(() => {})
-      .then(() => { this.onClose?.(); });
+      .then(() => {
+        this.onClose?.();
+      });
   }
 
   /**

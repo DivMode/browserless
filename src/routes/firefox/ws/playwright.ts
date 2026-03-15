@@ -8,8 +8,8 @@ import {
   Request,
   SystemQueryParameters,
   WebsocketRoutes,
-} from '@browserless.io/browserless';
-import { Duplex } from 'stream';
+} from "@browserless.io/browserless";
+import { Duplex } from "stream";
 
 export interface QuerySchema extends SystemQueryParameters {
   launch?: BrowserServerOptions & {
@@ -31,14 +31,10 @@ export default class FirefoxPlaywrightWebSocketRoute extends BrowserWebsocketRou
     head: Buffer,
     browser: FirefoxPlaywright,
   ): Promise<void> {
-    const isPlaywright = req.headers['user-agent']
-      ?.toLowerCase()
-      .includes('playwright');
+    const isPlaywright = req.headers["user-agent"]?.toLowerCase().includes("playwright");
 
     if (!isPlaywright) {
-      throw new BadRequest(
-        `Only playwright is allowed to work with this route`,
-      );
+      throw new BadRequest(`Only playwright is allowed to work with this route`);
     }
 
     return browser.proxyWebSocket(req, socket, head);

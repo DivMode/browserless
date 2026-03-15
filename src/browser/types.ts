@@ -5,11 +5,11 @@
 
 /** Events pushed from browser → server, multiplexed through __rrwebPush binding. */
 export type BridgeEvent =
-  | { type: 'detected'; method: string; cType?: string; cRay?: string }
-  | { type: 'solved'; token: string; tokenLength: number }
-  | { type: 'error'; errorType: string; hasToken: boolean }
-  | { type: 'still_detected'; detected: boolean }
-  | { type: 'timing'; event: string; ts: number };
+  | { type: "detected"; method: string; cType?: string; cRay?: string }
+  | { type: "solved"; token: string; tokenLength: number }
+  | { type: "error"; errorType: string; hasToken: boolean }
+  | { type: "still_detected"; detected: boolean }
+  | { type: "timing"; event: string; ts: number };
 
 /** Emit function — pushes a BridgeEvent to the server. */
 export type Emit = (event: BridgeEvent) => void;

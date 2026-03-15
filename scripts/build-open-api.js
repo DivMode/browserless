@@ -1,35 +1,29 @@
 #!/usr/bin/env node
 /* global process */
-'use strict';
+"use strict";
 
-import { join, parse } from 'path';
-import { dirname } from 'path';
-import { fileURLToPath } from 'url';
-import fs from 'fs/promises';
-import { marked } from 'marked';
+import { join, parse } from "path";
+import { dirname } from "path";
+import { fileURLToPath } from "url";
+import fs from "fs/promises";
+import { marked } from "marked";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const moduleMain = import.meta.url.endsWith(process.argv[1]);
-const swaggerJSONPath = join(__dirname, '..', 'static', 'docs', 'swagger.json');
-const swaggerJSONMinimal = join(
-  __dirname,
-  '..',
-  'static',
-  'docs',
-  'swagger.min.json',
-);
-const packageJSONPath = join(__dirname, '..', 'package.json');
+const swaggerJSONPath = join(__dirname, "..", "static", "docs", "swagger.json");
+const swaggerJSONMinimal = join(__dirname, "..", "static", "docs", "swagger.min.json");
+const packageJSONPath = join(__dirname, "..", "package.json");
 
 const readFileOrNull = async (path) => {
   if (!path) {
-    return 'null';
+    return "null";
   }
 
   try {
     const content = await fs.readFile(path);
     return content.toString();
   } catch (e) {
-    return 'null';
+    return "null";
   }
 };
 
@@ -62,48 +56,40 @@ const buildOpenAPI = async (
   externalWebSocketRoutes = [],
   disabledRoutes = [],
 ) => {
-  const [{ getRouteFiles }, { Config }, { errorCodes }, packageJSON] =
-    await Promise.all([
-      import('../build/utils.js'),
-      import('../build/config.js'),
-      import('../build/http.js'),
-      fs.readFile(packageJSONPath),
-    ]);
+  const [{ getRouteFiles }, { Config }, { errorCodes }, packageJSON] = await Promise.all([
+    import("../build/utils.js"),
+    import("../build/config.js"),
+    import("../build/http.js"),
+    fs.readFile(packageJSONPath),
+  ]);
 
-  const isWin = process.platform === 'win32';
-  const readme = (await fs.readFile('README.md').catch(() => '')).toString();
-  const changelog = marked.parse(
-    (await fs.readFile('CHANGELOG.md').catch(() => '')).toString(),
-  );
+  const isWin = process.platform === "win32";
+  const readme = (await fs.readFile("README.md").catch(() => "")).toString();
+  const changelog = marked.parse((await fs.readFile("CHANGELOG.md").catch(() => "")).toString());
 
   const [httpRoutes, wsRoutes] = await getRouteFiles(new Config());
   const swaggerJSON = {
-    customSiteTitle: 'Browserless Documentation',
+    customSiteTitle: "Browserless Documentation",
     definitions: {},
     info: {
-      title: 'Browserless',
+      title: "Browserless",
       version: JSON.parse(packageJSON.toString()).version,
-      'x-logo': {
-        altText: 'browserless logo',
-        url: './docs/browserless-logo-inline.svg',
+      "x-logo": {
+        altText: "browserless logo",
+        url: "./docs/browserless-logo-inline.svg",
       },
     },
-    openapi: '3.0.0',
+    openapi: "3.0.0",
     paths: {},
     servers: [],
     // Inject routes here...
   };
 
   const routeMetaData = await Promise.all(
-    [
-      ...httpRoutes,
-      ...wsRoutes,
-      ...externalHTTPRoutes,
-      ...externalWebSocketRoutes,
-    ]
-      .filter((r) => r.endsWith('.js'))
+    [...httpRoutes, ...wsRoutes, ...externalHTTPRoutes, ...externalWebSocketRoutes]
+      .filter((r) => r.endsWith(".js"))
       .map(async (routeModule) => {
-        const routeImport = `${isWin ? 'file:///' : ''}${routeModule}`;
+        const routeImport = `${isWin ? "file:///" : ""}${routeModule}`;
         const { default: Route } = await import(routeImport);
         if (!Route) {
           throw new Error(`Invalid route file to import docs ${routeModule}`);
@@ -115,31 +101,21 @@ const buildOpenAPI = async (
         }
 
         const { name } = parse(routeModule);
-        const body = routeModule.replace('.js', '.body.json');
-        const query = routeModule.replace('.js', '.query.json');
-        const response = routeModule.replace('.js', '.response.json');
-        const isWebSocket = routeModule.includes('/ws/') || name.endsWith('ws');
-        const paths = (
-          Array.isArray(route.path) ? route.path : [route.path]
-        ).map((p) => p === '?(/)' ? '/' : p.replace(/\?\(\/\)/g, ''));
+        const body = routeModule.replace(".js", ".body.json");
+        const query = routeModule.replace(".js", ".query.json");
+        const response = routeModule.replace(".js", ".response.json");
+        const isWebSocket = routeModule.includes("/ws/") || name.endsWith("ws");
+        const paths = (Array.isArray(route.path) ? route.path : [route.path]).map((p) =>
+          p === "?(/)" ? "/" : p.replace(/\?\(\/\)/g, ""),
+        );
         const [path, ...alternativePaths] = paths;
 
-        const {
-          tags,
-          description,
-          auth,
-          method,
-          accepts,
-          contentTypes,
-          title,
-        } = route;
+        const { tags, description, auth, method, accepts, contentTypes, title } = route;
 
         const routeDocs = [description];
 
         if (alternativePaths.length > 0) {
-          const altPathsText = alternativePaths
-            .map((p) => `\`${p}\``)
-            .join(', ');
+          const altPathsText = alternativePaths.map((p) => `\`${p}\``).join(", ");
 
           const compatNote = `**Note:** This endpoint is also available at: ${altPathsText} for backwards compatibility.`;
           routeDocs.push(compatNote);
@@ -150,14 +126,12 @@ const buildOpenAPI = async (
           auth,
           body: isWebSocket ? null : JSON.parse(await readFileOrNull(body)),
           contentTypes,
-          description: routeDocs.join('\n\n'),
+          description: routeDocs.join("\n\n"),
           isWebSocket,
           method,
           path,
           query: JSON.parse(await readFileOrNull(query)),
-          response: isWebSocket
-            ? null
-            : JSON.parse(await readFileOrNull(response)),
+          response: isWebSocket ? null : JSON.parse(await readFileOrNull(response)),
           tags,
           title,
         };
@@ -181,7 +155,7 @@ const buildOpenAPI = async (
         tags: r.tags,
       };
 
-      r.method = r.isWebSocket ? 'get' : r.method;
+      r.method = r.isWebSocket ? "get" : r.method;
 
       // Find all the swagger definitions and merge them into the
       // definitions object
@@ -199,8 +173,8 @@ const buildOpenAPI = async (
       });
 
       if (r.isWebSocket) {
-        swaggerRoute.responses['101'] = {
-          description: 'Indicates successful WebSocket upgrade.',
+        swaggerRoute.responses["101"] = {
+          description: "Indicates successful WebSocket upgrade.",
         };
       }
 
@@ -210,7 +184,7 @@ const buildOpenAPI = async (
       if (r.response) {
         if (r.contentTypes.length === 1) {
           const [type] = r.contentTypes;
-          swaggerRoute.responses['200'] = {
+          swaggerRoute.responses["200"] = {
             content: {
               [type]: {
                 schema: r.response,
@@ -224,7 +198,7 @@ const buildOpenAPI = async (
               // @ts-ignore
               accum.content[c] = {
                 schema: {
-                  type: 'text',
+                  type: "text",
                 },
               };
               return accum;
@@ -234,7 +208,7 @@ const buildOpenAPI = async (
               description: r.response.description,
             },
           );
-          swaggerRoute.responses['200'] = okResponses;
+          swaggerRoute.responses["200"] = okResponses;
         }
       }
 
@@ -246,22 +220,22 @@ const buildOpenAPI = async (
         if (anyOf) {
           // @ts-ignore
           anyOf.forEach((anyType) => {
-            if (anyType.type === 'string') {
+            if (anyType.type === "string") {
               const type = r.accepts.filter(
                 // @ts-ignore
-                (accept) => accept !== 'application/json',
+                (accept) => accept !== "application/json",
               );
               swaggerRoute.requestBody.content[type] = {
                 schema: {
-                  type: 'string',
+                  type: "string",
                 },
               };
             }
 
-            if (anyType['$ref']) {
-              swaggerRoute.requestBody.content['application/json'] = {
+            if (anyType["$ref"]) {
+              swaggerRoute.requestBody.content["application/json"] = {
                 schema: {
-                  $ref: anyType['$ref'],
+                  $ref: anyType["$ref"],
                 },
               };
             }
@@ -269,11 +243,11 @@ const buildOpenAPI = async (
         }
 
         // Handle JSON
-        if (type === 'object') {
-          swaggerRoute.requestBody.content['application/json'] = {
+        if (type === "object") {
+          swaggerRoute.requestBody.content["application/json"] = {
             schema: {
               properties,
-              type: 'object',
+              type: "object",
             },
           };
         }
@@ -287,7 +261,7 @@ const buildOpenAPI = async (
         if (props.length) {
           swaggerRoute.parameters = props
             .map((prop) => ({
-              in: 'query',
+              in: "query",
               name: prop,
               required: required?.includes(prop),
               schema: properties[prop],
@@ -304,18 +278,12 @@ const buildOpenAPI = async (
       return accum;
     }, {});
   swaggerJSON.paths = paths;
-  await fs.writeFile(
-    swaggerJSONMinimal,
-    JSON.stringify(swaggerJSON, null, '  '),
-  );
+  await fs.writeFile(swaggerJSONMinimal, JSON.stringify(swaggerJSON, null, "  "));
   swaggerJSON.info.description = readme + `\n# Changelog\n` + changelog;
 
   const cleanedSwaggerJSON = cleanupAbsolutePaths(swaggerJSON);
 
-  await fs.writeFile(
-    swaggerJSONPath,
-    JSON.stringify(cleanedSwaggerJSON, null, '  '),
-  );
+  await fs.writeFile(swaggerJSONPath, JSON.stringify(cleanedSwaggerJSON, null, "  "));
 };
 
 export default buildOpenAPI;

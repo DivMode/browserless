@@ -9,12 +9,12 @@ import {
   contentTypes,
   fileExists,
   mimeTypes,
-} from '@browserless.io/browserless';
-import { ServerResponse } from 'http';
-import { createReadStream } from 'fs';
-import path from 'path';
-import { Effect } from 'effect';
-import { runForkInServer } from '../../../otel-runtime.js';
+} from "@browserless.io/browserless";
+import { ServerResponse } from "http";
+import { createReadStream } from "fs";
+import path from "path";
+import { Effect } from "effect";
+import { runForkInServer } from "../../../otel-runtime.js";
 
 const pathMap: Map<
   string,
@@ -24,28 +24,22 @@ const pathMap: Map<
   }
 > = new Map();
 
-const streamFile = (
-  res: ServerResponse,
-  file: string,
-  contentType?: string,
-): Promise<void> =>
+const streamFile = (res: ServerResponse, file: string, contentType?: string): Promise<void> =>
   new Promise((resolve, reject) => {
     if (contentType) {
       runForkInServer(Effect.logDebug(`Setting content-type ${contentType}`));
-      res.setHeader('Content-Type', contentType);
+      res.setHeader("Content-Type", contentType);
     }
 
     return createReadStream(file)
-      .on('error', (error) => {
+      .on("error", (error) => {
         if (error) {
           runForkInServer(Effect.logError(`Error finding file ${file}, sending 404`));
           pathMap.delete(file);
-          return reject(
-            new NotFound(`Request for file "${file}" was not found`),
-          );
+          return reject(new NotFound(`Request for file "${file}" was not found`));
         }
       })
-      .on('end', resolve)
+      .on("end", resolve)
       .pipe(res);
   });
 
@@ -60,13 +54,10 @@ export default class StaticGetRoute extends HTTPRoute {
   method = Methods.get;
   path = HTTPManagementRoutes.static;
   tags = [APITags.management];
-  async handler(
-    req: Request,
-    res: ServerResponse,
-  ): Promise<unknown> {
+  async handler(req: Request, res: ServerResponse): Promise<unknown> {
     const route = this;
     return Effect.runPromise(
-      Effect.fn('route.static.get')(function* () {
+      Effect.fn("route.static.get")(function* () {
         const { pathname } = req.parsed;
         const fileCache = pathMap.get(pathname);
 
@@ -79,41 +70,31 @@ export default class StaticGetRoute extends HTTPRoute {
         const config = route.config();
         const sdkDir = route.staticSDKDir();
         const file = path.join(config.getStatic(), pathname);
-        const indexFile = path.join(file, 'index.html');
+        const indexFile = path.join(file, "index.html");
         const locations = [file, indexFile];
 
-        const pagesDir = path.join(config.getStatic(), '..', 'pages');
+        const pagesDir = path.join(config.getStatic(), "..", "pages");
         const pagesFile = path.join(pagesDir, pathname);
-        locations.push(pagesFile, path.join(pagesFile, 'index.html'));
+        locations.push(pagesFile, path.join(pagesFile, "index.html"));
 
         if (sdkDir) {
           const sdkPath = path.join(sdkDir, pathname);
-          locations.push(...[sdkPath, path.join(sdkPath, 'index.html')]);
+          locations.push(...[sdkPath, path.join(sdkPath, "index.html")]);
         }
 
         if (
-          pathname.includes('/debugger/') &&
+          pathname.includes("/debugger/") &&
           !(yield* Effect.promise(() => config.hasDebugger()))
         ) {
-          throw new NotFound(
-            `No route or file found for resource ${req.method}: ${pathname}`,
-          );
+          throw new NotFound(`No route or file found for resource ${req.method}: ${pathname}`);
         }
 
-        const foundFilePaths = (
-          yield* Effect.promise(() =>
-            Promise.all(
-              locations.map((l) =>
-                fileExists(l).then((e) => (e ? l : undefined)),
-              ),
-            ),
-          )
-        ).filter((_) => !!_) as string[];
+        const foundFilePaths = (yield* Effect.promise(() =>
+          Promise.all(locations.map((l) => fileExists(l).then((e) => (e ? l : undefined)))),
+        )).filter((_) => !!_) as string[];
 
         if (!foundFilePaths.length) {
-          throw new NotFound(
-            `No route or file found for resource ${req.method}: ${pathname}`,
-          );
+          throw new NotFound(`No route or file found for resource ${req.method}: ${pathname}`);
         }
 
         if (foundFilePaths.length > 1) {
@@ -123,14 +104,12 @@ export default class StaticGetRoute extends HTTPRoute {
         }
 
         const [foundFilePath] = foundFilePaths;
-        yield* Effect.logInfo(
-          `Found new file "${foundFilePath}", caching path and serving`,
-        );
+        yield* Effect.logInfo(`Found new file "${foundFilePath}", caching path and serving`);
 
         const contentType = mimeTypes.get(path.extname(foundFilePath));
 
         if (contentType) {
-          res.setHeader('Content-Type', contentType);
+          res.setHeader("Content-Type", contentType);
         }
 
         // Cache the file as being found so we don't have to call 'stat'
@@ -139,9 +118,7 @@ export default class StaticGetRoute extends HTTPRoute {
           path: foundFilePath,
         });
 
-        return yield* Effect.promise(() =>
-          streamFile(res, foundFilePath, contentType),
-        );
+        return yield* Effect.promise(() => streamFile(res, foundFilePath, contentType));
       })(),
     );
   }

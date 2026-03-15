@@ -9,9 +9,9 @@ import {
   SystemQueryParameters,
   contentTypes,
   jsonResponse,
-} from '@browserless.io/browserless';
-import { ServerResponse } from 'http';
-import { Effect } from 'effect';
+} from "@browserless.io/browserless";
+import { ServerResponse } from "http";
+import { Effect } from "effect";
 
 export interface QuerySchema extends SystemQueryParameters {
   token?: string;
@@ -37,29 +37,25 @@ export default class VideoDeleteRoute extends HTTPRoute {
   async handler(req: Request, res: ServerResponse): Promise<void> {
     const route = this;
     return Effect.runPromise(
-      Effect.fn('route.video.delete')(function* () {
+      Effect.fn("route.video.delete")(function* () {
         const video = route.videoManager();
         if (!video) {
           return jsonResponse(res, 503, {
-            error: 'Video manager is not enabled',
+            error: "Video manager is not enabled",
           });
         }
 
         // Extract replay ID from path: /video/:id
-        const pathParts = req.parsed.pathname.split('/');
-        const videoIndex = pathParts.indexOf('video');
+        const pathParts = req.parsed.pathname.split("/");
+        const videoIndex = pathParts.indexOf("video");
         const id =
-          videoIndex >= 0 && videoIndex + 1 < pathParts.length
-            ? pathParts[videoIndex + 1]
-            : null;
+          videoIndex >= 0 && videoIndex + 1 < pathParts.length ? pathParts[videoIndex + 1] : null;
 
         if (!id) {
-          throw new NotFound('Replay ID is required');
+          throw new NotFound("Replay ID is required");
         }
 
-        const deleted = yield* Effect.promise(() =>
-          video.deleteVideoFrames(id),
-        );
+        const deleted = yield* Effect.promise(() => video.deleteVideoFrames(id));
         if (!deleted) {
           throw new NotFound(`Video frames for replay "${id}" not found`);
         }

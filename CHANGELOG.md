@@ -1,6 +1,7 @@
 # [Latest](https://github.com/browserless/chrome/compare/v2.39.0...main)
 
 # [v2.39.0](https://github.com/browserless/browserless/compare/v2.38.4...v2.39.0)
+
 - Dependency updates.
 - Adds support for Playwright 1.58.
 - Docker image optimisations.
@@ -14,6 +15,7 @@
   - Edge: `144.0.3719.104` (amd64 only)
 
 # [v2.38.4](https://github.com/browserless/browserless/compare/v2.38.3...v2.38.4)
+
 - Dependency updates.
 - Updates NodeJS to `24.13.0`.
 - Supports the following libraries and browsers:
@@ -26,6 +28,7 @@
   - Edge: `143.0.3650.139` (amd64 only)
 
 # [v2.38.3](https://github.com/browserless/browserless/compare/v2.38.2...v2.38.3)
+
 - Adds support for Playwright 1.57
 - Supports the following libraries and browsers:
   - puppeteer-core: `24.35.0`

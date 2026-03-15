@@ -7,10 +7,10 @@
  * First flush creates the replay (writeTabReplay with metadata).
  * Subsequent flushes append events (appendTabEvents).
  */
-import { Cause, Effect, Queue, Stream } from 'effect';
-import type { ReplayEvent, ReplayMetadata, SessionId, TabEvent } from '../shared/replay-schemas.js';
-import type { TargetId } from '../shared/cloudflare-detection.js';
-import { ReplayWriter, ReplayMetrics } from './replay-services.js';
+import { Cause, Effect, Queue, Stream } from "effect";
+import type { ReplayEvent, ReplayMetadata, SessionId, TabEvent } from "../shared/replay-schemas.js";
+import type { TargetId } from "../shared/cloudflare-detection.js";
+import { ReplayWriter, ReplayMetrics } from "./replay-services.js";
 
 const BATCH_SIZE = 200;
 
@@ -23,8 +23,8 @@ export const tabConsumer = (
   sessionId: SessionId,
   targetId: TargetId,
 ): Effect.Effect<void, never, typeof ReplayWriter.Identifier | typeof ReplayMetrics.Identifier> =>
-  Effect.fn('replay.tab')(function*() {
-    yield* Effect.annotateCurrentSpan({ 'replay.target_id': targetId });
+  Effect.fn("replay.tab")(function* () {
+    yield* Effect.annotateCurrentSpan({ "replay.target_id": targetId });
     const writer = yield* ReplayWriter;
     const metrics = yield* ReplayMetrics;
     const startedAt = Date.now();
@@ -33,37 +33,43 @@ export const tabConsumer = (
     let replayCreated = false;
     const tabReplayId = `${sessionId}--tab-${targetId}`;
 
-    const flush = Effect.fn('replay.tab.flush')(function*() {
+    const flush = Effect.fn("replay.tab.flush")(function* () {
       if (accumulated.length === 0) return;
       const batch = accumulated.splice(0);
 
       if (!replayCreated) {
         const metadata: ReplayMetadata = {
           id: tabReplayId,
-          browserType: 'unknown',
-          routePath: 'unknown',
+          browserType: "unknown",
+          routePath: "unknown",
           startedAt,
           endedAt: Date.now(),
           duration: Date.now() - startedAt,
           eventCount: batch.length,
           frameCount: 0,
-          encodingStatus: 'none',
+          encodingStatus: "none",
           parentSessionId: sessionId,
           targetId,
         };
         yield* writer.writeTabReplay(tabReplayId, batch, metadata).pipe(
-          Effect.tap(() => Effect.annotateCurrentSpan({ 'replay.write_success': true })),
-          Effect.catchTag('ReplayStoreError', (err) =>
-            Effect.annotateCurrentSpan({ 'replay.write_success': false }).pipe(
-              Effect.andThen(Effect.logWarning(`Failed to create tab replay ${tabReplayId}: ${err.message}`)),
-            )),
+          Effect.tap(() => Effect.annotateCurrentSpan({ "replay.write_success": true })),
+          Effect.catchTag("ReplayStoreError", (err) =>
+            Effect.annotateCurrentSpan({ "replay.write_success": false }).pipe(
+              Effect.andThen(
+                Effect.logWarning(`Failed to create tab replay ${tabReplayId}: ${err.message}`),
+              ),
+            ),
+          ),
         );
         replayCreated = true;
       } else {
-        yield* writer.appendTabEvents(tabReplayId, batch).pipe(
-          Effect.catchTag('ReplayStoreError', (err) =>
-            Effect.logWarning(`Failed to append events to ${tabReplayId}: ${err.message}`)),
-        );
+        yield* writer
+          .appendTabEvents(tabReplayId, batch)
+          .pipe(
+            Effect.catchTag("ReplayStoreError", (err) =>
+              Effect.logWarning(`Failed to append events to ${tabReplayId}: ${err.message}`),
+            ),
+          );
       }
 
       totalFlushed += batch.length;
@@ -73,7 +79,7 @@ export const tabConsumer = (
     // Drain queue — flush every BATCH_SIZE events
     yield* Stream.fromQueue(queue).pipe(
       Stream.runForEach((event: TabEvent) =>
-        Effect.gen(function*() {
+        Effect.gen(function* () {
           accumulated.push(event.event);
           if (accumulated.length >= BATCH_SIZE) {
             yield* flush;
@@ -86,8 +92,8 @@ export const tabConsumer = (
     yield* flush;
 
     yield* Effect.annotateCurrentSpan({
-      'replay.event_count': totalFlushed,
-      'replay.batch_count': Math.ceil(totalFlushed / BATCH_SIZE) || 1,
+      "replay.event_count": totalFlushed,
+      "replay.batch_count": Math.ceil(totalFlushed / BATCH_SIZE) || 1,
     });
     yield* metrics.observeTabDuration((Date.now() - startedAt) / 1000);
   })();

@@ -11,12 +11,12 @@ import {
   availableBrowsers,
   contentTypes,
   jsonResponse,
-} from '@browserless.io/browserless';
-import { ServerResponse } from 'http';
-import { createRequire } from 'module';
-import { fileURLToPath } from 'url';
-import path from 'path';
-import { Effect } from 'effect';
+} from "@browserless.io/browserless";
+import { ServerResponse } from "http";
+import { createRequire } from "module";
+import { fileURLToPath } from "url";
+import path from "path";
+import { Effect } from "effect";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -54,11 +54,9 @@ export interface ResponseSchema {
 
 const semverReg = /(\*|\^|>|=|<|~)/gi;
 const require = createRequire(import.meta.url);
-const blessPackageJSON = require(
-  path.join(__dirname, '..', '..', '..', '..', 'package.json'),
-);
+const blessPackageJSON = require(path.join(__dirname, "..", "..", "..", "..", "package.json"));
 const { browsers } = require(
-  path.join(process.cwd(), 'node_modules', 'playwright-core', 'browsers.json'),
+  path.join(process.cwd(), "node_modules", "playwright-core", "browsers.json"),
 ) as {
   browsers: [
     {
@@ -67,21 +65,15 @@ const { browsers } = require(
     },
   ];
 };
-const chromium = browsers.find((b) => b.name === 'chromium')!.browserVersion;
-const firefox = browsers.find((b) => b.name === 'firefox')!.browserVersion;
-const webkit = browsers.find((b) => b.name === 'webkit')!.browserVersion;
-const playwrightCore = blessPackageJSON.dependencies['playwright-core'].replace(
-  semverReg,
-  '',
-);
-const puppeteer = blessPackageJSON.dependencies['puppeteer-core'].replace(
-  semverReg,
-  '',
-);
+const chromium = browsers.find((b) => b.name === "chromium")!.browserVersion;
+const firefox = browsers.find((b) => b.name === "firefox")!.browserVersion;
+const webkit = browsers.find((b) => b.name === "webkit")!.browserVersion;
+const playwrightCore = blessPackageJSON.dependencies["playwright-core"].replace(semverReg, "");
+const puppeteer = blessPackageJSON.dependencies["puppeteer-core"].replace(semverReg, "");
 const playwright = Object.entries(blessPackageJSON.playwrightVersions)
   .map(([, v]) => blessPackageJSON.dependencies[v as string])
   .filter((_) => !!_)
-  .map((v) => v.match(/[0-9.]+/g).join(''))
+  .map((v) => v.match(/[0-9.]+/g).join(""))
   .concat(playwrightCore);
 
 export default class MetaGetRoute extends HTTPRoute {
@@ -97,14 +89,12 @@ export default class MetaGetRoute extends HTTPRoute {
   tags = [APITags.management];
   async handler(_req: Request, res: ServerResponse): Promise<void> {
     return Effect.runPromise(
-      Effect.fn('route.meta.get')(function* () {
+      Effect.fn("route.meta.get")(function* () {
         const installedBrowsers = yield* Effect.promise(() => availableBrowsers);
         const response: ResponseSchema = {
           version: blessPackageJSON.version,
           chromium: installedBrowsers.includes(ChromiumCDP) ? chromium : null,
-          firefox: installedBrowsers.includes(FirefoxPlaywright)
-            ? firefox
-            : null,
+          firefox: installedBrowsers.includes(FirefoxPlaywright) ? firefox : null,
           webkit: installedBrowsers.includes(WebKitPlaywright) ? webkit : null,
           playwright: [...new Set(playwright)],
           puppeteer: [puppeteer],

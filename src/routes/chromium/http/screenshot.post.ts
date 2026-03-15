@@ -3,4 +3,4 @@ export {
   QuerySchema,
   ResponseSchema,
   default,
-} from '../../../shared/screenshot.http.js';
+} from "../../../shared/screenshot.http.js";

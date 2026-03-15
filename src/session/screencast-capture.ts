@@ -17,12 +17,12 @@
  * stream consumer. Child fibers (fallback screenshots) are interrupted
  * automatically when the consumer ends.
  */
-import { mkdir, writeFile } from 'fs/promises';
-import path from 'path';
+import { mkdir, writeFile } from "fs/promises";
+import path from "path";
 
-import { Cause, Effect, Fiber, Queue, Ref, Stream } from 'effect';
+import { Cause, Effect, Fiber, Queue, Ref, Stream } from "effect";
 
-import type { FrameParams, SendCommand, VideoHooks } from './video-services.js';
+import type { FrameParams, SendCommand, VideoHooks } from "./video-services.js";
 
 // ─── Frame event pushed into per-target Queue ────────────────────────
 
@@ -73,35 +73,39 @@ const targetConsumer = (
   cdpSessionId: string,
   sendCommand: SendCommand,
 ): Effect.Effect<number> =>
-  Effect.fn('screencast.target')(function*() {
-    yield* Effect.annotateCurrentSpan({ 'screencast.target_id': cdpSessionId });
+  Effect.fn("screencast.target")(function* () {
+    yield* Effect.annotateCurrentSpan({ "screencast.target_id": cdpSessionId });
     const startTime = Date.now();
     let frameCount = 0;
 
     // Ref holds the current fallback fiber so we can interrupt+restart it
     const fallbackRef = yield* Ref.make<Fiber.Fiber<void> | null>(null);
 
-    const startFallback = Effect.gen(function*() {
+    const startFallback = Effect.gen(function* () {
       // Interrupt previous fallback if still running
       const prev = yield* Ref.get(fallbackRef);
       if (prev) yield* Fiber.interrupt(prev).pipe(Effect.ignore);
 
       const fb = yield* Effect.forkChild(
-        Effect.sleep('2 seconds').pipe(
-          Effect.andThen(Effect.tryPromise(async () => {
-            const result = await sendCommand(
-              'Page.captureScreenshot', { format: 'png' }, cdpSessionId,
-            ) as { data?: string } | undefined;
-            if (result?.data) {
-              Queue.offerUnsafe(queue, {
-                data: result.data,
-                timestamp: Date.now(),
-                ackSessionId: 0,
-              });
-            }
-          })),
+        Effect.sleep("2 seconds").pipe(
+          Effect.andThen(
+            Effect.tryPromise(async () => {
+              const result = (await sendCommand(
+                "Page.captureScreenshot",
+                { format: "png" },
+                cdpSessionId,
+              )) as { data?: string } | undefined;
+              if (result?.data) {
+                Queue.offerUnsafe(queue, {
+                  data: result.data,
+                  timestamp: Date.now(),
+                  ackSessionId: 0,
+                });
+              }
+            }),
+          ),
           Effect.ignore,
-          Effect.andThen(Effect.sleep('2 seconds')),
+          Effect.andThen(Effect.sleep("2 seconds")),
           Effect.repeat({ while: () => true }),
         ),
       );
@@ -113,18 +117,22 @@ const targetConsumer = (
 
     yield* Stream.fromQueue(queue).pipe(
       Stream.runForEach((frame: FrameEvent) =>
-        Effect.gen(function*() {
+        Effect.gen(function* () {
           const framePath = path.join(targetDir, `${frame.timestamp}.png`);
           yield* Effect.tryPromise(() =>
-            writeFile(framePath, Buffer.from(frame.data, 'base64')),
+            writeFile(framePath, Buffer.from(frame.data, "base64")),
           ).pipe(Effect.ignore);
           frameCount++;
 
           if (frame.ackSessionId > 0) {
             yield* Effect.tryPromise(() =>
-              sendCommand('Page.screencastFrameAck', {
-                sessionId: frame.ackSessionId,
-              }, cdpSessionId),
+              sendCommand(
+                "Page.screencastFrameAck",
+                {
+                  sessionId: frame.ackSessionId,
+                },
+                cdpSessionId,
+              ),
             ).pipe(Effect.ignore);
 
             // Real frame arrived → reset fallback timer
@@ -141,9 +149,9 @@ const targetConsumer = (
     const durationSec = (Date.now() - startTime) / 1000;
     const fps = durationSec > 0 ? frameCount / durationSec : 0;
     yield* Effect.annotateCurrentSpan({
-      'screencast.frame_count': frameCount,
-      'screencast.fps': Math.round(fps * 100) / 100,
-      'screencast.duration_s': Math.round(durationSec * 100) / 100,
+      "screencast.frame_count": frameCount,
+      "screencast.fps": Math.round(fps * 100) / 100,
+      "screencast.duration_s": Math.round(durationSec * 100) / 100,
     });
     return frameCount;
   })();
@@ -185,21 +193,25 @@ export const createScreencastCapture = () => {
     cdpSessionId: string,
     targetId: string,
   ): Effect.Effect<void> =>
-    Effect.fn('screencast.addTarget')(function*() {
-      yield* Effect.annotateCurrentSpan({ 'screencast.target_id': targetId });
+    Effect.fn("screencast.addTarget")(function* () {
+      yield* Effect.annotateCurrentSpan({ "screencast.target_id": targetId });
       const session = sessions.get(sessionId);
       if (!session) return;
 
       const tabReplayId = `${sessionId}--tab-${targetId}`;
-      const targetDir = path.join(session.videosDir, tabReplayId, 'frames');
+      const targetDir = path.join(session.videosDir, tabReplayId, "frames");
       yield* Effect.tryPromise(() => mkdir(targetDir, { recursive: true })).pipe(Effect.ignore);
 
       yield* Effect.tryPromise(() =>
-        sendCommand('Page.startScreencast', {
-          format: 'png',
-          maxWidth: MAX_WIDTH,
-          maxHeight: MAX_HEIGHT,
-        }, cdpSessionId),
+        sendCommand(
+          "Page.startScreencast",
+          {
+            format: "png",
+            maxWidth: MAX_WIDTH,
+            maxHeight: MAX_HEIGHT,
+          },
+          cdpSessionId,
+        ),
       ).pipe(Effect.ignore);
 
       const queue = yield* Queue.unbounded<FrameEvent, Cause.Done>();
@@ -215,11 +227,7 @@ export const createScreencastCapture = () => {
 
   // ── handleFrame (sync — hot path) ────────────────────────────────
 
-  const handleFrame = (
-    sessionId: string,
-    cdpSessionId: string,
-    params: FrameParams,
-  ): void => {
+  const handleFrame = (sessionId: string, cdpSessionId: string, params: FrameParams): void => {
     const session = sessions.get(sessionId);
     if (!session) return;
 
@@ -238,17 +246,14 @@ export const createScreencastCapture = () => {
 
   // ── stopTargetCapture ────────────────────────────────────────────
 
-  const stopTargetCapture = (
-    sessionId: string,
-    cdpSessionId: string,
-  ): Effect.Effect<number> =>
-    Effect.fn('screencast.stopTargetCapture')(function*() {
-      yield* Effect.annotateCurrentSpan({ 'screencast.target_id': cdpSessionId });
+  const stopTargetCapture = (sessionId: string, cdpSessionId: string): Effect.Effect<number> =>
+    Effect.fn("screencast.stopTargetCapture")(function* () {
+      yield* Effect.annotateCurrentSpan({ "screencast.target_id": cdpSessionId });
       const session = sessions.get(sessionId);
       if (!session) return 0;
 
       yield* Effect.tryPromise(() =>
-        session.sendCommand('Page.stopScreencast', {}, cdpSessionId),
+        session.sendCommand("Page.stopScreencast", {}, cdpSessionId),
       ).pipe(Effect.ignore);
 
       const target = session.targets.get(cdpSessionId);
@@ -256,10 +261,7 @@ export const createScreencastCapture = () => {
 
       Queue.endUnsafe(target.queue);
 
-      yield* Fiber.await(target.fiber).pipe(
-        Effect.timeout('5 seconds'),
-        Effect.ignore,
-      );
+      yield* Fiber.await(target.fiber).pipe(Effect.timeout("5 seconds"), Effect.ignore);
 
       const count = target.frameCount;
       session.targets.delete(cdpSessionId);
@@ -271,9 +273,9 @@ export const createScreencastCapture = () => {
   // ── stopCapture (all targets) ────────────────────────────────────
 
   const stopCapture = (sessionId: string): Effect.Effect<number> =>
-    Effect.fn('screencast.stopCapture')(function*() {
+    Effect.fn("screencast.stopCapture")(function* () {
       const session = sessions.get(sessionId);
-      yield* Effect.annotateCurrentSpan({ 'screencast.target_count': session?.targets.size ?? 0 });
+      yield* Effect.annotateCurrentSpan({ "screencast.target_count": session?.targets.size ?? 0 });
       if (!session) return 0;
 
       for (const [, target] of session.targets) {
@@ -282,15 +284,12 @@ export const createScreencastCapture = () => {
 
       for (const cdpSessionId of session.targets.keys()) {
         yield* Effect.tryPromise(() =>
-          session.sendCommand('Page.stopScreencast', {}, cdpSessionId),
+          session.sendCommand("Page.stopScreencast", {}, cdpSessionId),
         ).pipe(Effect.ignore);
       }
 
       for (const [, target] of session.targets) {
-        yield* Fiber.await(target.fiber).pipe(
-          Effect.timeout('5 seconds'),
-          Effect.ignore,
-        );
+        yield* Fiber.await(target.fiber).pipe(Effect.timeout("5 seconds"), Effect.ignore);
       }
 
       const frameCount = session.totalFrames;
@@ -334,10 +333,8 @@ export const createScreencastCapture = () => {
     hooks,
     /** Direct access for coordinator: stop all targets, get frame count */
     stopCapture,
-    getFrameCount: (sessionId: string): number =>
-      sessions.get(sessionId)?.totalFrames ?? 0,
-    isCapturing: (sessionId: string): boolean =>
-      sessions.has(sessionId),
+    getFrameCount: (sessionId: string): number => sessions.get(sessionId)?.totalFrames ?? 0,
+    isCapturing: (sessionId: string): boolean => sessions.has(sessionId),
   };
 };
 

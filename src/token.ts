@@ -6,9 +6,9 @@ import {
   Request,
   WebSocketRoute,
   getTokenFromRequest,
-} from '@browserless.io/browserless';
-import { EventEmitter } from 'events';
-import { Effect } from 'effect';
+} from "@browserless.io/browserless";
+import { EventEmitter } from "events";
+import { Effect } from "effect";
 
 export class Token extends EventEmitter {
   constructor(protected config: Config) {
@@ -17,13 +17,9 @@ export class Token extends EventEmitter {
 
   public isAuthorizedEffect(
     req: Request,
-    route:
-      | BrowserHTTPRoute
-      | BrowserWebsocketRoute
-      | HTTPRoute
-      | WebSocketRoute,
+    route: BrowserHTTPRoute | BrowserWebsocketRoute | HTTPRoute | WebSocketRoute,
   ): Effect.Effect<boolean> {
-    return Effect.fn('token.isAuthorized')({ self: this }, function* () {
+    return Effect.fn("token.isAuthorized")({ self: this }, function* () {
       const token = this.config.getToken();
 
       if (token === null) {
@@ -46,11 +42,7 @@ export class Token extends EventEmitter {
 
   public async isAuthorized(
     req: Request,
-    route:
-      | BrowserHTTPRoute
-      | BrowserWebsocketRoute
-      | HTTPRoute
-      | WebSocketRoute,
+    route: BrowserHTTPRoute | BrowserWebsocketRoute | HTTPRoute | WebSocketRoute,
   ): Promise<boolean> {
     return Effect.runPromise(this.isAuthorizedEffect(req, route));
   }

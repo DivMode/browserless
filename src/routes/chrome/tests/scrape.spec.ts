@@ -1,7 +1,7 @@
-import { Browserless, Config, Metrics } from '@browserless.io/browserless';
-import { expect } from 'chai';
+import { Browserless, Config, Metrics } from "@browserless.io/browserless";
+import { expect } from "chai";
 
-describe('/chrome/scrape API', function () {
+describe("/chrome/scrape API", function () {
   let browserless: Browserless;
 
   const start = ({
@@ -16,53 +16,47 @@ describe('/chrome/scrape API', function () {
     await browserless.stop();
   });
 
-  it('allows requests', async () => {
+  it("allows requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
       elements: [
         {
-          selector: 'a',
+          selector: "a",
         },
       ],
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
     };
 
-    await fetch('http://localhost:3000/chrome/scrape?token=browserless', {
+    await fetch("http://localhost:3000/chrome/scrape?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then((res) => {
-      expect(res.headers.get('content-type')).to.equal(
-        'application/json; charset=UTF-8',
-      );
+      expect(res.headers.get("content-type")).to.equal("application/json; charset=UTF-8");
       expect(res.status).to.equal(200);
     });
   });
 
-  it('404s GET requests', async () => {
+  it("404s GET requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
-    await fetch('http://localhost:3000/chrome/scrape?token=browserless').then(
-      (res) => {
-        expect(res.headers.get('content-type')).to.equal(
-          'text/plain; charset=UTF-8',
-        );
-        expect(res.status).not.to.equal(200);
-      },
-    );
+    await fetch("http://localhost:3000/chrome/scrape?token=browserless").then((res) => {
+      expect(res.headers.get("content-type")).to.equal("text/plain; charset=UTF-8");
+      expect(res.status).not.to.equal(200);
+    });
   });
 
-  it('handles debug options', async () => {
+  it("handles debug options", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
@@ -71,189 +65,179 @@ describe('/chrome/scrape API', function () {
       },
       elements: [
         {
-          selector: 'a',
+          selector: "a",
         },
       ],
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
     };
 
-    await fetch('http://localhost:3000/chrome/scrape?token=browserless', {
+    await fetch("http://localhost:3000/chrome/scrape?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then(async (res) => {
-      expect(res.headers.get('content-type')).to.equal(
-        'application/json; charset=UTF-8',
-      );
+      expect(res.headers.get("content-type")).to.equal("application/json; charset=UTF-8");
       expect(res.status).to.equal(200);
 
       const json = await res.json();
-      expect(json).to.have.property('debug');
-      expect(json.debug).to.have.property('network');
+      expect(json).to.have.property("debug");
+      expect(json.debug).to.have.property("network");
     });
   });
 
-  it('handles selector timeouts', async () => {
+  it("handles selector timeouts", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
       elements: [
         {
-          selector: 'blink',
+          selector: "blink",
           timeout: 1000,
         },
       ],
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
     };
 
-    await fetch('http://localhost:3000/chrome/scrape?token=browserless', {
+    await fetch("http://localhost:3000/chrome/scrape?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then(async (res) => {
-      expect(await res.text()).to.contain('Timed out waiting for selector');
+      expect(await res.text()).to.contain("Timed out waiting for selector");
       expect(res.status).not.to.equal(200);
     });
   });
 
-  it('handles `waitForFunction` properties', async () => {
+  it("handles `waitForFunction` properties", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
       elements: [
         {
-          selector: 'a',
+          selector: "a",
         },
       ],
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
       waitForFunction: {
-        fn: '() => 5 + 5',
+        fn: "() => 5 + 5",
       },
     };
 
-    await fetch('http://localhost:3000/chrome/scrape?token=browserless', {
+    await fetch("http://localhost:3000/chrome/scrape?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then((res) => {
-      expect(res.headers.get('content-type')).to.equal(
-        'application/json; charset=UTF-8',
-      );
+      expect(res.headers.get("content-type")).to.equal("application/json; charset=UTF-8");
       expect(res.status).to.equal(200);
     });
   });
 
-  it('handles async `waitForFunction` properties', async () => {
+  it("handles async `waitForFunction` properties", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
       elements: [
         {
-          selector: 'a',
+          selector: "a",
         },
       ],
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
       waitForFunction: {
-        fn: 'async () => new Promise(resolve => resolve(5))',
+        fn: "async () => new Promise(resolve => resolve(5))",
       },
     };
 
-    await fetch('http://localhost:3000/chrome/scrape?token=browserless', {
+    await fetch("http://localhost:3000/chrome/scrape?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then((res) => {
-      expect(res.headers.get('content-type')).to.equal(
-        'application/json; charset=UTF-8',
-      );
+      expect(res.headers.get("content-type")).to.equal("application/json; charset=UTF-8");
       expect(res.status).to.equal(200);
     });
   });
 
-  it('handles `waitForSelector` properties', async () => {
+  it("handles `waitForSelector` properties", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
       elements: [
         {
-          selector: 'a',
+          selector: "a",
         },
       ],
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
       waitForSelector: {
-        selector: 'h1',
+        selector: "h1",
       },
     };
 
-    await fetch('http://localhost:3000/chrome/scrape?token=browserless', {
+    await fetch("http://localhost:3000/chrome/scrape?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then((res) => {
-      expect(res.headers.get('content-type')).to.equal(
-        'application/json; charset=UTF-8',
-      );
+      expect(res.headers.get("content-type")).to.equal("application/json; charset=UTF-8");
       expect(res.status).to.equal(200);
     });
   });
 
-  it('handles `waitForTimeout` properties', async () => {
+  it("handles `waitForTimeout` properties", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
       elements: [
         {
-          selector: 'a',
+          selector: "a",
         },
       ],
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
       waitForTimeout: 500,
     };
 
-    await fetch('http://localhost:3000/chrome/scrape?token=browserless', {
+    await fetch("http://localhost:3000/chrome/scrape?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then((res) => {
-      expect(res.headers.get('content-type')).to.equal(
-        'application/json; charset=UTF-8',
-      );
+      expect(res.headers.get("content-type")).to.equal("application/json; charset=UTF-8");
       expect(res.status).to.equal(200);
     });
   });
 
-  it('handles `waitForEvent` properties', async () => {
+  it("handles `waitForEvent` properties", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
     const body = {
       elements: [
         {
-          selector: 'a',
+          selector: "a",
         },
       ],
       html: `<script type="text/javascript">
@@ -261,156 +245,147 @@ describe('/chrome/scrape API', function () {
       setTimeout(() => document.dispatchEvent(event), 1500);
       </script><a href="/">Link</a>`,
       waitForEvent: {
-        event: 'customEvent',
+        event: "customEvent",
       },
     };
 
-    await fetch('http://localhost:3000/chrome/scrape?token=browserless', {
+    await fetch("http://localhost:3000/chrome/scrape?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then((res) => {
       expect(res.status).to.equal(200);
-      expect(res.headers.get('content-type')).to.equal(
-        'application/json; charset=UTF-8',
-      );
+      expect(res.headers.get("content-type")).to.equal("application/json; charset=UTF-8");
     });
   });
 
-  it('allows cookies', async () => {
+  it("allows cookies", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
-      cookies: [{ domain: 'one.one.one.one', name: 'foo', value: 'bar' }],
+      cookies: [{ domain: "one.one.one.one", name: "foo", value: "bar" }],
       elements: [
         {
-          selector: 'a',
+          selector: "a",
         },
       ],
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
     };
 
-    await fetch('http://localhost:3000/chrome/scrape?token=browserless', {
+    await fetch("http://localhost:3000/chrome/scrape?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then((res) => {
-      expect(res.headers.get('content-type')).to.equal(
-        'application/json; charset=UTF-8',
-      );
+      expect(res.headers.get("content-type")).to.equal("application/json; charset=UTF-8");
       expect(res.status).to.equal(200);
     });
   });
 
-  it('times out requests', async () => {
+  it("times out requests", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
     const body = {
       elements: [
         {
-          selector: 'a',
+          selector: "a",
         },
       ],
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
     };
 
-    await fetch(
-      'http://localhost:3000/chrome/scrape?token=browserless&timeout=10',
-      {
-        body: JSON.stringify(body),
-        headers: {
-          'content-type': 'application/json',
-        },
-        method: 'POST',
+    await fetch("http://localhost:3000/chrome/scrape?token=browserless&timeout=10", {
+      body: JSON.stringify(body),
+      headers: {
+        "content-type": "application/json",
       },
-    ).then((res) => {
+      method: "POST",
+    }).then((res) => {
       expect(res.status).to.equal(408);
     });
   });
 
-  it('rejects requests', async () => {
+  it("rejects requests", async () => {
     const config = new Config();
     config.setConcurrent(0);
     config.setQueued(0);
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
     const body = {
       elements: [
         {
-          selector: 'a',
+          selector: "a",
         },
       ],
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
     };
 
-    await fetch('http://localhost:3000/chrome/scrape?token=browserless', {
+    await fetch("http://localhost:3000/chrome/scrape?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then((res) => {
       expect(res.status).to.equal(429);
     });
   });
 
-  it('allows goto options', async () => {
+  it("allows goto options", async () => {
     const config = new Config();
-    config.setToken('browserless');
+    config.setToken("browserless");
     const metrics = new Metrics();
     await start({ config, metrics });
 
     const body = {
       elements: [
         {
-          selector: 'a',
+          selector: "a",
         },
       ],
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
     };
 
-    await fetch('http://localhost:3000/chrome/scrape?token=browserless', {
+    await fetch("http://localhost:3000/chrome/scrape?token=browserless", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then((res) => {
       expect(res.status).to.equal(200);
     });
   });
 
-  it('allows requests without token when auth token is not set', async () => {
+  it("allows requests without token when auth token is not set", async () => {
     await start();
     const body = {
       elements: [
         {
-          selector: 'a',
+          selector: "a",
         },
       ],
-      url: 'https://one.one.one.one',
+      url: "https://one.one.one.one",
     };
 
-    await fetch('http://localhost:3000/chrome/scrape', {
+    await fetch("http://localhost:3000/chrome/scrape", {
       body: JSON.stringify(body),
       headers: {
-        'content-type': 'application/json',
+        "content-type": "application/json",
       },
-      method: 'POST',
+      method: "POST",
     }).then((res) => {
-      expect(res.headers.get('content-type')).to.equal(
-        'application/json; charset=UTF-8',
-      );
+      expect(res.headers.get("content-type")).to.equal("application/json; charset=UTF-8");
       expect(res.status).to.equal(200);
     });
   });

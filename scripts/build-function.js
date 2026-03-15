@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /* eslint-disable no-undef */
 
-'use strict';
+"use strict";
 
-import { build } from 'esbuild';
-import fs from 'fs/promises';
-import { join } from 'path';
-import { polyfillNode } from 'esbuild-plugin-polyfill-node';
+import { build } from "esbuild";
+import fs from "fs/promises";
+import { join } from "path";
+import { polyfillNode } from "esbuild-plugin-polyfill-node";
 
 const html = (contents) => `<!DOCTYPE html>
 <html lang="en">
@@ -24,9 +24,9 @@ const html = (contents) => `<!DOCTYPE html>
 </html>
 `;
 
-const entryPoints = ['src/shared/utils/function/client.ts'];
-const outfile = join(process.cwd(), 'static/function/client.js');
-const htmlLocation = join(process.cwd(), 'static/function/index.html');
+const entryPoints = ["src/shared/utils/function/client.ts"];
+const outfile = join(process.cwd(), "static/function/client.js");
+const htmlLocation = join(process.cwd(), "static/function/index.html");
 
 (async () => {
   await build({
@@ -41,7 +41,7 @@ const htmlLocation = join(process.cwd(), 'static/function/index.html');
       }),
     ],
   });
-  const contents = await fs.readFile(outfile, 'utf-8');
+  const contents = await fs.readFile(outfile, "utf-8");
   const final = html(contents);
 
   await fs.writeFile(htmlLocation, final);

@@ -1,4 +1,4 @@
-import * as fs from 'fs/promises';
+import * as fs from "fs/promises";
 import {
   BLESS_PAGE_IDENTIFIER,
   ChromeCDP,
@@ -18,36 +18,34 @@ import {
   encodings,
   encryptionAlgo,
   encryptionSep,
-} from '@browserless.io/browserless';
-import playwright, { CDPSession } from 'playwright-core';
-import { Duplex } from 'stream';
-import { Page } from 'puppeteer-core';
-import { ServerResponse } from 'http';
-import crypto from 'crypto';
-import debug from 'debug';
-import { fileURLToPath } from 'url';
-import gradient from 'gradient-string';
-import { homedir } from 'os';
-import micromatch from 'micromatch';
-import path from 'path';
+} from "@browserless.io/browserless";
+import playwright, { CDPSession } from "playwright-core";
+import { Duplex } from "stream";
+import { Page } from "puppeteer-core";
+import { ServerResponse } from "http";
+import crypto from "crypto";
+import debug from "debug";
+import { fileURLToPath } from "url";
+import gradient from "gradient-string";
+import { homedir } from "os";
+import micromatch from "micromatch";
+import path from "path";
 
-const isHTTP = (
-  writeable: ServerResponse | Duplex,
-): writeable is ServerResponse => {
+const isHTTP = (writeable: ServerResponse | Duplex): writeable is ServerResponse => {
   return (writeable as ServerResponse).writeHead !== undefined;
 };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const getAuthHeaderToken = (header: string) => {
-  if (header.startsWith('Basic')) {
-    const username = header.split(/\s+/).pop() || '';
-    const token = Buffer.from(username, 'base64').toString().replace(':', '');
+  if (header.startsWith("Basic")) {
+    const username = header.split(/\s+/).pop() || "";
+    const token = Buffer.from(username, "base64").toString().replace(":", "");
     return token;
   }
 
-  if (header.startsWith('Bearer')) {
-    const [, token] = header.split(' ');
+  if (header.startsWith("Bearer")) {
+    const [, token] = header.split(" ");
     return token;
   }
 
@@ -63,11 +61,11 @@ const getAuthHeaderToken = (header: string) => {
  * // ["Playwright/1.43", "1.43"]
  */
 export const pwVersionRegex = /Playwright\/(\d+\.\d+)/;
-export const buildDir: string = path.join(path.resolve(), 'build');
-export const tsExtension = '.d.ts';
-export const jsonExtension = '.json';
-export const jsExtension = '.js';
-export const isWin = process.platform === 'win32';
+export const buildDir: string = path.join(path.resolve(), "build");
+export const tsExtension = ".d.ts";
+export const jsonExtension = ".json";
+export const jsExtension = ".js";
+export const isWin = process.platform === "win32";
 
 export const id = (): string => crypto.randomUUID();
 
@@ -79,9 +77,9 @@ export const id = (): string => crypto.randomUUID();
  */
 export const normalizeFileProtocol = (filepath: string) => {
   if (isWin) {
-    if (filepath.startsWith('file:///')) return filepath;
+    if (filepath.startsWith("file:///")) return filepath;
 
-    return 'file:///' + filepath;
+    return "file:///" + filepath;
   }
 
   return filepath;
@@ -96,10 +94,10 @@ export const normalizeFileProtocol = (filepath: string) => {
  * @returns {string} A random Page ID
  */
 export const pageID = (): string => {
-  const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   const id = Array.from({ length: 32 - BLESS_PAGE_IDENTIFIER.length })
     .map(() => chars[Math.floor(Math.random() * chars.length)])
-    .join('');
+    .join("");
 
   return `${BLESS_PAGE_IDENTIFIER}${id}`;
 };
@@ -108,22 +106,19 @@ export const createLogger = (domain: string): debug.Debugger => {
   return debug(`browserless.io:${domain}`);
 };
 
-const errorLog = createLogger('error');
+const errorLog = createLogger("error");
 
-export const dedent = (
-  strings: string | string[],
-  ...values: string[]
-): string => {
+export const dedent = (strings: string | string[], ...values: string[]): string => {
   const raw = Array.isArray(strings) ? strings : [strings];
 
-  let result = '';
+  let result = "";
 
   for (let i = 0; i < raw.length; i++) {
     result += raw[i]
       // join lines when there is a suppressed newline
-      .replace(/\\\n[ \t]*/g, '')
+      .replace(/\\\n[ \t]*/g, "")
       // handle escaped back-ticks
-      .replace(/\\`/g, '`');
+      .replace(/\\`/g, "`");
 
     if (i < values.length) {
       result += values[i];
@@ -131,7 +126,7 @@ export const dedent = (
   }
 
   // now strip indentation
-  const lines = result.split('\n');
+  const lines = result.split("\n");
   let mIndent: number | null = null;
   lines.forEach((l) => {
     const m = l.match(/^(\s+)\S+/);
@@ -148,7 +143,7 @@ export const dedent = (
 
   if (mIndent !== null) {
     const m = mIndent;
-    result = lines.map((l) => (l[0] === ' ' ? l.slice(m) : l)).join('\n');
+    result = lines.map((l) => (l[0] === " " ? l.slice(m) : l)).join("\n");
   }
 
   return (
@@ -156,7 +151,7 @@ export const dedent = (
       // dedent eats leading and trailing whitespace too
       .trim()
       // handle escaped newlines at the end to ensure they don't get stripped too
-      .replace(/\\n/g, '\n')
+      .replace(/\\n/g, "\n")
   );
 };
 
@@ -179,8 +174,8 @@ export const writeResponse = (
   if (isHTTP(writeable)) {
     const response = writeable;
     if (!response.headersSent) {
-      response.writeHead(httpMessage.code, { 'Content-Type': CTTHeader });
-      response.end(message + '\n');
+      response.writeHead(httpMessage.code, { "Content-Type": CTTHeader });
+      response.end(message + "\n");
     }
     return;
   }
@@ -188,12 +183,12 @@ export const writeResponse = (
   const httpResponse = [
     httpMessage.message,
     `Content-Type: ${CTTHeader}`,
-    'Content-Encoding: UTF-8',
-    'Accept-Ranges: bytes',
-    'Connection: keep-alive',
-    '\r\n',
+    "Content-Encoding: UTF-8",
+    "Accept-Ranges: bytes",
+    "Connection: keep-alive",
+    "\r\n",
     message,
-  ].join('\r\n');
+  ].join("\r\n");
 
   writeable.write(httpResponse);
   writeable.end();
@@ -210,7 +205,7 @@ export const jsonResponse = (
   const CTTHeader = `${contentTypes.json}; charset=${encodings.utf8}`;
 
   if (!response.headersSent) {
-    response.writeHead(httpMessage.code, { 'Content-Type': CTTHeader });
+    response.writeHead(httpMessage.code, { "Content-Type": CTTHeader });
     response.end(removeNullStringify(json, allowNull));
     return;
   }
@@ -218,10 +213,7 @@ export const jsonResponse = (
   return;
 };
 
-export const fetchJson = (
-  url: string,
-  init?: RequestInit | undefined,
-): Promise<unknown> =>
+export const fetchJson = (url: string, init?: RequestInit | undefined): Promise<unknown> =>
   fetch(url, init).then((res) => {
     if (!res.ok) {
       throw res;
@@ -231,8 +223,8 @@ export const fetchJson = (
 
 export const getTokenFromRequest = (req: Request) => {
   const authHeader = req.headers.authorization;
-  const tokenParam = req.parsed.searchParams.get('token');
-  return tokenParam ?? getAuthHeaderToken(authHeader || '');
+  const tokenParam = req.parsed.searchParams.get("token");
+  return tokenParam ?? getAuthHeaderToken(authHeader || "");
 };
 
 // NOTE, if proxying request elsewhere, you must re-stream the body again
@@ -262,7 +254,7 @@ export const readRequestBody = async (
     };
 
     req
-      .on('data', (chunk) => {
+      .on("data", (chunk) => {
         totalSize += chunk.length;
         if (totalSize > maxSize) {
           rejectOnce(
@@ -274,14 +266,14 @@ export const readRequestBody = async (
         }
         body.push(chunk);
       })
-      .on('end', () => {
+      .on("end", () => {
         const final = Buffer.concat(body).toString();
         resolveOnce(final);
       })
-      .on('aborted', () => {
-        resolveOnce('');
+      .on("aborted", () => {
+        resolveOnce("");
       })
-      .on('error', (error) => {
+      .on("error", (error) => {
         rejectOnce(error);
       });
   });
@@ -295,17 +287,14 @@ export const safeParse = (maybeJson: string): unknown | null => {
   }
 };
 
-export const removeNullStringify = (
-  json: unknown,
-  allowNull = true,
-): string => {
+export const removeNullStringify = (json: unknown, allowNull = true): string => {
   return JSON.stringify(
     json,
     (_key, value) => {
       if (allowNull) return value;
       if (value !== null) return value;
     },
-    '  ',
+    "  ",
   );
 };
 
@@ -317,10 +306,7 @@ export const generateDataDir = async (
   config: Config,
 ): Promise<string> => {
   const baseDirectory = await config.getDataDir();
-  const dataDirPath = path.join(
-    baseDirectory,
-    `browserless-data-dir-${sessionId}`,
-  );
+  const dataDirPath = path.join(baseDirectory, `browserless-data-dir-${sessionId}`);
 
   if (await exists(dataDirPath)) {
     debug(`Data directory already exists, not creating "${dataDirPath}"`);
@@ -330,9 +316,7 @@ export const generateDataDir = async (
   debug(`Generating user-data-dir at ${dataDirPath}`);
 
   await fs.mkdir(dataDirPath, { recursive: true }).catch((err) => {
-    throw new ServerError(
-      `Error creating data-directory "${dataDirPath}": ${err}`,
-    );
+    throw new ServerError(`Error creating data-directory "${dataDirPath}": ${err}`);
   });
 
   return dataDirPath;
@@ -342,17 +326,12 @@ export const readBody = async (
   req: Request,
   maxSize: number = 10485760,
 ): Promise<ReturnType<typeof safeParse>> => {
-  if (
-    typeof req.body === 'string' &&
-    (isBase64Encoded(req.body) || req.body.startsWith('{'))
-  ) {
+  if (typeof req.body === "string" && (isBase64Encoded(req.body) || req.body.startsWith("{"))) {
     return safeParse(convertIfBase64(req.body));
   }
   const body = await readRequestBody(req, maxSize);
 
-  return req.headers['content-type']?.includes(contentTypes.json)
-    ? safeParse(body)
-    : body;
+  return req.headers["content-type"]?.includes(contentTypes.json) ? safeParse(body) : body;
 };
 
 /**
@@ -360,50 +339,45 @@ export const readBody = async (
  * no library or utility out there does it including playwright.
  */
 export const chromeExecutablePath = () => {
-  if (process.platform === 'win32') {
+  if (process.platform === "win32") {
     // Windows always includes the ProgramFiles variable in the environment
-    return `${process.env['ProgramFiles']}\\Google\\Chrome\\Application\\chrome.exe`;
+    return `${process.env["ProgramFiles"]}\\Google\\Chrome\\Application\\chrome.exe`;
   }
 
-  if (process.platform === 'darwin') {
-    return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+  if (process.platform === "darwin") {
+    return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
   }
 
-  return '/usr/bin/google-chrome-stable';
+  return "/usr/bin/google-chrome-stable";
 };
 
 export const edgeExecutablePath = () => {
-  if (process.platform === 'win32') {
+  if (process.platform === "win32") {
     // Windows always includes the ProgramFiles variable in the environment
-    return `${process.env['ProgramFiles(x86)']}\\Microsoft\\Edge\\Application\\msedge.exe`;
+    return `${process.env["ProgramFiles(x86)"]}\\Microsoft\\Edge\\Application\\msedge.exe`;
   }
 
-  if (process.platform === 'darwin') {
-    return '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge';
+  if (process.platform === "darwin") {
+    return "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge";
   }
 
-  return '/usr/bin/microsoft-edge-stable';
+  return "/usr/bin/microsoft-edge-stable";
 };
 
 export const getRouteFiles = async (config: Config): Promise<string[][]> => {
   const routes = config.getRoutes();
   const foundRoutes: string[] = await fs
     .readdir(routes)
-    .then((dirs) =>
-      dirs.flatMap((d) => [
-        path.join(routes, d, 'ws'),
-        path.join(routes, d, 'http'),
-      ]),
-    )
+    .then((dirs) => dirs.flatMap((d) => [path.join(routes, d, "ws"), path.join(routes, d, "http")]))
     .catch(() => []);
 
   const [httpRouteFolders, wsRouteFolders] = foundRoutes.reduce(
     ([http, ws]: [string[], string[]], routePath) => {
-      if (routePath.endsWith('http')) {
+      if (routePath.endsWith("http")) {
         http.push(routePath);
       }
 
-      if (routePath.endsWith('ws')) {
+      if (routePath.endsWith("ws")) {
         ws.push(routePath);
       }
 
@@ -457,7 +431,7 @@ export const make404 = (...messages: string[]): string => {
     </style>
     <body><div style="background-image: url(&quot;data:image/svg+xml;base64,PHN2ZyBoZWlnaHQ9JzMwMHB4JyB3aWR0aD0nMzAwcHgnICBmaWxsPSIjMDAwMDAwIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGRhdGEtbmFtZT0i0KHQu9C+0LkgMSIgdmlld0JveD0iMCAwIDEyOCAxMjgiIHg9IjBweCIgeT0iMHB4Ij48dGl0bGU+aWNfcXVlc3Rpb25fbWFya193aW5kb3c8L3RpdGxlPjxjaXJjbGUgY3g9IjExNiIgY3k9IjEyIiByPSIyIj48L2NpcmNsZT48Y2lyY2xlIGN4PSIxMDgiIGN5PSIxMiIgcj0iMiI+PC9jaXJjbGU+PGNpcmNsZSBjeD0iMTAwIiBjeT0iMTIiIHI9IjIiPjwvY2lyY2xlPjxwYXRoIGQ9Ik0xMjEsMEg3QTcsNywwLDAsMCwwLDdWMTIxYTcsNywwLDAsMCw3LDdIMTIxYTcsNywwLDAsMCw3LTdWN0E3LDcsMCwwLDAsMTIxLDBaTTcsNEgxMjFhMywzLDAsMCwxLDMsM1YyMEg0VjdBMywzLDAsMCwxLDcsNFpNMTIxLDEyNEg3YTMsMywwLDAsMS0zLTNWMjRIMTI0VjEyMUEzLDMsMCwwLDEsMTIxLDEyNFoiPjwvcGF0aD48cGF0aCBkPSJNNjQsNDcuNTJhMTQsMTQsMCwwLDAtMTQsMTQsMiwyLDAsMCwwLDQsMCwxMCwxMCwwLDEsMSwyMCwwYzAsMy44My0yLjEyLDYuMS00LjgxLDlDNjYsNzQsNjIsNzguMjQsNjIsODYuMjNhMiwyLDAsMSwwLDQsMGMwLTYuNDEsMy05LjYsNi4xNC0xM0M3NSw3MC4xNSw3OCw2Nyw3OCw2MS41NEExNCwxNCwwLDAsMCw2NCw0Ny41MloiPjwvcGF0aD48Y2lyY2xlIGN4PSI2NCIgY3k9Ijk2LjIzIiByPSIyLjI1Ij48L2NpcmNsZT48L3N2Zz4=&quot;); background-repeat: no-repeat; height: 75px; background-size: contain; background-position: 50%;"></div>
       <pre style="font-size: 24px; font-weight: bold">404: ${title}</pre>
-      <pre>${rest.join('\n')}</pre>
+      <pre>${rest.join("\n")}</pre>
     </body>
     </html>
     `;
@@ -470,8 +444,7 @@ export const make404 = (...messages: string[]): string => {
  * @param {number} time
  * @returns {Promise}
  */
-export const sleep = (time: number): Promise<void> =>
-  new Promise((r) => setTimeout(r, time));
+export const sleep = (time: number): Promise<void> => new Promise((r) => setTimeout(r, time));
 
 /**
  * Returns a boolean if a given filepath (directory or file)
@@ -497,13 +470,12 @@ export const fileExists = async (path: string): Promise<boolean> =>
     .then((stat) => stat.isFile())
     .catch(() => false);
 
-const isBase64 =
-  /^([0-9a-zA-Z+/]{4})*(([0-9a-zA-Z+/]{2}==)|([0-9a-zA-Z+/]{3}=))?$/;
+const isBase64 = /^([0-9a-zA-Z+/]{4})*(([0-9a-zA-Z+/]{2}==)|([0-9a-zA-Z+/]{3}=))?$/;
 
 export const isBase64Encoded = (item: string): boolean => isBase64.test(item);
 
 export const convertIfBase64 = (item: string): string =>
-  isBase64Encoded(item) ? Buffer.from(item, 'base64').toString() : item;
+  isBase64Encoded(item) ? Buffer.from(item, "base64").toString() : item;
 
 export const availableBrowsers = Promise.all([
   exists(playwright.chromium.executablePath()),
@@ -511,41 +483,36 @@ export const availableBrowsers = Promise.all([
   exists(playwright.webkit.executablePath()),
   exists(chromeExecutablePath()),
   exists(edgeExecutablePath()),
-]).then(
-  ([chromiumExists, firefoxExists, webkitExists, chromeExists, edgeExists]) => {
-    const availableBrowsers = [];
+]).then(([chromiumExists, firefoxExists, webkitExists, chromeExists, edgeExists]) => {
+  const availableBrowsers = [];
 
-    if (chromiumExists) {
-      availableBrowsers.push(ChromiumCDP, ChromiumPlaywright);
-    }
+  if (chromiumExists) {
+    availableBrowsers.push(ChromiumCDP, ChromiumPlaywright);
+  }
 
-    if (chromeExists) {
-      availableBrowsers.push(ChromeCDP, ChromePlaywright);
-    }
+  if (chromeExists) {
+    availableBrowsers.push(ChromeCDP, ChromePlaywright);
+  }
 
-    if (firefoxExists) {
-      availableBrowsers.push(FirefoxPlaywright);
-    }
+  if (firefoxExists) {
+    availableBrowsers.push(FirefoxPlaywright);
+  }
 
-    if (webkitExists) {
-      availableBrowsers.push(WebKitPlaywright);
-    }
+  if (webkitExists) {
+    availableBrowsers.push(WebKitPlaywright);
+  }
 
-    if (edgeExists) {
-      availableBrowsers.push(EdgeCDP, EdgePlaywright);
-    }
+  if (edgeExists) {
+    availableBrowsers.push(EdgeCDP, EdgePlaywright);
+  }
 
-    return availableBrowsers;
-  },
-);
+  return availableBrowsers;
+});
 
-export const queryParamsToObject = (
-  params: URLSearchParams,
-): Record<string, unknown> =>
+export const queryParamsToObject = (params: URLSearchParams): Record<string, unknown> =>
   [...params.entries()].reduce(
     (accum, [key, value]) => {
-      accum[key] =
-        value === '' || value === undefined || value === null ? true : value;
+      accum[key] = value === "" || value === undefined || value === null ? true : value;
       return accum;
     },
     {} as ReturnType<typeof queryParamsToObject>,
@@ -556,12 +523,12 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 const wrapUserFunction = (fn: string) => {
   // Handle async definitions
-  if (fn.includes('async') || fn.includes('await')) {
+  if (fn.includes("async") || fn.includes("await")) {
     return new AsyncFunction(`await (${fn})(); return true`);
   }
 
   // Handle IIFE or anonymous functions
-  if (fn.startsWith('function') || fn.startsWith('()')) {
+  if (fn.startsWith("function") || fn.startsWith("()")) {
     return `(${fn})()`;
   }
 
@@ -569,20 +536,14 @@ const wrapUserFunction = (fn: string) => {
   return fn;
 };
 
-export const waitForFunction = async (
-  page: Page,
-  opts: WaitForFunctionOptions,
-): Promise<void> => {
+export const waitForFunction = async (page: Page, opts: WaitForFunctionOptions): Promise<void> => {
   const { fn, polling, timeout } = opts;
   const wrappedFn = wrapUserFunction(fn);
   // @ts-ignore objects are valid arguments into evaluate
   return page.waitForFunction(wrappedFn, { polling, timeout });
 };
 
-export const waitForEvent = async (
-  page: Page,
-  opts: WaitForEventOptions,
-): Promise<void> => {
+export const waitForEvent = async (page: Page, opts: WaitForEventOptions): Promise<void> => {
   const awaitEvent = async (event: string) => {
     await new Promise<void>((resolve) => {
       document.addEventListener(event, () => resolve(), { once: true });
@@ -667,25 +628,21 @@ export const getRandomNegativeInt = (): number => {
 export const convertPathToURL = (url: string, config: Config): URL => {
   const external = config.getExternalAddress();
   const fullInboundURL = new URL(url, external).href;
-  const internalPath = fullInboundURL.replace(external, '');
+  const internalPath = fullInboundURL.replace(external, "");
 
   return new URL(internalPath, config.getServerAddress());
 };
 
-export const makeExternalURL = (
-  externalAddress: string,
-  ...parts: string[]
-): string => {
+export const makeExternalURL = (externalAddress: string, ...parts: string[]): string => {
   const externalURL = new URL(externalAddress);
 
-  return new URL(path.join(externalURL.pathname, ...parts), externalAddress)
-    .href;
+  return new URL(path.join(externalURL.pathname, ...parts), externalAddress).href;
 };
 
 export class BadRequest extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'BadRequest';
+    this.name = "BadRequest";
     this.message = message;
     errorLog(this.message);
   }
@@ -694,7 +651,7 @@ export class BadRequest extends Error {
 export class TooManyRequests extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'TooManyRequests';
+    this.name = "TooManyRequests";
     this.message = message;
     errorLog(this.message);
   }
@@ -703,7 +660,7 @@ export class TooManyRequests extends Error {
 export class ServerError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'ServerError';
+    this.name = "ServerError";
     this.message = message;
     errorLog(this.message);
   }
@@ -711,7 +668,7 @@ export class ServerError extends Error {
 export class Unauthorized extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'Unauthorized';
+    this.name = "Unauthorized";
     this.message = message;
     errorLog(this.message);
   }
@@ -719,7 +676,7 @@ export class Unauthorized extends Error {
 export class NotFound extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'NotFound';
+    this.name = "NotFound";
     this.message = message;
     errorLog(this.message);
   }
@@ -727,7 +684,7 @@ export class NotFound extends Error {
 export class Timeout extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'Timeout';
+    this.name = "Timeout";
     this.message = message;
     errorLog(this.message);
   }
@@ -740,11 +697,7 @@ export const bestAttemptCatch =
     throw err;
   };
 
-export const parseBooleanParam = (
-  params: URLSearchParams,
-  name: string,
-  defaultValue: boolean,
-) => {
+export const parseBooleanParam = (params: URLSearchParams, name: string, defaultValue: boolean) => {
   const value = params.get(name);
 
   if (value === null) {
@@ -752,22 +705,18 @@ export const parseBooleanParam = (
   }
 
   // ?param format (no specified value)
-  if (value === '' || value === 'true') {
+  if (value === "" || value === "true") {
     return true;
   }
 
-  if (value === 'false') {
+  if (value === "false") {
     return false;
   }
 
   return defaultValue;
 };
 
-export const parseNumberParam = (
-  params: URLSearchParams,
-  name: string,
-  defaultValue: number,
-) => {
+export const parseNumberParam = (params: URLSearchParams, name: string, defaultValue: number) => {
   const value = params.get(name);
 
   if (value === null) {
@@ -775,7 +724,7 @@ export const parseNumberParam = (
   }
 
   // ?param format (no specified value)
-  if (value === '') {
+  if (value === "") {
     return defaultValue;
   }
 
@@ -805,23 +754,16 @@ export const parseStringParam = (
 export const encrypt = (text: string, secret: Buffer) => {
   const iv = crypto.randomBytes(16);
   const cipher = crypto.createCipheriv(encryptionAlgo, secret, iv);
-  const encrypted = cipher.update(text, 'utf8', 'hex');
+  const encrypted = cipher.update(text, "utf8", "hex");
 
-  return [
-    encrypted + cipher.final('hex'),
-    Buffer.from(iv).toString('hex'),
-  ].join(encryptionSep);
+  return [encrypted + cipher.final("hex"), Buffer.from(iv).toString("hex")].join(encryptionSep);
 };
 
 export const decrypt = (encryptedText: string, secret: Buffer) => {
   const [encrypted, iv] = encryptedText.toString().split(encryptionSep);
-  if (!iv) throw new ServerError('Bad or invalid encrypted format');
-  const decipher = crypto.createDecipheriv(
-    encryptionAlgo,
-    secret,
-    Buffer.from(iv, 'hex'),
-  );
-  return decipher.update(encrypted, 'hex', 'utf8') + decipher.final('utf8');
+  if (!iv) throw new ServerError("Bad or invalid encrypted format");
+  const decipher = crypto.createDecipheriv(encryptionAlgo, secret, Buffer.from(iv, "hex"));
+  return decipher.update(encrypted, "hex", "utf8") + decipher.final("utf8");
 };
 
 interface RequestInitTimeout extends RequestInit {
@@ -838,10 +780,7 @@ export const fetchTimeout = async (
   if (!timeout) return await fetch(input, init);
 
   const controller = new AbortController();
-  const id = setTimeout(
-    () => controller.abort(new Error(`TimeoutError`)),
-    timeout,
-  );
+  const id = setTimeout(() => controller.abort(new Error(`TimeoutError`)), timeout);
   let res;
 
   try {
@@ -869,13 +808,15 @@ export const printLogo = (docsLink: string, debugURL?: string | boolean) => `
 | OpenAPI: ${docsLink}
 | Full Documentation: https://docs.browserless.io/ ${
   /*prettier-ignore*/
-  debugURL ? `
-| Debbuger: ${debugURL}`  : ""
+  debugURL
+    ? `
+| Debbuger: ${debugURL}`
+    : ""
 }
 ---------------------------------------------------------
 ${gradient(
-  '#ff1a8c',
-  '#ffea00',
+  "#ff1a8c",
+  "#ffea00",
 )(`
 
 █▓▒
@@ -904,33 +845,18 @@ export const getCDPClient = (page: Page): CDPSession => {
   // @ts-ignore using internal CDP client
   const c = page._client;
 
-  return typeof c === 'function' ? c.call(page) : c;
+  return typeof c === "function" ? c.call(page) : c;
 };
 
-export const ublockLitePath = path.join(
-  __dirname,
-  '..',
-  'extensions',
-  'ublocklite',
-);
+export const ublockLitePath = path.join(__dirname, "..", "extensions", "ublocklite");
 
-export const screenxyPatchPath = path.join(
-  __dirname,
-  '..',
-  'extensions',
-  'screenxy-patch',
-);
+export const screenxyPatchPath = path.join(__dirname, "..", "extensions", "screenxy-patch");
 
-export const replayExtensionPath = path.join(
-  __dirname,
-  '..',
-  'extensions',
-  'replay',
-);
+export const replayExtensionPath = path.join(__dirname, "..", "extensions", "replay");
 
 export const isMatch = (text: string, pattern: string) => {
   return micromatch.isMatch(text, pattern, { bash: true });
 };
 
 export const getFinalPathSegment = (pathname: string): string | undefined =>
-  pathname.split(/[?#&]/)[0].split('/').filter(Boolean).pop();
+  pathname.split(/[?#&]/)[0].split("/").filter(Boolean).pop();

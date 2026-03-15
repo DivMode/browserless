@@ -3,14 +3,14 @@ import {
   BrowserlessSession,
   ReplayCompleteParams,
   exists,
-} from '@browserless.io/browserless';
-import { rm } from 'fs/promises';
+} from "@browserless.io/browserless";
+import { rm } from "fs/promises";
 
-import { Effect, Exit, Fiber, FiberMap, Schedule, Scope } from 'effect';
-import { observeHistogram, sessionDuration } from '../effect-metrics.js';
-import { runForkInServer } from '../otel-runtime.js';
-import { SessionCoordinator } from './session-coordinator.js';
-import { SessionRegistry } from './session-registry.js';
+import { Effect, Exit, Fiber, FiberMap, Schedule, Scope } from "effect";
+import { observeHistogram, sessionDuration } from "../effect-metrics.js";
+import { runForkInServer } from "../otel-runtime.js";
+import { SessionCoordinator } from "./session-coordinator.js";
+import { SessionRegistry } from "./session-registry.js";
 
 /**
  * SessionLifecycleManager handles browser session lifecycle.
@@ -28,9 +28,7 @@ export class SessionLifecycleManager {
   // Scope.close() drains all timer fibers atomically on shutdown.
   private readonly timerScope = Scope.makeUnsafe();
   private readonly timerFibers: FiberMap.FiberMap<string> = Effect.runSync(
-    FiberMap.make<string>().pipe(
-      Effect.provideService(Scope.Scope, this.timerScope),
-    ),
+    FiberMap.make<string>().pipe(Effect.provideService(Scope.Scope, this.timerScope)),
   );
 
   private watchdogFiber: Fiber.Fiber<unknown> | null = null;
@@ -53,7 +51,7 @@ export class SessionLifecycleManager {
   ): Effect.Effect<void> {
     const lifecycle = this;
 
-    const replayCleanup = Effect.fn('session.destroy.replay')(function*() {
+    const replayCleanup = Effect.fn("session.destroy.replay")(function* () {
       const coordinator = lifecycle.sessionCoordinator;
       if (!coordinator) return;
 
@@ -62,27 +60,27 @@ export class SessionLifecycleManager {
       // it races with per-tab cleanup and drops markers into deleted queues.
 
       if (session.replay) {
-        yield* coordinator.stopReplayEffect(session.id, {
-          browserType: browser.constructor.name,
-          routePath: Array.isArray(session.routePath)
-            ? session.routePath[0]
-            : session.routePath,
-          trackingId: session.trackingId,
-        }).pipe(
-          // 60s — GeoGuessr/Street View sessions can produce 20-30MB of rrweb events.
-          // The previous 12s timeout caused large replay POSTs to be interrupted,
-          // leaving orphaned NDJSON files on disk with no DB entry.
-          Effect.timeout('60 seconds'),
-          Effect.ignore,
-        );
+        yield* coordinator
+          .stopReplayEffect(session.id, {
+            browserType: browser.constructor.name,
+            routePath: Array.isArray(session.routePath) ? session.routePath[0] : session.routePath,
+            trackingId: session.trackingId,
+          })
+          .pipe(
+            // 60s — GeoGuessr/Street View sessions can produce 20-30MB of rrweb events.
+            // The previous 12s timeout caused large replay POSTs to be interrupted,
+            // leaving orphaned NDJSON files on disk with no DB entry.
+            Effect.timeout("60 seconds"),
+            Effect.ignore,
+          );
       }
     })();
 
-    return Effect.fn('session.destroy')(function*() {
-      yield* Effect.logDebug('session.destroy.start').pipe(
+    return Effect.fn("session.destroy")(function* () {
+      yield* Effect.logDebug("session.destroy.start").pipe(
         Effect.annotateLogs({ session_id: session.id }),
       );
-      yield* Effect.annotateCurrentSpan({ 'session.id': session.id });
+      yield* Effect.annotateCurrentSpan({ "session.id": session.id });
 
       // Step 1: Registry removal (immediate — prevents stale /sessions)
       lifecycle.registry.remove(browser);
@@ -92,25 +90,24 @@ export class SessionLifecycleManager {
       yield* observeHistogram(sessionDuration, durationSec);
 
       // Step 3: Replay + CF cleanup (with timeout)
-      yield* replayCleanup.pipe(
-        Effect.timeout('65 seconds'),
-        Effect.ignore,
-      );
+      yield* replayCleanup.pipe(Effect.timeout("65 seconds"), Effect.ignore);
 
       // Step 4: Browser close (with timeout — SIGKILL fallback is in browsers.cdp.ts)
       yield* Effect.tryPromise(() => browser.close()).pipe(
-        Effect.timeout('5 seconds'),
+        Effect.timeout("5 seconds"),
         Effect.ignore,
       );
     })().pipe(
       // Step 5: Data dir cleanup — GUARANTEED by Effect.ensuring
       // Runs even if steps 1-4 throw, timeout, or get interrupted
       Effect.ensuring(
-        Effect.logDebug('session.destroy.end').pipe(
+        Effect.logDebug("session.destroy.end").pipe(
           Effect.annotateLogs({ session_id: session.id }),
           Effect.andThen(
             session.isTempDataDir
-              ? Effect.tryPromise(() => lifecycle.removeUserDataDir(session.userDataDir)).pipe(Effect.ignore)
+              ? Effect.tryPromise(() => lifecycle.removeUserDataDir(session.userDataDir)).pipe(
+                  Effect.ignore,
+                )
               : Effect.void,
           ),
         ),
@@ -143,16 +140,16 @@ export class SessionLifecycleManager {
    */
   private async removeUserDataDir(userDataDir: string | null): Promise<void> {
     if (userDataDir && (await exists(userDataDir))) {
-      runForkInServer(
-        Effect.logDebug(`Deleting data directory "${userDataDir}"`),
+      runForkInServer(Effect.logDebug(`Deleting data directory "${userDataDir}"`));
+      await rm(userDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 }).catch(
+        (err) => {
+          runForkInServer(
+            Effect.logError(`Error cleaning up user-data-dir`).pipe(
+              Effect.annotateLogs({ error: String(err), user_data_dir: userDataDir }),
+            ),
+          );
+        },
       );
-      await rm(userDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 }).catch((err) => {
-        runForkInServer(
-          Effect.logError(`Error cleaning up user-data-dir`).pipe(
-            Effect.annotateLogs({ error: String(err), user_data_dir: userDataDir }),
-          ),
-        );
-      });
     }
   }
 
@@ -171,7 +168,7 @@ export class SessionLifecycleManager {
   ): Effect.Effect<ReplayCompleteParams | null> {
     const lifecycle = this;
 
-    return Effect.fn('lifecycle.close')(function*() {
+    return Effect.fn("lifecycle.close")(function* () {
       const now = Date.now();
       const keepUntil = browser.keepUntil();
       const connected = session.numbConnected;
@@ -185,12 +182,24 @@ export class SessionLifecycleManager {
         );
       }
 
-      yield* Effect.logDebug('session.close.decision').pipe(
-        Effect.annotateLogs({ session_id: session.id, keep_open: keepOpen, connected, has_keep_until: hasKeepUntil, force }),
+      yield* Effect.logDebug("session.close.decision").pipe(
+        Effect.annotateLogs({
+          session_id: session.id,
+          keep_open: keepOpen,
+          connected,
+          has_keep_until: hasKeepUntil,
+          force,
+        }),
       );
 
-      yield* Effect.logDebug('close() check').pipe(
-        Effect.annotateLogs({ session_id: session.id, numb_connected: session.numbConnected, keep_until: keepUntil, keep_open: keepOpen, force }),
+      yield* Effect.logDebug("close() check").pipe(
+        Effect.annotateLogs({
+          session_id: session.id,
+          numb_connected: session.numbConnected,
+          keep_until: keepUntil,
+          keep_open: keepOpen,
+          force,
+        }),
       );
 
       if (!force && hasKeepUntil) {
@@ -199,26 +208,35 @@ export class SessionLifecycleManager {
           Effect.annotateLogs({ session_id: session.id, timeout_ms: timeout }),
         );
         // FiberMap.run auto-interrupts any existing fiber for this session.id
-        yield* FiberMap.run(lifecycle.timerFibers, session.id,
+        yield* FiberMap.run(
+          lifecycle.timerFibers,
+          session.id,
           Effect.sleep(timeout).pipe(
-            Effect.andThen(Effect.sync(() => {
-              const currentSession = lifecycle.registry.get(browser);
-              if (currentSession) {
-                runForkInServer(
-                  Effect.logDebug('Timer hit').pipe(
-                    Effect.annotateLogs({ session_id: currentSession.id }),
-                  ),
-                );
-                lifecycle.close(browser, currentSession);
-              }
-            })),
+            Effect.andThen(
+              Effect.sync(() => {
+                const currentSession = lifecycle.registry.get(browser);
+                if (currentSession) {
+                  runForkInServer(
+                    Effect.logDebug("Timer hit").pipe(
+                      Effect.annotateLogs({ session_id: currentSession.id }),
+                    ),
+                  );
+                  lifecycle.close(browser, currentSession);
+                }
+              }),
+            ),
           ),
         );
       }
 
       if (!keepOpen) {
         yield* Effect.logWarning(`KILLING browser session`).pipe(
-          Effect.annotateLogs({ session_id: session.id, numb_connected: connected, keep_until: keepUntil, force }),
+          Effect.annotateLogs({
+            session_id: session.id,
+            numb_connected: connected,
+            keep_until: keepUntil,
+            force,
+          }),
         );
         yield* lifecycle.destroySession(browser, session);
       }
@@ -245,10 +263,10 @@ export class SessionLifecycleManager {
   private completeEffect(browser: BrowserInstance): Effect.Effect<void> {
     const lifecycle = this;
 
-    return Effect.fn('lifecycle.complete')(function*() {
+    return Effect.fn("lifecycle.complete")(function* () {
       const session = lifecycle.registry.get(browser);
       if (!session) {
-        yield* Effect.logInfo('complete() called but no session found (already closed?)');
+        yield* Effect.logInfo("complete() called but no session found (already closed?)");
         yield* Effect.promise(() => browser.close());
         return;
       }
@@ -261,7 +279,7 @@ export class SessionLifecycleManager {
 
       --session.numbConnected;
 
-      yield* Effect.logDebug('complete()').pipe(
+      yield* Effect.logDebug("complete()").pipe(
         Effect.annotateLogs({ session_id: id, numb_connected: session.numbConnected }),
       );
 
@@ -285,21 +303,15 @@ export class SessionLifecycleManager {
   private killSessionsEffect(target: string): Effect.Effect<ReplayCompleteParams[]> {
     const lifecycle = this;
 
-    return Effect.fn('lifecycle.killSessions')(function*() {
-      yield* Effect.logDebug('killSessions invoked').pipe(
-        Effect.annotateLogs({ target }),
-      );
+    return Effect.fn("lifecycle.killSessions")(function* () {
+      yield* Effect.logDebug("killSessions invoked").pipe(Effect.annotateLogs({ target }));
       const sessions = lifecycle.registry.toArray();
       const results: ReplayCompleteParams[] = [];
       let closed = 0;
 
       for (const [browser, session] of sessions) {
-        if (
-          session.trackingId === target ||
-          session.id === target ||
-          target === 'all'
-        ) {
-          yield* Effect.logDebug('Closing browser via killSessions').pipe(
+        if (session.trackingId === target || session.id === target || target === "all") {
+          yield* Effect.logDebug("Closing browser via killSessions").pipe(
             Effect.annotateLogs({ browser_id: session.id, tracking_id: session.trackingId }),
           );
           // CRITICAL: Must await close to ensure session is fully cleaned up
@@ -309,7 +321,7 @@ export class SessionLifecycleManager {
         }
       }
 
-      if (closed === 0 && target !== 'all') {
+      if (closed === 0 && target !== "all") {
         // Throw directly — Effect catches as defect, runPromise rejects with it.
         // Matches original behavior where callers catch Error instances.
         throw new Error(`Couldn't locate session for id: "${target}"`);
@@ -368,14 +380,13 @@ export class SessionLifecycleManager {
   startWatchdog(defaultMaxAgeMs: number): void {
     const lifecycle = this;
     this.watchdogFiber = Effect.runFork(
-      Effect.fn('watchdog.tick')(function*() {
+      Effect.fn("watchdog.tick")(function* () {
         const now = Date.now();
-        const stale = lifecycle.registry.toArray()
-          .filter(([, s]) => {
-            // Use per-session TTL if set, otherwise fall back to global default
-            const maxAge = s.ttl > 0 ? s.ttl + 60_000 : defaultMaxAgeMs;
-            return now - s.startedOn > maxAge;
-          });
+        const stale = lifecycle.registry.toArray().filter(([, s]) => {
+          // Use per-session TTL if set, otherwise fall back to global default
+          const maxAge = s.ttl > 0 ? s.ttl + 60_000 : defaultMaxAgeMs;
+          return now - s.startedOn > maxAge;
+        });
 
         if (stale.length > 0) {
           yield* Effect.logWarning(`Watchdog: stale sessions found`).pipe(
@@ -383,20 +394,24 @@ export class SessionLifecycleManager {
           );
           yield* Effect.all(
             stale.map(([browser, session]) => {
-              return Effect.logWarning('Watchdog: force-closing session').pipe(
-                Effect.annotateLogs({ session_id: session.id, age_s: Math.round((now - session.startedOn) / 1000), ttl_ms: session.ttl, numb_connected: session.numbConnected }),
-                Effect.andThen(lifecycle.destroySession(browser, session).pipe(
-                  Effect.timeout('20 seconds'),
-                  Effect.ignore,
-                )),
+              return Effect.logWarning("Watchdog: force-closing session").pipe(
+                Effect.annotateLogs({
+                  session_id: session.id,
+                  age_s: Math.round((now - session.startedOn) / 1000),
+                  ttl_ms: session.ttl,
+                  numb_connected: session.numbConnected,
+                }),
+                Effect.andThen(
+                  lifecycle
+                    .destroySession(browser, session)
+                    .pipe(Effect.timeout("20 seconds"), Effect.ignore),
+                ),
               );
             }),
-            { concurrency: 'unbounded' },
+            { concurrency: "unbounded" },
           );
         }
-      })().pipe(
-        Effect.repeat(Schedule.fixed('60 seconds')),
-      ),
+      })().pipe(Effect.repeat(Schedule.fixed("60 seconds"))),
     );
   }
 
@@ -404,7 +419,7 @@ export class SessionLifecycleManager {
    * Shutdown: destroy all sessions via the single cleanup path, clear timers.
    */
   async shutdown(): Promise<void> {
-    runForkInServer(Effect.logInfo('Closing down browser sessions'));
+    runForkInServer(Effect.logInfo("Closing down browser sessions"));
 
     // Step 0: Flush all root spans IMMEDIATELY — before any slow cleanup.
     // This pushes session + tab root spans to the OTLP exporter buffer so
@@ -423,19 +438,16 @@ export class SessionLifecycleManager {
     const sessions = this.registry.toArray();
     if (sessions.length > 0) {
       runForkInServer(
-        Effect.logInfo('Destroying sessions').pipe(
+        Effect.logInfo("Destroying sessions").pipe(
           Effect.annotateLogs({ session_count: sessions.length }),
         ),
       );
       await Effect.runPromise(
         Effect.all(
           sessions.map(([browser, session]) =>
-            this.destroySession(browser, session).pipe(
-              Effect.timeout('20 seconds'),
-              Effect.ignore,
-            )
+            this.destroySession(browser, session).pipe(Effect.timeout("20 seconds"), Effect.ignore),
           ),
-          { concurrency: 'unbounded' },
+          { concurrency: "unbounded" },
         ),
       );
     }
@@ -447,6 +459,6 @@ export class SessionLifecycleManager {
     // FiberMap.clear interrupts all timer fibers, then close the scope
     this.clearTimers();
     await Effect.runPromise(Scope.close(this.timerScope, Exit.void));
-    runForkInServer(Effect.logInfo('Session lifecycle shutdown complete'));
+    runForkInServer(Effect.logInfo("Session lifecycle shutdown complete"));
   }
 }

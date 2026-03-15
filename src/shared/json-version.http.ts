@@ -11,13 +11,11 @@ import {
   contentTypes,
   jsonResponse,
   writeResponse,
-} from '@browserless.io/browserless';
-import { Effect } from 'effect';
-import { runForkInServer } from '../otel-runtime.js';
+} from "@browserless.io/browserless";
+import { Effect } from "effect";
+import { runForkInServer } from "../otel-runtime.js";
 
-export type ResponseSchema = UnwrapPromise<
-  ReturnType<BrowserManager['getVersionJSON']>
->;
+export type ResponseSchema = UnwrapPromise<ReturnType<BrowserManager["getVersionJSON"]>>;
 
 export default class ChromiumJSONVersionGetRoute extends HTTPRoute {
   protected cachedJSON: ResponseSchema | undefined;
@@ -34,7 +32,7 @@ export default class ChromiumJSONVersionGetRoute extends HTTPRoute {
   tags = [APITags.browserAPI];
   async handler(req: Request, res: Response): Promise<void> {
     const baseUrl = req.parsed.host;
-    const protocol = req.parsed.protocol.includes('s') ? 'wss' : 'ws';
+    const protocol = req.parsed.protocol.includes("s") ? "wss" : "ws";
 
     try {
       if (!this.cachedJSON) {
@@ -47,12 +45,7 @@ export default class ChromiumJSONVersionGetRoute extends HTTPRoute {
       return jsonResponse(res, 200, this.cachedJSON);
     } catch (err) {
       runForkInServer(Effect.logWarning(`Error handling request: ` + String(err)));
-      return writeResponse(
-        res,
-        500,
-        'There was an error handling your request',
-        contentTypes.text,
-      );
+      return writeResponse(res, 500, "There was an error handling your request", contentTypes.text);
     }
   }
 }

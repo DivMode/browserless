@@ -1,15 +1,15 @@
-import { createInterface } from 'readline';
-import debug from 'debug';
-import fs from 'fs/promises';
-import path from 'path';
-import { promisify } from 'util';
+import { createInterface } from "readline";
+import debug from "debug";
+import fs from "fs/promises";
+import path from "path";
+import { promisify } from "util";
 
-import { exec } from 'child_process';
+import { exec } from "child_process";
 
 // Ignore node_modules, dist, .next, .cache, coverage for route loading
 // This is to prevent the SDK from loading routes that aren't actual routes
 // we do build in a "build" directory so we need to keep that out of the list
-const ignore = ['node_modules', 'dist', '.next', '.cache', 'coverage'];
+const ignore = ["node_modules", "dist", ".next", ".cache", "coverage"];
 
 const execAsync = promisify(exec);
 
@@ -17,40 +17,32 @@ const waitForCommand = async (cmd: string, workingDirectory: string) =>
   execAsync(cmd, { cwd: workingDirectory })
     .then(({ stderr }) => {
       if (stderr) {
-        console.warn(
-          `Command produced the following stderr entries: \n${stderr}`,
-        );
+        console.warn(`Command produced the following stderr entries: \n${stderr}`);
       }
       return;
     })
     .catch((e) => {
-      console.error(
-        `Error running command: "${cmd}" at directory: "${workingDirectory}"`,
-        e,
-      );
+      console.error(`Error running command: "${cmd}" at directory: "${workingDirectory}"`, e);
       process.exit(1);
     });
 
 export const getArgSwitches = () => {
   return process.argv.reduce(
     (accum, arg, idx) => {
-      if (!arg.startsWith('--')) {
+      if (!arg.startsWith("--")) {
         return accum;
       }
 
-      if (arg.includes('=')) {
-        const [parameter, value] = arg.split('=');
-        accum[parameter.replace(/-/gi, '')] = value || true;
+      if (arg.includes("=")) {
+        const [parameter, value] = arg.split("=");
+        accum[parameter.replace(/-/gi, "")] = value || true;
         return accum;
       }
 
       const nextSwitchOrParameter = process.argv[idx + 1];
-      const param = arg.replace(/-/gi, '');
+      const param = arg.replace(/-/gi, "");
 
-      if (
-        typeof nextSwitchOrParameter === 'undefined' ||
-        nextSwitchOrParameter?.startsWith('--')
-      ) {
+      if (typeof nextSwitchOrParameter === "undefined" || nextSwitchOrParameter?.startsWith("--")) {
         accum[param] = true;
         return accum;
       }
@@ -64,7 +56,7 @@ export const getArgSwitches = () => {
 };
 
 export const getSourceFiles = async (cwd: string) => {
-  const buildDir = path.join(cwd, 'build');
+  const buildDir = path.join(cwd, "build");
   const files = await fs.readdir(buildDir, { recursive: true });
   const [httpRoutes, webSocketRoutes] = files.reduce(
     ([httpRoutes, webSocketRoutes], file) => {
@@ -75,11 +67,11 @@ export const getSourceFiles = async (cwd: string) => {
         return [httpRoutes, webSocketRoutes];
       }
 
-      if (parsed.name.endsWith('http')) {
+      if (parsed.name.endsWith("http")) {
         httpRoutes.push(path.join(buildDir, file));
       }
 
-      if (parsed.name.endsWith('ws')) {
+      if (parsed.name.endsWith("ws")) {
         webSocketRoutes.push(path.join(buildDir, file));
       }
 
@@ -95,11 +87,10 @@ export const getSourceFiles = async (cwd: string) => {
   };
 };
 
-export const camelCase = (str: string) =>
-  str.replace(/-([a-z])/g, (_, w) => w.toUpperCase());
+export const camelCase = (str: string) => str.replace(/-([a-z])/g, (_, w) => w.toUpperCase());
 
 export const prompt = async (question: string) => {
-  const promptLog = debug('browserless.io:prompt');
+  const promptLog = debug("browserless.io:prompt");
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -107,7 +98,7 @@ export const prompt = async (question: string) => {
 
   return new Promise((resolve) => {
     promptLog(question);
-    rl.question('  > ', (a) => {
+    rl.question("  > ", (a) => {
       rl.close();
       resolve(a.trim());
     });
@@ -115,26 +106,20 @@ export const prompt = async (question: string) => {
 };
 
 // Exceptions are not caught, since any error would result in a crash regardless
-export const installDependencies = async (
-  workingDirectory: string,
-): Promise<void> => {
-  await waitForCommand('npm install', workingDirectory);
+export const installDependencies = async (workingDirectory: string): Promise<void> => {
+  await waitForCommand("npm install", workingDirectory);
   await installBrowsers(workingDirectory);
 };
 
 export const installBrowsers = async (workingDirectory: string) => {
   await waitForCommand(
-    './node_modules/playwright-core/cli.js install --with-deps chromium firefox webkit msedge',
+    "./node_modules/playwright-core/cli.js install --with-deps chromium firefox webkit msedge",
     workingDirectory,
   );
 };
 
-export const buildDockerImage = async (
-  cmd: string,
-  projectDir: string,
-): Promise<void> => waitForCommand(cmd, projectDir);
+export const buildDockerImage = async (cmd: string, projectDir: string): Promise<void> =>
+  waitForCommand(cmd, projectDir);
 
-export const buildTypeScript = async (
-  buildDir: string,
-  projectDir: string,
-): Promise<void> => waitForCommand(`npx tsc --outDir ${buildDir}`, projectDir);
+export const buildTypeScript = async (buildDir: string, projectDir: string): Promise<void> =>
+  waitForCommand(`npx tsc --outDir ${buildDir}`, projectDir);

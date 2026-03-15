@@ -10,9 +10,9 @@
  * true — pre-click OOPIF destruction is normal CF lifecycle (api.js replaces
  * iframes). Post-click OOPIF death means CF rejected the click → abort.
  */
-import { Data, Effect, Exit, Scope, Tracer } from 'effect';
-import type { CdpSessionId, TargetId } from '../../shared/cloudflare-detection.js';
-import type { ActiveDetection, ReadonlyActiveDetection } from './cloudflare-event-emitter.js';
+import { Data, Effect, Exit, Scope, Tracer } from "effect";
+import type { CdpSessionId, TargetId } from "../../shared/cloudflare-detection.js";
+import type { ActiveDetection, ReadonlyActiveDetection } from "./cloudflare-event-emitter.js";
 
 /** OOPIF lifecycle states — distinguishes "never attached" from "cleared for rebind". */
 export type OOPIFState = Data.TaggedEnum<{
@@ -47,10 +47,14 @@ export class DetectionContext {
   }
 
   /** Public read-only view of the active detection. Mutations go through controlled methods. */
-  get active(): ReadonlyActiveDetection { return this._active; }
+  get active(): ReadonlyActiveDetection {
+    return this._active;
+  }
 
   /** Mutable active detection — for resolution settlement by detector/state-tracker. */
-  get mutableActive(): ActiveDetection { return this._active; }
+  get mutableActive(): ActiveDetection {
+    return this._active;
+  }
 
   /**
    * Set aborted state on an ActiveDetection — THE ONLY way to set aborted=true.
@@ -92,18 +96,24 @@ export class DetectionContext {
     this._active.aborted = false;
   }
 
-  get aborted(): boolean { return this._active.aborted; }
+  get aborted(): boolean {
+    return this._active.aborted;
+  }
 
   /** Current OOPIF binding, or null if not in Bound state. */
   get oopif(): OOPIFBinding | null {
-    return this._oopifState._tag === 'Bound' ? this._oopifState.binding : null;
+    return this._oopifState._tag === "Bound" ? this._oopifState.binding : null;
   }
 
   /** Full OOPIF lifecycle state for pattern matching. */
-  get oopifState(): OOPIFState { return this._oopifState; }
+  get oopifState(): OOPIFState {
+    return this._oopifState;
+  }
 
   /** Can a new OOPIF bind? Only in Unbound or Cleared states. */
-  get canBindOOPIF(): boolean { return this._oopifState._tag !== 'Bound'; }
+  get canBindOOPIF(): boolean {
+    return this._oopifState._tag !== "Bound";
+  }
 
   /**
    * Mark this detection as resolved and close its scope.
@@ -164,14 +174,17 @@ export class DetectionContext {
 
   bindOOPIF(iframeTargetId: TargetId, iframeCdpSessionId: CdpSessionId): Effect.Effect<void> {
     const ctx = this;
-    return Effect.gen(function*() {
+    return Effect.gen(function* () {
       const oopifScope = yield* Scope.make();
       // OOPIF death → only abort if click was delivered (post-click OOPIF death
       // means CF rejected us). Pre-click OOPIF death is normal CF lifecycle.
-      yield* Scope.addFinalizer(oopifScope, Effect.suspend(() => {
-        if (ctx._active.clickDelivered) return ctx.abort();
-        return Effect.void;
-      }));
+      yield* Scope.addFinalizer(
+        oopifScope,
+        Effect.suspend(() => {
+          if (ctx._active.clickDelivered) return ctx.abort();
+          return Effect.void;
+        }),
+      );
       // Detection scope close → OOPIF scope also closes (cleanup)
       yield* Scope.addFinalizer(ctx.scope, Scope.close(oopifScope, Exit.void));
       const binding: OOPIFBinding = { iframeTargetId, iframeCdpSessionId, scope: oopifScope };

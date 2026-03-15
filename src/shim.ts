@@ -1,27 +1,17 @@
-import * as http from 'http';
-import {
-  CDPLaunchOptions,
-  convertIfBase64,
-  safeParse,
-} from '@browserless.io/browserless';
+import * as http from "http";
+import { CDPLaunchOptions, convertIfBase64, safeParse } from "@browserless.io/browserless";
 
-const shimParam = [
-  'headless',
-  'stealth',
-  'ignoreDefaultArgs',
-  'slowMo',
-  'ignoreHTTPSErrors',
-];
+const shimParam = ["headless", "stealth", "ignoreDefaultArgs", "slowMo", "ignoreHTTPSErrors"];
 
 /**
  * Obfuscates the ?token parameter by shifting it to a header instead of a query-parameter.
  */
 export function moveTokenToHeader(req: http.IncomingMessage): string {
-  const parsed = new URL(req.url || '', 'http://localhost');
-  const token = parsed.searchParams.get('token');
+  const parsed = new URL(req.url || "", "http://localhost");
+  const token = parsed.searchParams.get("token");
 
   if (token) {
-    parsed.searchParams.delete('token');
+    parsed.searchParams.delete("token");
     req.headers.authorization = req.headers.authorization ?? `Bearer ${token}`;
     req.url = parsed.pathname + parsed.search;
   }
@@ -42,42 +32,34 @@ export function shimLegacyRequests(url: URL): URL {
   const params = [...searchParams];
   const names = params.map(([k]) => k);
 
-  const cliSwitches = params.filter(([name]) => name.startsWith('--'));
-  const hasLegacyParams =
-    cliSwitches.length || shimParam.some((name) => names.includes(name));
+  const cliSwitches = params.filter(([name]) => name.startsWith("--"));
+  const hasLegacyParams = cliSwitches.length || shimParam.some((name) => names.includes(name));
 
   if (hasLegacyParams) {
     const launchParams: CDPLaunchOptions =
-      safeParse(convertIfBase64(searchParams.get('launch') || '{}')) || {};
+      safeParse(convertIfBase64(searchParams.get("launch") || "{}")) || {};
     const ignoreDefaultArgs =
-      searchParams.get('ignoreDefaultArgs') ?? launchParams.ignoreDefaultArgs;
+      searchParams.get("ignoreDefaultArgs") ?? launchParams.ignoreDefaultArgs;
     const ignoreHTTPSErrors =
-      searchParams.get('ignoreHTTPSErrors') ?? launchParams.ignoreHTTPSErrors;
-    const stealth = searchParams.get('stealth') ?? launchParams.stealth;
-    const slowMo = searchParams.get('slowMo') ?? launchParams.slowMo;
-    const headless = searchParams.get('headless') ?? launchParams.headless;
+      searchParams.get("ignoreHTTPSErrors") ?? launchParams.ignoreHTTPSErrors;
+    const stealth = searchParams.get("stealth") ?? launchParams.stealth;
+    const slowMo = searchParams.get("slowMo") ?? launchParams.slowMo;
+    const headless = searchParams.get("headless") ?? launchParams.headless;
 
-    if (
-      typeof headless !== 'undefined' &&
-      launchParams.headless === undefined
-    ) {
-      launchParams.headless =
-        headless === 'shell' ? 'shell' : headless !== 'false';
+    if (typeof headless !== "undefined" && launchParams.headless === undefined) {
+      launchParams.headless = headless === "shell" ? "shell" : headless !== "false";
     }
 
-    if (typeof slowMo !== 'undefined' && launchParams.slowMo === undefined) {
+    if (typeof slowMo !== "undefined" && launchParams.slowMo === undefined) {
       launchParams.slowMo = +slowMo;
     }
 
-    if (typeof stealth !== 'undefined' && launchParams.stealth === undefined) {
-      launchParams.stealth = stealth !== 'false';
+    if (typeof stealth !== "undefined" && launchParams.stealth === undefined) {
+      launchParams.stealth = stealth !== "false";
     }
 
-    if (
-      typeof ignoreHTTPSErrors !== 'undefined' &&
-      launchParams.ignoreHTTPSErrors === undefined
-    ) {
-      launchParams.ignoreHTTPSErrors = ignoreHTTPSErrors !== 'false';
+    if (typeof ignoreHTTPSErrors !== "undefined" && launchParams.ignoreHTTPSErrors === undefined) {
+      launchParams.ignoreHTTPSErrors = ignoreHTTPSErrors !== "false";
     }
 
     // When acceptInsecureCerts is set, ignoreHTTPSErrors is ignored
@@ -87,24 +69,19 @@ export function shimLegacyRequests(url: URL): URL {
 
     // When ignoreHTTPSErrors sent, convert it to acceptInsecureCerts
     if (
-      typeof ignoreHTTPSErrors !== 'undefined' &&
+      typeof ignoreHTTPSErrors !== "undefined" &&
       launchParams.acceptInsecureCerts === undefined
     ) {
-      launchParams.acceptInsecureCerts = ignoreHTTPSErrors !== 'false';
+      launchParams.acceptInsecureCerts = ignoreHTTPSErrors !== "false";
       launchParams.ignoreHTTPSErrors = undefined;
     }
 
-    if (
-      typeof ignoreDefaultArgs !== 'undefined' &&
-      launchParams.ignoreDefaultArgs === undefined
-    ) {
+    if (typeof ignoreDefaultArgs !== "undefined" && launchParams.ignoreDefaultArgs === undefined) {
       const parsed =
-        typeof ignoreDefaultArgs === 'string' && ignoreDefaultArgs.includes(',')
-          ? ignoreDefaultArgs.split(',')
+        typeof ignoreDefaultArgs === "string" && ignoreDefaultArgs.includes(",")
+          ? ignoreDefaultArgs.split(",")
           : ignoreDefaultArgs;
-      launchParams.ignoreDefaultArgs = Array.isArray(parsed)
-        ? parsed
-        : parsed !== 'false';
+      launchParams.ignoreDefaultArgs = Array.isArray(parsed) ? parsed : parsed !== "false";
     }
 
     // Handle CLI switches
@@ -114,7 +91,7 @@ export function shimLegacyRequests(url: URL): URL {
 
     shimParam.forEach((n) => searchParams.delete(n));
     cliSwitches.forEach(([n]) => searchParams.delete(n));
-    searchParams.set('launch', JSON.stringify(launchParams));
+    searchParams.set("launch", JSON.stringify(launchParams));
   }
 
   return url;

@@ -14,13 +14,13 @@ import {
   getTokenFromRequest,
   makeExternalURL,
   mimeTypes,
-} from '@browserless.io/browserless';
-import { Effect } from 'effect';
-import { FunctionRunner } from './client.js';
-import { runForkInServer } from '../../../otel-runtime.js';
-import { Page } from 'puppeteer-core';
-import fs from 'fs';
-import path from 'path';
+} from "@browserless.io/browserless";
+import { Effect } from "effect";
+import { FunctionRunner } from "./client.js";
+import { runForkInServer } from "../../../otel-runtime.js";
+import { Page } from "puppeteer-core";
+import fs from "fs";
+import path from "path";
 
 declare global {
   interface Window {
@@ -43,17 +43,14 @@ export default (config: Config, options: HandlerOptions = {}) =>
     req: Request,
     browser: BrowserInstance,
   ): Promise<{ contentType: string; page: Page; payload: unknown }> => {
-    const isJson = req.headers['content-type']?.includes('json');
-    const functionPath = HTTPRoutes.function.replace('?(/)', '');
-    const functionAssetLocation = path.join(config.getStatic(), 'function');
-    const functionRequestPath = makeExternalURL(
-      config.getExternalAddress(),
-      functionPath,
-    );
+    const isJson = req.headers["content-type"]?.includes("json");
+    const functionPath = HTTPRoutes.function.replace("?(/)", "");
+    const functionAssetLocation = path.join(config.getStatic(), "function");
+    const functionRequestPath = makeExternalURL(config.getExternalAddress(), functionPath);
     const functionIndexHTML = makeExternalURL(
       config.getExternalAddress(),
       functionPath,
-      '/index.html',
+      "/index.html",
     );
 
     const { code: rawCode, context: rawContext } = isJson
@@ -68,23 +65,19 @@ export default (config: Config, options: HandlerOptions = {}) =>
     const privateWSEndpoint = browser.wsEndpoint();
 
     if (!privateWSEndpoint) {
-      throw new ServerError(
-        `No browser endpoint was found, is the browser running?`,
-      );
+      throw new ServerError(`No browser endpoint was found, is the browser running?`);
     }
 
     const browserID = getFinalPathSegment(privateWSEndpoint)!;
     const browserWSEndpoint = makeExternalURL(
       config.getExternalWebSocketAddress(),
-      'function',
-      'connect',
+      "function",
+      "connect",
       browserID,
-      '?token=' + getTokenFromRequest(req),
+      "?token=" + getTokenFromRequest(req),
     );
     const functionCodeJS = `browserless-function-${browserID}.js`;
-    const page = (await browser.newPage()) as UnwrapPromise<
-      ReturnType<ChromiumCDP['newPage']>
-    >;
+    const page = (await browser.newPage()) as UnwrapPromise<ReturnType<ChromiumCDP["newPage"]>>;
     await page.setRequestInterception(true);
 
     /**
@@ -93,7 +86,7 @@ export default (config: Config, options: HandlerOptions = {}) =>
      * a proxy, which might not have access or abilities to
      * request the function index/js from this server.
      */
-    page.on('request', async (request) => {
+    page.on("request", async (request) => {
       const requestUrl = request.url();
       runForkInServer(Effect.logDebug(`Outbound Page Request: "${requestUrl}"`));
       if (requestUrl.startsWith(functionRequestPath)) {
@@ -114,26 +107,30 @@ export default (config: Config, options: HandlerOptions = {}) =>
             status: 200,
           });
         }
-        runForkInServer(Effect.logWarning(
-          `Static asset request to "${requestUrl}" couldn't be found, 404-ing`,
-        ));
+        runForkInServer(
+          Effect.logWarning(`Static asset request to "${requestUrl}" couldn't be found, 404-ing`),
+        );
         return request.respond({
           body: code,
           contentType: `Couldn't locate this file "${filename}" request "${requestUrl}" in "${functionAssetLocation}"`,
           status: 404,
         });
       }
-      runForkInServer(Effect.logDebug(`Request: "${requestUrl}" no responder found, continuing...`));
+      runForkInServer(
+        Effect.logDebug(`Request: "${requestUrl}" no responder found, continuing...`),
+      );
       return request.continue();
     });
 
-    page.on('response', (res) => {
+    page.on("response", (res) => {
       if (!res.ok()) {
-        runForkInServer(Effect.logWarning(`Received a non-200 response for request "${res.url()}"`));
+        runForkInServer(
+          Effect.logWarning(`Received a non-200 response for request "${res.url()}"`),
+        );
       }
     });
 
-    page.on('console', (event) => {
+    page.on("console", (event) => {
       runForkInServer(Effect.logDebug(`${event.type()}: ${event.text()}`));
     });
 
@@ -141,22 +138,15 @@ export default (config: Config, options: HandlerOptions = {}) =>
 
     const { contentType, payload } = await page
       .evaluate(
-        async (
-          browserWSEndpoint,
-          context,
-          functionCodeJS,
-          serializedOptions,
-        ) => {
-          const [{ default: code }] = await Promise.all([
-            import('./' + functionCodeJS),
-          ]);
-          console.log('/function.js: imported successfully.');
+        async (browserWSEndpoint, context, functionCodeJS, serializedOptions) => {
+          const [{ default: code }] = await Promise.all([import("./" + functionCodeJS)]);
+          console.log("/function.js: imported successfully.");
           console.log(
             `/function.js: BrowserlessFunctionRunner: ${typeof window.BrowserlessFunctionRunner}`,
           );
           const helper = new window.BrowserlessFunctionRunner();
           const options = JSON.parse(serializedOptions);
-          console.log('/function.js: executing puppeteer code.');
+          console.log("/function.js: executing puppeteer code.");
 
           return helper.start({
             browserWSEndpoint,

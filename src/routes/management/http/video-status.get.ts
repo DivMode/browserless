@@ -9,9 +9,9 @@ import {
   SystemQueryParameters,
   contentTypes,
   jsonResponse,
-} from '@browserless.io/browserless';
-import { ServerResponse } from 'http';
-import { Effect } from 'effect';
+} from "@browserless.io/browserless";
+import { ServerResponse } from "http";
+import { Effect } from "effect";
 
 export interface QuerySchema extends SystemQueryParameters {
   token?: string;
@@ -39,24 +39,22 @@ export default class VideoStatusGetRoute extends HTTPRoute {
   async handler(req: Request, res: ServerResponse): Promise<void> {
     const route = this;
     return Effect.runPromise(
-      Effect.fn('route.video-status.get')(function* () {
+      Effect.fn("route.video-status.get")(function* () {
         const video = route.videoManager();
         if (!video) {
           return jsonResponse(res, 503, {
-            error: 'Video manager is not enabled',
+            error: "Video manager is not enabled",
           });
         }
 
         // Extract replay ID from path: /video/:id/status
-        const pathParts = req.parsed.pathname.split('/');
-        const videoIndex = pathParts.indexOf('video');
+        const pathParts = req.parsed.pathname.split("/");
+        const videoIndex = pathParts.indexOf("video");
         const id =
-          videoIndex >= 0 && videoIndex + 1 < pathParts.length
-            ? pathParts[videoIndex + 1]
-            : null;
+          videoIndex >= 0 && videoIndex + 1 < pathParts.length ? pathParts[videoIndex + 1] : null;
 
         if (!id) {
-          throw new NotFound('Replay ID is required');
+          throw new NotFound("Replay ID is required");
         }
 
         const encoder = video.getVideoEncoder();
@@ -73,12 +71,7 @@ export default class VideoStatusGetRoute extends HTTPRoute {
           fps: progress.fps,
           percent:
             progress.totalFrames > 0
-              ? Math.min(
-                  100,
-                  Math.round(
-                    (progress.framesProcessed / progress.totalFrames) * 100,
-                  ),
-                )
+              ? Math.min(100, Math.round((progress.framesProcessed / progress.totalFrames) * 100))
               : 0,
         };
 

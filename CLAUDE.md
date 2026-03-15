@@ -59,12 +59,14 @@ npm run install:browsers
 **ALWAYS run ALL tests in the CURRENT session before committing.** "Tests passed last session" is not valid.
 
 Vitest has TWO configs:
+
 1. `npx vitest run` — unit tests (`*.test.ts`, excludes integration). Fast, no browser.
 2. `LOCAL_MOBILE_PROXY=$(op read "op://Catchseo.com/Proxies/local_mobile_proxy") npx vitest run --config vitest.integration.config.ts` — integration tests (`*.integration.test.ts`). Launches real server, hits real CF sites, runs pydoll subprocess tests (ahrefs-fast, cf-stress, pytest). 60s timeout.
 
 `npx vitest run` alone only runs unit tests — ALWAYS run both.
 
 The full test gate:
+
 1. `npx tsc --noEmit` (typecheck)
 2. `npx vitest run` (unit tests)
 3. `LOCAL_MOBILE_PROXY=... npx vitest run --config vitest.integration.config.ts` (integration + pydoll)
@@ -90,6 +92,7 @@ The full test gate:
 Routes are organized by browser type: `chrome/`, `chromium/`, `edge/`, `firefox/`, `webkit/`, `management/`
 
 Each browser folder contains:
+
 - `http/` - REST API routes (e.g., `pdf.post.ts`, `screenshot.post.ts`)
 - `ws/` - WebSocket routes (e.g., `browser.ts`, `playwright.ts`)
 - `tests/` - Test files
@@ -99,14 +102,16 @@ Route naming convention: `{action}.{method}.ts` (e.g., `pdf.post.ts`, `json-list
 ### Shared Route Logic (`src/shared/`)
 
 Browser-specific routes often re-export from shared implementations:
+
 ```typescript
 // src/routes/chromium/http/pdf.post.ts
-export { default } from '../../../shared/pdf.http.js';
+export { default } from "../../../shared/pdf.http.js";
 ```
 
 ### Route Types
 
 Four route primitives (defined in `src/types.ts`):
+
 - **`HTTPRoute`** - Basic HTTP route without browser
 - **`BrowserHTTPRoute`** - HTTP route that requires a browser instance
 - **`WebSocketRoute`** - WebSocket route without browser
@@ -117,12 +122,14 @@ Routes specify: `name`, `path`, `method`, `accepts`, `contentTypes`, `auth`, `co
 ### Schema Generation
 
 Routes export TypeScript interfaces (`BodySchema`, `QuerySchema`, `ResponseSchema`) that are automatically converted to:
+
 - Runtime JSON Schema validation
 - OpenAPI documentation (served at `/docs`)
 
 ### Docker Images
 
 Located in `docker/` with browser-specific Dockerfiles:
+
 - `base/` - Base image with Node.js and browserless core
 - `chromium/`, `chrome/`, `firefox/`, `webkit/`, `edge/` - Single browser images
 - `multi/` - All browsers combined
@@ -140,6 +147,7 @@ Located in `docker/` with browser-specific Dockerfiles:
 ### Extending via SDK
 
 The SDK allows extending browserless functionality. Key extension points:
+
 - Custom routes (`*.http.ts`, `*.websocket.ts`)
 - Module overrides: `config.ts`, `hooks.ts`, `limiter.ts`, `metrics.ts`, etc.
 - Disabled routes via `disabled-routes.ts`
@@ -149,6 +157,7 @@ Run `npx @browserless.io/browserless create` to scaffold an SDK project.
 ### Environment Configuration
 
 Key environment variables (see `src/config.ts`):
+
 - `PORT` - Server port (default: 3000)
 - `TOKEN` - Authentication token
 - `CONCURRENT` - Max concurrent sessions
@@ -203,11 +212,11 @@ All core modules can be overridden by extending and default-exporting:
 
 ```typescript
 // src/config.ts in SDK project
-import { Config } from '@browserless.io/browserless';
+import { Config } from "@browserless.io/browserless";
 
 export default class MyConfig extends Config {
   public getCustomSetting(): string {
-    return process.env.CUSTOM_SETTING ?? 'default';
+    return process.env.CUSTOM_SETTING ?? "default";
   }
 }
 ```
@@ -217,6 +226,7 @@ Every module has a `stop()` method (left blank) that SDK extensions can override
 ## Hooks System
 
 Four lifecycle hooks in `src/hooks.ts`:
+
 - `before({ req, res?, socket?, head? })` - Before request processing. Return `false` to reject (you must write response).
 - `after({ req, start, status, error? })` - After request completion
 - `page({ meta, page })` - On new Page creation
@@ -227,6 +237,7 @@ Legacy hook injection via `external/*.js` files (before.js, after.js, browser.js
 ## Key Utilities
 
 Import from `@browserless.io/browserless`:
+
 - `writeResponse(res, code, message)` / `jsonResponse(res, code, object)` - Response helpers
 - `readBody(req, maxSize)` - Parse request body
 - `BadRequest`, `Unauthorized`, `NotFound`, `Timeout`, `TooManyRequests`, `ServerError` - Error classes (throw to return appropriate HTTP codes)
@@ -238,6 +249,7 @@ Import from `@browserless.io/browserless`:
 ### Problem Solved
 
 External CDP clients that connect via `/json/new` or WebSocket were experiencing CDP command timeouts because:
+
 1. Puppeteer-stealth was attaching to ALL page targets (internal and external)
 2. Recording used `flatten=true` attachment which created competing CDP sessions
 
@@ -276,26 +288,27 @@ protected async onTargetCreated(target: Target) {
 
 ```typescript
 // Use flatten=false to avoid dedicated CDP sessions
-const attachResult = await sendCommand('Target.attachToTarget', {
+const attachResult = await sendCommand("Target.attachToTarget", {
   targetId,
-  flatten: false,  // Less invasive than flatten=true
+  flatten: false, // Less invasive than flatten=true
 });
 
 // With flatten=false, commands must use Target.sendMessageToTarget
 const innerCommand = JSON.stringify({ id, method, params });
-await sendCommand('Target.sendMessageToTarget', {
+await sendCommand("Target.sendMessageToTarget", {
   sessionId: cdpSessionId,
   message: innerCommand,
 });
 
 // Responses come via Target.receivedMessageFromTarget events
-if (msg.method === 'Target.receivedMessageFromTarget') {
+if (msg.method === "Target.receivedMessageFromTarget") {
   const innerMsg = JSON.parse(msg.params.message);
   // Route response to pending command handler
 }
 ```
 
 **Why `flatten=false`:**
+
 - `flatten=true`: Creates dedicated CDP session that can block external clients
 - `flatten=false`: Uses browser WebSocket, commands/responses via `sendMessageToTarget`/`receivedMessageFromTarget`
 

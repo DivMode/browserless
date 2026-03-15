@@ -18,10 +18,10 @@ The `@divmode/rrweb` fork (v0.0.38) patches `attachShadow` to intercept closed r
 
 **Tested 2026-01-29** with `static/test-shadow-dom.html` (before fix):
 
-| Shadow DOM Mode | Captured? | Details |
-|----------------|-----------|---------|
-| Regular DOM | Yes | Baseline — always captured |
-| Open (`mode: 'open'`) | Yes | Content + styles serialized with `isShadow` markers |
+| Shadow DOM Mode           | Captured?           | Details                                                |
+| ------------------------- | ------------------- | ------------------------------------------------------ |
+| Regular DOM               | Yes                 | Baseline — always captured                             |
+| Open (`mode: 'open'`)     | Yes                 | Content + styles serialized with `isShadow` markers    |
 | Closed (`mode: 'closed'`) | **No** (before fix) | Custom element tag present, shadow root contents empty |
 
 With the `setAutoAttach` fix, the closed shadow DOM row should now capture content since rrweb's interceptor is in place before `connectedCallback` runs.
@@ -53,7 +53,7 @@ patchAttachShadow(element, doc) {
 function shadowRoot$1(n2) {
   if (!n2 || !("shadowRoot" in n2)) return null;
   if ("__rrClosedShadowRoot" in n2) {
-    return n2.__rrClosedShadowRoot;                 // bypasses native .shadowRoot (null for closed)
+    return n2.__rrClosedShadowRoot; // bypasses native .shadowRoot (null for closed)
   }
   return getUntaintedAccessor$1("Element", n2, "shadowRoot");
 }

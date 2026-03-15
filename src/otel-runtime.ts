@@ -11,13 +11,13 @@
  * Spans push to the server exporter (never disposed during sessions).
  * The exporter's scope finalizer only runs on disposeOtelRuntime().
  */
-import { Effect, type Fiber, Layer, ManagedRuntime, References, Tracer } from 'effect';
-import { OtelLayer } from './otel-layer.js';
+import { Effect, type Fiber, Layer, ManagedRuntime, References, Tracer } from "effect";
+import { OtelLayer } from "./otel-layer.js";
 
 const serverRuntime = ManagedRuntime.make(OtelLayer);
 let _cachedTracer: Tracer.Tracer | null = null;
 
-const logLevelLayer = Layer.succeed(References.MinimumLogLevel, 'Info');
+const logLevelLayer = Layer.succeed(References.MinimumLogLevel, "Info");
 
 /**
  * Initialize the server-level OTLP runtime.
@@ -30,7 +30,9 @@ export async function initOtelRuntime(): Promise<void> {
   // Extract the built Tracer — its span() factory references the server exporter via closure.
   // When OtelLayer = Layer.empty (no endpoint), returns the default NativeSpan tracer (no-op).
   _cachedTracer = await serverRuntime.runPromise(
-    Effect.gen(function*() { return yield* Tracer.Tracer; }),
+    Effect.gen(function* () {
+      return yield* Tracer.Tracer;
+    }),
   );
 }
 
@@ -41,12 +43,10 @@ export async function initOtelRuntime(): Promise<void> {
  * The tracer's span factory pushes to the server exporter — session dispose
  * doesn't touch it. No per-session OtlpExporter, no finalizer, no dispose race.
  */
-export const SharedTracerLayer: Layer.Layer<never> = Layer.effect(
-  Tracer.Tracer,
-)(
+export const SharedTracerLayer: Layer.Layer<never> = Layer.effect(Tracer.Tracer)(
   Effect.sync(() => {
     if (!_cachedTracer) {
-      throw new Error('OtelRuntime not initialized — call initOtelRuntime() at startup');
+      throw new Error("OtelRuntime not initialized — call initOtelRuntime() at startup");
     }
     return _cachedTracer;
   }),

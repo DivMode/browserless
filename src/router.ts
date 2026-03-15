@@ -14,13 +14,13 @@ import {
   contentTypes,
   isConnected,
   writeResponse,
-} from '@browserless.io/browserless';
-import { Effect } from 'effect';
-import { EventEmitter } from 'events';
-import micromatch from 'micromatch';
-import stream from 'stream';
+} from "@browserless.io/browserless";
+import { Effect } from "effect";
+import { EventEmitter } from "events";
+import micromatch from "micromatch";
+import stream from "stream";
 
-import { runForkInServer } from './otel-runtime.js';
+import { runForkInServer } from "./otel-runtime.js";
 
 export class Router extends EventEmitter {
   protected httpRoutes: Array<HTTPRoute | BrowserHTTPRoute> = [];
@@ -35,46 +35,46 @@ export class Router extends EventEmitter {
   }
 
   protected getTimeout(req: Request) {
-    const timer = req.parsed.searchParams.get('timeout');
+    const timer = req.parsed.searchParams.get("timeout");
 
     return timer ? +timer : undefined;
   }
 
   protected onQueueFullHTTP(_req: Request, res: Response) {
     runForkInServer(Effect.logWarning(`Queue is full, sending 429 response`));
-    return writeResponse(res, 429, 'Too many requests');
+    return writeResponse(res, 429, "Too many requests");
   }
 
   protected onQueueFullWebSocket(_req: Request, socket: stream.Duplex) {
     runForkInServer(Effect.logWarning(`Queue is full, sending 429 response`));
-    return writeResponse(socket, 429, 'Too many requests');
+    return writeResponse(socket, 429, "Too many requests");
   }
 
   protected onHTTPTimeout(_req: Request, res: Response) {
     runForkInServer(Effect.logError(`HTTP job has timedout, sending 408 response`));
-    return writeResponse(res, 408, 'Request has timed out');
+    return writeResponse(res, 408, "Request has timed out");
   }
 
   protected onWebsocketTimeout(_req: Request, socket: stream.Duplex) {
     runForkInServer(Effect.logError(`Websocket job has timedout, sending 408 response`));
-    return writeResponse(socket, 408, 'Request has timed out');
+    return writeResponse(socket, 408, "Request has timed out");
   }
 
   protected wrapHTTPHandler(
     route: HTTPRoute | BrowserHTTPRoute,
-    handler: HTTPRoute['handler'] | BrowserHTTPRoute['handler'],
+    handler: HTTPRoute["handler"] | BrowserHTTPRoute["handler"],
   ) {
     const router = this;
     return async (req: Request, res: Response) => {
       return Effect.runPromise(
-        Effect.fn('router.httpHandler')(function*() {
+        Effect.fn("router.httpHandler")(function* () {
           if (!isConnected(res)) {
             yield* Effect.logWarning(`HTTP Request has closed prior to running`);
             return;
           }
           if (
             Object.getPrototypeOf(route) instanceof BrowserHTTPRoute &&
-            'browser' in route &&
+            "browser" in route &&
             route.browser
           ) {
             const browser = yield* Effect.promise(() =>
@@ -92,7 +92,7 @@ export class Router extends EventEmitter {
                 Promise.race([
                   handler(req, res, browser),
                   new Promise((resolve, reject) => {
-                    res.once('close', () => {
+                    res.once("close", () => {
                       if (!res.writableEnded) {
                         reject(new Error(`Request closed prior to writing results`));
                       }
@@ -107,9 +107,7 @@ export class Router extends EventEmitter {
             }
           }
 
-          return yield* Effect.promise(() =>
-            (handler as HTTPRoute['handler'])(req, res),
-          );
+          return yield* Effect.promise(() => (handler as HTTPRoute["handler"])(req, res));
         })(),
       );
     };
@@ -117,19 +115,19 @@ export class Router extends EventEmitter {
 
   protected wrapWebSocketHandler(
     route: WebSocketRoute | BrowserWebsocketRoute,
-    handler: WebSocketRoute['handler'] | BrowserWebsocketRoute['handler'],
+    handler: WebSocketRoute["handler"] | BrowserWebsocketRoute["handler"],
   ) {
     const router = this;
     return async (req: Request, socket: stream.Duplex, head: Buffer) => {
       return Effect.runPromise(
-        Effect.fn('router.wsHandler')(function*() {
+        Effect.fn("router.wsHandler")(function* () {
           if (!isConnected(socket)) {
             yield* Effect.logWarning(`WebSocket Request has closed prior to running`);
             return;
           }
           if (
             Object.getPrototypeOf(route) instanceof BrowserWebsocketRoute &&
-            'browser' in route &&
+            "browser" in route &&
             route.browser
           ) {
             const browser = yield* Effect.promise(() =>
@@ -147,9 +145,9 @@ export class Router extends EventEmitter {
                 Promise.race([
                   handler(req, socket, head, browser),
                   new Promise<void>((resolve) => {
-                    socket.once('close', resolve);
-                    socket.once('end', resolve);
-                    socket.once('error', resolve);
+                    socket.once("close", resolve);
+                    socket.once("end", resolve);
+                    socket.once("error", resolve);
                   }),
                 ]),
               );
@@ -160,19 +158,17 @@ export class Router extends EventEmitter {
             return;
           }
           return yield* Effect.promise(() =>
-            (handler as WebSocketRoute['handler'])(req, socket, head),
+            (handler as WebSocketRoute["handler"])(req, socket, head),
           );
         })(),
       );
     };
   }
 
-  public registerHTTPRoute(
-    route: HTTPRoute | BrowserHTTPRoute,
-  ): HTTPRoute | BrowserHTTPRoute {
-    runForkInServer(Effect.logDebug(
-      `Registering HTTP ${route.method.toUpperCase()} ${route.path}`,
-    ));
+  public registerHTTPRoute(route: HTTPRoute | BrowserHTTPRoute): HTTPRoute | BrowserHTTPRoute {
+    runForkInServer(
+      Effect.logDebug(`Registering HTTP ${route.method.toUpperCase()} ${route.path}`),
+    );
 
     const bound = route.handler.bind(route);
     const wrapped = this.wrapHTTPHandler(route, bound);
@@ -192,7 +188,7 @@ export class Router extends EventEmitter {
     );
 
     if (duplicatePaths.length) {
-      runForkInServer(Effect.logWarning(`Found duplicate routes: ${duplicatePaths.join(', ')}`));
+      runForkInServer(Effect.logWarning(`Found duplicate routes: ${duplicatePaths.join(", ")}`));
     }
     this.httpRoutes.push(route);
 
@@ -217,12 +213,10 @@ export class Router extends EventEmitter {
       : wrapped;
     route.path = Array.isArray(route.path) ? route.path : [route.path];
     const registeredPaths = this.webSocketRoutes.map((r) => r.path).flat();
-    const duplicatePaths = registeredPaths.filter((path) =>
-      route.path.includes(path),
-    );
+    const duplicatePaths = registeredPaths.filter((path) => route.path.includes(path));
 
     if (duplicatePaths.length) {
-      runForkInServer(Effect.logWarning(`Found duplicate routes: ${duplicatePaths.join(', ')}`));
+      runForkInServer(Effect.logWarning(`Found duplicate routes: ${duplicatePaths.join(", ")}`));
     }
     this.webSocketRoutes.push(route);
     return route;
@@ -235,28 +229,22 @@ export class Router extends EventEmitter {
   }
 
   public getRouteForHTTPRequestEffect(req: Request) {
-    return Effect.fn('router.getRouteForHTTPRequest')({ self: this }, function*() {
-      const accepts = (req.headers['accept']?.toLowerCase() || '*/*').split(',');
-      const contentType = req.headers['content-type']
-        ?.toLowerCase()
-        ?.split(';')
-        .shift() as contentTypes | undefined;
+    return Effect.fn("router.getRouteForHTTPRequest")({ self: this }, function* () {
+      const accepts = (req.headers["accept"]?.toLowerCase() || "*/*").split(",");
+      const contentType = req.headers["content-type"]?.toLowerCase()?.split(";").shift() as
+        | contentTypes
+        | undefined;
 
       return (
         this.httpRoutes.find(
           (r) =>
-            (r.path as Array<PathTypes>).some((p) =>
-              micromatch.isMatch(req.parsed.pathname, p),
-            ) &&
+            (r.path as Array<PathTypes>).some((p) => micromatch.isMatch(req.parsed.pathname, p)) &&
             r.method === (req.method?.toLocaleLowerCase() as Methods) &&
-            (accepts.some((a) => a.includes('*/*')) ||
-              r.contentTypes.some((contentType) =>
-                accepts.includes(contentType),
-              )) &&
+            (accepts.some((a) => a.includes("*/*")) ||
+              r.contentTypes.some((contentType) => accepts.includes(contentType))) &&
             ((!contentType && r.accepts.includes(contentTypes.any)) ||
               r.accepts.includes(contentType as contentTypes)),
-        ) ||
-        (req.method?.toLowerCase() === 'get' ? this.getStaticHandler() : null)
+        ) || (req.method?.toLowerCase() === "get" ? this.getStaticHandler() : null)
       );
     })();
   }
@@ -266,7 +254,7 @@ export class Router extends EventEmitter {
   }
 
   public getRouteForWebSocketRequestEffect(req: Request) {
-    return Effect.fn('router.getRouteForWebSocketRequest')({ self: this }, function*() {
+    return Effect.fn("router.getRouteForWebSocketRequest")({ self: this }, function* () {
       const { pathname } = req.parsed;
 
       return this.webSocketRoutes.find((r) =>

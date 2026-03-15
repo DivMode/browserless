@@ -8,24 +8,24 @@ Browserless container memory grew at ~870 MB/hr due to orphaned Chrome user-data
 
 ## Symptoms
 
-| Signal | Where to Check | What You See |
-|--------|----------------|--------------|
-| Memory climbing | Prometheus: `container_memory_working_set_bytes{name="browserless"}` | Monotonic increase ~670-870 MB/hr |
-| Watchdog firing | Loki: `{service_name="flatcar-browserless"} \|= "Watchdog"` | "force-closing stale session" every 7 min |
-| Orphaned dirs | SSH: `ls /tmp/browserless-data-dirs/ \| wc -l` | Count >> active session count |
-| CF solver timeouts | Loki: `{service_name="flatcar-pydoll-scraper"} \|~ "timeout\|widget_not_found"` | Cluster of turnstile failures |
-| Batch failures | Loki: `{service_name="workers-prod"} \|~ "workflow failed"` | "Turnstile + API not completed within timeout" |
-| Queue retries | Loki: `{service_name="workers-prod"} \|= "queue_attempt_distribution"` | Attempts > 1 (retries at 3, 6, etc.) |
+| Signal             | Where to Check                                                                  | What You See                                   |
+| ------------------ | ------------------------------------------------------------------------------- | ---------------------------------------------- |
+| Memory climbing    | Prometheus: `container_memory_working_set_bytes{name="browserless"}`            | Monotonic increase ~670-870 MB/hr              |
+| Watchdog firing    | Loki: `{service_name="flatcar-browserless"} \|= "Watchdog"`                     | "force-closing stale session" every 7 min      |
+| Orphaned dirs      | SSH: `ls /tmp/browserless-data-dirs/ \| wc -l`                                  | Count >> active session count                  |
+| CF solver timeouts | Loki: `{service_name="flatcar-pydoll-scraper"} \|~ "timeout\|widget_not_found"` | Cluster of turnstile failures                  |
+| Batch failures     | Loki: `{service_name="workers-prod"} \|~ "workflow failed"`                     | "Turnstile + API not completed within timeout" |
+| Queue retries      | Loki: `{service_name="workers-prod"} \|= "queue_attempt_distribution"`          | Attempts > 1 (retries at 3, 6, etc.)           |
 
 ## Root Cause
 
 Three code paths closed sessions, each with different cleanup steps:
 
-| Path | Registry | Prometheus | Replay | Browser Close | Data Dir |
-|------|----------|------------|--------|---------------|----------|
-| `close()` (normal) | yes | yes | yes | yes | yes |
-| `startWatchdog()` | yes | no | yes (forceCleanup) | yes | **no — BUG** |
-| `shutdown()` | no | no | yes (coordinator.shutdown) | yes | no |
+| Path               | Registry | Prometheus | Replay                     | Browser Close | Data Dir     |
+| ------------------ | -------- | ---------- | -------------------------- | ------------- | ------------ |
+| `close()` (normal) | yes      | yes        | yes                        | yes           | yes          |
+| `startWatchdog()`  | yes      | no         | yes (forceCleanup)         | yes           | **no — BUG** |
+| `shutdown()`       | no       | no         | yes (coordinator.shutdown) | yes           | no           |
 
 The watchdog path (line 279-296 of `session-lifecycle-manager.ts`) used `Effect.sync` (synchronous, fire-and-forget) and manually called `registry.remove()`, `forceCleanup()`, `browser.close()` — but NEVER `removeUserDataDir()`.
 
@@ -60,6 +60,7 @@ shutdown   -> destroySession()  <- same pipeline
 ```
 
 Key Effect v4 features:
+
 - `Effect.fn('session.destroy')` — traced span in Tempo
 - `Effect.ensuring` — GUARANTEES data dir cleanup runs even if browser.close() hangs/times out
 - `Effect.timeout` — composable timeouts (replay 12s, browser 5s, per-session 15-20s)
@@ -76,37 +77,44 @@ Adding a new cleanup step means adding it to ONE place. `Effect.ensuring` is the
 
 ## Files Changed
 
-| File | Change |
-|------|--------|
+| File                                       | Change                                                                                   |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------- |
 | `src/session/session-lifecycle-manager.ts` | Extract `destroySession` Effect, simplify `close`/`watchdog`/`shutdown`/`acquireSession` |
-| `src/browsers/browsers.cdp.ts` | 5s timeout + SIGKILL fallback on `close()` |
-| `src/session/session-lifecycle.test.ts` | 3 new tests: data dir cleanup, cleanup-on-failure, skip-non-temp |
+| `src/browsers/browsers.cdp.ts`             | 5s timeout + SIGKILL fallback on `close()`                                               |
+| `src/session/session-lifecycle.test.ts`    | 3 new tests: data dir cleanup, cleanup-on-failure, skip-non-temp                         |
 
 ## Debugging Checklist (Future Reference)
 
 If you see memory climbing again:
 
 1. **Check orphaned data dirs:**
+
    ```bash
    ssh flatcar 'ls /tmp/browserless-data-dirs/ | wc -l'
    ```
+
    Compare with `browserless_sessions_registered` — should be roughly equal.
 
 2. **Check watchdog activity:**
+
    ```
    {service_name="flatcar-browserless"} |= "Watchdog"
    ```
 
 3. **Check session.destroy spans in Tempo:**
+
    ```
    {span.name="session.destroy"} && {session.id=~".*"}
    ```
+
    Every destroy should have data dir cleanup (visible as the `ensuring` finalizer).
 
 4. **Check for Chrome zombies:**
+
    ```bash
    ssh flatcar 'docker exec browserless ps aux | grep chrome | wc -l'
    ```
+
    Should be <= registered sessions + 1 (main process).
 
 5. **Emergency cleanup:**
@@ -128,6 +136,7 @@ The watchdog used global `TIMEOUT` env var (300s = 5 min) instead of per-session
 Pydoll's AhrefsSessionManager creates persistent Chrome sessions with `timeout=3600000` (1 hour) via the WebSocket query param. The limiter (queue library) correctly used this as the job timeout. But the watchdog ignored it entirely and used `TIMEOUT + 60s` = 360s as the kill threshold.
 
 **The math:**
+
 - Watchdog threshold: `TIMEOUT + 60s` = 360s
 - Watchdog poll interval: 60s
 - Expected stale age: 360-420s (threshold + poll variance)
@@ -183,15 +192,15 @@ Active sockets grow linearly across scrape batches: 118 → 160 → 197 → 256 
 
 Frozen deltas after all scraping stopped (no new creates or destroys for 5+ minutes):
 
-| Type | Create | Destroy | Delta | Leak Rate |
-|------|--------|---------|-------|-----------|
-| `clean_page` | 168 | 83 | **85** | ~51% never released |
-| `solver_isolated` | 81 | 43 | **38** | ~47% never released |
-| `proxy_isolated` | 81 | 43 | **38** | ~47% never released |
-| `page` | 61 | 58 | **3** | Healthy (active sessions) |
-| `proxy_browser` | 11 | 8 | **3** | Healthy (active sessions) |
-| `proxy_client` | 11 | 8 | **3** | Healthy (active sessions) |
-| `session_browser` | 11 | 8 | **3** | Healthy (active sessions) |
+| Type              | Create | Destroy | Delta  | Leak Rate                 |
+| ----------------- | ------ | ------- | ------ | ------------------------- |
+| `clean_page`      | 168    | 83      | **85** | ~51% never released       |
+| `solver_isolated` | 81     | 43      | **38** | ~47% never released       |
+| `proxy_isolated`  | 81     | 43      | **38** | ~47% never released       |
+| `page`            | 61     | 58      | **3**  | Healthy (active sessions) |
+| `proxy_browser`   | 11     | 8       | **3**  | Healthy (active sessions) |
+| `proxy_client`    | 11     | 8       | **3**  | Healthy (active sessions) |
+| `session_browser` | 11     | 8       | **3**  | Healthy (active sessions) |
 
 **Key ratio:** 38 solver_isolated × ~2.2 = ~84 clean_page leaked. Each solve creates 1 `solver_isolated` + 1 `proxy_isolated` + ~2 `clean_page` (one in `phase1PageDomTraversal`, one in `getIframePageCoords`). The proportional leak confirms all three leak from the SAME scope failure.
 
@@ -269,6 +278,7 @@ Detection fibers run via `runtime.runFork(FiberMap.run(...))`. When session tear
 If `disposeEffect` returns before the interrupted fiber's `Effect.scoped` finalizers run, the scope's release handlers are orphaned. The WS acquire ran (counter incremented) but the release never fires.
 
 The teardown timeout chain also creates pressure:
+
 ```
 destroySession timeout: 15s overall
   └── stopReplayEffect timeout: 12s
@@ -301,6 +311,7 @@ get destroyEffect(): Effect.Effect<void> {
 ```
 
 Also removed diagnostic `console.error` logs added during Part 3 investigation:
+
 - `solver.dispatch.acquire` / `solver.dispatch.release` in `cloudflare-solver.ts`
 - `ws.acquire.clean_page` / `ws.release.clean_page` in `cf-coords.ts`
 
@@ -310,13 +321,13 @@ Also removed diagnostic `console.error` logs added during Part 3 investigation:
 
 Post-deploy Prometheus data (idle, all counters frozen, zero activity for 5+ min):
 
-| Type | Create | Destroy | Delta | Leak Rate |
-|------|--------|---------|-------|-----------|
-| `solver_isolated` | 327 | 174 | **153** | **47%** |
-| `proxy_isolated` | 327 | 174 | **153** | **47%** |
-| `clean_page` | 591 | 341 | **250** | **42%** |
-| `page` | 159 | 156 | 3 | healthy |
-| `proxy_browser` | 3 | 0 | 3 | 3 sessions alive |
+| Type              | Create | Destroy | Delta   | Leak Rate        |
+| ----------------- | ------ | ------- | ------- | ---------------- |
+| `solver_isolated` | 327    | 174     | **153** | **47%**          |
+| `proxy_isolated`  | 327    | 174     | **153** | **47%**          |
+| `clean_page`      | 591    | 341     | **250** | **42%**          |
+| `page`            | 159    | 156     | 3       | healthy          |
+| `proxy_browser`   | 3      | 0       | 3       | 3 sessions alive |
 
 Socket count: **182** (frozen at idle). Timeline: 27 → 67 → 151 → 182 → 182 → 182 (grew during batch, froze at idle, confirmed stable across 3 checks ~5min apart).
 
@@ -332,18 +343,19 @@ The hypotheses from Fix Attempt 1 were wrong — the issue was NOT fiber interru
 
 ```typescript
 // BEFORE (leaked): After click race, blocked indefinitely
-if (raceResult._tag === 'Clicked') {
-  yield* active.abortLatch.await.pipe(Effect.ignore);  // ← BLOCKS FOREVER
+if (raceResult._tag === "Clicked") {
+  yield * active.abortLatch.await.pipe(Effect.ignore); // ← BLOCKS FOREVER
   return raceResult;
 }
 
 // AFTER (fixed): Return immediately, detection awaits push signals independently
-if (raceResult._tag === 'Clicked') {
-  return raceResult;  // dispatch scope closes → WS released
+if (raceResult._tag === "Clicked") {
+  return raceResult; // dispatch scope closes → WS released
 }
 ```
 
 **Files changed:**
+
 - `src/session/cf/cloudflare-solver.effect.ts` — removed 3 `abortLatch.await` calls (Clicked, OopifDead, NoClick paths)
 - `src/session/cf/cloudflare-solver.effect.test.ts` — updated 11 tests to match new immediate-return behavior
 
@@ -353,19 +365,20 @@ if (raceResult._tag === 'Clicked') {
 
 Post-deploy Prometheus data across 5+ batches, 101 solver_isolated connections:
 
-| Type | Create | Destroy | Delta | Leak Rate |
-|------|--------|---------|-------|-----------|
-| `solver_isolated` | 101 | 101 | **0** | **0%** |
-| `proxy_isolated` | 101 | 101 | **0** | **0%** |
-| `clean_page` | 166 | 104 | 62 | counter gap* |
-| `page` | 51 | 50 | 1 | 1 active tab |
-| `proxy_browser` | 1 | 0 | 1 | 1 active session |
+| Type              | Create | Destroy | Delta | Leak Rate        |
+| ----------------- | ------ | ------- | ----- | ---------------- |
+| `solver_isolated` | 101    | 101     | **0** | **0%**           |
+| `proxy_isolated`  | 101    | 101     | **0** | **0%**           |
+| `clean_page`      | 166    | 104     | 62    | counter gap\*    |
+| `page`            | 51     | 50      | 1     | 1 active tab     |
+| `proxy_browser`   | 1      | 0       | 1     | 1 active session |
 
 Socket count: **13** during active session (3 session sockets + active tab/page), **3** at true idle. Stable across 10+ consecutive monitoring checks over ~1.5 hours. No growth.
 
-*`clean_page` delta 62: counter instrumentation gap, NOT a socket leak — see Fix Attempt 3 below.
+\*`clean_page` delta 62: counter instrumentation gap, NOT a socket leak — see Fix Attempt 3 below.
 
 **Before vs After:**
+
 ```
 Before fix: Sockets 118 → 160 → 197 → 256 → 295 → 334  (linear growth, leak)
 After fix:  Sockets  3 →  13 →  13 →  13 →  13 →   3  (batch spike → full drain)
@@ -378,6 +391,7 @@ After fix:  Sockets  3 →  13 →  13 →  13 →  13 →   3  (batch spike →
 **Problem:** `clean_page` delta grew linearly (62 → 92 → 145 → 1949 → 6089 → 7554) while socket count stayed flat at 13. Not a socket leak — a counter instrumentation bug.
 
 **Root cause:** In `cf-coords.ts`, `openCleanPageWsScoped` incremented `wsLifecycle.labels('clean_page', 'create')` immediately on `new WebSocket()` (before the `open` event). If the fiber was interrupted during the handshake or the WS failed to connect (timeout/error):
+
 1. `Effect.callback` cleanup ran → `ws.terminate()` → socket freed
 2. But `acquireRelease` acquire never completed → release handler never ran
 3. `destroy` counter never incremented → permanent counter gap
@@ -389,27 +403,28 @@ After fix:  Sockets  3 →  13 →  13 →  13 →  13 →   3  (batch spike →
 ```typescript
 // BEFORE (counter gap): create fires before open, destroy only fires on success
 const ws = new WebSocket(pageWsUrl);
-wsLifecycle.labels('clean_page', 'create').inc();  // ← fires even if WS fails to open
-yield* Effect.callback(/* wait for open */);
+wsLifecycle.labels("clean_page", "create").inc(); // ← fires even if WS fails to open
+yield * Effect.callback(/* wait for open */);
 
 // AFTER (fixed): create fires only after successful open
 const ws = new WebSocket(pageWsUrl);
-yield* Effect.callback(/* wait for open */);
-wsLifecycle.labels('clean_page', 'create').inc();  // ← only counts successful opens
+yield * Effect.callback(/* wait for open */);
+wsLifecycle.labels("clean_page", "create").inc(); // ← only counts successful opens
 ```
 
 **Files changed:**
+
 - `src/session/cf/cf-coords.ts` — moved `create` counter after `Effect.callback` completion
 
 **Post-deploy verification (first tick, counters reset):**
 
-| Type | Create | Destroy | Delta |
-|------|--------|---------|-------|
-| `solver_isolated` | 383 | 383 | **0** |
-| `proxy_isolated` | 383 | 383 | **0** |
-| `clean_page` | 412 | 412 | **0** |
-| `page` | 183 | 180 | 3 (active tabs) |
-| `proxy_browser` | 4 | 2 | 2 (active sessions) |
+| Type              | Create | Destroy | Delta               |
+| ----------------- | ------ | ------- | ------------------- |
+| `solver_isolated` | 383    | 383     | **0**               |
+| `proxy_isolated`  | 383    | 383     | **0**               |
+| `clean_page`      | 412    | 412     | **0**               |
+| `page`            | 183    | 180     | 3 (active tabs)     |
+| `proxy_browser`   | 4      | 2       | 2 (active sessions) |
 
 All three WS types now track to delta 0 at idle. The counter gap is eliminated.
 
@@ -448,13 +463,14 @@ browserless_active_handles_by_type{type="Socket"}
 
 Effect's `acquireRelease` + `scoped` guarantees are structurally sound — release ALWAYS fires when scope closes. The bugs were developer errors, not Effect bugs:
 
-| Bug | Why Effect Couldn't Prevent It |
-|-----|-------------------------------|
-| `solveTurnstile` blocking on `abortLatch.await` inside dispatch scope | Effect CAN'T release a resource you're still using. Blocking inside a scope = scope stays open. By design. |
-| `disposeEffect` racing fiber finalizers | `ManagedRuntime.disposeEffect` fires `Scope.close(scope, Exit.void)` — fire-and-forget interrupt. Fibers get interrupted but `disposeEffect` returns before they unwind. This is an Effect design choice. Need `FiberMap.clear` to explicitly await fiber exit. |
-| `clean_page` counter before `open` | Pure counter placement error. `acquireRelease` acquire failed (WS never opened), so release never ran, so `destroy` counter never fired. The WS itself was properly cleaned up by `Effect.callback` cleanup. |
+| Bug                                                                   | Why Effect Couldn't Prevent It                                                                                                                                                                                                                                  |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `solveTurnstile` blocking on `abortLatch.await` inside dispatch scope | Effect CAN'T release a resource you're still using. Blocking inside a scope = scope stays open. By design.                                                                                                                                                      |
+| `disposeEffect` racing fiber finalizers                               | `ManagedRuntime.disposeEffect` fires `Scope.close(scope, Exit.void)` — fire-and-forget interrupt. Fibers get interrupted but `disposeEffect` returns before they unwind. This is an Effect design choice. Need `FiberMap.clear` to explicitly await fiber exit. |
+| `clean_page` counter before `open`                                    | Pure counter placement error. `acquireRelease` acquire failed (WS never opened), so release never ran, so `destroy` counter never fired. The WS itself was properly cleaned up by `Effect.callback` cleanup.                                                    |
 
 **Takeaway:** Effect v4 provides structural guarantees for resource cleanup, but those guarantees require the developer to:
+
 1. Not block indefinitely inside scoped regions
 2. Explicitly drain fibers before disposing runtimes (`FiberMap.clear` before `disposeEffect`)
 3. Place counters/metrics after acquire completes, not before
@@ -478,14 +494,14 @@ This is why `console.error(JSON.stringify({...}))` logs to Loki are the ground t
 
 The investigation spanned 3 days (2026-03-06 to 2026-03-08) and 3 fix attempts. Most time was spent on wrong hypotheses:
 
-| Phase | Time Spent | What Happened |
-|-------|-----------|---------------|
-| Part 1: Session registry leak (OOM) | ~4 hours | Found quickly via disk inspection. Watchdog missing `removeUserDataDir()`. |
-| Part 2: Watchdog timeout bug | ~1 hour | Quick: `TIMEOUT` constant vs per-session `ttl`. |
-| Part 3, Fix 1: `FiberMap.clear` hypothesis | ~6 hours | Wrong hypothesis: assumed `disposeEffect` fire-and-forget was the sole cause. Fixed destroy-time leak but not per-solve leak. |
-| Part 3, Fix 2: `abortLatch.await` root cause | ~4 hours | Correct hypothesis: `solveTurnstile` blocking inside dispatch scope. 47% leak rate → 0%. |
-| Part 3, Fix 3: Counter instrumentation | ~30 min | Quick: `create` counter before `open` event. |
-| Monitoring verification | ~9 hours | 9480 connections, 21 sessions, 0 leaks confirmed. |
+| Phase                                        | Time Spent | What Happened                                                                                                                 |
+| -------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Part 1: Session registry leak (OOM)          | ~4 hours   | Found quickly via disk inspection. Watchdog missing `removeUserDataDir()`.                                                    |
+| Part 2: Watchdog timeout bug                 | ~1 hour    | Quick: `TIMEOUT` constant vs per-session `ttl`.                                                                               |
+| Part 3, Fix 1: `FiberMap.clear` hypothesis   | ~6 hours   | Wrong hypothesis: assumed `disposeEffect` fire-and-forget was the sole cause. Fixed destroy-time leak but not per-solve leak. |
+| Part 3, Fix 2: `abortLatch.await` root cause | ~4 hours   | Correct hypothesis: `solveTurnstile` blocking inside dispatch scope. 47% leak rate → 0%.                                      |
+| Part 3, Fix 3: Counter instrumentation       | ~30 min    | Quick: `create` counter before `open` event.                                                                                  |
+| Monitoring verification                      | ~9 hours   | 9480 connections, 21 sessions, 0 leaks confirmed.                                                                             |
 
 **Key lesson:** Fix 1 partially worked (destroy-time leak fixed) which made it harder to identify Fix 2 was needed. The ~47% per-solve leak rate was consistent and immediately identifiable via Prometheus deltas, but we initially attributed ALL leaks to the destroy-time race.
 

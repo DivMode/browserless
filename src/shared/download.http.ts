@@ -16,15 +16,15 @@ import {
   mimeTypes,
   once,
   sleep,
-} from '@browserless.io/browserless';
-import { mkdir, readdir } from 'fs/promises';
-import { Effect } from 'effect';
-import { ServerResponse } from 'http';
-import { runForkInServer } from '../otel-runtime.js';
-import { createReadStream } from 'fs';
-import { deleteAsync } from 'del';
-import functionHandler from './utils/function/handler.js';
-import path from 'path';
+} from "@browserless.io/browserless";
+import { mkdir, readdir } from "fs/promises";
+import { Effect } from "effect";
+import { ServerResponse } from "http";
+import { runForkInServer } from "../otel-runtime.js";
+import { createReadStream } from "fs";
+import { deleteAsync } from "del";
+import functionHandler from "./utils/function/handler.js";
+import path from "path";
 
 interface JSONSchema {
   code: string;
@@ -60,14 +60,10 @@ export default class ChromiumDownloadPostRoute extends BrowserHTTPRoute {
   method = Methods.post;
   path = [HTTPRoutes.chromiumDownload, HTTPRoutes.download];
   tags = [APITags.browserAPI];
-  async handler(
-    req: Request,
-    res: ServerResponse,
-    browser: BrowserInstance,
-  ): Promise<void> {
+  async handler(req: Request, res: ServerResponse, browser: BrowserInstance): Promise<void> {
     const config = this.config();
     return Effect.runPromise(
-      Effect.fn('route.download.post')(function* () {
+      Effect.fn("route.download.post")(function* () {
         const downloadPath = path.join(
           yield* Effect.promise(() => config.getDownloadsDir()),
           `.browserless.download.${id()}`,
@@ -82,13 +78,13 @@ export default class ChromiumDownloadPostRoute extends BrowserHTTPRoute {
         yield* Effect.logDebug(`Download function has returned, finding downloads...`);
         async function checkIfDownloadComplete(): Promise<string | null> {
           if (res.headersSent) {
-            runForkInServer(Effect.logDebug(
-              `Request headers have been sent, terminating download watch.`,
-            ));
+            runForkInServer(
+              Effect.logDebug(`Request headers have been sent, terminating download watch.`),
+            );
             return null;
           }
           const [fileName] = await readdir(downloadPath);
-          if (!fileName || fileName.endsWith('.crdownload')) {
+          if (!fileName || fileName.endsWith(".crdownload")) {
             await sleep(500);
             return checkIfDownloadComplete();
           }
@@ -108,14 +104,14 @@ export default class ChromiumDownloadPostRoute extends BrowserHTTPRoute {
             filePath &&
             deleteAsync(filePath, { force: true })
               .then(() => {
-                runForkInServer(Effect.logDebug(
-                  `Successfully deleted downloads from disk at "${filePath}"`,
-                ));
+                runForkInServer(
+                  Effect.logDebug(`Successfully deleted downloads from disk at "${filePath}"`),
+                );
               })
               .catch((err) => {
-                runForkInServer(Effect.logError(
-                  `Error cleaning up downloaded files: "${err}" at "${filePath}"`,
-                ));
+                runForkInServer(
+                  Effect.logError(`Error cleaning up downloaded files: "${err}" at "${filePath}"`),
+                );
               }),
         );
 
@@ -125,7 +121,7 @@ export default class ChromiumDownloadPostRoute extends BrowserHTTPRoute {
         }
         const contentType = mimeTypes.get(path.extname(filePath));
         if (contentType) {
-          res.setHeader('Content-Type', contentType);
+          res.setHeader("Content-Type", contentType);
         }
 
         // Stream the file — bridge to Promise for the createReadStream callback API
@@ -133,17 +129,15 @@ export default class ChromiumDownloadPostRoute extends BrowserHTTPRoute {
           () =>
             new Promise<void>((resolve, reject) => {
               createReadStream(filePath)
-                .on('error', (error) => {
+                .on("error", (error) => {
                   if (error) {
                     rmDownload();
                     return reject(
-                      new NotFound(
-                        `Couldn't locate or send downloads in "${downloadPath}"`,
-                      ),
+                      new NotFound(`Couldn't locate or send downloads in "${downloadPath}"`),
                     );
                   }
                 })
-                .on('end', () => {
+                .on("end", () => {
                   runForkInServer(Effect.logInfo(`Downloads successfully sent`));
                   rmDownload();
                   return resolve();

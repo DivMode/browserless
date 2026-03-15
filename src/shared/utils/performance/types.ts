@@ -1,5 +1,5 @@
-import { BrowserInstance } from '@browserless.io/browserless';
-import { Config, Flags } from 'lighthouse';
+import { BrowserInstance } from "@browserless.io/browserless";
+import { Config, Flags } from "lighthouse";
 
 export interface Message {
   data?: unknown;

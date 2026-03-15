@@ -54,20 +54,15 @@ export const easeInOutQuint: TweeningFunction = (t) => {
   return 1 + 16 * t1 * t1 * t1 * t1 * t1;
 };
 
-export const easeInSine: TweeningFunction = (t) =>
-  1 - Math.cos((t * Math.PI) / 2);
+export const easeInSine: TweeningFunction = (t) => 1 - Math.cos((t * Math.PI) / 2);
 
-export const easeOutSine: TweeningFunction = (t) =>
-  Math.sin((t * Math.PI) / 2);
+export const easeOutSine: TweeningFunction = (t) => Math.sin((t * Math.PI) / 2);
 
-export const easeInOutSine: TweeningFunction = (t) =>
-  -(Math.cos(Math.PI * t) - 1) / 2;
+export const easeInOutSine: TweeningFunction = (t) => -(Math.cos(Math.PI * t) - 1) / 2;
 
-export const easeInExpo: TweeningFunction = (t) =>
-  t === 0 ? 0 : Math.pow(2, 10 * t - 10);
+export const easeInExpo: TweeningFunction = (t) => (t === 0 ? 0 : Math.pow(2, 10 * t - 10));
 
-export const easeOutExpo: TweeningFunction = (t) =>
-  t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
+export const easeOutExpo: TweeningFunction = (t) => (t === 1 ? 1 : 1 - Math.pow(2, -10 * t));
 
 export const easeInOutExpo: TweeningFunction = (t) => {
   if (t === 0) return 0;
@@ -76,11 +71,9 @@ export const easeInOutExpo: TweeningFunction = (t) => {
   return (2 - Math.pow(2, -20 * t + 10)) / 2;
 };
 
-export const easeInCirc: TweeningFunction = (t) =>
-  1 - Math.sqrt(1 - Math.pow(t, 2));
+export const easeInCirc: TweeningFunction = (t) => 1 - Math.sqrt(1 - Math.pow(t, 2));
 
-export const easeOutCirc: TweeningFunction = (t) =>
-  Math.sqrt(1 - Math.pow(t - 1, 2));
+export const easeOutCirc: TweeningFunction = (t) => Math.sqrt(1 - Math.pow(t - 1, 2));
 
 export const easeInOutCirc: TweeningFunction = (t) => {
   if (t < 0.5) {
