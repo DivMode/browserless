@@ -38,7 +38,7 @@ import { filterOwnedTargets } from "./cf/cloudflare-detector.js";
 import { CdpSessionGone } from "./cf/cf-errors.js";
 import { solveDetection as solveDetectionEffect } from "./cf/cloudflare-solver.effect.js";
 import { simulateHumanPresence } from "../shared/mouse-humanizer.js";
-import { SharedTracerLayer } from "../otel-runtime.js";
+import { SharedTracerLayer, runForkInServer } from "../otel-runtime.js";
 import { WS_SCOPE_BUDGET } from "./cf/cf-ws-resource.js";
 import { withSessionSpan, forkTracedFiber, bridgeRuntime } from "./trace-helpers.js";
 import { makeTabRuntime } from "./cf/cf-tab-runtime.js";
@@ -346,14 +346,18 @@ export class CloudflareSolver {
                 Effect.catch(() => {
                   return incCounter(wsScopeBudgetExceeded, { type: "solver_isolated" }).pipe(
                     Effect.andThen(
-                      Effect.logWarning("ws.scope_budget_exceeded").pipe(
-                        Effect.annotateLogs({
-                          label: "solver_isolated",
-                          budget_ms: WS_SCOPE_BUDGET,
-                          solveId,
-                          tid,
-                        }),
-                      ),
+                      Effect.sync(() => {
+                        runForkInServer(
+                          Effect.logWarning("ws.scope_budget_exceeded").pipe(
+                            Effect.annotateLogs({
+                              label: "solver_isolated",
+                              budget_ms: WS_SCOPE_BUDGET,
+                              solveId,
+                              tid,
+                            }),
+                          ),
+                        );
+                      }),
                     ),
                     Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
                   );

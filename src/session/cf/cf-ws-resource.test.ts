@@ -165,7 +165,7 @@ describe("openScopedWs", () => {
     }),
   );
 
-  it("WS_SCOPE_BUDGET is 45 seconds", () => {
-    expect(WS_SCOPE_BUDGET).toBe(45_000);
+  it("WS_SCOPE_BUDGET is 90 seconds", () => {
+    expect(WS_SCOPE_BUDGET).toBe(90_000);
   });
 });

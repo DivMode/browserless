@@ -10,7 +10,8 @@
  * Reference pattern: CDPProxy (cdp-proxy.ts:99-180) — Scope.makeUnsafe() + upfront
  * Scope.addFinalizer + scope-bound FiberSet + atomic Scope.close().
  */
-import { Effect, Scope } from "effect";
+import type { Scope } from "effect";
+import { Effect } from "effect";
 import { CdpConnection } from "../../shared/cdp-rpc.js";
 import { incCounter, wsLifecycle } from "../../effect-metrics.js";
 
@@ -24,7 +25,7 @@ export interface ScopedWsOptions {
 }
 
 /** Per-solve scope timeout — kills the scope if a solve blocks too long (ms). */
-export const WS_SCOPE_BUDGET = 45_000;
+export const WS_SCOPE_BUDGET = 90_000;
 
 /**
  * Open a scoped WebSocket connection with structural counter guarantees.
