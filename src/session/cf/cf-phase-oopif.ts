@@ -13,6 +13,7 @@ import { Effect } from "effect";
 import type { CdpSessionId, TargetId } from "../../shared/cloudflare-detection.js";
 import { SolverEvents } from "./cf-services.js";
 import { MAX_OOPIF_POLLS, OOPIF_POLL_DELAY, OOPIF_PROBE_TIMEOUT } from "./cf-schedules.js";
+import { cfPhase2Duration, observeHistogram } from "../../effect-metrics.js";
 
 /** Effect-returning CDP sender — eliminates the Promise bridge. */
 type EffectSend = (
@@ -307,11 +308,15 @@ export function phase2OOPIFResolution(
       "cf.phase2.selected_parent_frame": match?.target.parentFrameId?.substring(0, 16) ?? "none",
       "cf.phase2.match_method": match?.method ?? "none",
     });
+    const phase2ElapsedMs = Date.now() - phase2Start;
     yield* events.marker(pageTargetId, "cf.phase2_end", {
       found: !!match,
-      elapsed_ms: Date.now() - phase2Start,
+      elapsed_ms: phase2ElapsedMs,
       polls_used: pollsUsed,
       method: match?.method ?? "none",
+    });
+    yield* observeHistogram(cfPhase2Duration, phase2ElapsedMs / 1000, {
+      found: match ? "true" : "false",
     });
 
     return match?.sessionId ?? null;

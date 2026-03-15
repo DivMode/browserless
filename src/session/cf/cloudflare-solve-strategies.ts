@@ -1,8 +1,15 @@
 import { Data, Effect } from "effect";
-import { CdpSessionId } from "../../shared/cloudflare-detection.js";
+import type { CdpSessionId } from "../../shared/cloudflare-detection.js";
 import { isInterstitialType } from "../../shared/cloudflare-detection.js";
 import type { ReadonlyActiveDetection } from "./cloudflare-event-emitter.js";
 import type { CdpConnection } from "../../shared/cdp-rpc.js";
+import {
+  cfPhase4Duration,
+  cfClickResultTotal,
+  cfClickPipelineDuration,
+  observeHistogram,
+  incCounter,
+} from "../../effect-metrics.js";
 
 /** Effect-returning CDP sender — eliminates the Promise bridge. */
 type EffectSend = (
@@ -377,6 +384,7 @@ export class CloudflareSolveStrategies {
           total_targets: targetInfos?.length ?? 0,
           elapsed_ms: Date.now() - solveStart,
         });
+        yield* incCounter(cfClickResultTotal, { result: "no_checkbox" });
         return ClickResult.NoCheckbox();
       }
 
@@ -470,6 +478,9 @@ export class CloudflareSolveStrategies {
         })();
       }
 
+      yield* observeHistogram(cfClickPipelineDuration, (Date.now() - solveStart) / 1000, {
+        type: active.info.type,
+      });
       return clickResult;
     })().pipe(
       Effect.scoped,
@@ -481,6 +492,7 @@ export class CloudflareSolveStrategies {
             via: "proxy_ws",
             attempt,
           });
+          yield* incCounter(cfClickResultTotal, { result: "click_failed" });
           return ClickResult.ClickFailed();
         }),
       ),
@@ -821,8 +833,16 @@ export class CloudflareSolveStrategies {
         phase4_duration_ms,
         total_solve_ms,
       });
-      if (clickVerified) return ClickResult.Verified({ clickDeliveredAt: Date.now() });
-      if (verifyError) return ClickResult.NotVerified({ reason: verifyError });
+      yield* observeHistogram(cfPhase4Duration, phase4_duration_ms / 1000);
+      if (clickVerified) {
+        yield* incCounter(cfClickResultTotal, { result: "verified" });
+        return ClickResult.Verified({ clickDeliveredAt: Date.now() });
+      }
+      if (verifyError) {
+        yield* incCounter(cfClickResultTotal, { result: "not_verified" });
+        return ClickResult.NotVerified({ reason: verifyError });
+      }
+      yield* incCounter(cfClickResultTotal, { result: "click_failed" });
       return ClickResult.ClickFailed();
     })().pipe(Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())));
   }

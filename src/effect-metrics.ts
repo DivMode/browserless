@@ -71,6 +71,72 @@ export const cfManagedClickNoNav = Metric.counter("browserless_cf_managed_click_
     "Managed/interstitial CF: click delivered but page never navigated (resolution timeout)",
 });
 
+// ──────────────────────────────────────────────
+// CF Solver counters
+// Labels: {type} = turnstile|interstitial|managed|non_interactive|invisible
+// ──────────────────────────────────────────────
+
+/** Every CF detection registered. Labels: {type, detection_method} */
+export const cfDetectionTotal = Metric.counter("browserless_cf_detection_total", {
+  description: "CF challenge detections registered",
+});
+
+/** Every CF resolution. Labels: {type, outcome, method, signal} */
+export const cfSolveTotal = Metric.counter("browserless_cf_solve_total", {
+  description: "CF challenge resolution outcomes (solved/failed/timeout)",
+});
+
+/** Every click attempt result. Labels: {result} = verified|not_verified|no_checkbox|click_failed */
+export const cfClickResultTotal = Metric.counter("browserless_cf_click_result_total", {
+  description: "CF click pipeline attempt results",
+});
+
+// ──────────────────────────────────────────────
+// CF Solver histograms
+// ──────────────────────────────────────────────
+
+/** Detection-to-resolution total time. Labels: {type, outcome} */
+export const cfSolveDuration = Metric.histogram("browserless_cf_solve_duration_seconds", {
+  description: "Total CF solve duration from detection to resolution",
+  boundaries: [1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 30, 60],
+});
+
+/** Full click pipeline (phases 1-4). Labels: {type} */
+export const cfClickPipelineDuration = Metric.histogram(
+  "browserless_cf_click_pipeline_duration_seconds",
+  {
+    description: "Full CF click pipeline duration (phase 1 through phase 4)",
+    boundaries: [0.5, 1, 1.5, 2, 3, 5, 8, 10, 15, 20],
+  },
+);
+
+/** Phase 2: OOPIF discovery. Labels: {found} */
+export const cfPhase2Duration = Metric.histogram("browserless_cf_phase2_duration_seconds", {
+  description: "CF Phase 2 OOPIF discovery duration",
+  boundaries: [0.1, 0.2, 0.5, 0.8, 1, 1.5, 2, 3, 5],
+});
+
+/** Phase 3: Checkbox find. Labels: {found} */
+export const cfPhase3Duration = Metric.histogram("browserless_cf_phase3_duration_seconds", {
+  description: "CF Phase 3 checkbox find duration",
+  boundaries: [0.1, 0.2, 0.5, 1, 1.5, 2, 3, 5],
+});
+
+/** Phase 4: Click dispatch + verify. No labels. */
+export const cfPhase4Duration = Metric.histogram("browserless_cf_phase4_duration_seconds", {
+  description: "CF Phase 4 click dispatch and verify duration",
+  boundaries: [0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 1, 2],
+});
+
+/** Time from click delivered to resolution settled. Labels: {signal} */
+export const cfClickToResolveDuration = Metric.histogram(
+  "browserless_cf_click_to_resolve_seconds",
+  {
+    description: "Time from click delivery to resolution settlement",
+    boundaries: [0.5, 1, 2, 3, 5, 8, 10, 15, 20, 30],
+  },
+);
+
 export const replayEventsTotal = Metric.counter("browserless_replay_events_total", {
   description: "Total rrweb replay events captured across all sessions",
 });

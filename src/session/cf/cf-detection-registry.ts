@@ -15,11 +15,13 @@
  * Resolution is identity-safe via DetectionContext.resolve() — no targetId-based resolve.
  */
 
-import { Effect, Exit, Option, Scope, Tracer } from "effect";
+import type { Tracer } from "effect";
+import { Effect, Exit, Option, Scope } from "effect";
 import type { TargetId } from "../../shared/cloudflare-detection.js";
 import type { ActiveDetection, ReadonlyActiveDetection } from "./cloudflare-event-emitter.js";
 import type { SolveSignal } from "./cloudflare-state-tracker.js";
 import { DetectionContext } from "./cf-detection-context.js";
+import { cfDetectionTotal, incCounter } from "../../effect-metrics.js";
 
 /** Callback to emit a session_close fallback for an orphaned detection. */
 export type EmitFallback = (active: ReadonlyActiveDetection, signal: SolveSignal) => void;
@@ -75,6 +77,10 @@ export class DetectionRegistry {
             "cf.domain": domain,
             "cf.detection_id": detectionId,
             ...(active.sessionId ? { "session.id": active.sessionId } : {}),
+          });
+          yield* incCounter(cfDetectionTotal, {
+            type: active.info.type,
+            detection_method: active.info.detectionMethod ?? "unknown",
           });
           // If a detection already exists for this target, close its scope first
           const existing = self.entries.get(targetId);

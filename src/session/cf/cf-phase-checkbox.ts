@@ -12,6 +12,7 @@ import type { CdpSessionId } from "../../shared/cloudflare-detection.js";
 import type { ReadonlyActiveDetection } from "./cloudflare-event-emitter.js";
 import { SolverEvents } from "./cf-services.js";
 import { CDP_CALL_TIMEOUT, MAX_CHECKBOX_POLLS, CHECKBOX_POLL_INTERVAL_MS } from "./cf-schedules.js";
+import { cfPhase3Duration, observeHistogram } from "../../effect-metrics.js";
 
 /** Effect-returning CDP sender — eliminates the Promise bridge. */
 type EffectSend = (
@@ -397,10 +398,12 @@ export function phase3CheckboxFind(
         diag_cbI: diag.cbI,
         diag_inp: diag.inp,
       });
+      const phase3NotFoundMs = Date.now() - phase3Start;
       yield* events.marker(pageTargetId, "cf.phase3_end", {
         found: false,
-        elapsed_ms: Date.now() - phase3Start,
+        elapsed_ms: phase3NotFoundMs,
       });
+      yield* observeHistogram(cfPhase3Duration, phase3NotFoundMs / 1000, { found: "false" });
       return null;
     }
 
@@ -418,10 +421,12 @@ export function phase3CheckboxFind(
       checkbox_found_ms: Date.now() - solveStart,
     });
     yield* events.emitProgress(active, "widget_found", { method, x: 0, y: 0 });
+    const phase3FoundMs = Date.now() - phase3Start;
     yield* events.marker(pageTargetId, "cf.phase3_end", {
       found: true,
-      elapsed_ms: Date.now() - phase3Start,
+      elapsed_ms: phase3FoundMs,
     });
+    yield* observeHistogram(cfPhase3Duration, phase3FoundMs / 1000, { found: "true" });
 
     return { checkbox, method };
   })();

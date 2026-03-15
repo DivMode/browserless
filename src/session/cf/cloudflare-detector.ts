@@ -19,7 +19,15 @@ import {
   RECHALLENGE_DELAY_MS,
   WIDGET_RELOAD_GRACE,
 } from "./cf-schedules.js";
-import { incCounter, cfResolutionTimeouts, cfManagedClickNoNav } from "../../effect-metrics.js";
+import {
+  incCounter,
+  observeHistogram,
+  cfResolutionTimeouts,
+  cfManagedClickNoNav,
+  cfSolveTotal,
+  cfSolveDuration,
+  cfClickToResolveDuration,
+} from "../../effect-metrics.js";
 import { CloudflareTracker } from "./cloudflare-event-emitter.js";
 import type {
   ActiveDetection,
@@ -848,18 +856,36 @@ export class CloudflareDetector {
       if (maybeResolved._tag === "Some") {
         const resolved = maybeResolved.value;
         if (resolved._tag === "solved") {
+          const solveElapsedMs = Date.now() - active.startTime;
           yield* Effect.annotateCurrentSpan({
             "cf.resolution_outcome": "solved",
             "cf.solve_method": resolved.result.method,
-            "cf.elapsed_ms": Date.now() - active.startTime,
+            "cf.elapsed_ms": solveElapsedMs,
           });
+          yield* incCounter(cfSolveTotal, {
+            type: active.info.type,
+            outcome: "solved",
+            method: resolved.result.method ?? "",
+            signal: resolved.result.signal ?? "",
+          });
+          yield* observeHistogram(cfSolveDuration, solveElapsedMs / 1000, {
+            type: active.info.type,
+            outcome: "solved",
+          });
+          if (active.clickDeliveredAt) {
+            yield* observeHistogram(
+              cfClickToResolveDuration,
+              (Date.now() - active.clickDeliveredAt) / 1000,
+              { signal: resolved.result.signal ?? "" },
+            );
+          }
           yield* Effect.logInfo("CF lifecycle: resolution_result").pipe(
             Effect.annotateLogs({
               target_id: targetId.slice(0, 8),
               session_id: self.sid,
               result: "solved",
               method: resolved.result.method,
-              elapsed_ms: Date.now() - active.startTime,
+              elapsed_ms: solveElapsedMs,
             }),
           );
           if (opts.addToSolvedPages) self.state.solvedPages.add(targetId);
@@ -886,6 +912,16 @@ export class CloudflareDetector {
             "cf.fail_reason": resolved.reason,
             "cf.elapsed_ms": resolved.duration_ms,
             "cf.verified": cfVerified,
+          });
+          yield* incCounter(cfSolveTotal, {
+            type: active.info.type,
+            outcome: "failed",
+            method: "",
+            signal: resolved.reason,
+          });
+          yield* observeHistogram(cfSolveDuration, resolved.duration_ms / 1000, {
+            type: active.info.type,
+            outcome: "failed",
           });
           yield* Effect.logWarning("CF lifecycle: resolution_result").pipe(
             Effect.annotateLogs({
@@ -961,8 +997,18 @@ export class CloudflareDetector {
           );
         }
         const timeoutReason = opts.timeoutReason ?? "resolution_timeout";
-        yield* incCounter(cfResolutionTimeouts, { type: opts.counterLabel });
         const duration = Date.now() - active.startTime;
+        yield* incCounter(cfSolveTotal, {
+          type: active.info.type,
+          outcome: "timeout",
+          method: "",
+          signal: "",
+        });
+        yield* observeHistogram(cfSolveDuration, duration / 1000, {
+          type: active.info.type,
+          outcome: "timeout",
+        });
+        yield* incCounter(cfResolutionTimeouts, { type: opts.counterLabel });
         yield* active.resolution.fail(timeoutReason, duration);
         self.state.pushPhase(targetId, active.info.type, `✗ ${timeoutReason}`);
         const label = self.state.buildCompoundLabel(targetId);
