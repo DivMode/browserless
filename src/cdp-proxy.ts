@@ -1,15 +1,16 @@
 import WebSocket from "ws";
 // ws is CJS — Server lives on default export at runtime but TS types don't expose it
 const WebSocketServer = (WebSocket as any).Server as typeof import("ws").WebSocketServer;
-import { Duplex } from "stream";
-import { IncomingMessage } from "http";
-import { Config } from "@browserless.io/browserless";
+import type { Duplex } from "stream";
+import type { IncomingMessage } from "http";
+import type { Config } from "@browserless.io/browserless";
 import { Duration, Effect, Exit, FiberSet, Queue, Schedule, Schema, Scope, Stream } from "effect";
 
 import { incCounter, proxyDroppedMessages, wsLifecycle } from "./effect-metrics.js";
 import { runForkInServer } from "./otel-runtime.js";
 import { CloudflareConfig } from "./shared/cloudflare-detection.js";
-import { CdpSessionId, TargetId } from "./shared/cloudflare-detection.js";
+import type { CdpSessionId} from "./shared/cloudflare-detection.js";
+import { TargetId } from "./shared/cloudflare-detection.js";
 import { BROWSER_WS_PING_INTERVAL, BROWSER_WS_PONG_TIMEOUT_MS } from "./session/cf/cf-schedules.js";
 import {
   decodeCDPCommand,
@@ -320,19 +321,24 @@ export class CDPProxy {
               });
               return;
             }
-            if (this.onEnableCloudflareSolver) {
-              const exit = Schema.decodeExit(CloudflareConfig)(msg.params || {}, {
-                onExcessProperty: "ignore",
+            if (!this.onEnableCloudflareSolver) {
+              void this.sendClientResponse(msg.id, {
+                enabled: false,
+                error: "Cloudflare solver not available for this session",
               });
-              if (exit._tag === "Failure") {
-                void this.sendClientResponse(msg.id, {
-                  enabled: false,
-                  error: `Invalid config: ${exit.cause.toString()}`,
-                });
-                return;
-              }
-              this.onEnableCloudflareSolver(exit.value);
+              return;
             }
+            const exit = Schema.decodeExit(CloudflareConfig)(msg.params || {}, {
+              onExcessProperty: "ignore",
+            });
+            if (exit._tag === "Failure") {
+              void this.sendClientResponse(msg.id, {
+                enabled: false,
+                error: `Invalid config: ${exit.cause.toString()}`,
+              });
+              return;
+            }
+            this.onEnableCloudflareSolver(exit.value);
             void this.sendClientResponse(msg.id, { enabled: true });
             return;
           }
