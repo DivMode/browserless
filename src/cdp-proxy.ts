@@ -9,7 +9,7 @@ import { Duration, Effect, Exit, FiberSet, Queue, Schedule, Schema, Scope, Strea
 import { incCounter, proxyDroppedMessages, wsLifecycle } from "./effect-metrics.js";
 import { runForkInServer } from "./otel-runtime.js";
 import { CloudflareConfig } from "./shared/cloudflare-detection.js";
-import type { CdpSessionId} from "./shared/cloudflare-detection.js";
+import type { CdpSessionId } from "./shared/cloudflare-detection.js";
 import { TargetId } from "./shared/cloudflare-detection.js";
 import { BROWSER_WS_PING_INTERVAL, BROWSER_WS_PONG_TIMEOUT_MS } from "./session/cf/cf-schedules.js";
 import {

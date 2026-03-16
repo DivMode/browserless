@@ -649,7 +649,14 @@ export class CloudflareDetector {
       }
 
       // ── Phase C: Post-navigation detection ─────────────────────────
-      if (!self.enabled || !url || url.startsWith("about:")) return;
+      if (!self.enabled || !url || url.startsWith("about:")) {
+        yield* Effect.annotateCurrentSpan({
+          "cf.nav.phase_c_skipped": true,
+          "cf.nav.enabled": self.enabled,
+          "cf.nav.has_url": !!url,
+        });
+        return;
+      }
 
       // URL-based detection first (instant, zero CDP calls)
       const cfType = self.detectCFFromUrl(url);
@@ -1231,13 +1238,26 @@ export class CloudflareDetector {
         "cf.target_id": targetId,
         ...(self.sessionId ? { "session.id": self.sessionId } : {}),
       });
-      if (self.state.destroyed || !self.enabled) return;
-      if (self.state.registry.has(targetId)) return;
+      // ── Pre-loop guards: annotate exit reason for every early return ──
+      if (self.state.destroyed || !self.enabled) {
+        yield* Effect.annotateCurrentSpan({
+          "cf.detect.exit_reason": self.state.destroyed ? "destroyed" : "not_enabled",
+          "cf.detect.enabled": self.enabled,
+        });
+        return;
+      }
+      if (self.state.registry.has(targetId)) {
+        yield* Effect.annotateCurrentSpan({ "cf.detect.exit_reason": "registry_has" });
+        return;
+      }
 
       // PHANTOM GUARD: Skip detection on pages that already solved CF — new OOPIFs
       // spawned post-solve are not real challenges. See solvedPages JSDoc.
       if (self.state.solvedPages.has(targetId)) {
-        yield* Effect.annotateCurrentSpan({ "cf.phantom": true });
+        yield* Effect.annotateCurrentSpan({
+          "cf.phantom": true,
+          "cf.detect.exit_reason": "solved_pages",
+        });
         return;
       }
 
@@ -1274,13 +1294,45 @@ export class CloudflareDetector {
         "cf.detect.page_frame_id": pageFrameId?.substring(0, 16) ?? "null",
       });
 
+      let pollCount = 0;
       while (true) {
-        if (self.state.destroyed || !self.enabled) return;
-        if (self.state.registry.has(targetId)) return;
-        if (self.state.bindingSolvedTargets.has(targetId)) return;
+        // ── Per-iteration guards: annotate exit reason + poll stats on outer span ──
+        if (self.state.destroyed || !self.enabled) {
+          yield* Effect.annotateCurrentSpan({
+            "cf.detect.exit_reason": self.state.destroyed ? "destroyed" : "disabled",
+            "cf.detect.poll_count": pollCount,
+            "cf.detect.elapsed_ms": Date.now() - startTime,
+          });
+          return;
+        }
+        if (self.state.registry.has(targetId)) {
+          yield* Effect.annotateCurrentSpan({
+            "cf.detect.exit_reason": "registry_has",
+            "cf.detect.poll_count": pollCount,
+            "cf.detect.elapsed_ms": Date.now() - startTime,
+          });
+          return;
+        }
+        if (self.state.bindingSolvedTargets.has(targetId)) {
+          yield* Effect.annotateCurrentSpan({
+            "cf.detect.exit_reason": "binding_solved",
+            "cf.detect.poll_count": pollCount,
+            "cf.detect.elapsed_ms": Date.now() - startTime,
+          });
+          return;
+        }
         // PHANTOM GUARD: Check every iteration — solvedPages may be set by
         // onPageNavigatedEffect while this loop is polling.
-        if (self.state.solvedPages.has(targetId)) return;
+        if (self.state.solvedPages.has(targetId)) {
+          yield* Effect.annotateCurrentSpan({
+            "cf.detect.exit_reason": "solved_pages",
+            "cf.detect.poll_count": pollCount,
+            "cf.detect.elapsed_ms": Date.now() - startTime,
+          });
+          return;
+        }
+
+        pollCount++;
 
         // TabDetector.detect handles:
         // 1. detectTurnstileViaCDP(cdpSessionId, solvedCFTargetIds)
@@ -1323,6 +1375,12 @@ export class CloudflareDetector {
             }),
             Match.exhaustive,
           ) as Effect.Effect<void, never, BaseDetectorR>;
+
+          yield* Effect.annotateCurrentSpan({
+            "cf.detect.exit_reason": "detected",
+            "cf.detect.poll_count": pollCount,
+            "cf.detect.elapsed_ms": Date.now() - startTime,
+          });
 
           // Common cleanup — scope-bound so entries are removed when page is destroyed
           for (const t of detection.targets) {
