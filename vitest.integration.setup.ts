@@ -196,6 +196,33 @@ export async function setup() {
     );
   }
 
+  // Validate proxy connectivity — env var existing != proxy working.
+  // Without this, tests run with a dead proxy and produce confusing
+  // "0 CF markers" failures instead of a clear "proxy down" error.
+  // Route a real request THROUGH the proxy via Node 24 native env proxy (NODE_USE_ENV_PROXY).
+  const proxyUrl = process.env.LOCAL_MOBILE_PROXY;
+  const proxyHost = proxyUrl.replace(/^https?:\/\/(?:[^@]+@)?/, "").replace(/\/$/, "");
+  console.log(`[globalSetup] Validating proxy connectivity: ${proxyHost}...`);
+  process.env.NODE_USE_ENV_PROXY = "1";
+  process.env.HTTP_PROXY = proxyUrl;
+  try {
+    const proxyCheck = await fetch("http://httpbin.org/ip", {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!proxyCheck.ok) throw new Error(`HTTP ${proxyCheck.status}`);
+    const body = (await proxyCheck.json()) as { origin?: string };
+    console.log(`[globalSetup] Proxy working (exit IP: ${body.origin ?? "unknown"})`);
+  } catch (err) {
+    throw new Error(
+      `Proxy not working at ${proxyHost}. Integration tests require a working proxy.\n` +
+        `  Verify the proxy server is running before running integration tests.`,
+    );
+  } finally {
+    // Clean up — don't leave env proxy on for the rest of the test run
+    delete process.env.NODE_USE_ENV_PROXY;
+    delete process.env.HTTP_PROXY;
+  }
+
   // Remote mode — skip build + spawn, just verify reachability
   const isRemote = !!process.env.BROWSERLESS_ENDPOINT;
   if (isRemote) {

@@ -29,9 +29,10 @@ import {
 import { CdpSessionId, TargetId } from "../shared/cloudflare-detection.js";
 import { decodeCDPMessage, decodeRrwebEventBatch } from "../shared/cdp-schemas.js";
 import { CdpConnection } from "../shared/cdp-rpc.js";
+import type {
+  CdpTimeout as CdpTimeoutError} from "./cf/cf-errors.js";
 import {
-  CdpSessionGone as CdpSessionGoneError,
-  CdpTimeout as CdpTimeoutError,
+  CdpSessionGone as CdpSessionGoneError
 } from "./cf/cf-errors.js";
 import {
   registerSessionState,
@@ -143,6 +144,12 @@ export class CdpSession {
    */
   private sessionSpan: Tracer.Span | null = null;
   private sessionContext: Tracer.ExternalSpan | null = null;
+
+  // Track Ahrefs API requests for trace spans (requestId → metadata)
+  private readonly pendingAhrefsApiCalls = new Map<
+    string,
+    { url: string; method: string; timestamp: number }
+  >();
 
   // Replay state — per-tab event queues and counters
   private readonly tabQueues = new Map<string, Queue.Queue<TabEvent, Cause.Done>>();
@@ -1350,6 +1357,14 @@ export class CdpSession {
         this.antibotHandler.onRequest(req.url);
       }
       if (req?.url) {
+        // Track Ahrefs API requests for trace spans
+        if (req.url.includes("/v4/stGetFree")) {
+          this.pendingAhrefsApiCalls.set(p?.requestId || "", {
+            url: req.url,
+            method: req.method || "POST",
+            timestamp: Date.now(),
+          });
+        }
         this.offerEvents(pageTargetId, [
           {
             type: 5,
@@ -1378,6 +1393,49 @@ export class CdpSession {
         this.antibotHandler.onResponse(resp.url, resp.headers || {});
       }
       if (resp?.url) {
+        // Create trace span for Ahrefs API responses
+        if (resp.url.includes("/v4/stGetFree")) {
+          const requestId = p?.requestId || "";
+          const reqData = this.pendingAhrefsApiCalls.get(requestId);
+          const tab = this.tabs.get(pageTargetId);
+          if (reqData && tab && this.runtime && this._fiberMap) {
+            const durationMs = Date.now() - reqData.timestamp;
+            const success = resp.status >= 200 && resp.status < 300;
+            const cdpSessionId = this.targets.getByTarget(pageTargetId)?.cdpSessionId;
+            this.pendingAhrefsApiCalls.delete(requestId);
+
+            const session = this;
+            forkTracedFiber(
+              this.runtime,
+              this._fiberMap,
+              `ahrefs:api:${requestId}`,
+              Effect.fn("ahrefs.api")(function* () {
+                yield* Effect.annotateCurrentSpan({
+                  "http.url": reqData.url,
+                  "http.method": reqData.method,
+                  "http.status_code": resp.status || 0,
+                  "ahrefs.duration_ms": durationMs,
+                  "ahrefs.success": success,
+                  "ahrefs.request_id": requestId,
+                });
+                if (!success && cdpSessionId) {
+                  yield* Effect.annotateCurrentSpan({ error: true });
+                  // Fetch response body via CDP for error diagnosis
+                  const bodyResult = yield* session
+                    .send("Network.getResponseBody", { requestId }, cdpSessionId)
+                    .pipe(Effect.orElseSucceed(() => ({ body: "" })));
+                  if (bodyResult?.body) {
+                    yield* Effect.annotateCurrentSpan({
+                      "ahrefs.error_body": bodyResult.body.substring(0, 500),
+                    });
+                  }
+                }
+              })(),
+              tab.context,
+            );
+          }
+        }
+
         this.offerEvents(pageTargetId, [
           {
             type: 5,
