@@ -724,10 +724,11 @@ export class CloudflareSolver {
     const effect = this.stateTracker.onBeaconSolved(targetId, tokenLength);
     // Inject the detection's parent span so the beacon span joins the same trace
     // instead of creating an orphan root span (beacon arrives via HTTP, not CDP).
-    // If no detection context, beacon is stale — discard.
+    // When no detection context exists (e.g., standalone Turnstile on non-CF page),
+    // run as a root span — the StandaloneAutoSolved fallback in the state tracker
+    // will emit cloudflareDetected + cloudflareSolved CDP events.
     const ctx = this.stateTracker.registry.getContext(targetId);
-    if (!ctx) return; // Detection was already cleaned up — discard stale beacon
-    const parented = withSessionSpan(effect, ctx.parentSpan);
+    const parented = ctx ? withSessionSpan(effect, ctx.parentSpan) : effect;
     await this.runtime
       .runPromise(parented)
       .catch((e) =>
