@@ -674,19 +674,11 @@ export class CloudflareDetector {
         return;
       }
 
-      // URL-based detection first (instant, zero CDP calls)
-      const cfType = self.detectCFFromUrl(url);
-      if (cfType) {
-        // If we already waited for click-based rechallenge check above, skip extra delay
-        const alreadyWaited = active && isInterstitialType(active.info.type);
-        if (!alreadyWaited) {
-          yield* Effect.sleep(`${RECHALLENGE_DELAY_MS} millis`);
-        }
-        yield* self.triggerSolveFromUrlEffect(targetId, cdpSessionId, url, cfType);
-        return;
-      }
-
-      // Not a CF URL — check for embedded Turnstile via DOM walk (zero JS injection)
+      // Detect via OOPIF polling (zero JS injection).
+      // URL-based detection removed: __cf_chl_rt_tk tokens persist in retry-tab
+      // URLs after CF bypass, causing misclassification as interstitial when the
+      // page actually serves embedded Turnstile. OOPIF polling + classifyOOPIFDetection
+      // handles both interstitials (via title) and embedded Turnstile correctly.
       const alreadyWaited = active && isInterstitialType(active.info.type);
       if (!alreadyWaited) {
         yield* Effect.sleep(`${RECHALLENGE_DELAY_MS} millis`);
