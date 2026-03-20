@@ -497,6 +497,18 @@ export class CloudflareSolver {
 
   /** Interrupt and stop the detection fiber for a target (e.g. on tab close). */
   stopTargetDetection(targetId: TargetId): Effect.Effect<void> {
+    // ── Diagnostic: log fiber stop ──
+    const hasActiveDetection = this.stateTracker.registry.has(targetId);
+    this.runtime.runFork(
+      Effect.logInfo("cf.solver.stopTargetDetection").pipe(
+        Effect.annotateLogs({
+          target_id: targetId.slice(0, 8),
+          session_id: this.sessionId,
+          has_active_detection: hasActiveDetection,
+        }),
+      ),
+    );
+
     // Synchronous guard — prevents startDetectionFiber from forking a ghost
     // when onPageNavigatedEffect's 500ms sleep completes after FiberMap.remove.
     this.destroyedTargets.add(targetId);
@@ -560,6 +572,23 @@ export class CloudflareSolver {
       );
       return;
     }
+
+    // ── Diagnostic: log fiber startup state ──
+    const hasSolvedPage = this.stateTracker.solvedPages.has(targetId);
+    const hasRegistry = this.stateTracker.registry.has(targetId);
+    const hasTabSpan = this.tabContexts.has(targetId);
+    this.runtime.runFork(
+      Effect.logInfo("cf.solver.startDetectionFiber").pipe(
+        Effect.annotateLogs({
+          target_id: targetId.slice(0, 8),
+          session_id: this.sessionId,
+          has_solved_page: hasSolvedPage,
+          has_registry: hasRegistry,
+          has_tab_span: hasTabSpan,
+          destroyed_targets_size: this.destroyedTargets.size,
+        }),
+      ),
+    );
 
     // Create per-tab state container — scalar fields, GC'd when entry is deleted.
     // pageFrameId is resolved later inside detectTurnstileWidgetEffect via CdpSender.

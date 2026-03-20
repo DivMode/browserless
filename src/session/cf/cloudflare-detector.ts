@@ -452,6 +452,22 @@ export class CloudflareDetector {
       });
       self.state.registerPage(targetId, cdpSessionId);
 
+      // ── Diagnostic: trace retry-tab detection pipeline ──
+      const hasActive = !!self.state.registry.getActive(targetId);
+      const cfUrlMatch = self.detectCFFromUrl(url);
+      const isSolvedPage = self.state.solvedPages.has(targetId);
+      yield* Effect.logInfo("cf.detector.onPageNavigated").pipe(
+        Effect.annotateLogs({
+          target_id: targetId.slice(0, 8),
+          session_id: self.sid,
+          url: url?.substring(0, 200) ?? "",
+          has_active: hasActive,
+          cf_url_match: cfUrlMatch ?? "none",
+          is_solved_page: isSolvedPage,
+          enabled: self.enabled,
+        }),
+      );
+
       // ── Phase A: Classification ──────────────────────────────────────
       const active = self.state.registry.getActive(targetId);
 
@@ -677,7 +693,25 @@ export class CloudflareDetector {
       }
       // PHANTOM GUARD: After navigation on a solved page, don't restart Turnstile detection.
       // CF spawns new OOPIFs post-solve that look like fresh challenges. See solvedPages JSDoc.
-      if (self.state.solvedPages.has(targetId)) return;
+      if (self.state.solvedPages.has(targetId)) {
+        yield* Effect.logInfo("cf.detector.phaseC.solvedPage.skip").pipe(
+          Effect.annotateLogs({
+            target_id: targetId.slice(0, 8),
+            session_id: self.sid,
+            url: url?.substring(0, 200) ?? "",
+          }),
+        );
+        return;
+      }
+      yield* Effect.logInfo("cf.detector.phaseC.startDetectionLoop").pipe(
+        Effect.annotateLogs({
+          target_id: targetId.slice(0, 8),
+          session_id: self.sid,
+          url: url?.substring(0, 200) ?? "",
+          has_active: !!active,
+          registry_has: self.state.registry.has(targetId),
+        }),
+      );
       const starter = yield* DetectionLoopStarter;
       yield* starter.start(targetId, cdpSessionId);
     })();
@@ -1340,6 +1374,21 @@ export class CloudflareDetector {
         // 3. parentFrameId filter — catches OOPIFs missed by iframeToPage
         // All baked into the service — impossible to bypass.
         const detection = yield* tabDetect.detect(self.state.solvedCFTargetIds);
+
+        // ── Diagnostic: log first poll + every 10th poll ──
+        if (pollCount === 1 || pollCount % 10 === 0) {
+          yield* Effect.logInfo("cf.detector.oopifPoll").pipe(
+            Effect.annotateLogs({
+              target_id: targetId.slice(0, 8),
+              session_id: self.sessionId,
+              poll_count: pollCount,
+              elapsed_ms: Date.now() - startTime,
+              detection_tag: detection._tag,
+              solved_cf_target_ids_size: self.state.solvedCFTargetIds.size,
+              target_count: detection._tag === "detected" ? detection.targets.length : 0,
+            }),
+          );
+        }
 
         if (detection._tag === "detected") {
           // Classify using all signals BEFORE dispatching to handler
