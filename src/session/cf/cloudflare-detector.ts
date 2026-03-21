@@ -18,9 +18,12 @@ import {
   DETECTION_POLL_DELAY,
   EMBEDDED_RESOLUTION_TIMEOUT,
   INTERSTITIAL_RESOLUTION_TIMEOUT,
+  MAX_CLICK_RETRIES,
   MAX_RECHALLENGES,
   MAX_WIDGET_RELOADS,
   RECHALLENGE_DELAY_MS,
+  REJECTION_MONITOR_MAX_MS,
+  REJECTION_MONITOR_POLL_MS,
   WIDGET_RELOAD_GRACE,
 } from "./cf-schedules.js";
 import {
@@ -1700,11 +1703,139 @@ export class CloudflareDetector {
         }
       }
 
+      // ── Click rejection monitor: detect late CF rejection during resolution wait ──
+      // CF's WASM takes 20-35s to decide after click. If rejected, it loads a
+      // "failure_retry" URL which replaces the OOPIF with a new one containing a
+      // fresh widget. We detect this by polling Target.getTargets for new OOPIF
+      // targets that differ from the original one.
+      // Flag set by the monitor fiber when rejection detected — checked post-resolution.
+      let clickRejected = false;
+      // Proven: replay 09855860 — click at 2.6s, CF rejected at 34.4s (failure_retry),
+      // new widget at 37.7s, but solver had exited → 60s timeout.
+      const originalOopifTargetId = detection.targets[0]?.targetId;
+      const clickWasDelivered = active.clickDelivered;
+      const rejectionCount = self.state.clickRejectionCount.get(targetId) ?? 0;
+
+      if (
+        clickWasDelivered &&
+        originalOopifTargetId &&
+        rejectionCount < MAX_CLICK_RETRIES &&
+        !active.aborted &&
+        !active.resolution.isDone
+      ) {
+        yield* Effect.forkIn(
+          Effect.fn("cf.clickRejectionMonitor")(function* () {
+            yield* Effect.annotateCurrentSpan({
+              "cf.target_id": targetId.slice(0, 8),
+              "cf.original_oopif": originalOopifTargetId.slice(0, 16),
+              "cf.rejection_attempt": rejectionCount,
+            });
+            const monitorStart = Date.now();
+            const maxPolls = Math.ceil(REJECTION_MONITOR_MAX_MS / REJECTION_MONITOR_POLL_MS);
+
+            for (let poll = 0; poll < maxPolls; poll++) {
+              if (active.aborted || active.resolution.isDone) return;
+
+              yield* Effect.sleep(`${REJECTION_MONITOR_POLL_MS} millis`);
+              if (active.aborted || active.resolution.isDone) return;
+
+              // Browser-level Target.getTargets — zero page interaction, invisible to CF
+              const snapshot = yield* self.strategies
+                .detectTurnstileViaCDP(cdpSessionId)
+                .pipe(Effect.orElseSucceed(() => ({ _tag: "not_detected" as const })));
+
+              if (snapshot._tag !== "detected") continue;
+
+              // Check if any detected OOPIF has a DIFFERENT targetId from the original.
+              // Same targetId = DOM refresh within existing OOPIF (not a rejection).
+              // Different targetId = CF replaced the iframe entirely (failure_retry).
+              const newOopif = snapshot.targets.find((t) => t.targetId !== originalOopifTargetId);
+              if (!newOopif) continue;
+
+              // New OOPIF found — CF rejected the click and loaded a new widget.
+              const pollMs = Date.now() - monitorStart;
+              yield* Effect.logWarning("CF lifecycle: click_rejected").pipe(
+                Effect.annotateLogs({
+                  target_id: targetId.slice(0, 8),
+                  session_id: self.sid,
+                  original_oopif: originalOopifTargetId.slice(0, 16),
+                  new_oopif: newOopif.targetId.slice(0, 16),
+                  poll_ms: pollMs,
+                  poll,
+                  rejection_count: rejectionCount + 1,
+                }),
+              );
+              self.cfPublish(
+                CFEvent.Marker({
+                  targetId,
+                  tag: "cf.click_rejected",
+                  payload: {
+                    poll_ms: pollMs,
+                    poll,
+                    attempt: rejectionCount + 1,
+                    max_attempts: MAX_CLICK_RETRIES,
+                    new_oopif: newOopif.targetId.slice(0, 16),
+                  },
+                }),
+              );
+
+              // Signal rejection through Resolution — awaitResolutionRace will see it
+              clickRejected = true;
+              yield* active.resolution.fail(
+                "click_rejected",
+                Date.now() - active.startTime,
+                "↻rej",
+              );
+              return;
+            }
+          })(),
+          ctx.scope,
+        );
+      }
+
       // Await Resolution via race: resolution vs timeout (baked into Resolution deadline).
       yield* self.awaitResolutionRace(ctx, {
         addToSolvedPages: true,
         counterLabel: "embedded",
       });
+
+      // ── Post-resolution: if click was rejected, reload page for retry ──
+      // The monitor fiber set clickRejected=true and called resolution.fail("click_rejected").
+      // awaitResolutionRace has already emitted the failure metrics/markers.
+      // Now reload the page to trigger a new detection → solve cycle.
+      if (clickRejected && !active.aborted && rejectionCount < MAX_CLICK_RETRIES) {
+        self.state.clickRejectionCount.set(targetId, rejectionCount + 1);
+
+        yield* Effect.logWarning("CF lifecycle: click_rejection_reload").pipe(
+          Effect.annotateLogs({
+            target_id: targetId.slice(0, 8),
+            session_id: self.sid,
+            rejection_count: rejectionCount + 1,
+            max_retries: MAX_CLICK_RETRIES,
+          }),
+        );
+        self.cfPublish(
+          CFEvent.Marker({
+            targetId,
+            tag: "cf.retry_click",
+            payload: {
+              attempt: rejectionCount + 1,
+              max_attempts: MAX_CLICK_RETRIES,
+            },
+          }),
+        );
+
+        // Resolve detection context BEFORE reload — frees the registry entry
+        // so the new CF challenge after reload can re-register the same pageTargetId.
+        // Without this, the old registration blocks new detection (confirmed:
+        // shopify replay showed cf.retry_click but no second cf.detected).
+        yield* ctx.resolve();
+
+        // Reload page — triggers new navigation → new CF detection → fresh solve
+        const cdp = yield* CdpSender;
+        yield* cdp.send("Page.reload").pipe(Effect.ignore);
+        return;
+      }
     })();
   }
 }

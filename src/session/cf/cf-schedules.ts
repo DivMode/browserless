@@ -66,15 +66,16 @@ export const MAX_WIDGET_RELOADS = 2;
  * that solve without a visible checkbox. */
 export const WIDGET_RELOAD_GRACE = "5 seconds" as const;
 
-/** Post-click DOM polling: interval between success/rejection checks (ms).
- * DOM.getDocument is ~2-6ms so 200ms is conservative. */
-export const POST_CLICK_POLL_INTERVAL_MS = 200;
+/** Click rejection monitor: poll interval for Target.getTargets (ms).
+ * Target.getTargets is ~2ms. 2s intervals keep CPU light during the 40s window. */
+export const REJECTION_MONITOR_POLL_MS = 2_000;
 
-/** Post-click DOM polling: max polling window after click (ms).
- * 5s covers CF's rejection animation (~1-2s) + widget reload (~1s). */
-export const POST_CLICK_POLL_MAX_MS = 5_000;
+/** Click rejection monitor: max monitoring window after click (ms).
+ * CF's WASM verification takes 20-35s. 40s covers the observed rejection at ~35s
+ * with margin. Replay evidence: click at 2.6s, failure_retry at 34.4s, new widget at 37.7s. */
+export const REJECTION_MONITOR_MAX_MS = 40_000;
 
-/** Max click retries after CF rejection (red X → new checkbox). */
+/** Max page reloads after click rejection (CF red X → new widget). */
 export const MAX_CLICK_RETRIES = 3;
 
 /** Max rechallenge loops before giving up. */

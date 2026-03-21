@@ -45,7 +45,7 @@ import { TARGET_GET_TIMEOUT_MS } from "./cf-schedules.js";
 
 // Extracted modules
 import { phase2OOPIFResolution } from "./cf-phase-oopif.js";
-import { phase3CheckboxFind, phase4PostClickPoll, getAttr } from "./cf-phase-checkbox.js";
+import { phase3CheckboxFind, getAttr } from "./cf-phase-checkbox.js";
 import { openCleanPageWsScoped } from "./cf-coords.js";
 
 /** Parsed metadata from a CF Turnstile OOPIF URL. */
@@ -125,8 +125,6 @@ export type ClickResult = Data.TaggedEnum<{
   NotVerified: { readonly reason: string };
   NoCheckbox: {};
   ClickFailed: {};
-  /** CF rejected the click (red X) — new checkbox appeared, caller should retry. */
-  ClickRejected: { readonly attempt: number; readonly pollMs: number };
 }>;
 export const ClickResult = Data.taggedEnum<ClickResult>();
 
@@ -837,18 +835,6 @@ export class CloudflareSolveStrategies {
       });
       yield* observeHistogram(cfPhase4Duration, phase4_duration_ms / 1000);
       if (clickVerified) {
-        // ── Phase 4b: Post-click DOM poll for CF acceptance/rejection ──
-        // Only for embedded turnstile — interstitials signal via page navigation.
-        // Poll the OOPIF DOM to detect if CF accepted or rejected the click.
-        // Rejection: red X → widget reloads → fresh checkbox appears.
-        if (!isInterstitialType(active.info.type)) {
-          const postClick = yield* phase4PostClickPoll(verifySend, oopifSessionId, active);
-          if (postClick.outcome === "rejected") {
-            yield* incCounter(cfClickResultTotal, { result: "click_rejected" });
-            return ClickResult.ClickRejected({ attempt, pollMs: postClick.pollMs });
-          }
-          // "accepted" or "pending" — proceed normally. Bridge push handles the rest.
-        }
         yield* incCounter(cfClickResultTotal, { result: "verified" });
         return ClickResult.Verified({ clickDeliveredAt: Date.now() });
       }

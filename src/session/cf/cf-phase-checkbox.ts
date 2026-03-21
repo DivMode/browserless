@@ -1,6 +1,5 @@
 /**
  * Phase 3: Checkbox Finding — locate the Turnstile checkbox in the OOPIF.
- * Phase 4b: Post-click polling — detect CF acceptance/rejection after click.
  *
  * Extracted from cloudflare-solve-strategies.ts for maintainability.
  * Three strategies tried in order:
@@ -12,13 +11,7 @@ import { Effect } from "effect";
 import type { CdpSessionId } from "../../shared/cloudflare-detection.js";
 import type { ReadonlyActiveDetection } from "./cloudflare-event-emitter.js";
 import { SolverEvents } from "./cf-services.js";
-import {
-  CDP_CALL_TIMEOUT,
-  MAX_CHECKBOX_POLLS,
-  CHECKBOX_POLL_INTERVAL_MS,
-  POST_CLICK_POLL_INTERVAL_MS,
-  POST_CLICK_POLL_MAX_MS,
-} from "./cf-schedules.js";
+import { CDP_CALL_TIMEOUT, MAX_CHECKBOX_POLLS, CHECKBOX_POLL_INTERVAL_MS } from "./cf-schedules.js";
 import { cfPhase3Duration, observeHistogram } from "../../effect-metrics.js";
 
 /** Effect-returning CDP sender — eliminates the Promise bridge. */
@@ -437,136 +430,6 @@ export function phase3CheckboxFind(
 
     return { checkbox, method };
   })();
-}
-
-// ── Phase 4b: Post-click DOM polling ─────────────────────────────────
-
-/**
- * Post-click outcome detected by polling the OOPIF DOM after click.
- *
- * - `accepted`: div#success visible — CF accepted the click, bridge push imminent.
- * - `rejected`: Fresh span.cb-i appeared — CF rejected the click (red X), retry needed.
- * - `pending`: Neither signal seen within the poll window — fall through to resolution race.
- */
-export type PostClickOutcome = "accepted" | "rejected" | "pending";
-
-/**
- * Phase 4b: Poll OOPIF DOM after click to detect CF acceptance or rejection.
- *
- * After phase 4 click is verified (mousedown event fired), CF's WASM evaluates
- * the click. Three outcomes:
- *   1. Accepted: div#success becomes visible → bridge push is imminent
- *   2. Rejected: Red X → widget reloads → fresh span.cb-i appears
- *   3. Neither: Still processing or auto-solved via different signal
- *
- * Polls every POST_CLICK_POLL_INTERVAL_MS for up to POST_CLICK_POLL_MAX_MS.
- */
-export function phase4PostClickPoll(
-  send: EffectSend,
-  oopifSessionId: CdpSessionId,
-  active: ReadonlyActiveDetection,
-): Effect.Effect<
-  { outcome: PostClickOutcome; pollMs: number },
-  never,
-  typeof SolverEvents.Identifier
-> {
-  const pageTargetId = active.pageTargetId;
-  return Effect.fn("cf.phase4PostClickPoll")(function* () {
-    yield* Effect.annotateCurrentSpan({
-      "cf.target_id": pageTargetId,
-      "cf.oopif_session": oopifSessionId.substring(0, 20),
-    });
-    const events = yield* SolverEvents;
-    const pollStart = Date.now();
-    const maxPolls = Math.ceil(POST_CLICK_POLL_MAX_MS / POST_CLICK_POLL_INTERVAL_MS);
-
-    for (let poll = 0; poll < maxPolls; poll++) {
-      if (active.aborted) return { outcome: "pending" as const, pollMs: Date.now() - pollStart };
-
-      // Check if resolution already completed (bridge push, navigation, etc.)
-      if (active.resolution.isDone) {
-        return { outcome: "accepted" as const, pollMs: Date.now() - pollStart };
-      }
-
-      yield* Effect.sleep(`${POST_CLICK_POLL_INTERVAL_MS} millis`);
-
-      // Get full OOPIF DOM tree — same call as phase 3
-      const doc = yield* cdpCall(
-        send("DOM.getDocument", { depth: -1, pierce: true }, oopifSessionId),
-      );
-      if (!doc?.root) {
-        // OOPIF gone — can't determine outcome, fall through
-        return { outcome: "pending" as const, pollMs: Date.now() - pollStart };
-      }
-
-      // Check for success indicator (div#success visible)
-      const successNode = findSuccessInTree(doc.root);
-      if (successNode) {
-        const pollMs = Date.now() - pollStart;
-        yield* events.marker(pageTargetId, "cf.click_accepted", { poll_ms: pollMs });
-        yield* Effect.annotateCurrentSpan({
-          "cf.post_click_outcome": "accepted",
-          "cf.post_click_poll_ms": pollMs,
-        });
-        return { outcome: "accepted" as const, pollMs };
-      }
-
-      // Check for fresh checkbox (span.cb-i) — indicates rejection + widget reload.
-      // After a verified click, the checkbox should be gone (clicked state).
-      // If it reappears, CF rejected the click and rendered a new widget.
-      const freshCheckbox = findCheckboxInTree(doc.root);
-      if (freshCheckbox) {
-        const pollMs = Date.now() - pollStart;
-        yield* events.marker(pageTargetId, "cf.click_rejected", {
-          poll_ms: pollMs,
-          poll,
-        });
-        yield* Effect.annotateCurrentSpan({
-          "cf.post_click_outcome": "rejected",
-          "cf.post_click_poll_ms": pollMs,
-        });
-        return { outcome: "rejected" as const, pollMs };
-      }
-    }
-
-    // Neither signal seen within poll window — not necessarily bad.
-    // Bridge may fire via async signal. Fall through to resolution race.
-    const pollMs = Date.now() - pollStart;
-    yield* Effect.annotateCurrentSpan({
-      "cf.post_click_outcome": "pending",
-      "cf.post_click_poll_ms": pollMs,
-    });
-    return { outcome: "pending" as const, pollMs };
-  })().pipe(
-    Effect.catch(() => Effect.succeed({ outcome: "pending" as PostClickOutcome, pollMs: 0 })),
-  );
-}
-
-/**
- * Walk the CDP DOM tree to find a div#success element.
- * CF renders this when the turnstile check passes.
- */
-function findSuccessInTree(node: CDPNode): CDPNode | null {
-  const name = node.localName || node.nodeName?.toLowerCase();
-  if (name === "div" && getAttr(node, "id") === "success") return node;
-
-  if (node.shadowRoots) {
-    for (const shadow of node.shadowRoots) {
-      const found = findSuccessInTree(shadow);
-      if (found) return found;
-    }
-  }
-  if (node.contentDocument) {
-    const found = findSuccessInTree(node.contentDocument);
-    if (found) return found;
-  }
-  if (node.children) {
-    for (const child of node.children) {
-      const found = findSuccessInTree(child);
-      if (found) return found;
-    }
-  }
-  return null;
 }
 
 // ── Shadow DOM diagnostics ───────────────────────────────────────────

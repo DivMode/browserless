@@ -47,7 +47,6 @@ type SolveDepsI = typeof SolveDeps.Service;
 import {
   CLICK_RETRY_DELAY,
   MAX_CLICK_ATTEMPTS,
-  MAX_CLICK_RETRIES,
   MAX_NO_CHECKBOX_BEFORE_BAILOUT,
 } from "./cf-schedules.js";
 
@@ -236,12 +235,6 @@ const solveByClicking = (active: SolverActiveDetection, deps: SolveDepsI) =>
             consecutiveNoCheckbox = 0;
             return Effect.succeed(null as boolean | null);
           },
-          // ClickRejected only fires for embedded turnstile (post-click poll is
-          // skipped for interstitials), but handle for exhaustive match.
-          ClickRejected: () => {
-            consecutiveNoCheckbox = 0;
-            return Effect.succeed(null as boolean | null);
-          },
         }),
         Match.exhaustive,
       );
@@ -305,7 +298,6 @@ const solveTurnstile = (active: SolverActiveDetection, deps: SolveDepsI) =>
 
     // Click loop — try to find and click the Turnstile checkbox.
     // Non-interactive widgets never render a checkbox.
-    let clickRejectionCount = 0;
     const handleClickResult = (
       result: ClickResult,
       attempt: number,
@@ -321,25 +313,6 @@ const solveTurnstile = (active: SolverActiveDetection, deps: SolveDepsI) =>
               Effect.map((): TurnstileResult | null => TR.Clicked({ attempt })),
             ),
           ),
-          Match.tag("ClickRejected", (r) => {
-            // CF rejected the click (red X) — new checkbox appeared.
-            // Retry by returning null (continue loop) unless we've exhausted retries.
-            clickRejectionCount++;
-            return events
-              .marker(pageTargetId, "cf.retry_click", {
-                attempt: clickRejectionCount,
-                max_attempts: MAX_CLICK_RETRIES,
-                poll_ms: r.pollMs,
-              })
-              .pipe(
-                Effect.map((): TurnstileResult | null => {
-                  if (clickRejectionCount >= MAX_CLICK_RETRIES) {
-                    return TR.NoClick();
-                  }
-                  return null; // Continue click loop — phase 3+4 will find the fresh checkbox
-                }),
-              );
-          }),
           Match.tag("NotVerified", (r) => {
             if (r.reason === "oopif_gone") {
               return events

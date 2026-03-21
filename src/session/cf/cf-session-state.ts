@@ -38,6 +38,8 @@ export class SessionSolverState {
   readonly pendingRechallengeCount = new Map<TargetId, number>();
   /** Per-page reload count for widget-not-rendered recovery. Reset on solve. */
   readonly widgetReloadCount = new Map<TargetId, number>();
+  /** Per-page count of click rejection reloads (CF rejected click, new widget appeared). */
+  readonly clickRejectionCount = new Map<TargetId, number>();
   /** Per-page cleanup scopes — finalizers remove solvedCFTargetIds entries when page is destroyed. */
   private readonly pageCleanupScopes = new Map<TargetId, Scope.Closeable>();
   config: Required<CloudflareConfig> = {
@@ -183,6 +185,7 @@ export class SessionSolverState {
       self.pendingIframes.delete(targetId);
       self.pendingRechallengeCount.delete(targetId);
       self.widgetReloadCount.delete(targetId);
+      self.clickRejectionCount.delete(targetId);
       self.summaryPhases.delete(targetId);
 
       const cleanupScope = self.pageCleanupScopes.get(targetId);
@@ -212,6 +215,7 @@ export class SessionSolverState {
         this.solvedPages.clear();
         this.pendingIframes.clear();
         this.widgetReloadCount.clear();
+        this.clickRejectionCount.clear();
         this.summaryPhases.clear();
       }.bind(this),
     );
