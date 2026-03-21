@@ -712,6 +712,8 @@ describe("Pydoll Pipeline", () => {
   // The pre-push hook runs `npx vitest run` which re-runs the full suite — without
   // this cooldown, cf-stress always fails on push after an explicit test run.
   it("cf-stress passes >=80% with 10 concurrent tabs", { timeout: 65_000 }, () => {
+    const STRESS_TABS = 10;
+    const STRESS_PASS_THRESHOLD = Math.ceil(STRESS_TABS * 0.8);
     const COOLDOWN_FILE = "/tmp/cf-stress-last-pass";
     const COOLDOWN_MS = 10 * 60 * 1000;
     try {
@@ -731,7 +733,14 @@ describe("Pydoll Pipeline", () => {
     try {
       stdout = execFileSync(
         "uv",
-        ["run", "pydoll", "cf-stress", "--concurrent", "10", "--chrome-endpoint=local-browserless"],
+        [
+          "run",
+          "pydoll",
+          "cf-stress",
+          "--concurrent",
+          String(STRESS_TABS),
+          "--chrome-endpoint=local-browserless",
+        ],
         {
           cwd: PYDOLL_DIR,
           encoding: "utf-8",
@@ -745,11 +754,14 @@ describe("Pydoll Pipeline", () => {
       throw new Error(`pydoll cf-stress failed:\n${e.stderr || ""}\n\nstdout:\n${e.stdout || ""}`);
     }
 
-    // Parse results table: "N/10 passed"
-    const passMatch = stdout.match(/(\d+)\/10 passed/);
+    // Parse results table: "N/STRESS_TABS passed"
+    const passMatch = stdout.match(new RegExp(`(\\d+)/${STRESS_TABS} passed`));
     expect(passMatch, "No pass count in cf-stress output").toBeTruthy();
     const passed = Number(passMatch![1]);
-    expect(passed, `Only ${passed}/10 passed (need >=8 for 80%)`).toBeGreaterThanOrEqual(8);
+    expect(
+      passed,
+      `Only ${passed}/${STRESS_TABS} passed (need >=${STRESS_PASS_THRESHOLD} for 80%)`,
+    ).toBeGreaterThanOrEqual(STRESS_PASS_THRESHOLD);
 
     // Mark pass time — subsequent runs within cooldown will skip
     fs.writeFileSync(COOLDOWN_FILE, "");
