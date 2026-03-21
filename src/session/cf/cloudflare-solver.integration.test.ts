@@ -134,7 +134,7 @@ const runSession: Effect.Effect<SessionResult, never, typeof ReplayAPI | Scope.S
             const t = (window as any).turnstile;
             return t && typeof t.getResponse === "function" && !!t.getResponse();
           },
-          { timeout: 8_000, polling: 500 },
+          { timeout: 15_000, polling: 500 },
         )
         .catch(() => {}),
     );

@@ -231,7 +231,8 @@ const CF_TEST_SITES: CfTestSite[] = [
     url: "https://nopecha.com/captcha/turnstile",
     expectedTypes: ["turnstile"],
     waitStrategy: "turnstile",
-    expectedSummaries: ["Emb✓", "Emb→"],
+    // Emb↻ = widget reload (checkbox not rendered, solver used recovery mechanism)
+    expectedSummaries: ["Emb✓", "Emb→", "Emb↻"],
   },
   {
     name: "peet-managed",
@@ -315,8 +316,9 @@ describe.concurrent("CF Solver Multi-Site", () => {
                 );
 
                 // Interstitials need more time — CF can take 10-15s to verify and navigate.
-                // Turnstile tokens appear faster (5-8s). Both fit well under 60s test timeout.
-                const defaultWaitMs = site.waitStrategy === "interstitial" ? 20_000 : 8_000;
+                // Turnstile solver cycle: phase3 checkbox poll (3.2s) + WIDGET_RELOAD_GRACE (5s)
+                // + reload + second detection cycle. 15s covers one full reload attempt.
+                const defaultWaitMs = site.waitStrategy === "interstitial" ? 20_000 : 15_000;
                 yield* waitForSolve(p, site.waitStrategy, site.waitMs ?? defaultWaitMs);
 
                 return p;

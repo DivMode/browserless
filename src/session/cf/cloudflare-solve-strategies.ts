@@ -936,6 +936,10 @@ export class CloudflareSolveStrategies {
       // Traced path — only when fresh (non-stale) CF targets found
       return yield* Effect.fn("cf.detectTurnstileViaCDP")(function* () {
         yield* Effect.annotateCurrentSpan({ "cf.target_id": _pageCdpSessionId });
+        yield* Effect.annotateCurrentSpan({
+          "cf.target_cache.age_ms": Date.now() - (strategies.targetCache?.timestamp ?? 0),
+          "cf.target_cache.hit": !!strategies.targetCache,
+        });
 
         const filteredOut = cfTargets.filter(
           (t: { targetId?: string }) => t.targetId && solvedCFTargetIds?.has(t.targetId),

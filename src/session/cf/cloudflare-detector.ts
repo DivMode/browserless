@@ -1387,6 +1387,19 @@ export class CloudflareDetector {
           const pageInfo = self.strategies.getPageInfo(targetId as string);
           const classified = classifyOOPIFDetection(detection, pageInfo);
 
+          yield* Effect.logInfo("cf.detector.oopifClassification").pipe(
+            Effect.annotateLogs({
+              target_id: targetId.slice(0, 8),
+              session_id: self.sessionId,
+              classification: classified._tag,
+              page_title: pageInfo?.title?.substring(0, 80) ?? "null",
+              page_url: pageInfo?.url?.substring(0, 200) ?? "null",
+              oopif_url: detection.targets[0]?.url?.substring(0, 100) ?? "none",
+              oopif_count: detection.targets.length,
+              pageinfo_available: !!pageInfo,
+            }),
+          );
+
           yield* pipe(
             Match.value(classified),
             Match.tag("EmbeddedTurnstile", (c) =>
