@@ -126,30 +126,48 @@ describe("classifyOOPIFDetection", () => {
     expect(result._tag).toBe("EmbeddedTurnstile");
   });
 
-  it('returns InlineInterstitial for "Just a moment..." title', () => {
+  // ── URL-based classification (title is unreliable — stale after navigation) ──
+
+  it("returns InlineInterstitial for CF challenge-platform URL", () => {
     const result = classifyOOPIFDetection(makeDetection(), {
       title: "Just a moment...",
-      url: "https://oyvana.com/",
+      url: "https://oyvana.com/cdn-cgi/challenge-platform/h/g/cv/",
     });
     expect(result._tag).toBe("InlineInterstitial");
     if (result._tag === "InlineInterstitial") {
-      expect(result.pageUrl).toBe("https://oyvana.com/");
+      expect(result.pageUrl).toContain("challenge-platform");
       expect(result.pageTitle).toBe("Just a moment...");
     }
   });
 
-  it('returns InlineInterstitial for "Attention Required" title', () => {
+  it("returns InlineInterstitial for challenges.cloudflare.com URL", () => {
     const result = classifyOOPIFDetection(makeDetection(), {
-      title: "Attention Required! | Cloudflare",
-      url: "https://example.com",
+      title: "",
+      url: "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/cv/",
     });
     expect(result._tag).toBe("InlineInterstitial");
+  });
+
+  it("returns InlineInterstitial for about:blank (during interstitial load)", () => {
+    const result = classifyOOPIFDetection(makeDetection(), {
+      title: "",
+      url: "about:blank",
+    });
+    expect(result._tag).toBe("InlineInterstitial");
+  });
+
+  it("stale CF title with destination URL → EmbeddedTurnstile (URL is fresh)", () => {
+    const result = classifyOOPIFDetection(makeDetection(), {
+      title: "Just a moment...",
+      url: "https://ahrefs.com/backlink-checker?input=example.com&mode=subdomains",
+    });
+    expect(result._tag).toBe("EmbeddedTurnstile");
   });
 
   it('returns EmbeddedTurnstile for "Verifying" (Ahrefs loading state)', () => {
     const result = classifyOOPIFDetection(makeDetection(), {
       title: "Verifying",
-      url: "https://oyvana.com/",
+      url: "https://ahrefs.com/backlink-checker?input=example.com",
     });
     expect(result._tag).toBe("EmbeddedTurnstile");
   });
@@ -166,7 +184,7 @@ describe("classifyOOPIFDetection", () => {
   it("preserves OOPIF metadata in InlineInterstitial variant", () => {
     const result = classifyOOPIFDetection(makeDetection(), {
       title: "Just a moment...",
-      url: "https://x.com",
+      url: "https://example.com/cdn-cgi/challenge-platform/h/g/cv/",
     });
     if (result._tag === "InlineInterstitial") {
       expect(result.meta?.sitekey).toBe("0xTestKey");
@@ -174,7 +192,7 @@ describe("classifyOOPIFDetection", () => {
     }
   });
 
-  it("returns EmbeddedTurnstile for empty page title", () => {
+  it("returns EmbeddedTurnstile for empty page title with normal URL", () => {
     const result = classifyOOPIFDetection(makeDetection(), { title: "", url: "https://x.com" });
     expect(result._tag).toBe("EmbeddedTurnstile");
   });

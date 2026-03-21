@@ -105,6 +105,21 @@ export const CF_INTERSTITIAL_TITLE_PREFIXES = [
 export const isCFInterstitialTitle = (title: string): boolean =>
   CF_INTERSTITIAL_TITLE_PREFIXES.some((prefix) => title.startsWith(prefix));
 
+/** Returns true if the page URL itself is a CF challenge/interstitial (not a destination).
+ *  Unlike page title, URL is updated immediately on navigation commit — reliable.
+ *  See cloudflare-event-emitter.ts:173 — Chrome's stale title causes misclassification. */
+export const isCFChallengeUrl = (url: string): boolean => {
+  if (!url || url === "about:blank") return true; // blank during interstitial load
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === "challenges.cloudflare.com") return true;
+    if (parsed.pathname.includes("/cdn-cgi/challenge-platform/")) return true;
+  } catch {
+    if (url.includes("challenges.cloudflare.com")) return true;
+  }
+  return false;
+};
+
 export const CloudflareInfo = Schema.Struct({
   type: CloudflareType,
   url: Schema.String,

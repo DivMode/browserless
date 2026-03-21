@@ -246,14 +246,15 @@ const CF_TEST_SITES: CfTestSite[] = [
     url: "https://peet.ws/turnstile-test/non-interactive.html",
     expectedTypes: ["turnstile"],
     waitStrategy: "turnstile",
-    expectedSummaries: ["Emb→"],
+    // Emb↻Emb→ = widget reload then auto-solve on retry (checkbox not rendered first time)
+    expectedSummaries: ["Emb→", "Emb↻Emb→"],
   },
   {
     name: "peet-invisible",
     url: "https://peet.ws/turnstile-test/invisible.html",
     expectedTypes: ["turnstile"],
     waitStrategy: "turnstile",
-    expectedSummaries: ["Emb→"],
+    expectedSummaries: ["Emb→", "Emb↻Emb→"],
   },
   {
     name: "cfschl-peet",

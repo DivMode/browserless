@@ -9,7 +9,11 @@ import type {
   EmbeddedInfo,
   InterstitialCFType,
 } from "../../shared/cloudflare-detection.js";
-import { isInterstitialType, isCFInterstitialTitle } from "../../shared/cloudflare-detection.js";
+import {
+  isInterstitialType,
+  isCFInterstitialTitle,
+  isCFChallengeUrl,
+} from "../../shared/cloudflare-detection.js";
 import {
   DETECTION_POLL_DELAY,
   EMBEDDED_RESOLUTION_TIMEOUT,
@@ -120,7 +124,10 @@ export function classifyOOPIFDetection(
   const firstTarget = detection.targets[0];
   const meta: TurnstileOOPIFMeta | undefined = firstTarget?.meta;
 
-  if (pageInfo && isCFInterstitialTitle(pageInfo.title)) {
+  // URL is reliable (updated on navigation commit). Title is NOT — Chrome's
+  // Target.getTargets returns stale titles after cross-document navigations
+  // (see cloudflare-event-emitter.ts:173). Use URL to classify.
+  if (pageInfo && isCFChallengeUrl(pageInfo.url)) {
     return ClassifiedOOPIF.InlineInterstitial({
       pageUrl: pageInfo.url,
       pageTitle: pageInfo.title,
