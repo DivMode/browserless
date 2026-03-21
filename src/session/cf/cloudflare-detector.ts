@@ -1752,6 +1752,10 @@ export class CloudflareDetector {
               const newOopif = snapshot.targets.find((t) => t.targetId !== originalOopifTargetId);
               if (!newOopif) continue;
 
+              // Only real rejections have failure_retry in the URL.
+              // Normal verification OOPIF swaps use /new/normal URLs.
+              if (!newOopif.url?.includes("failure_retry")) continue;
+
               // New OOPIF found — CF rejected the click and loaded a new widget.
               const pollMs = Date.now() - monitorStart;
               yield* Effect.logWarning("CF lifecycle: click_rejected").pipe(

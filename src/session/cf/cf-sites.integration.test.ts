@@ -745,8 +745,8 @@ describe("Pydoll Pipeline", () => {
       throw new Error(`pydoll cf-stress failed:\n${e.stderr || ""}\n\nstdout:\n${e.stdout || ""}`);
     }
 
-    // Parse results table: "N/15 passed"
-    const passMatch = stdout.match(/(\d+)\/15 passed/);
+    // Parse results table: "N/10 passed"
+    const passMatch = stdout.match(/(\d+)\/10 passed/);
     expect(passMatch, "No pass count in cf-stress output").toBeTruthy();
     const passed = Number(passMatch![1]);
     expect(passed, `Only ${passed}/10 passed (need >=8 for 80%)`).toBeGreaterThanOrEqual(8);
