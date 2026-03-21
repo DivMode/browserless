@@ -65,7 +65,9 @@ export class TargetRegistry {
         state.pageWebSocket.terminate();
       } catch {}
       state.pageWebSocket = null;
-      Effect.runSync(incCounter(wsLifecycle, { type: "page_registry", action: "destroy" }));
+      Effect.runSync(
+        incCounter(wsLifecycle, { "handle.type": "page_registry", "ws.action": "destroy" }),
+      );
     }
     // Clean iframe refs that reference this target's cdpSessionId
     this.iframeToCdpSession.delete(state.cdpSessionId);

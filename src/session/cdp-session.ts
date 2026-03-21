@@ -29,11 +29,8 @@ import {
 import { CdpSessionId, TargetId } from "../shared/cloudflare-detection.js";
 import { decodeCDPMessage, decodeRrwebEventBatch } from "../shared/cdp-schemas.js";
 import { CdpConnection } from "../shared/cdp-rpc.js";
-import type {
-  CdpTimeout as CdpTimeoutError} from "./cf/cf-errors.js";
-import {
-  CdpSessionGone as CdpSessionGoneError
-} from "./cf/cf-errors.js";
+import type { CdpTimeout as CdpTimeoutError } from "./cf/cf-errors.js";
+import { CdpSessionGone as CdpSessionGoneError } from "./cf/cf-errors.js";
 import {
   registerSessionState,
   tabDuration,
@@ -393,7 +390,9 @@ export class CdpSession {
       Effect.acquireRelease(
         Effect.fn("cdp.wsLifecycle")(function* () {
           const ws = new self.WebSocket(self.wsEndpoint);
-          Effect.runSync(incCounter(wsLifecycle, { type: "session_browser", action: "create" }));
+          Effect.runSync(
+            incCounter(wsLifecycle, { "handle.type": "session_browser", "ws.action": "create" }),
+          );
 
           // CRITICAL: Attach error handler synchronously before any async work
           ws.on("error", (err: Error) => {
@@ -480,7 +479,9 @@ export class CdpSession {
             self.ws = null;
             self.unregisterGauges?.();
             self.unregisterGauges = null;
-            Effect.runSync(incCounter(wsLifecycle, { type: "session_browser", action: "destroy" }));
+            Effect.runSync(
+              incCounter(wsLifecycle, { "handle.type": "session_browser", "ws.action": "destroy" }),
+            );
           }),
       ),
     );
@@ -812,7 +813,7 @@ export class CdpSession {
       const pageWs = yield* Effect.acquireRelease(
         Effect.gen(function* () {
           const pageWs = new WebSocket(pageWsUrl);
-          Effect.runSync(incCounter(wsLifecycle, { type: "page", action: "create" }));
+          Effect.runSync(incCounter(wsLifecycle, { "handle.type": "page", "ws.action": "create" }));
 
           pageWs.on("message", (data: Buffer) => {
             try {
@@ -873,7 +874,9 @@ export class CdpSession {
             conn?.dispose();
             pageWs.removeAllListeners();
             pageWs.terminate();
-            Effect.runSync(incCounter(wsLifecycle, { type: "page", action: "destroy" }));
+            Effect.runSync(
+              incCounter(wsLifecycle, { "handle.type": "page", "ws.action": "destroy" }),
+            );
           }),
       );
 

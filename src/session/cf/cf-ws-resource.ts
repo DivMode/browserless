@@ -73,7 +73,7 @@ export function openScopedWs(
       // Counter AFTER open succeeds — structural guarantee.
       // If handshake fails or fiber interrupts during open, acquire never
       // completes → release never fires → no counter gap.
-      yield* incCounter(wsLifecycle, { type: label, action: "create" });
+      yield* incCounter(wsLifecycle, { "handle.type": label, "ws.action": "create" });
 
       const conn = new CdpConnection(ws, {
         startId: opts.startId,
@@ -104,7 +104,7 @@ export function openScopedWs(
             /* already closed */
           }
         }
-        yield* incCounter(wsLifecycle, { type: label, action: "destroy" });
+        yield* incCounter(wsLifecycle, { "handle.type": label, "ws.action": "destroy" });
       })(),
   );
 }

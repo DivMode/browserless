@@ -65,9 +65,9 @@ const { wsLifecycle } = await import("../../effect-metrics.js");
 
 /** Read counter value for a labeled metric inside the Effect context. */
 function readCounter(type: string, action: string) {
-  return Metric.value(wsLifecycle.pipe(Metric.withAttributes({ type, action }))).pipe(
-    Effect.map((state) => (state as any)?.count ?? 0),
-  );
+  return Metric.value(
+    wsLifecycle.pipe(Metric.withAttributes({ "handle.type": type, "ws.action": action })),
+  ).pipe(Effect.map((state) => (state as any)?.count ?? 0));
 }
 
 describe("openScopedWs", () => {

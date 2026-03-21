@@ -903,13 +903,13 @@ export class CloudflareDetector {
             "cf.elapsed_ms": solveElapsedMs,
           });
           yield* incCounter(cfSolveTotal, {
-            type: active.info.type,
+            "handle.type": active.info.type,
             outcome: "solved",
             method: resolved.result.method ?? "",
             signal: resolved.result.signal ?? "",
           });
           yield* observeHistogram(cfSolveDuration, solveElapsedMs / 1000, {
-            type: active.info.type,
+            "handle.type": active.info.type,
             outcome: "solved",
           });
           if (active.clickDeliveredAt) {
@@ -954,13 +954,13 @@ export class CloudflareDetector {
             "cf.verified": cfVerified,
           });
           yield* incCounter(cfSolveTotal, {
-            type: active.info.type,
+            "handle.type": active.info.type,
             outcome: "failed",
             method: "",
             signal: resolved.reason,
           });
           yield* observeHistogram(cfSolveDuration, resolved.duration_ms / 1000, {
-            type: active.info.type,
+            "handle.type": active.info.type,
             outcome: "failed",
           });
           yield* Effect.logWarning("CF lifecycle: resolution_result").pipe(
@@ -1022,7 +1022,7 @@ export class CloudflareDetector {
         );
         // Track managed/interstitial click-delivered-but-no-nav specifically
         if (active.clickDelivered && isInterstitialType(active.info.type)) {
-          yield* incCounter(cfManagedClickNoNav, { type: active.info.type });
+          yield* incCounter(cfManagedClickNoNav, { "handle.type": active.info.type });
           yield* Effect.logWarning("CF lifecycle: managed_click_no_nav").pipe(
             Effect.annotateLogs({
               session_id: self.sid,
@@ -1039,16 +1039,16 @@ export class CloudflareDetector {
         const timeoutReason = opts.timeoutReason ?? "resolution_timeout";
         const duration = Date.now() - active.startTime;
         yield* incCounter(cfSolveTotal, {
-          type: active.info.type,
+          "handle.type": active.info.type,
           outcome: "timeout",
           method: "",
           signal: "",
         });
         yield* observeHistogram(cfSolveDuration, duration / 1000, {
-          type: active.info.type,
+          "handle.type": active.info.type,
           outcome: "timeout",
         });
-        yield* incCounter(cfResolutionTimeouts, { type: opts.counterLabel });
+        yield* incCounter(cfResolutionTimeouts, { "handle.type": opts.counterLabel });
         yield* active.resolution.fail(timeoutReason, duration);
         self.state.pushPhase(targetId, active.info.type, `✗ ${timeoutReason}`);
         const label = self.state.buildCompoundLabel(targetId);

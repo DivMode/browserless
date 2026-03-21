@@ -325,13 +325,16 @@ export const gaugeCollector = Effect.gen(function* () {
           else alive++;
         }
       }
-      yield* Metric.update(socketState.pipe(Metric.withAttributes({ state: "alive" })), alive);
       yield* Metric.update(
-        socketState.pipe(Metric.withAttributes({ state: "destroyed" })),
+        socketState.pipe(Metric.withAttributes({ "socket.state": "alive" })),
+        alive,
+      );
+      yield* Metric.update(
+        socketState.pipe(Metric.withAttributes({ "socket.state": "destroyed" })),
         destroyed,
       );
       yield* Metric.update(
-        socketState.pipe(Metric.withAttributes({ state: "half_open" })),
+        socketState.pipe(Metric.withAttributes({ "socket.state": "half_open" })),
         halfOpen,
       );
 
@@ -345,7 +348,10 @@ export const gaugeCollector = Effect.gen(function* () {
         counts.set(type, (counts.get(type) || 0) + 1);
       }
       for (const [type, count] of counts) {
-        yield* Metric.update(activeHandlesByType.pipe(Metric.withAttributes({ type })), count);
+        yield* Metric.update(
+          activeHandlesByType.pipe(Metric.withAttributes({ "handle.type": type })),
+          count,
+        );
       }
 
       // Node.js runtime metrics

@@ -481,7 +481,7 @@ export class CloudflareSolveStrategies {
       }
 
       yield* observeHistogram(cfClickPipelineDuration, (Date.now() - solveStart) / 1000, {
-        type: active.info.type,
+        "handle.type": active.info.type,
       });
       return clickResult;
     })().pipe(

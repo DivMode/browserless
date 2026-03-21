@@ -170,7 +170,9 @@ export class CDPProxy {
             this.clientWs.removeAllListeners();
             this.clientWs.terminate();
             this.clientWs = null;
-            Effect.runSync(incCounter(wsLifecycle, { type: "proxy_client", action: "destroy" }));
+            Effect.runSync(
+              incCounter(wsLifecycle, { "handle.type": "proxy_client", "ws.action": "destroy" }),
+            );
           }
           (this as any).clientSocket = null;
           // 3. Close browser WS last
@@ -178,7 +180,9 @@ export class CDPProxy {
             this.browserWs.removeAllListeners();
             this.browserWs.terminate();
             this.browserWs = null;
-            Effect.runSync(incCounter(wsLifecycle, { type: "proxy_browser", action: "destroy" }));
+            Effect.runSync(
+              incCounter(wsLifecycle, { "handle.type": "proxy_browser", "ws.action": "destroy" }),
+            );
           }
         }),
       ),
@@ -192,7 +196,9 @@ export class CDPProxy {
       Effect.fn("cdp.connect")({ self: this }, function* () {
         // Step 1: Connect to Chrome's CDP endpoint FIRST
         this.browserWs = new WebSocket(this.browserWsEndpoint);
-        Effect.runSync(incCounter(wsLifecycle, { type: "proxy_browser", action: "create" }));
+        Effect.runSync(
+          incCounter(wsLifecycle, { "handle.type": "proxy_browser", "ws.action": "create" }),
+        );
 
         yield* Effect.callback<void, Error>((resume) => {
           const ws = this.browserWs!;
@@ -228,7 +234,9 @@ export class CDPProxy {
 
         // Setup AFTER successful upgrade
         this.clientWs = clientWs;
-        Effect.runSync(incCounter(wsLifecycle, { type: "proxy_client", action: "create" }));
+        Effect.runSync(
+          incCounter(wsLifecycle, { "handle.type": "proxy_client", "ws.action": "create" }),
+        );
         runForkInServer(Effect.logDebug("Client WebSocket upgraded"));
 
         // Scope-bound outbound queue: all client WS sends go through here.
@@ -570,7 +578,7 @@ export class CDPProxy {
           },
         })
       ) {
-        Effect.runSync(incCounter(proxyDroppedMessages, { direction: "client" }));
+        Effect.runSync(incCounter(proxyDroppedMessages, { "ws.direction": "client" }));
         resolve();
       }
     });
@@ -594,7 +602,7 @@ export class CDPProxy {
           },
         })
       ) {
-        Effect.runSync(incCounter(proxyDroppedMessages, { direction: "client" }));
+        Effect.runSync(incCounter(proxyDroppedMessages, { "ws.direction": "client" }));
         resolve();
       }
     });
@@ -671,7 +679,7 @@ export class CDPProxy {
         },
       });
       if (!offered) {
-        Effect.runSync(incCounter(proxyDroppedMessages, { direction: "client" }));
+        Effect.runSync(incCounter(proxyDroppedMessages, { "ws.direction": "client" }));
         resolve(); // Silent no-op during shutdown
       }
     });
@@ -735,7 +743,9 @@ export class CDPProxy {
   } {
     const endpoint = this.browserWsEndpoint;
     const ws = new WebSocket(endpoint);
-    Effect.runSync(incCounter(wsLifecycle, { type: "proxy_isolated", action: "create" }));
+    Effect.runSync(
+      incCounter(wsLifecycle, { "handle.type": "proxy_isolated", "ws.action": "create" }),
+    );
     const conn = new CdpConnection(ws, { startId: 300_000, defaultTimeout: 30_000 });
     let connected = false;
     const openPromise = new Promise<void>((resolve, reject) => {
@@ -767,7 +777,9 @@ export class CDPProxy {
       conn.dispose();
       ws.removeAllListeners();
       ws.terminate();
-      Effect.runSync(incCounter(wsLifecycle, { type: "proxy_isolated", action: "destroy" }));
+      Effect.runSync(
+        incCounter(wsLifecycle, { "handle.type": "proxy_isolated", "ws.action": "destroy" }),
+      );
     };
 
     return { conn, ws, waitForOpen, cleanup };
@@ -896,13 +908,13 @@ export class CDPProxy {
   /** Send data to Chrome. No-op after handleClose(). */
   private sendToBrowser(data: WebSocket.RawData, binary: boolean): void {
     if (this.isClosing || this.browserWs?.readyState !== WebSocket.OPEN) {
-      Effect.runSync(incCounter(proxyDroppedMessages, { direction: "browser" }));
+      Effect.runSync(incCounter(proxyDroppedMessages, { "ws.direction": "browser" }));
       return;
     }
     try {
       this.browserWs.send(data, { binary });
     } catch {
-      Effect.runSync(incCounter(proxyDroppedMessages, { direction: "browser" }));
+      Effect.runSync(incCounter(proxyDroppedMessages, { "ws.direction": "browser" }));
     }
   }
 

@@ -358,7 +358,9 @@ export class CloudflareSolver {
                       } catch {
                         /* malformed URL */
                       }
-                      return incCounter(wsScopeBudgetExceeded, { type: "solver_isolated" }).pipe(
+                      return incCounter(wsScopeBudgetExceeded, {
+                        "handle.type": "solver_isolated",
+                      }).pipe(
                         Effect.andThen(
                           Effect.sync(() => {
                             runForkInServer(
@@ -392,13 +394,19 @@ export class CloudflareSolver {
               // Legacy path — kept for backward compatibility during migration.
               return Effect.acquireRelease(
                 Effect.gen(function* () {
-                  yield* incCounter(wsLifecycle, { type: "solver_isolated", action: "create" });
+                  yield* incCounter(wsLifecycle, {
+                    "handle.type": "solver_isolated",
+                    "ws.action": "create",
+                  });
                   return self.createIsolatedConn!();
                 }),
                 (c) =>
                   Effect.fn("ws.release.solver_isolated")(function* () {
                     c.cleanup();
-                    yield* incCounter(wsLifecycle, { type: "solver_isolated", action: "destroy" });
+                    yield* incCounter(wsLifecycle, {
+                      "handle.type": "solver_isolated",
+                      "ws.action": "destroy",
+                    });
                   })(),
               ).pipe(
                 Effect.tap((isolated) => isolated.waitForOpen.pipe(Effect.ignore)),

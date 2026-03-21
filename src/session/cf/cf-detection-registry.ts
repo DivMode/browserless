@@ -79,7 +79,7 @@ export class DetectionRegistry {
             ...(active.sessionId ? { "session.id": active.sessionId } : {}),
           });
           yield* incCounter(cfDetectionTotal, {
-            type: active.info.type,
+            "handle.type": active.info.type,
             detection_method: active.info.detectionMethod ?? "unknown",
           });
           // If a detection already exists for this target, close its scope first
