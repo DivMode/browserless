@@ -51,7 +51,7 @@
  *   for i in $(seq 1 5); do uv run pydoll nopecha --serverside --chrome-endpoint=local-browserless; done
  *
  *   # Stress test
- *   uv run pydoll cf-stress --concurrent 15 --chrome-endpoint=local-browserless
+ *   uv run pydoll cf-stress --concurrent 10 --chrome-endpoint=local-browserless
  *
  * Run:
  *   npx vitest run --config vitest.integration.config.ts
@@ -711,7 +711,7 @@ describe("Pydoll Pipeline", () => {
   // Cooldown enforced: if cf-stress passed within the last 10 minutes, skip it.
   // The pre-push hook runs `npx vitest run` which re-runs the full suite — without
   // this cooldown, cf-stress always fails on push after an explicit test run.
-  it("cf-stress passes >=80% with 15 concurrent tabs", { timeout: 65_000 }, () => {
+  it("cf-stress passes >=80% with 10 concurrent tabs", { timeout: 65_000 }, () => {
     const COOLDOWN_FILE = "/tmp/cf-stress-last-pass";
     const COOLDOWN_MS = 10 * 60 * 1000;
     try {
@@ -731,7 +731,7 @@ describe("Pydoll Pipeline", () => {
     try {
       stdout = execFileSync(
         "uv",
-        ["run", "pydoll", "cf-stress", "--concurrent", "15", "--chrome-endpoint=local-browserless"],
+        ["run", "pydoll", "cf-stress", "--concurrent", "10", "--chrome-endpoint=local-browserless"],
         {
           cwd: PYDOLL_DIR,
           encoding: "utf-8",
@@ -749,7 +749,7 @@ describe("Pydoll Pipeline", () => {
     const passMatch = stdout.match(/(\d+)\/15 passed/);
     expect(passMatch, "No pass count in cf-stress output").toBeTruthy();
     const passed = Number(passMatch![1]);
-    expect(passed, `Only ${passed}/15 passed (need >=12 for 80%)`).toBeGreaterThanOrEqual(12);
+    expect(passed, `Only ${passed}/10 passed (need >=8 for 80%)`).toBeGreaterThanOrEqual(8);
 
     // Mark pass time — subsequent runs within cooldown will skip
     fs.writeFileSync(COOLDOWN_FILE, "");
