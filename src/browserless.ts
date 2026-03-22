@@ -1,10 +1,14 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 
-import {
+import type {
   BrowserHTTPRoute,
-  BrowserManager,
   BrowserWebsocketRoute,
+  HTTPRoute,
+  IBrowserlessStats,
+  WebSocketRoute} from "@browserless.io/browserless";
+import {
+  BrowserManager,
   ChromeCDP,
   ChromiumCDP,
   ChromiumPlaywright,
@@ -13,10 +17,8 @@ import {
   EdgePlaywright,
   FileSystem,
   FirefoxPlaywright,
-  HTTPRoute,
   HTTPServer,
   Hooks,
-  IBrowserlessStats,
   Limiter,
   Metrics,
   Monitoring,
@@ -24,7 +26,6 @@ import {
   Token,
   WebHooks,
   WebKitPlaywright,
-  WebSocketRoute,
   availableBrowsers,
   dedent,
   getRouteFiles,
@@ -38,9 +39,9 @@ import { Duration, Effect, Fiber, Schedule } from "effect";
 import { readFile } from "fs/promises";
 import { userInfo } from "os";
 
-import { ServiceContainer } from "./container/container.js";
+import type { ServiceContainer } from "./container/container.js";
 import { createContainer, Services } from "./container/bootstrap.js";
-import { gaugeCollector } from "./effect-metrics.js";
+import { gaugeCollector, setPressureState } from "./effect-metrics.js";
 import { initOtelRuntime, runForkInServer, disposeOtelRuntime } from "./otel-runtime.js";
 import { VideoManager } from "./video/video-manager.js";
 
@@ -443,6 +444,50 @@ export class Browserless extends EventEmitter {
         Effect.repeat(Schedule.fixed(Duration.millis(this.metricsSaveInterval))),
       ),
     );
+
+    // Wire pressure state for gauge collector — reads live values from Limiter/Metrics/Config.
+    // Object uses getters so gaugeCollector always reads current values.
+    const limiterRef = this.limiter;
+    const metricsRef = this.metrics;
+    const configRef = this.config;
+    setPressureState({
+      get executing() {
+        return limiterRef.executing;
+      },
+      get waiting() {
+        return limiterRef.waiting;
+      },
+      get hasCapacity() {
+        return limiterRef.hasCapacity;
+      },
+      get rejected() {
+        return metricsRef.get().rejected;
+      },
+      get maxConcurrent() {
+        return configRef.getConcurrent();
+      },
+      get maxQueued() {
+        return configRef.getQueued();
+      },
+      get successful() {
+        return metricsRef.get().successful;
+      },
+      get error() {
+        return metricsRef.get().error;
+      },
+      get timedout() {
+        return metricsRef.get().timedout;
+      },
+      get unhealthy() {
+        return metricsRef.get().unhealthy;
+      },
+      get units() {
+        return metricsRef.get().units;
+      },
+      get maxConcurrentPeak() {
+        return metricsRef.get().maxConcurrent;
+      },
+    });
 
     // OTLP metrics export + gauge collection at server level.
     // Runs in the server runtime — shares the same exporter as all session runtimes.

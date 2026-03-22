@@ -11,6 +11,7 @@
  */
 import { Effect, Metric, Schedule } from "effect";
 import { monitorEventLoopDelay } from "perf_hooks";
+import si from "systeminformation";
 import {
   METRIC_BROWSERLESS_WS_LIFECYCLE,
   METRIC_BROWSERLESS_WS_SCOPE_BUDGET_EXCEEDED,
@@ -46,6 +47,21 @@ import {
   METRIC_NODEJS_EVENTLOOP_LAG_P99,
   METRIC_PROCESS_CPU_USER,
   METRIC_PROCESS_CPU_SYSTEM,
+  METRIC_BROWSERLESS_CPU_PERCENT,
+  METRIC_BROWSERLESS_MEMORY_PERCENT,
+  METRIC_BROWSERLESS_AVAILABLE,
+  METRIC_BROWSERLESS_SESSIONS_RUNNING,
+  METRIC_BROWSERLESS_SESSIONS_QUEUED,
+  METRIC_BROWSERLESS_SESSIONS_REJECTED_RECENT,
+  METRIC_BROWSERLESS_MAX_CONCURRENT_SESSIONS,
+  METRIC_BROWSERLESS_MAX_QUEUED,
+  METRIC_BROWSERLESS_SESSIONS_SUCCESSFUL,
+  METRIC_BROWSERLESS_SESSIONS_ERROR,
+  METRIC_BROWSERLESS_SESSIONS_TIMEDOUT,
+  METRIC_BROWSERLESS_SESSIONS_UNHEALTHY,
+  METRIC_BROWSERLESS_UNITS,
+  METRIC_BROWSERLESS_ESTIMATED_MONTHLY_UNITS,
+  METRIC_BROWSERLESS_MAX_CONCURRENT_PEAK,
 } from "./browserless_metrics_gen.js";
 
 // Event loop histogram — created once at module scope, reset each collection tick
@@ -84,6 +100,45 @@ let getRegistrySize: () => number = () => 0;
 
 export function setRegistrySize(fn: () => number): void {
   getRegistrySize = fn;
+}
+
+// ──────────────────────────────────────────────
+// Pressure state (set by Browserless.start())
+// ──────────────────────────────────────────────
+
+/** Interface for pressure state that gaugeCollector reads periodically. */
+export interface PressureState {
+  /** Limiter: currently executing sessions */
+  executing: number;
+  /** Limiter: sessions waiting in queue */
+  waiting: number;
+  /** Limiter: has capacity for new sessions */
+  hasCapacity: boolean;
+  /** Recently rejected session count */
+  rejected: number;
+  /** Config: max concurrent sessions allowed */
+  maxConcurrent: number;
+  /** Config: max queue depth allowed */
+  maxQueued: number;
+  /** Metrics: successful session count */
+  successful: number;
+  /** Metrics: error session count */
+  error: number;
+  /** Metrics: timed out session count */
+  timedout: number;
+  /** Metrics: unhealthy rejection count */
+  unhealthy: number;
+  /** Metrics: billing units consumed */
+  units: number;
+  /** Metrics: peak concurrent sessions */
+  maxConcurrentPeak: number;
+}
+
+// Pressure state ref — set by Browserless.start()
+let pressureRef: PressureState | null = null;
+
+export function setPressureState(state: PressureState): void {
+  pressureRef = state;
 }
 
 // ──────────────────────────────────────────────
@@ -283,6 +338,63 @@ export const processCpuSystem = Metric.gauge(METRIC_PROCESS_CPU_SYSTEM.name, {
   attributes: { unit: "s" },
 });
 
+// ── Pressure gauges (migrated from JSON exporter) ──
+
+export const cpuPercent = Metric.gauge(METRIC_BROWSERLESS_CPU_PERCENT.name, {
+  description: "Container CPU usage percentage (0-1 ratio)",
+});
+export const memoryPercent = Metric.gauge(METRIC_BROWSERLESS_MEMORY_PERCENT.name, {
+  description: "Container memory usage percentage (0-1 ratio)",
+});
+export const availableGauge = Metric.gauge(METRIC_BROWSERLESS_AVAILABLE.name, {
+  description: "Service availability boolean (1=yes, 0=no)",
+});
+export const sessionsRunning = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_RUNNING.name, {
+  description: "Currently executing browser sessions",
+});
+export const sessionsQueued = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_QUEUED.name, {
+  description: "Sessions waiting in queue",
+});
+export const sessionsRejectedRecent = Metric.gauge(
+  METRIC_BROWSERLESS_SESSIONS_REJECTED_RECENT.name,
+  {
+    description: "Recently rejected sessions",
+  },
+);
+export const maxConcurrentSessions = Metric.gauge(METRIC_BROWSERLESS_MAX_CONCURRENT_SESSIONS.name, {
+  description: "Maximum concurrent sessions config",
+});
+export const maxQueuedGauge = Metric.gauge(METRIC_BROWSERLESS_MAX_QUEUED.name, {
+  description: "Maximum queued sessions config",
+});
+
+// ── Session totals gauges (migrated from JSON exporter) ──
+// Note: these are gauges that track cumulative values from the Metrics class,
+// NOT monotonic counters. The JSON exporter exposed them as counters but they
+// reset every 5 minutes in browserless. Using gauges is more accurate.
+
+export const sessionsSuccessful = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_SUCCESSFUL.name, {
+  description: "Total successful sessions (resets periodically)",
+});
+export const sessionsError = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_ERROR.name, {
+  description: "Total error sessions (resets periodically)",
+});
+export const sessionsTimedout = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_TIMEDOUT.name, {
+  description: "Total timed out sessions (resets periodically)",
+});
+export const sessionsUnhealthy = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_UNHEALTHY.name, {
+  description: "Total unhealthy rejections (resets periodically)",
+});
+export const unitsGauge = Metric.gauge(METRIC_BROWSERLESS_UNITS.name, {
+  description: "Total billing units consumed (resets periodically)",
+});
+export const estimatedMonthlyUnits = Metric.gauge(METRIC_BROWSERLESS_ESTIMATED_MONTHLY_UNITS.name, {
+  description: "Projected monthly billing units",
+});
+export const maxConcurrentPeak = Metric.gauge(METRIC_BROWSERLESS_MAX_CONCURRENT_PEAK.name, {
+  description: "Peak concurrent sessions observed",
+});
+
 // ──────────────────────────────────────────────
 // Metric update helpers
 //
@@ -407,6 +519,39 @@ export const gaugeCollector = Effect.gen(function* () {
       yield* Metric.update(eventLoopLagP50, eventLoopHistogram.percentile(50) / 1e9); // ns → seconds
       yield* Metric.update(eventLoopLagP99, eventLoopHistogram.percentile(99) / 1e9);
       eventLoopHistogram.reset();
+
+      // ── Pressure metrics (migrated from JSON exporter) ──
+      // CPU and memory via systeminformation (same pattern as monitoring.ts)
+      const [cpuLoad, memLoad] = yield* Effect.tryPromise(() =>
+        Promise.all([si.currentLoad(), si.mem()]),
+      ).pipe(Effect.catch(() => Effect.succeed([null, null] as const)));
+      const cpuVal = cpuLoad ? cpuLoad.currentLoadUser / 100 : 0;
+      const memVal = memLoad ? memLoad.active / memLoad.total : 0;
+      yield* Metric.update(cpuPercent, cpuVal);
+      yield* Metric.update(memoryPercent, memVal);
+
+      // Pressure state from Limiter/Metrics/Config
+      if (pressureRef) {
+        const cpuOver = cpuVal >= 0.99; // same threshold as monitoring.ts
+        const memOver = memVal >= 0.99;
+        yield* Metric.update(
+          availableGauge,
+          pressureRef.hasCapacity && !cpuOver && !memOver ? 1 : 0,
+        );
+        yield* Metric.update(sessionsRunning, pressureRef.executing);
+        yield* Metric.update(sessionsQueued, pressureRef.waiting);
+        yield* Metric.update(sessionsRejectedRecent, pressureRef.rejected);
+        yield* Metric.update(maxConcurrentSessions, pressureRef.maxConcurrent);
+        yield* Metric.update(maxQueuedGauge, pressureRef.maxQueued);
+
+        // Session totals
+        yield* Metric.update(sessionsSuccessful, pressureRef.successful);
+        yield* Metric.update(sessionsError, pressureRef.error);
+        yield* Metric.update(sessionsTimedout, pressureRef.timedout);
+        yield* Metric.update(sessionsUnhealthy, pressureRef.unhealthy);
+        yield* Metric.update(unitsGauge, pressureRef.units);
+        yield* Metric.update(maxConcurrentPeak, pressureRef.maxConcurrentPeak);
+      }
     }),
     Schedule.fixed("30 seconds"),
   );
