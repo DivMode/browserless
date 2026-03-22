@@ -1764,7 +1764,7 @@ export class CloudflareDetector {
                   session_id: self.sid,
                   original_oopif: originalOopifTargetId.slice(0, 16),
                   new_oopif: newOopif.targetId.slice(0, 16),
-                  new_oopif_url: newOopif.url?.substring(0, 200) ?? "none",
+                  new_oopif_url: newOopif.url ?? "none",
                   poll_ms: pollMs,
                   poll,
                   rejection_count: rejectionCount + 1,
