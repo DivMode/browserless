@@ -339,6 +339,10 @@ export const processCpuSystem = Metric.gauge(METRIC_PROCESS_CPU_SYSTEM.name, {
 });
 
 // ── Pressure gauges (migrated from JSON exporter) ──
+// Use .otel_name for metrics whose registry instrument differs from Effect instrument.
+// E.g., registry says "counter" but Effect uses Metric.gauge (because values reset).
+// Using .name for a gauge with a counter-style name (_total) causes Mimir to add
+// _ratio on top → _total_ratio double suffix.
 
 export const cpuPercent = Metric.gauge(METRIC_BROWSERLESS_CPU_PERCENT.name, {
   description: "Container CPU usage percentage (0-1 ratio)",
@@ -373,19 +377,22 @@ export const maxQueuedGauge = Metric.gauge(METRIC_BROWSERLESS_MAX_QUEUED.name, {
 // NOT monotonic counters. The JSON exporter exposed them as counters but they
 // reset every 5 minutes in browserless. Using gauges is more accurate.
 
-export const sessionsSuccessful = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_SUCCESSFUL.name, {
+// These 5 use .otel_name because the registry defines them as counters (_total suffix)
+// but we expose them as gauges (values reset every 5min). Using .name would produce
+// _total_ratio double suffix in Mimir (gauge with _total name gets _ratio added).
+export const sessionsSuccessful = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_SUCCESSFUL.otel_name, {
   description: "Total successful sessions (resets periodically)",
 });
-export const sessionsError = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_ERROR.name, {
+export const sessionsError = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_ERROR.otel_name, {
   description: "Total error sessions (resets periodically)",
 });
-export const sessionsTimedout = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_TIMEDOUT.name, {
+export const sessionsTimedout = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_TIMEDOUT.otel_name, {
   description: "Total timed out sessions (resets periodically)",
 });
-export const sessionsUnhealthy = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_UNHEALTHY.name, {
+export const sessionsUnhealthy = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_UNHEALTHY.otel_name, {
   description: "Total unhealthy rejections (resets periodically)",
 });
-export const unitsGauge = Metric.gauge(METRIC_BROWSERLESS_UNITS.name, {
+export const unitsGauge = Metric.gauge(METRIC_BROWSERLESS_UNITS.otel_name, {
   description: "Total billing units consumed (resets periodically)",
 });
 export const estimatedMonthlyUnits = Metric.gauge(METRIC_BROWSERLESS_ESTIMATED_MONTHLY_UNITS.name, {
