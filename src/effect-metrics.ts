@@ -134,22 +134,26 @@ export function setPressureState(state: PressureState): void {
 
 export const wsLifecycle = Metric.counter(METRIC_BROWSERLESS_WS_LIFECYCLE.name, {
   description: "WebSocket create/destroy events by type",
+  attributes: { unit: METRIC_BROWSERLESS_WS_LIFECYCLE.unit },
 });
 
 export const wsScopeBudgetExceeded = Metric.counter(
   METRIC_BROWSERLESS_WS_SCOPE_BUDGET_EXCEEDED.name,
   {
     description: "WS scope budget timeout exceeded (solve blocked too long)",
+    attributes: { unit: METRIC_BROWSERLESS_WS_SCOPE_BUDGET_EXCEEDED.unit },
   },
 );
 
 export const cfResolutionTimeouts = Metric.counter(METRIC_BROWSERLESS_CF_RESOLUTION_TIMEOUT.name, {
   description: "CF detection resolution timeouts (zombie detections caught by timeout)",
+  attributes: { unit: METRIC_BROWSERLESS_CF_RESOLUTION_TIMEOUT.unit },
 });
 
 export const cfManagedClickNoNav = Metric.counter(METRIC_BROWSERLESS_CF_MANAGED_CLICK_NO_NAV.name, {
   description:
     "Managed/interstitial CF: click delivered but page never navigated (resolution timeout)",
+  attributes: { unit: METRIC_BROWSERLESS_CF_MANAGED_CLICK_NO_NAV.unit },
 });
 
 // ──────────────────────────────────────────────
@@ -160,16 +164,19 @@ export const cfManagedClickNoNav = Metric.counter(METRIC_BROWSERLESS_CF_MANAGED_
 /** Every CF detection registered. Labels: {type, detection_method} */
 export const cfDetectionTotal = Metric.counter(METRIC_BROWSERLESS_CF_DETECTION.name, {
   description: "CF challenge detections registered",
+  attributes: { unit: METRIC_BROWSERLESS_CF_DETECTION.unit },
 });
 
 /** Every CF resolution. Labels: {type, outcome, method, signal} */
 export const cfSolveTotal = Metric.counter(METRIC_BROWSERLESS_CF_SOLVE.name, {
   description: "CF challenge resolution outcomes (solved/failed/timeout)",
+  attributes: { unit: METRIC_BROWSERLESS_CF_SOLVE.unit },
 });
 
 /** Every click attempt result. Labels: {result} = verified|not_verified|no_checkbox|click_failed */
 export const cfClickResultTotal = Metric.counter(METRIC_BROWSERLESS_CF_CLICK_RESULT.name, {
   description: "CF click pipeline attempt results",
+  attributes: { unit: METRIC_BROWSERLESS_CF_CLICK_RESULT.unit },
 });
 
 // ──────────────────────────────────────────────
@@ -180,6 +187,7 @@ export const cfClickResultTotal = Metric.counter(METRIC_BROWSERLESS_CF_CLICK_RES
 export const cfSolveDuration = Metric.histogram(METRIC_BROWSERLESS_CF_SOLVE_DURATION.name, {
   description: "Total CF solve duration from detection to resolution",
   boundaries: [1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 30, 60],
+  attributes: { unit: METRIC_BROWSERLESS_CF_SOLVE_DURATION.unit },
 });
 
 /** Full click pipeline (phases 1-4). Labels: {type} */
@@ -188,6 +196,7 @@ export const cfClickPipelineDuration = Metric.histogram(
   {
     description: "Full CF click pipeline duration (phase 1 through phase 4)",
     boundaries: [0.5, 1, 1.5, 2, 3, 5, 8, 10, 15, 20],
+    attributes: { unit: METRIC_BROWSERLESS_CF_CLICK_PIPELINE_DURATION.unit },
   },
 );
 
@@ -195,18 +204,21 @@ export const cfClickPipelineDuration = Metric.histogram(
 export const cfPhase2Duration = Metric.histogram(METRIC_BROWSERLESS_CF_PHASE2_DURATION.name, {
   description: "CF Phase 2 OOPIF discovery duration",
   boundaries: [0.1, 0.2, 0.5, 0.8, 1, 1.5, 2, 3, 5],
+  attributes: { unit: METRIC_BROWSERLESS_CF_PHASE2_DURATION.unit },
 });
 
 /** Phase 3: Checkbox find. Labels: {found} */
 export const cfPhase3Duration = Metric.histogram(METRIC_BROWSERLESS_CF_PHASE3_DURATION.name, {
   description: "CF Phase 3 checkbox find duration",
   boundaries: [0.1, 0.2, 0.5, 1, 1.5, 2, 3, 5],
+  attributes: { unit: METRIC_BROWSERLESS_CF_PHASE3_DURATION.unit },
 });
 
 /** Phase 4: Click dispatch + verify. No labels. */
 export const cfPhase4Duration = Metric.histogram(METRIC_BROWSERLESS_CF_PHASE4_DURATION.name, {
   description: "CF Phase 4 click dispatch and verify duration",
   boundaries: [0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 1, 2],
+  attributes: { unit: METRIC_BROWSERLESS_CF_PHASE4_DURATION.unit },
 });
 
 /** Time from click delivered to resolution settled. Labels: {signal} */
@@ -215,19 +227,23 @@ export const cfClickToResolveDuration = Metric.histogram(
   {
     description: "Time from click delivery to resolution settlement",
     boundaries: [0.5, 1, 2, 3, 5, 8, 10, 15, 20, 30],
+    attributes: { unit: METRIC_BROWSERLESS_CF_CLICK_TO_RESOLVE.unit },
   },
 );
 
 export const replayEventsTotal = Metric.counter(METRIC_BROWSERLESS_REPLAY_EVENTS.name, {
   description: "Total rrweb replay events captured across all sessions",
+  attributes: { unit: METRIC_BROWSERLESS_REPLAY_EVENTS.unit },
 });
 
 export const replayOverflowsTotal = Metric.counter(METRIC_BROWSERLESS_REPLAY_OVERFLOWS.name, {
   description: "Total replay overflow events (replay exceeded max size and stopped merged capture)",
+  attributes: { unit: METRIC_BROWSERLESS_REPLAY_OVERFLOWS.unit },
 });
 
 export const proxyDroppedMessages = Metric.counter(METRIC_BROWSERLESS_PROXY_DROPPED_MESSAGES.name, {
   description: "CDP messages dropped because outbound queue was closed during teardown",
+  attributes: { unit: METRIC_BROWSERLESS_PROXY_DROPPED_MESSAGES.unit },
 });
 
 // ──────────────────────────────────────────────
@@ -237,11 +253,13 @@ export const proxyDroppedMessages = Metric.counter(METRIC_BROWSERLESS_PROXY_DROP
 export const tabDuration = Metric.histogram(METRIC_BROWSERLESS_TAB_DURATION.name, {
   description: "Duration of individual browser tabs (page targets) from creation to close",
   boundaries: [5, 10, 15, 30, 45, 60, 90, 120, 180, 300, 600],
+  attributes: { unit: METRIC_BROWSERLESS_TAB_DURATION.unit },
 });
 
 export const sessionDuration = Metric.histogram(METRIC_BROWSERLESS_SESSION_DURATION.name, {
   description: "Duration of browser sessions from creation to close",
   boundaries: [5, 10, 15, 30, 45, 60, 90, 120, 180, 300, 600],
+  attributes: { unit: METRIC_BROWSERLESS_SESSION_DURATION.unit },
 });
 
 // ──────────────────────────────────────────────
@@ -250,42 +268,42 @@ export const sessionDuration = Metric.histogram(METRIC_BROWSERLESS_SESSION_DURAT
 
 export const sessionsRegistered = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_REGISTERED.name, {
   description: "Number of browser sessions in the session registry",
-  attributes: { unit: "{count}" },
+  attributes: { unit: METRIC_BROWSERLESS_SESSIONS_REGISTERED.unit },
 });
 
 export const replaySessionsActive = Metric.gauge(METRIC_BROWSERLESS_REPLAY_SESSIONS_ACTIVE.name, {
   description: "Number of active replay sessions",
-  attributes: { unit: "{count}" },
+  attributes: { unit: METRIC_BROWSERLESS_REPLAY_SESSIONS_ACTIVE.unit },
 });
 
 export const wsConnections = Metric.gauge(METRIC_BROWSERLESS_REPLAY_WS_CONNECTIONS.name, {
   description: "Number of open per-page WebSocket connections",
-  attributes: { unit: "{count}" },
+  attributes: { unit: METRIC_BROWSERLESS_REPLAY_WS_CONNECTIONS.unit },
 });
 
 export const pendingCommandsGauge = Metric.gauge(METRIC_BROWSERLESS_REPLAY_PENDING_COMMANDS.name, {
   description: "Number of pending CDP commands awaiting response",
-  attributes: { unit: "{count}" },
+  attributes: { unit: METRIC_BROWSERLESS_REPLAY_PENDING_COMMANDS.unit },
 });
 
 export const tabsOpen = Metric.gauge(METRIC_BROWSERLESS_TABS_OPEN.name, {
   description: "Number of Chrome tabs currently open",
-  attributes: { unit: "{count}" },
+  attributes: { unit: METRIC_BROWSERLESS_TABS_OPEN.unit },
 });
 
 export const replayEstimatedBytes = Metric.gauge(METRIC_BROWSERLESS_REPLAY_ESTIMATED.name, {
   description: "Estimated bytes of in-memory replay data across all active sessions",
-  attributes: { unit: "By" },
+  attributes: { unit: METRIC_BROWSERLESS_REPLAY_ESTIMATED.unit },
 });
 
 export const socketState = Metric.gauge(METRIC_BROWSERLESS_SOCKET_STATE.name, {
   description: "Socket handle states (alive/destroyed/half-open)",
-  attributes: { unit: "{count}" },
+  attributes: { unit: METRIC_BROWSERLESS_SOCKET_STATE.unit },
 });
 
 export const activeHandlesByType = Metric.gauge(METRIC_BROWSERLESS_ACTIVE_HANDLES_BY_TYPE.name, {
   description: "Active handles broken down by constructor type",
-  attributes: { unit: "{count}" },
+  attributes: { unit: METRIC_BROWSERLESS_ACTIVE_HANDLES_BY_TYPE.unit },
 });
 
 // browserless_socket_handles removed — per-IP label creates unbounded cardinality
@@ -294,35 +312,35 @@ export const activeHandlesByType = Metric.gauge(METRIC_BROWSERLESS_ACTIVE_HANDLE
 // Node.js runtime gauges (replaces prom-client default collectors)
 export const processHeapUsed = Metric.gauge(METRIC_PROCESS_HEAP_USED.name, {
   description: "V8 heap used in bytes",
-  attributes: { unit: "By" },
+  attributes: { unit: METRIC_PROCESS_HEAP_USED.unit },
 });
 export const processHeapTotal = Metric.gauge(METRIC_PROCESS_HEAP_TOTAL.name, {
   description: "V8 heap total in bytes",
-  attributes: { unit: "By" },
+  attributes: { unit: METRIC_PROCESS_HEAP_TOTAL.unit },
 });
 export const processRss = Metric.gauge(METRIC_PROCESS_RSS.name, {
   description: "Resident set size in bytes",
-  attributes: { unit: "By" },
+  attributes: { unit: METRIC_PROCESS_RSS.unit },
 });
 export const processExternal = Metric.gauge(METRIC_PROCESS_EXTERNAL.name, {
   description: "V8 external memory in bytes",
-  attributes: { unit: "By" },
+  attributes: { unit: METRIC_PROCESS_EXTERNAL.unit },
 });
 export const eventLoopLagP50 = Metric.gauge(METRIC_NODEJS_EVENTLOOP_LAG_P50.name, {
   description: "Event loop delay p50 in seconds",
-  attributes: { unit: "s" },
+  attributes: { unit: METRIC_NODEJS_EVENTLOOP_LAG_P50.unit },
 });
 export const eventLoopLagP99 = Metric.gauge(METRIC_NODEJS_EVENTLOOP_LAG_P99.name, {
   description: "Event loop delay p99 in seconds",
-  attributes: { unit: "s" },
+  attributes: { unit: METRIC_NODEJS_EVENTLOOP_LAG_P99.unit },
 });
 export const processCpuUser = Metric.gauge(METRIC_PROCESS_CPU_USER.name, {
   description: "Cumulative user CPU time in seconds",
-  attributes: { unit: "s" },
+  attributes: { unit: METRIC_PROCESS_CPU_USER.unit },
 });
 export const processCpuSystem = Metric.gauge(METRIC_PROCESS_CPU_SYSTEM.name, {
   description: "Cumulative system CPU time in seconds",
-  attributes: { unit: "s" },
+  attributes: { unit: METRIC_PROCESS_CPU_SYSTEM.unit },
 });
 
 // ── Pressure gauges (migrated from JSON exporter) ──
@@ -333,30 +351,38 @@ export const processCpuSystem = Metric.gauge(METRIC_PROCESS_CPU_SYSTEM.name, {
 
 export const cpuPercent = Metric.gauge(METRIC_BROWSERLESS_CPU_PERCENT.name, {
   description: "Container CPU usage percentage (0-1 ratio)",
+  attributes: { unit: METRIC_BROWSERLESS_CPU_PERCENT.unit },
 });
 export const memoryPercent = Metric.gauge(METRIC_BROWSERLESS_MEMORY_PERCENT.name, {
   description: "Container memory usage percentage (0-1 ratio)",
+  attributes: { unit: METRIC_BROWSERLESS_MEMORY_PERCENT.unit },
 });
 export const availableGauge = Metric.gauge(METRIC_BROWSERLESS_AVAILABLE.name, {
   description: "Service availability boolean (1=yes, 0=no)",
+  attributes: { unit: METRIC_BROWSERLESS_AVAILABLE.unit },
 });
 export const sessionsRunning = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_RUNNING.name, {
   description: "Currently executing browser sessions",
+  attributes: { unit: METRIC_BROWSERLESS_SESSIONS_RUNNING.unit },
 });
 export const sessionsQueued = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_QUEUED.name, {
   description: "Sessions waiting in queue",
+  attributes: { unit: METRIC_BROWSERLESS_SESSIONS_QUEUED.unit },
 });
 export const sessionsRejectedRecent = Metric.gauge(
   METRIC_BROWSERLESS_SESSIONS_REJECTED_RECENT.name,
   {
     description: "Recently rejected sessions",
+    attributes: { unit: METRIC_BROWSERLESS_SESSIONS_REJECTED_RECENT.unit },
   },
 );
 export const maxConcurrentSessions = Metric.gauge(METRIC_BROWSERLESS_MAX_CONCURRENT_SESSIONS.name, {
   description: "Maximum concurrent sessions config",
+  attributes: { unit: METRIC_BROWSERLESS_MAX_CONCURRENT_SESSIONS.unit },
 });
 export const maxQueuedGauge = Metric.gauge(METRIC_BROWSERLESS_MAX_QUEUED.name, {
   description: "Maximum queued sessions config",
+  attributes: { unit: METRIC_BROWSERLESS_MAX_QUEUED.unit },
 });
 
 // ── Session total counters (monotonic — incremented directly in limiter/server) ──
@@ -364,22 +390,30 @@ export const maxQueuedGauge = Metric.gauge(METRIC_BROWSERLESS_MAX_QUEUED.name, {
 // Mimir won't add _ratio because the instrument is counter, not gauge.
 export const sessionsSuccessfulCounter = Metric.counter(
   METRIC_BROWSERLESS_SESSIONS_SUCCESSFUL.name,
-  { description: "Total successful sessions" },
+  {
+    description: "Total successful sessions",
+    attributes: { unit: METRIC_BROWSERLESS_SESSIONS_SUCCESSFUL.unit },
+  },
 );
 export const sessionsErrorCounter = Metric.counter(METRIC_BROWSERLESS_SESSIONS_ERROR.name, {
   description: "Total error sessions",
+  attributes: { unit: METRIC_BROWSERLESS_SESSIONS_ERROR.unit },
 });
 export const sessionsTimedoutCounter = Metric.counter(METRIC_BROWSERLESS_SESSIONS_TIMEDOUT.name, {
   description: "Total timed out sessions",
+  attributes: { unit: METRIC_BROWSERLESS_SESSIONS_TIMEDOUT.unit },
 });
 export const sessionsUnhealthyCounter = Metric.counter(METRIC_BROWSERLESS_SESSIONS_UNHEALTHY.name, {
   description: "Total unhealthy rejections",
+  attributes: { unit: METRIC_BROWSERLESS_SESSIONS_UNHEALTHY.unit },
 });
 export const unitsCounter = Metric.counter(METRIC_BROWSERLESS_UNITS.name, {
   description: "Total billing units consumed",
+  attributes: { unit: METRIC_BROWSERLESS_UNITS.unit },
 });
 export const sessionsRejectedCounter = Metric.counter(METRIC_BROWSERLESS_SESSIONS_REJECTED.name, {
   description: "Total rejected sessions",
+  attributes: { unit: METRIC_BROWSERLESS_SESSIONS_REJECTED.unit },
 });
 
 // ──────────────────────────────────────────────
