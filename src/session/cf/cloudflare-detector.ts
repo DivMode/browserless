@@ -1735,6 +1735,12 @@ export class CloudflareDetector {
             // Tab-scoped detection — cross-tab OOPIFs filtered by construction.
             const tabDetect = yield* TabDetector;
 
+            // Skip the normal verification window — CF swaps OOPIFs at 2-5s
+            // as part of normal verification (NOT rejection). Real rejections
+            // happen at 20-40s. 10s delay avoids all false positives.
+            yield* Effect.sleep("10 seconds");
+            if (active.aborted || active.resolution.isDone) return;
+
             for (let poll = 0; poll < maxPolls; poll++) {
               if (active.aborted || active.resolution.isDone) return;
 
@@ -1752,11 +1758,7 @@ export class CloudflareDetector {
               const newOopif = snapshot.targets.find((t) => t.targetId !== originalOopifTargetId);
               if (!newOopif) continue;
 
-              // Only real rejections have failure_retry in the URL.
-              // Normal verification OOPIF swaps use /new/normal URLs.
-              if (!newOopif.url?.includes("failure_retry")) continue;
-
-              // New OOPIF found — CF rejected the click and loaded a new widget.
+              // New OOPIF after 10s delay — CF rejected the click.
               const pollMs = Date.now() - monitorStart;
               yield* Effect.logWarning("CF lifecycle: click_rejected").pipe(
                 Effect.annotateLogs({
