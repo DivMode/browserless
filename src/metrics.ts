@@ -1,117 +1,65 @@
-import { IBrowserlessStats } from "@browserless.io/browserless";
+import type { IBrowserlessStats } from "@browserless.io/browserless";
 
 import { EventEmitter } from "events";
 
+/**
+ * Legacy Metrics stub — kept for API compatibility with route constructors
+ * and tests. All actual metric collection now happens via Effect counters
+ * in effect-metrics.ts. Methods are no-ops; get() returns zeroed data.
+ *
+ * @deprecated Use Effect counters from effect-metrics.ts instead.
+ */
 export class Metrics extends EventEmitter {
-  protected sessionTimes: number[] = [];
-  protected successful = 0;
-  protected queued = 0;
-  protected rejected = 0;
-  protected unauthorized = 0;
-  protected concurrent = 0;
-  protected timedout = 0;
-  protected running = 0;
-  protected unhealthy = 0;
-  protected error = 0;
-
-  addSuccessful(sessionTime: number): number {
-    --this.running;
-    this.sessionTimes.push(sessionTime);
-    return ++this.successful;
+  addSuccessful(_sessionTime: number): number {
+    return 0;
   }
-
-  addTimedout(sessionTime: number): number {
-    --this.running;
-    this.sessionTimes.push(sessionTime);
-    return ++this.timedout;
+  addTimedout(_sessionTime: number): number {
+    return 0;
   }
-
-  addError(sessionTime: number): number {
-    --this.running;
-    this.sessionTimes.push(sessionTime);
-    return ++this.error;
+  addError(_sessionTime: number): number {
+    return 0;
   }
-
   addQueued(): number {
-    return ++this.queued;
+    return 0;
   }
-
   addRejected(): number {
-    return ++this.rejected;
+    return 0;
   }
-
   addUnhealthy(): number {
-    return ++this.unhealthy;
+    return 0;
   }
-
   addUnauthorized(): number {
-    return ++this.unauthorized;
+    return 0;
   }
-
   addRunning(): number {
-    ++this.running;
-
-    if (this.concurrent < this.running) {
-      this.concurrent = this.running;
-    }
-
-    return this.running;
+    return 0;
   }
 
   public get(): Omit<IBrowserlessStats, "cpu" | "memory"> {
-    const currentStat = {
-      error: this.error,
-      maxConcurrent: this.concurrent,
-      queued: this.queued,
-      rejected: this.rejected,
-      running: this.running,
-      sessionTimes: this.sessionTimes,
-      successful: this.successful,
-      timedout: this.timedout,
-      unauthorized: this.unauthorized,
-      unhealthy: this.unhealthy,
-    };
-
     return {
-      ...currentStat,
-      ...this.calculateStats(currentStat.sessionTimes),
       date: Date.now(),
+      error: 0,
+      maxConcurrent: 0,
+      maxTime: 0,
+      meanTime: 0,
+      minTime: 0,
+      queued: 0,
+      rejected: 0,
+      sessionTimes: [],
+      successful: 0,
+      timedout: 0,
+      totalTime: 0,
+      unauthorized: 0,
+      unhealthy: 0,
+      units: 0,
     };
   }
 
-  public reset() {
-    this.successful = 0;
-    this.error = 0;
-    this.queued = 0;
-    this.rejected = 0;
-    this.unauthorized = 0;
-    this.concurrent = 0;
-    this.timedout = 0;
-    this.running = 0;
-    this.unhealthy = 0;
-    this.sessionTimes = [];
-  }
+  public reset() {}
 
-  protected calculateStats(sessionTimes: number[]) {
-    return {
-      maxTime: Math.max(...sessionTimes) || 0,
-      meanTime: sessionTimes.reduce((avg, value, _, { length }) => avg + value / length, 0),
-      minTime: Math.min(...sessionTimes) || 0,
-      totalTime: sessionTimes.reduce((sum, value) => sum + value, 0),
-      units: sessionTimes.reduce((sum, value) => sum + Math.ceil(value / 30000), 0),
-    };
-  }
-
-  /**
-   * Implement any browserless-core-specific shutdown logic here.
-   * Calls the empty-SDK stop method for downstream implementations.
-   */
   public async shutdown() {
     await this.stop();
   }
 
-  /**
-   * Left blank for downstream SDK modules to optionally implement.
-   */
   public stop() {}
 }

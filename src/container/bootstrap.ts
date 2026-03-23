@@ -3,7 +3,6 @@ import {
   FileSystem,
   Hooks,
   Limiter,
-  Metrics,
   Monitoring,
   Router,
   Token,
@@ -21,7 +20,6 @@ import { VideoManager } from "../video/video-manager.js";
  */
 export const Services = {
   Config: "config",
-  Metrics: "metrics",
   Token: "token",
   Hooks: "hooks",
   WebHooks: "webhooks",
@@ -43,7 +41,6 @@ export type ServiceName = (typeof Services)[keyof typeof Services];
  */
 export interface ContainerOptions {
   config?: Config;
-  metrics?: Metrics;
   token?: Token;
   hooks?: Hooks;
   webhooks?: WebHooks;
@@ -68,9 +65,6 @@ export function createContainer(options: ContainerOptions = {}): ServiceContaine
 
   // Core configuration - no dependencies
   container.registerSingleton(Services.Config, () => options.config ?? new Config());
-
-  // Metrics - no dependencies
-  container.registerSingleton(Services.Metrics, () => options.metrics ?? new Metrics());
 
   // Token - depends on config
   container.registerSingleton(
@@ -138,19 +132,18 @@ export function createContainer(options: ContainerOptions = {}): ServiceContaine
     [Services.Config, Services.Hooks, Services.FileSystem, Services.VideoManager],
   );
 
-  // Limiter - depends on config, metrics, monitoring, webhooks, hooks
+  // Limiter - depends on config, monitoring, webhooks, hooks
   container.registerSingleton(
     Services.Limiter,
     (c) =>
       options.limiter ??
       new Limiter(
         c.resolve<Config>(Services.Config),
-        c.resolve<Metrics>(Services.Metrics),
         c.resolve<Monitoring>(Services.Monitoring),
         c.resolve<WebHooks>(Services.WebHooks),
         c.resolve<Hooks>(Services.Hooks),
       ),
-    [Services.Config, Services.Metrics, Services.Monitoring, Services.WebHooks, Services.Hooks],
+    [Services.Config, Services.Monitoring, Services.WebHooks, Services.Hooks],
   );
 
   // Router - depends on config, browserManager, limiter

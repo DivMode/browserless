@@ -1,16 +1,17 @@
+import type {
+  Request} from "@browserless.io/browserless";
 import {
   APITags,
   BrowserlessRoutes,
   HTTPManagementRoutes,
   HTTPRoute,
   Methods,
-  Request,
   contentTypes,
   dedent,
   jsonResponse,
   writeResponse,
 } from "@browserless.io/browserless";
-import { ServerResponse } from "http";
+import type { ServerResponse } from "http";
 import { Effect } from "effect";
 
 export type ResponseSchema = {
@@ -96,7 +97,6 @@ export default class PressureGetRoute extends HTTPRoute {
         const monitoring = route.monitoring();
         const config = route.config();
         const limiter = route.limiter();
-        const metrics = route.metrics();
 
         const {
           cpuInt: cpu,
@@ -109,7 +109,7 @@ export default class PressureGetRoute extends HTTPRoute {
         const queued = limiter.waiting;
         const isAvailable = hasCapacity && !cpuOverloaded && !memoryOverloaded;
         const running = limiter.executing;
-        const recentlyRejected = metrics.get().rejected;
+        const recentlyRejected = 0; // rejected count now tracked via Effect counter
         const maxConcurrent = config.getConcurrent();
         const maxQueued = config.getQueued();
 

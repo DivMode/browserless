@@ -1,20 +1,20 @@
 import * as http from "http";
-import * as stream from "stream";
-import {
-  BadRequest,
+import type * as stream from "stream";
+import type {
   Config,
   HTTPRoute,
   Hooks,
-  Metrics,
-  NotFound,
   Request,
   Response,
   Router,
-  Timeout,
   Token,
+  WebSocketRoute} from "@browserless.io/browserless";
+import {
+  BadRequest,
+  NotFound,
+  Timeout,
   TooManyRequests,
   Unauthorized,
-  WebSocketRoute,
   contentTypes,
   convertPathToURL,
   isMatch,
@@ -46,7 +46,6 @@ export class HTTPServer extends EventEmitter {
 
   constructor(
     protected config: Config,
-    protected metrics: Metrics,
     protected token: Token,
     protected router: Router,
     protected hooks: Hooks,
@@ -95,7 +94,6 @@ export class HTTPServer extends EventEmitter {
     runForkInServer(
       Effect.logError(`HTTP request is not properly authorized, responding with 401`),
     );
-    this.metrics.addUnauthorized();
     return writeResponse(res, 401, "Bad or missing authentication.");
   }
 
@@ -103,7 +101,6 @@ export class HTTPServer extends EventEmitter {
     runForkInServer(
       Effect.logError(`Websocket request is not properly authorized, responding with 401`),
     );
-    this.metrics.addUnauthorized();
     return writeResponse(socket, 401, "Bad or missing authentication.");
   }
 

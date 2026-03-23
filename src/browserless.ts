@@ -5,8 +5,8 @@ import type {
   BrowserHTTPRoute,
   BrowserWebsocketRoute,
   HTTPRoute,
-  IBrowserlessStats,
-  WebSocketRoute} from "@browserless.io/browserless";
+  WebSocketRoute,
+} from "@browserless.io/browserless";
 import {
   BrowserManager,
   ChromeCDP,
@@ -35,7 +35,7 @@ import {
   safeParse,
 } from "@browserless.io/browserless";
 import { EventEmitter } from "events";
-import { Duration, Effect, Fiber, Schedule } from "effect";
+import { Effect, Fiber } from "effect";
 import { readFile } from "fs/promises";
 import { userInfo } from "os";
 
@@ -75,9 +75,7 @@ export class Browserless extends EventEmitter {
   webSocketRouteFiles: string[] = [];
   httpRouteFiles: string[] = [];
   server?: HTTPServer;
-  metricsSaveInterval: number = 5 * 60 * 1000;
-  private metricsFiber: Fiber.Fiber<unknown> | null = null;
-  private gaugeCollectorFiber: Fiber.Fiber<unknown> | null = null;
+  protected gaugeCollectorFiber: Fiber.Fiber<unknown> | null = null;
 
   constructor({
     browserManager,
@@ -116,8 +114,7 @@ export class Browserless extends EventEmitter {
     this.browserManager =
       browserManager ||
       new BrowserManager(this.config, this.hooks, this.fileSystem, this.videoManager);
-    this.limiter =
-      limiter || new Limiter(this.config, this.metrics, this.monitoring, this.webhooks, this.hooks);
+    this.limiter = limiter || new Limiter(this.config, this.monitoring, this.webhooks, this.hooks);
     this.router = router || new Router(this.config, this.browserManager, this.limiter);
   }
 
@@ -158,61 +155,6 @@ export class Browserless extends EventEmitter {
     return Effect.runPromise(this.loadPwVersionsEffect());
   }
 
-  protected saveMetricsEffect = Effect.fn("browserless.saveMetrics")({ self: this }, function* () {
-    const metricsPath = this.config.getMetricsJSONPath();
-    const { cpu, memory } = yield* this.monitoring.getMachineStatsEffect();
-    const metrics = this.metrics.get();
-    const aggregatedStats: IBrowserlessStats = {
-      ...metrics,
-      cpu,
-      memory,
-    };
-
-    this.metrics.reset();
-
-    yield* Effect.logInfo(
-      `Current period usage: ${JSON.stringify({
-        date: aggregatedStats.date,
-        error: aggregatedStats.error,
-        maxConcurrent: aggregatedStats.maxConcurrent,
-        maxTime: aggregatedStats.maxTime,
-        meanTime: aggregatedStats.meanTime,
-        minTime: aggregatedStats.minTime,
-        rejected: aggregatedStats.rejected,
-        successful: aggregatedStats.successful,
-        timedout: aggregatedStats.timedout,
-        totalTime: aggregatedStats.totalTime,
-        units: aggregatedStats.units,
-      })}`,
-    );
-
-    if (metricsPath) {
-      yield* Effect.logInfo(`Saving metrics to "${metricsPath}"`);
-      this.fileSystem.append(metricsPath, JSON.stringify(aggregatedStats), false);
-    }
-  });
-
-  protected async saveMetrics(): Promise<void> {
-    return Effect.runPromise(this.saveMetricsEffect());
-  }
-
-  public setMetricsSaveInterval(interval: number) {
-    if (interval <= 0) {
-      return console.warn(`Interval value of "${interval}" must be greater than 1. Ignoring`);
-    }
-
-    if (this.metricsFiber) {
-      Effect.runFork(Fiber.interrupt(this.metricsFiber));
-    }
-    this.metricsSaveInterval = interval;
-    this.metricsFiber = Effect.runFork(
-      this.saveMetricsEffect().pipe(
-        Effect.ignore,
-        Effect.repeat(Schedule.fixed(Duration.millis(interval))),
-      ),
-    );
-  }
-
   protected routeIsDisabled(route: routeInstances) {
     return this.disabledRouteNames.some((name) => name === route.name);
   }
@@ -245,10 +187,6 @@ export class Browserless extends EventEmitter {
       yield* Fiber.interrupt(this.gaugeCollectorFiber);
       this.gaugeCollectorFiber = null;
     }
-    if (this.metricsFiber) {
-      yield* Fiber.interrupt(this.metricsFiber);
-      this.metricsFiber = null;
-    }
     yield* Effect.promise(() =>
       Promise.all([
         this.server?.shutdown(),
@@ -256,7 +194,6 @@ export class Browserless extends EventEmitter {
         this.config.shutdown(),
         this.fileSystem.shutdown(),
         this.limiter.shutdown(),
-        this.metrics.shutdown(),
         this.monitoring.shutdown(),
         this.router.shutdown(),
         this.token.shutdown(),
@@ -428,7 +365,7 @@ export class Browserless extends EventEmitter {
 
     yield* Effect.logDebug(`Imported and validated all route files, starting up server.`);
 
-    this.server = new HTTPServer(this.config, this.metrics, this.token, this.router, this.hooks);
+    this.server = new HTTPServer(this.config, this.token, this.router, this.hooks);
 
     // Initialize server-scoped OTLP runtime — must happen before any sessions.
     // Creates ONE OtlpExporter for the entire process. Session runtimes share the
@@ -437,18 +374,9 @@ export class Browserless extends EventEmitter {
 
     yield* this.loadPwVersionsEffect();
     yield* Effect.promise(() => this.server!.start());
-    yield* Effect.logDebug(`Starting metrics collection.`);
-    this.metricsFiber = Effect.runFork(
-      this.saveMetricsEffect().pipe(
-        Effect.ignore,
-        Effect.repeat(Schedule.fixed(Duration.millis(this.metricsSaveInterval))),
-      ),
-    );
-
-    // Wire pressure state for gauge collector — reads live values from Limiter/Metrics/Config.
+    // Wire pressure state for gauge collector — reads live values from Limiter/Config.
     // Object uses getters so gaugeCollector always reads current values.
     const limiterRef = this.limiter;
-    const metricsRef = this.metrics;
     const configRef = this.config;
     setPressureState({
       get executing() {
@@ -461,31 +389,13 @@ export class Browserless extends EventEmitter {
         return limiterRef.hasCapacity;
       },
       get rejected() {
-        return metricsRef.get().rejected;
+        return 0; // rejected count now tracked by sessionsRejectedCounter
       },
       get maxConcurrent() {
         return configRef.getConcurrent();
       },
       get maxQueued() {
         return configRef.getQueued();
-      },
-      get successful() {
-        return metricsRef.get().successful;
-      },
-      get error() {
-        return metricsRef.get().error;
-      },
-      get timedout() {
-        return metricsRef.get().timedout;
-      },
-      get unhealthy() {
-        return metricsRef.get().unhealthy;
-      },
-      get units() {
-        return metricsRef.get().units;
-      },
-      get maxConcurrentPeak() {
-        return metricsRef.get().maxConcurrent;
       },
     });
 
@@ -530,7 +440,6 @@ export class Browserless extends EventEmitter {
       fileSystem: c.resolve<FileSystem>(Services.FileSystem),
       hooks: c.resolve<Hooks>(Services.Hooks),
       limiter: c.resolve<Limiter>(Services.Limiter),
-      metrics: c.resolve<Metrics>(Services.Metrics),
       monitoring: c.resolve<Monitoring>(Services.Monitoring),
       router: c.resolve<Router>(Services.Router),
       token: c.resolve<Token>(Services.Token),

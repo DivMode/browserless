@@ -12,14 +12,13 @@ import type {
   Config,
   FileSystem,
   Hooks,
-  Metrics,
   Monitoring,
   Router,
   Token,
   WebHooks,
 } from "@browserless.io/browserless";
 
-import {
+import type {
   BrowserManager as BrowserManagerClass,
   Limiter as LimiterClass,
   SessionRegistry as SessionRegistryClass,
@@ -31,7 +30,6 @@ import {
   FileSystemService,
   HooksService,
   LimiterService,
-  MetricsService,
   MonitoringService,
   RouterService,
   SessionRegistryService,
@@ -82,24 +80,6 @@ export const configFromInstance = (config: Config) =>
     hasDebugger: () => Effect.tryPromise(() => config.hasDebugger()),
     getDataDir: () => Effect.tryPromise(() => config.getDataDir()),
     getDownloadsDir: () => Effect.tryPromise(() => config.getDownloadsDir()),
-  });
-
-// ═══════════════════════════════════════════════════════════════════════
-// MetricsService Layer
-// ═══════════════════════════════════════════════════════════════════════
-
-export const metricsFromInstance = (metrics: Metrics) =>
-  Layer.succeed(MetricsService, {
-    addSuccessful: (t) => metrics.addSuccessful(t),
-    addTimedout: (t) => metrics.addTimedout(t),
-    addError: (t) => metrics.addError(t),
-    addQueued: () => metrics.addQueued(),
-    addRejected: () => metrics.addRejected(),
-    addUnhealthy: () => metrics.addUnhealthy(),
-    addUnauthorized: () => metrics.addUnauthorized(),
-    addRunning: () => metrics.addRunning(),
-    get: () => metrics.get(),
-    reset: () => metrics.reset(),
   });
 
 // ═══════════════════════════════════════════════════════════════════════

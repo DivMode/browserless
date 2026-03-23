@@ -1,15 +1,16 @@
-import {
+import type {
   AfterResponse,
   Config,
   Hooks,
-  Metrics,
   Monitoring,
-  TooManyRequests,
-  WebHooks,
+  WebHooks} from "@browserless.io/browserless";
+import {
+  TooManyRequests
 } from "@browserless.io/browserless";
 import { Effect } from "effect";
 import q from "queue";
 
+import { incSuccessful, incError, incTimedout, incRejected } from "./effect-metrics.js";
 import { runForkInServer } from "./otel-runtime.js";
 
 export type LimitFn<TArgs extends unknown[], TResult> = (...args: TArgs) => Promise<TResult>;
@@ -26,13 +27,19 @@ interface Job {
 
 export class Limiter extends q {
   protected queued: number;
+  protected monitor: Monitoring;
+  protected webhooks: WebHooks;
+  protected hooks: Hooks;
 
+  /**
+   * Accepts both old 5-arg (config, metrics, monitor, webhooks, hooks) and
+   * new 4-arg (config, monitor, webhooks, hooks) signatures.
+   * The old Metrics parameter is accepted but ignored — metrics are now
+   * tracked via Effect counters in effect-metrics.ts.
+   */
   constructor(
     protected config: Config,
-    protected metrics: Metrics,
-    protected monitor: Monitoring,
-    protected webhooks: WebHooks,
-    protected hooks: Hooks,
+    ...args: unknown[]
   ) {
     super({
       autostart: true,
@@ -40,6 +47,20 @@ export class Limiter extends q {
       timeout: config.getTimeout(),
     });
     this.queued = config.getQueued();
+
+    // Parse args: 5-arg (config, metrics, monitor, webhooks, hooks) or
+    // 4-arg (config, monitor, webhooks, hooks)
+    if (args.length >= 4) {
+      // Old 5-arg signature: args[0]=metrics (ignored), args[1..3]=monitor,webhooks,hooks
+      this.monitor = args[1] as Monitoring;
+      this.webhooks = args[2] as WebHooks;
+      this.hooks = args[3] as Hooks;
+    } else {
+      // New 4-arg signature: args[0..2]=monitor,webhooks,hooks
+      this.monitor = args[0] as Monitoring;
+      this.webhooks = args[1] as WebHooks;
+      this.hooks = args[2] as Hooks;
+    }
 
     runForkInServer(
       Effect.logDebug(
@@ -91,7 +112,7 @@ export class Limiter extends q {
     runForkInServer(
       Effect.logDebug(`Job has succeeded after ${timeUsed.toLocaleString()}ms of activity.`),
     );
-    this.metrics.addSuccessful(Date.now() - job.start);
+    runForkInServer(incSuccessful());
     // @TODO Figure out a better argument handling for jobs
     this.jobEnd({
       req: job.args[0],
@@ -105,7 +126,7 @@ export class Limiter extends q {
     runForkInServer(
       Effect.logWarning(`Job has hit timeout after ${timeUsed.toLocaleString()}ms of activity.`),
     );
-    this.metrics.addTimedout(Date.now() - job.start);
+    runForkInServer(incTimedout());
     this.webhooks.callTimeoutAlertURL();
     runForkInServer(Effect.logDebug(`Calling timeout handler`));
     job?.onTimeoutFn(job);
@@ -120,7 +141,7 @@ export class Limiter extends q {
 
   protected handleFail({ detail: { error, job } }: { detail: { error: unknown; job: Job } }) {
     runForkInServer(Effect.logDebug(`Recording failed stat, cleaning up: "${error?.toString()}"`));
-    this.metrics.addError(Date.now() - job.start);
+    runForkInServer(incError());
     this.webhooks.callErrorAlertURL(error?.toString() ?? "Unknown Error");
     this.jobEnd({
       req: job.args[0],
@@ -186,7 +207,7 @@ export class Limiter extends q {
         if (cpuOverloaded || memoryOverloaded) {
           this.logQueue(`Health checks have failed, rejecting`);
           this.webhooks.callFailedHealthURL();
-          this.metrics.addRejected();
+          yield* incRejected();
           overCapacityFn(...args);
           throw new Error(`Health checks have failed, rejecting`);
         }
@@ -195,7 +216,7 @@ export class Limiter extends q {
       if (!this.hasCapacity) {
         this.logQueue(`Concurrency and queue is at capacity`);
         this.webhooks.callRejectAlertURL();
-        this.metrics.addRejected();
+        yield* incRejected();
         overCapacityFn(...args);
         const concurrencyLimit = this.concurrency;
         const queueLimit = this.queued;
@@ -207,7 +228,6 @@ export class Limiter extends q {
       if (this.willQueue) {
         this.logQueue(`Concurrency is at capacity, queueing`);
         this.webhooks.callQueueAlertURL();
-        this.metrics.addQueued();
       }
 
       // This Promise is intentionally used — the `queue` library
@@ -218,7 +238,6 @@ export class Limiter extends q {
           new Promise<TResult | unknown>((res, rej) => {
             const bound: () => Promise<TResult | unknown> = async () => {
               this.logQueue(`Starting new job`);
-              this.metrics.addRunning();
 
               try {
                 const result = await limitFn(...args);

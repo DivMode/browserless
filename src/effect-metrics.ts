@@ -53,6 +53,7 @@ import {
   METRIC_BROWSERLESS_SESSIONS_RUNNING,
   METRIC_BROWSERLESS_SESSIONS_QUEUED,
   METRIC_BROWSERLESS_SESSIONS_REJECTED_RECENT,
+  METRIC_BROWSERLESS_SESSIONS_REJECTED,
   METRIC_BROWSERLESS_MAX_CONCURRENT_SESSIONS,
   METRIC_BROWSERLESS_MAX_QUEUED,
   METRIC_BROWSERLESS_SESSIONS_SUCCESSFUL,
@@ -60,8 +61,6 @@ import {
   METRIC_BROWSERLESS_SESSIONS_TIMEDOUT,
   METRIC_BROWSERLESS_SESSIONS_UNHEALTHY,
   METRIC_BROWSERLESS_UNITS,
-  METRIC_BROWSERLESS_ESTIMATED_MONTHLY_UNITS,
-  METRIC_BROWSERLESS_MAX_CONCURRENT_PEAK,
 } from "./browserless_metrics_gen.js";
 
 // Event loop histogram — created once at module scope, reset each collection tick
@@ -114,24 +113,12 @@ export interface PressureState {
   waiting: number;
   /** Limiter: has capacity for new sessions */
   hasCapacity: boolean;
-  /** Recently rejected session count */
+  /** Recently rejected session count (from limiter) */
   rejected: number;
   /** Config: max concurrent sessions allowed */
   maxConcurrent: number;
   /** Config: max queue depth allowed */
   maxQueued: number;
-  /** Metrics: successful session count */
-  successful: number;
-  /** Metrics: error session count */
-  error: number;
-  /** Metrics: timed out session count */
-  timedout: number;
-  /** Metrics: unhealthy rejection count */
-  unhealthy: number;
-  /** Metrics: billing units consumed */
-  units: number;
-  /** Metrics: peak concurrent sessions */
-  maxConcurrentPeak: number;
 }
 
 // Pressure state ref — set by Browserless.start()
@@ -372,34 +359,27 @@ export const maxQueuedGauge = Metric.gauge(METRIC_BROWSERLESS_MAX_QUEUED.name, {
   description: "Maximum queued sessions config",
 });
 
-// ── Session totals gauges (migrated from JSON exporter) ──
-// Note: these are gauges that track cumulative values from the Metrics class,
-// NOT monotonic counters. The JSON exporter exposed them as counters but they
-// reset every 5 minutes in browserless. Using gauges is more accurate.
-
-// These 5 use .otel_name because the registry defines them as counters (_total suffix)
-// but we expose them as gauges (values reset every 5min). Using .name would produce
-// _total_ratio double suffix in Mimir (gauge with _total name gets _ratio added).
-export const sessionsSuccessful = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_SUCCESSFUL.otel_name, {
-  description: "Total successful sessions (resets periodically)",
+// ── Session total counters (monotonic — incremented directly in limiter/server) ──
+// Now proper counters: .name includes _total suffix which is correct for counters.
+// Mimir won't add _ratio because the instrument is counter, not gauge.
+export const sessionsSuccessfulCounter = Metric.counter(
+  METRIC_BROWSERLESS_SESSIONS_SUCCESSFUL.name,
+  { description: "Total successful sessions" },
+);
+export const sessionsErrorCounter = Metric.counter(METRIC_BROWSERLESS_SESSIONS_ERROR.name, {
+  description: "Total error sessions",
 });
-export const sessionsError = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_ERROR.otel_name, {
-  description: "Total error sessions (resets periodically)",
+export const sessionsTimedoutCounter = Metric.counter(METRIC_BROWSERLESS_SESSIONS_TIMEDOUT.name, {
+  description: "Total timed out sessions",
 });
-export const sessionsTimedout = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_TIMEDOUT.otel_name, {
-  description: "Total timed out sessions (resets periodically)",
+export const sessionsUnhealthyCounter = Metric.counter(METRIC_BROWSERLESS_SESSIONS_UNHEALTHY.name, {
+  description: "Total unhealthy rejections",
 });
-export const sessionsUnhealthy = Metric.gauge(METRIC_BROWSERLESS_SESSIONS_UNHEALTHY.otel_name, {
-  description: "Total unhealthy rejections (resets periodically)",
+export const unitsCounter = Metric.counter(METRIC_BROWSERLESS_UNITS.name, {
+  description: "Total billing units consumed",
 });
-export const unitsGauge = Metric.gauge(METRIC_BROWSERLESS_UNITS.otel_name, {
-  description: "Total billing units consumed (resets periodically)",
-});
-export const estimatedMonthlyUnits = Metric.gauge(METRIC_BROWSERLESS_ESTIMATED_MONTHLY_UNITS.name, {
-  description: "Projected monthly billing units",
-});
-export const maxConcurrentPeak = Metric.gauge(METRIC_BROWSERLESS_MAX_CONCURRENT_PEAK.name, {
-  description: "Peak concurrent sessions observed",
+export const sessionsRejectedCounter = Metric.counter(METRIC_BROWSERLESS_SESSIONS_REJECTED.name, {
+  description: "Total rejected sessions",
 });
 
 // ──────────────────────────────────────────────
@@ -537,7 +517,7 @@ export const gaugeCollector = Effect.gen(function* () {
       yield* Metric.update(cpuPercent, cpuVal);
       yield* Metric.update(memoryPercent, memVal);
 
-      // Pressure state from Limiter/Metrics/Config
+      // Pressure state from Limiter/Config
       if (pressureRef) {
         const cpuOver = cpuVal >= 0.99; // same threshold as monitoring.ts
         const memOver = memVal >= 0.99;
@@ -550,16 +530,22 @@ export const gaugeCollector = Effect.gen(function* () {
         yield* Metric.update(sessionsRejectedRecent, pressureRef.rejected);
         yield* Metric.update(maxConcurrentSessions, pressureRef.maxConcurrent);
         yield* Metric.update(maxQueuedGauge, pressureRef.maxQueued);
-
-        // Session totals
-        yield* Metric.update(sessionsSuccessful, pressureRef.successful);
-        yield* Metric.update(sessionsError, pressureRef.error);
-        yield* Metric.update(sessionsTimedout, pressureRef.timedout);
-        yield* Metric.update(sessionsUnhealthy, pressureRef.unhealthy);
-        yield* Metric.update(unitsGauge, pressureRef.units);
-        yield* Metric.update(maxConcurrentPeak, pressureRef.maxConcurrentPeak);
       }
     }),
     Schedule.fixed("30 seconds"),
   );
 });
+
+// ──────────────────────────────────────────────
+// Counter increment helpers
+//
+// Fire-and-forget from non-Effect contexts (limiter event handlers)
+// via runForkInServer(incSuccessful()), or yield* inside Effect contexts.
+// ──────────────────────────────────────────────
+
+export const incSuccessful = () => Metric.update(sessionsSuccessfulCounter, 1);
+export const incError = () => Metric.update(sessionsErrorCounter, 1);
+export const incTimedout = () => Metric.update(sessionsTimedoutCounter, 1);
+export const incUnhealthy = () => Metric.update(sessionsUnhealthyCounter, 1);
+export const incRejected = () => Metric.update(sessionsRejectedCounter, 1);
+export const incUnits = (units: number) => Metric.update(unitsCounter, units);

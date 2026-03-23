@@ -20,7 +20,6 @@ import type {
   BrowserlessSessionJSON,
   CDPJSONPayload,
   HTTPRoute,
-  IBrowserlessStats,
   IResourceLoad,
   PageHook,
   ReplayCompleteParams,
@@ -83,23 +82,6 @@ export const ConfigService = ServiceMap.Service<{
   readonly getDataDir: () => Effect.Effect<string>;
   readonly getDownloadsDir: () => Effect.Effect<string>;
 }>("ConfigService");
-
-// ═══════════════════════════════════════════════════════════════════════
-// MetricsService — session/request counters
-// ═══════════════════════════════════════════════════════════════════════
-
-export const MetricsService = ServiceMap.Service<{
-  readonly addSuccessful: (sessionTime: number) => number;
-  readonly addTimedout: (sessionTime: number) => number;
-  readonly addError: (sessionTime: number) => number;
-  readonly addQueued: () => number;
-  readonly addRejected: () => number;
-  readonly addUnhealthy: () => number;
-  readonly addUnauthorized: () => number;
-  readonly addRunning: () => number;
-  readonly get: () => Omit<IBrowserlessStats, "cpu" | "memory">;
-  readonly reset: () => void;
-}>("MetricsService");
 
 // ═══════════════════════════════════════════════════════════════════════
 // MonitoringService — machine resource load (CPU/memory)
