@@ -1471,7 +1471,7 @@ export class CloudflareDetector {
     meta: TurnstileOOPIFMeta | undefined,
     startTime: number,
     pageUrl?: string,
-  ): Effect.Effect<void, never, BaseDetectorR> {
+  ): Effect.Effect<void, never, DetectorR> {
     const self = this;
     return Effect.fn("cf.handleEmbeddedDetection")(function* () {
       yield* Effect.annotateCurrentSpan({
@@ -1732,6 +1732,8 @@ export class CloudflareDetector {
             });
             const monitorStart = Date.now();
             const maxPolls = Math.ceil(REJECTION_MONITOR_MAX_MS / REJECTION_MONITOR_POLL_MS);
+            // Tab-scoped detection — cross-tab OOPIFs filtered by construction.
+            const tabDetect = yield* TabDetector;
 
             for (let poll = 0; poll < maxPolls; poll++) {
               if (active.aborted || active.resolution.isDone) return;
@@ -1739,10 +1741,8 @@ export class CloudflareDetector {
               yield* Effect.sleep(`${REJECTION_MONITOR_POLL_MS} millis`);
               if (active.aborted || active.resolution.isDone) return;
 
-              // Browser-level Target.getTargets — zero page interaction, invisible to CF
-              const snapshot = yield* self.strategies
-                .detectTurnstileViaCDP(cdpSessionId)
-                .pipe(Effect.orElseSucceed(() => ({ _tag: "not_detected" as const })));
+              // Tab-scoped Target.getTargets — only OOPIFs belonging to this tab
+              const snapshot = yield* tabDetect.detect();
 
               if (snapshot._tag !== "detected") continue;
 
