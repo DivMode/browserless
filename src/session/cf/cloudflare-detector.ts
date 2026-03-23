@@ -1693,6 +1693,22 @@ export class CloudflareDetector {
 
             // Settle current detection — phase label ↻ (reload) instead of ✗
             yield* active.resolution.fail("widget_reload", duration, "↻");
+
+            // Emit CFEvent.Failed so pydoll receives the CDP event.
+            // awaitResolutionRace (below) won't run because we return early.
+            const label = self.state.buildCompoundLabel(targetId);
+            self.cfPublish(
+              CFEvent.Failed({
+                active,
+                reason: "widget_reload",
+                duration,
+                phaseLabel: "↻",
+                cf_summary_label: label,
+                skipMarker: active.resolution.markerEmitted,
+                cf_verified: false,
+              }),
+            );
+
             yield* ctx.resolve();
 
             // Reload the page — triggers new navigation → new detection cycle
