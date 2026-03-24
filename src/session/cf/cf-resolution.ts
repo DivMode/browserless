@@ -11,7 +11,8 @@
  *
  * Deadline is baked in at construction — no unbounded await possible.
  */
-import { Deferred, Duration, Effect, Option } from "effect";
+import type { Duration, Option } from "effect";
+import { Deferred, Effect } from "effect";
 import type { CloudflareResult } from "../../shared/cloudflare-detection.js";
 
 export type ResolvedOutcome =
@@ -24,8 +25,10 @@ export type ResolvedOutcome =
     };
 
 export class Resolution {
-  /** True after onSettle callback has emitted the marker. Consumer checks this to skip duplicate emission. */
-  markerEmitted = false;
+  /** True after onSettle callback ran (pushPhase + solvedPages guards done synchronously). */
+  settledSync = false;
+  /** True after CFEvent.Solved has been emitted externally (interstitial path). Consumer checks to skip duplicate marker. */
+  solvedEmitted = false;
 
   private constructor(
     private readonly deferred: Deferred.Deferred<ResolvedOutcome>,
@@ -50,12 +53,12 @@ export class Resolution {
    * Complete with solved result. Returns true if this was the winning completion.
    * Second+ calls return false and are no-ops.
    * If onSettle is provided and this is the winning completion, fires onSettle
-   * synchronously so the marker timestamp matches settlement — not consumer wake.
+   * synchronously so pushPhase/solvedPages guards fire before any fiber scheduling.
    */
   solve(result: CloudflareResult): Effect.Effect<boolean> {
     return Effect.tap(Deferred.succeed(this.deferred, { _tag: "solved", result }), (won) => {
-      if (won && this.onSettle && !this.markerEmitted) {
-        this.markerEmitted = true;
+      if (won && this.onSettle && !this.settledSync) {
+        this.settledSync = true;
         this.onSettle({ _tag: "solved", result });
       }
       return Effect.void;
@@ -66,14 +69,14 @@ export class Resolution {
    * Complete with failure. Returns true if this was the winning completion.
    * Second+ calls return false and are no-ops.
    * If onSettle is provided and this is the winning completion, fires onSettle
-   * synchronously so the marker timestamp matches settlement — not consumer wake.
+   * synchronously so pushPhase/solvedPages guards fire before any fiber scheduling.
    */
   fail(reason: string, duration_ms: number, phase_label?: string): Effect.Effect<boolean> {
     return Effect.tap(
       Deferred.succeed(this.deferred, { _tag: "failed", reason, duration_ms, phase_label }),
       (won) => {
-        if (won && this.onSettle && !this.markerEmitted) {
-          this.markerEmitted = true;
+        if (won && this.onSettle && !this.settledSync) {
+          this.settledSync = true;
           this.onSettle({ _tag: "failed", reason, duration_ms, phase_label });
         }
         return Effect.void;
@@ -101,5 +104,6 @@ export class Resolution {
 export interface ReadonlyResolution {
   readonly isDone: boolean;
   readonly awaitBounded: Effect.Effect<Option.Option<ResolvedOutcome>>;
-  readonly markerEmitted: boolean;
+  readonly settledSync: boolean;
+  readonly solvedEmitted: boolean;
 }

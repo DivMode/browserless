@@ -639,7 +639,7 @@ export class CloudflareDetector {
               self.state.pushPhase(targetId, o.emitType, attr.label);
               const label = self.state.buildCompoundLabel(targetId);
               self.cfPublish(CFEvent.Solved({ active, result, cf_summary_label: label }));
-              active.resolution.markerEmitted = true;
+              active.resolution.solvedEmitted = true;
 
               yield* abortAndResolve();
               // NOTE: Do NOT add to solvedPages here. Interstitial solves don't produce
@@ -932,7 +932,7 @@ export class CloudflareDetector {
             }),
           );
           if (opts.addToSolvedPages) self.state.solvedPages.add(targetId);
-          if (!active.resolution.markerEmitted) {
+          if (!active.resolution.settledSync) {
             self.state.pushPhase(
               targetId,
               resolved.result.type,
@@ -945,7 +945,7 @@ export class CloudflareDetector {
               active,
               result: resolved.result,
               cf_summary_label: label,
-              skipMarker: active.resolution.markerEmitted,
+              skipMarker: active.resolution.solvedEmitted,
             }),
           );
         } else {
@@ -976,7 +976,7 @@ export class CloudflareDetector {
               cf_verified: cfVerified,
             }),
           );
-          if (!active.resolution.markerEmitted) {
+          if (!active.resolution.settledSync) {
             const phase_label = cfVerified ? "⊘" : (resolved.phase_label ?? `✗ ${resolved.reason}`);
             self.state.pushPhase(targetId, active.info.type, phase_label);
           }
@@ -988,7 +988,7 @@ export class CloudflareDetector {
               duration: resolved.duration_ms,
               phaseLabel: cfVerified ? "⊘" : resolved.phase_label,
               cf_summary_label: label,
-              skipMarker: active.resolution.markerEmitted,
+              skipMarker: active.resolution.solvedEmitted,
               cf_verified: cfVerified,
             }),
           );
@@ -1118,37 +1118,15 @@ export class CloudflareDetector {
         resolution: Resolution.makeUnsafe(INTERSTITIAL_RESOLUTION_TIMEOUT, (outcome) => {
           // Guard: if aborted, scope finalizer or emitSolveFailure handles emission
           if (active.aborted) return;
+          // Synchronous pushPhase — must happen before fiber scheduling so compound
+          // labels are correct when awaitResolutionRace builds the label.
+          // Marker emission is handled by CFEvent.Solved/Failed in awaitResolutionRace.
           if (outcome._tag === "solved") {
             self.state.pushPhase(targetId, outcome.result.type, outcome.result.phase_label || "→");
-            self.cfPublish(
-              CFEvent.Marker({
-                targetId,
-                tag: "cf.solved",
-                payload: {
-                  type: outcome.result.type,
-                  method: outcome.result.method,
-                  duration_ms: outcome.result.duration_ms,
-                  phase_label: outcome.result.phase_label,
-                  signal: outcome.result.signal,
-                },
-              }),
-            );
           } else {
             const cfVerified = outcome.reason === "verified_session_close";
             const phase_label = cfVerified ? "⊘" : (outcome.phase_label ?? `✗ ${outcome.reason}`);
             self.state.pushPhase(targetId, active.info.type, phase_label);
-            self.cfPublish(
-              CFEvent.Marker({
-                targetId,
-                tag: "cf.failed",
-                payload: {
-                  reason: outcome.reason,
-                  duration_ms: outcome.duration_ms,
-                  phase_label,
-                  cf_verified: cfVerified,
-                },
-              }),
-            );
           }
         }),
       };
@@ -1509,41 +1487,18 @@ export class CloudflareDetector {
         resolution: Resolution.makeUnsafe(EMBEDDED_RESOLUTION_TIMEOUT, (outcome) => {
           // Guard: if aborted, scope finalizer or emitSolveFailure handles emission
           if (active.aborted) return;
+          // PHANTOM GUARD: Set solvedPages + pushPhase in the Resolution callback
+          // (synchronous) so guards fire immediately for ALL solve signals
+          // (bridge_solved, page_navigated, etc.). awaitResolutionRace also sets
+          // solvedPages, but there's a scheduling window between callback and
+          // Effect wakeup where phantom OOPIFs could trigger a false detection.
+          // Marker emission is handled by CFEvent.Solved/Failed in awaitResolutionRace.
           if (outcome._tag === "solved") {
-            // PHANTOM GUARD: Set solvedPages in the Resolution callback (synchronous)
-            // so the guard fires immediately for ALL solve signals (bridge_solved,
-            // page_navigated, etc.). The awaitResolutionRace also sets it, but there's
-            // a scheduling window between callback and Effect wakeup where phantom
-            // OOPIFs could trigger a false detection.
             self.state.solvedPages.add(targetId);
             self.state.pushPhase(targetId, outcome.result.type, outcome.result.phase_label || "→");
-            self.cfPublish(
-              CFEvent.Marker({
-                targetId,
-                tag: "cf.solved",
-                payload: {
-                  type: outcome.result.type,
-                  method: outcome.result.method,
-                  duration_ms: outcome.result.duration_ms,
-                  phase_label: outcome.result.phase_label,
-                  signal: outcome.result.signal,
-                },
-              }),
-            );
           } else {
             const phase_label = outcome.phase_label ?? `✗ ${outcome.reason}`;
             self.state.pushPhase(targetId, active.info.type, phase_label);
-            self.cfPublish(
-              CFEvent.Marker({
-                targetId,
-                tag: "cf.failed",
-                payload: {
-                  reason: outcome.reason,
-                  duration_ms: outcome.duration_ms,
-                  phase_label,
-                },
-              }),
-            );
           }
         }),
       };
@@ -1704,7 +1659,7 @@ export class CloudflareDetector {
                 duration,
                 phaseLabel: "↻",
                 cf_summary_label: label,
-                skipMarker: active.resolution.markerEmitted,
+                skipMarker: active.resolution.solvedEmitted,
                 cf_verified: false,
               }),
             );

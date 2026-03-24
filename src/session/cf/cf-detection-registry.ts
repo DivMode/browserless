@@ -115,7 +115,7 @@ export class DetectionRegistry {
                   : "session_close";
                 yield* active.resolution.fail(reason, duration);
                 // Only emit fallback if onSettle didn't already handle it
-                if (!active.resolution.markerEmitted) {
+                if (!active.resolution.settledSync) {
                   self.emitFallback(active, reason);
                 }
               }
@@ -150,7 +150,7 @@ export class DetectionRegistry {
           yield* mutable.resolution.fail(reason, duration);
         }
         // Only emit fallback if onSettle didn't already handle it
-        if (!mutable.resolution.markerEmitted) {
+        if (!mutable.resolution.settledSync) {
           self.emitFallback(context.active, reason);
         }
         context.resolved = true;
