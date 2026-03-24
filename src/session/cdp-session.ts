@@ -2099,15 +2099,12 @@ export class CdpSession {
       return this.cloudflareHooks.onPageAttached(target.targetId, frameCdpSessionId, url);
     }
 
-    // Backup: if targetInfoChanged missed this tab (untracked target race),
-    // trigger detection via onPageNavigated for any ahrefs URL.
-    if (url.includes("ahrefs.com")) {
-      return this.cloudflareHooks
-        .onPageNavigated(target.targetId, frameCdpSessionId, url, "")
-        .pipe(Effect.ignore);
-    }
-
-    return Effect.void;
+    // Backup: trigger CF detection for ALL page navigations.
+    // The primary path (targetInfoChanged → onPageNavigated) misses some tabs
+    // in batch sessions. This ensures every navigation gets a detection attempt.
+    return this.cloudflareHooks
+      .onPageNavigated(target.targetId, frameCdpSessionId, url, "")
+      .pipe(Effect.ignore);
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────────
