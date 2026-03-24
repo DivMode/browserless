@@ -2011,6 +2011,16 @@ export class CdpSession {
         }
 
         const target = session.targets.getByTarget(changedTargetId);
+        if (!target) {
+          yield* Effect.logWarning('cf.targetInfoChanged.untracked').pipe(
+            Effect.annotateLogs({
+              target_id: changedTargetId.slice(0, 16),
+              url: targetInfo.url?.substring(0, 80) ?? '',
+              type: targetInfo.type ?? '',
+              tracked_count: session.targets.size,
+            }),
+          );
+        }
         if (target) {
           // Re-enable CDP domains that Chrome resets on same-target navigation
           yield* Effect.all(
@@ -2074,6 +2084,10 @@ export class CdpSession {
     const url = frame.url;
     if (!url || url.startsWith("about:") || url.startsWith("chrome:")) return Effect.void;
 
+    const frameCdpSessionId = CdpSessionId.makeUnsafe(msg.sessionId);
+    const target = this.targets.getByCdpSession(frameCdpSessionId);
+    if (!target) return Effect.void;
+
     const isCFUrl =
       url.includes("__cf_chl_rt_tk=") ||
       url.includes("__cf_chl_f_tk=") ||
@@ -2081,13 +2095,19 @@ export class CdpSession {
       url.includes("/cdn-cgi/challenge-platform/") ||
       url.includes("challenges.cloudflare.com");
 
-    if (!isCFUrl) return Effect.void;
+    if (isCFUrl) {
+      return this.cloudflareHooks.onPageAttached(target.targetId, frameCdpSessionId, url);
+    }
 
-    const frameCdpSessionId = CdpSessionId.makeUnsafe(msg.sessionId);
-    const target = this.targets.getByCdpSession(frameCdpSessionId);
-    if (!target) return Effect.void;
+    // Backup: if targetInfoChanged missed this tab (untracked target race),
+    // trigger detection via onPageNavigated for any ahrefs URL.
+    if (url.includes("ahrefs.com")) {
+      return this.cloudflareHooks
+        .onPageNavigated(target.targetId, frameCdpSessionId, url, "")
+        .pipe(Effect.ignore);
+    }
 
-    return this.cloudflareHooks.onPageAttached(target.targetId, frameCdpSessionId, url);
+    return Effect.void;
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────────
