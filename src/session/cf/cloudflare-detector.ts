@@ -538,11 +538,10 @@ export class CloudflareDetector {
           ),
           Match.tag("TurnstileSolved", (o) =>
             Effect.fn("cf.nav.turnstileSolved")(function* () {
-              yield* abortAndResolve();
-              // PHANTOM GUARD: Set solvedPages HERE (producer side) before falling through
-              // to detection loop. triggerSolveFromUrlEffect sets it on the consumer side
-              // but runs in a separate fiber that hasn't woken up yet.
-              self.state.solvedPages.add(targetId);
+              // Emit CFEvent.Solved BEFORE abortAndResolve — same pattern as InterstitialSolved.
+              // abortAndResolve() tears down ctx.scope which interrupts the handleEmbeddedDetection
+              // fiber hosting awaitResolutionRace. If we don't emit here, the CDP event
+              // (Browserless.cloudflareSolved) is never delivered to pydoll.
               const attr = deriveSolveAttribution("page_navigated", o.clickDelivered);
               const result = {
                 solved: true as const,
@@ -554,6 +553,13 @@ export class CloudflareDetector {
                 auto_resolved: attr.autoResolved,
                 phase_label: attr.label,
               };
+              self.state.solvedPages.add(targetId);
+              self.state.pushPhase(targetId, "turnstile", attr.label);
+              const label = self.state.buildCompoundLabel(targetId);
+              self.cfPublish(CFEvent.Solved({ active, result, cf_summary_label: label }));
+              active.resolution.solvedEmitted = true;
+
+              yield* abortAndResolve();
               yield* active.resolution.solve(result);
               if (attr.method === "click_navigation" && o.clickDeliveredAt) {
                 self.cfPublish(
