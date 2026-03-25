@@ -1677,6 +1677,26 @@ export class CloudflareDetector {
             yield* cdp.send("Page.reload").pipe(Effect.ignore);
             return;
           }
+        } else {
+          // All widget reloads exhausted, checkbox never appeared.
+          // Fast-fail instead of waiting 60s for a resolution that won't come.
+          yield* Effect.logWarning("CF lifecycle: widget_not_found_exhausted").pipe(
+            Effect.annotateLogs({
+              target_id: targetId.slice(0, 8),
+              session_id: self.sid,
+              reload_count: reloadCount,
+              max_reloads: MAX_WIDGET_RELOADS,
+            }),
+          );
+          self.cfPublish(
+            CFEvent.Marker({
+              targetId,
+              tag: "cf.widget_reload_exhausted",
+              payload: { reload_count: reloadCount, max_reloads: MAX_WIDGET_RELOADS },
+            }),
+          );
+          const duration = Date.now() - active.startTime;
+          yield* active.resolution.fail("widget_not_found", duration);
         }
       }
 
