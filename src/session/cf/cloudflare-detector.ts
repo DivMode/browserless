@@ -1857,6 +1857,17 @@ export class CloudflareDetector {
             `rejection=${rejectionCount + 1} registry_clear=${!self.state.registry.has(targetId)} ` +
             `solved_page=${self.state.solvedPages.has(targetId)} aborted=${active.aborted}`,
         );
+
+        // Don't rely on onPageNavigated — Page.reload on embedded Turnstile
+        // pages (same URL) doesn't fire Target.targetInfoChanged.
+        // Confirmed: diagnostic logs showed registry_clear=true, solved_page=false,
+        // aborted=false — all guards clear — but re-detection never started.
+        // Start detection directly after giving the page time to reload.
+        yield* Effect.sleep("2 seconds");
+        if (!active.aborted) {
+          const starter = yield* DetectionLoopStarter;
+          yield* starter.start(targetId, cdpSessionId);
+        }
         return;
       }
     })();
