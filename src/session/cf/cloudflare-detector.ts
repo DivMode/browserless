@@ -1267,6 +1267,12 @@ export class CloudflareDetector {
         return;
       }
       if (self.state.registry.has(targetId)) {
+        const rejCount = self.state.clickRejectionCount.get(targetId) ?? 0;
+        if (rejCount > 0) {
+          yield* Effect.logWarning(
+            `CF detect: registry_has guard blocked post-rejection re-detect session=${self.sid} target=${targetId.slice(0, 8)} rejection=${rejCount}`,
+          );
+        }
         yield* Effect.annotateCurrentSpan({ "cf.detect.exit_reason": "registry_has" });
         return;
       }
@@ -1274,6 +1280,12 @@ export class CloudflareDetector {
       // PHANTOM GUARD: Skip detection on pages that already solved CF — new OOPIFs
       // spawned post-solve are not real challenges. See solvedPages JSDoc.
       if (self.state.solvedPages.has(targetId)) {
+        const rejCount = self.state.clickRejectionCount.get(targetId) ?? 0;
+        if (rejCount > 0) {
+          yield* Effect.logWarning(
+            `CF detect: solved_pages guard blocked post-rejection re-detect session=${self.sid} target=${targetId.slice(0, 8)} rejection=${rejCount}`,
+          );
+        }
         yield* Effect.annotateCurrentSpan({
           "cf.phantom": true,
           "cf.detect.exit_reason": "solved_pages",
@@ -1838,6 +1850,13 @@ export class CloudflareDetector {
         // Reload page — triggers new navigation → new CF detection → fresh solve
         const cdp = yield* CdpSender;
         yield* cdp.send("Page.reload").pipe(Effect.ignore);
+
+        // Diagnostic: trace post-reload state so we can verify re-detection fires
+        yield* Effect.logWarning(
+          `CF lifecycle: post_reload_state session=${self.sid} target=${targetId.slice(0, 8)} ` +
+            `rejection=${rejectionCount + 1} registry_clear=${!self.state.registry.has(targetId)} ` +
+            `solved_page=${self.state.solvedPages.has(targetId)} aborted=${active.aborted}`,
+        );
         return;
       }
     })();
