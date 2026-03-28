@@ -735,6 +735,7 @@ describe("Pydoll Pipeline", () => {
         "uv",
         [
           "run",
+          "--frozen",
           "pydoll",
           "cf-stress",
           "--concurrent",
@@ -768,11 +769,15 @@ describe("Pydoll Pipeline", () => {
   });
 
   it("pydoll unit tests pass", { timeout: 10_000 }, () => {
-    const stdout = execFileSync("uv", ["run", "pytest", "tests/test_cloudflare_metrics.py", "-v"], {
-      cwd: PYDOLL_DIR,
-      encoding: "utf-8",
-      timeout: 8_000,
-    });
+    const stdout = execFileSync(
+      "uv",
+      ["run", "--frozen", "pytest", "tests/test_cloudflare_metrics.py", "-v"],
+      {
+        cwd: PYDOLL_DIR,
+        encoding: "utf-8",
+        timeout: 8_000,
+      },
+    );
 
     // pytest prints "N passed" at the end
     const passMatch = stdout.match(/(\d+) passed/);

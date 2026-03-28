@@ -283,7 +283,7 @@ export function dumpReplayHint(replayId: string) {
   console.error(`=== REPLAY ===`);
   console.error(`  ID: ${replayId}`);
   console.error(
-    `  curl -s ${REPLAY_HTTP}/replays/${replayId} | python3 -c "import sys,json; [print(f'{e[\"type\"]}:{e.get(\"data\",{}).get(\"tag\",\"\")}') for e in json.load(sys.stdin).get('events',[])]"`,
+    `  curl -s ${REPLAY_HTTP}/replays/${replayId} | python3 -c "import sys,json; [print(f'{e["type"]}:{e.get("data",{}).get("tag","")}') for e in json.load(sys.stdin).get('events',[])]"`,
   );
 }
 
@@ -371,7 +371,7 @@ export async function runPydoll(args: string[], timeoutMs: number): Promise<Pydo
 
   let stdout: string;
   try {
-    const result = await execFileAsync("uv", ["run", "pydoll", ...args], {
+    const result = await execFileAsync("uv", ["run", "--frozen", "pydoll", ...args], {
       cwd: PYDOLL_DIR,
       encoding: "utf-8",
       timeout: timeoutMs,
