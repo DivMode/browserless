@@ -258,50 +258,6 @@ export class SessionLifecycleManager {
   }
 
   /**
-   * Complete effect — Effect-native implementation of complete().
-   */
-  private completeEffect(browser: BrowserInstance): Effect.Effect<void> {
-    const lifecycle = this;
-
-    return Effect.fn("lifecycle.complete")(function* () {
-      const session = lifecycle.registry.get(browser);
-      if (!session) {
-        yield* Effect.logInfo("complete() called but no session found (already closed?)");
-        yield* Effect.promise(() => browser.close());
-        return;
-      }
-
-      const { id, resolver } = session;
-
-      if (id && resolver) {
-        resolver(null);
-      }
-
-      --session.numbConnected;
-
-      yield* Effect.logDebug("complete()").pipe(
-        Effect.annotateLogs({ session_id: id, numb_connected: session.numbConnected }),
-      );
-
-      // Only the main browser connection (numbConnected drops to 0) should
-      // trigger session destruction. Page-level (/devtools/page/) and reconnection
-      // handlers also call complete(), but they no longer increment numbConnected,
-      // so their complete() is a no-op.
-      if (session.numbConnected <= 0) {
-        yield* lifecycle.closeEffect(browser, session, true);
-      }
-    })();
-  }
-
-  /**
-   * Complete a browser session (WebSocket disconnect).
-   * Public Promise bridge — delegates to completeEffect.
-   */
-  async complete(browser: BrowserInstance): Promise<void> {
-    return Effect.runPromise(this.completeEffect(browser));
-  }
-
-  /**
    * Kill sessions effect — Effect-native implementation of killSessions().
    */
   private killSessionsEffect(target: string): Effect.Effect<ReplayCompleteParams[]> {

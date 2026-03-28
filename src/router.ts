@@ -7,7 +7,8 @@ import type {
   PathTypes,
   Request,
   Response,
-  WebSocketRoute} from "@browserless.io/browserless";
+  WebSocketRoute,
+} from "@browserless.io/browserless";
 import {
   BrowserHTTPRoute,
   BrowserWebsocketRoute,
@@ -78,34 +79,33 @@ export class Router extends EventEmitter {
             "browser" in route &&
             route.browser
           ) {
-            const browser = yield* Effect.promise(() =>
-              router.browserManager.getBrowserForRequest(req, route),
+            // Effect.scoped guarantees destroySession runs on scope close —
+            // no manual try/finally or numbConnected counter needed.
+            return yield* Effect.scoped(
+              Effect.fn("router.scopedBrowser")(function* () {
+                const browser = yield* router.browserManager.acquireBrowserForRequest(req, route);
+
+                if (!isConnected(res)) {
+                  yield* Effect.logWarning(`HTTP Request has closed prior to running`);
+                  return;
+                }
+
+                yield* Effect.logTrace(`Running found HTTP handler.`);
+                return yield* Effect.promise(() =>
+                  Promise.race([
+                    handler(req, res, browser),
+                    new Promise((resolve, reject) => {
+                      res.once("close", () => {
+                        if (!res.writableEnded) {
+                          reject(new Error(`Request closed prior to writing results`));
+                        }
+                        resolve(null);
+                      });
+                    }),
+                  ]),
+                );
+              })(),
             );
-
-            try {
-              if (!isConnected(res)) {
-                yield* Effect.logWarning(`HTTP Request has closed prior to running`);
-                return;
-              }
-
-              yield* Effect.logTrace(`Running found HTTP handler.`);
-              return yield* Effect.promise(() =>
-                Promise.race([
-                  handler(req, res, browser),
-                  new Promise((resolve, reject) => {
-                    res.once("close", () => {
-                      if (!res.writableEnded) {
-                        reject(new Error(`Request closed prior to writing results`));
-                      }
-                      resolve(null);
-                    });
-                  }),
-                ]),
-              );
-            } finally {
-              runForkInServer(Effect.logDebug(`HTTP Request handler has finished.`));
-              router.browserManager.complete(browser);
-            }
           }
 
           return yield* Effect.promise(() => (handler as HTTPRoute["handler"])(req, res));
@@ -131,11 +131,36 @@ export class Router extends EventEmitter {
             "browser" in route &&
             route.browser
           ) {
-            const browser = yield* Effect.promise(() =>
-              router.browserManager.getBrowserForRequest(req, route),
-            );
+            if (route.concurrency) {
+              // Session owner — Effect.scoped guarantees destroySession on scope close.
+              yield* Effect.scoped(
+                Effect.fn("router.scopedBrowser")(function* () {
+                  const browser = yield* router.browserManager.acquireBrowserForRequest(req, route);
 
-            try {
+                  if (!isConnected(socket)) {
+                    yield* Effect.logWarning(`WebSocket Request has closed prior to running`);
+                    return;
+                  }
+
+                  yield* Effect.logTrace(`Running found WebSocket handler.`);
+                  yield* Effect.promise(() =>
+                    Promise.race([
+                      handler(req, socket, head, browser),
+                      new Promise<void>((resolve) => {
+                        socket.once("close", resolve);
+                        socket.once("end", resolve);
+                        socket.once("error", resolve);
+                      }),
+                    ]),
+                  );
+                })(),
+              );
+            } else {
+              // Page-level route — borrows existing browser, no lifecycle ownership.
+              const browser = yield* Effect.promise(() =>
+                router.browserManager.getBrowserForRequest(req, route),
+              );
+
               if (!isConnected(socket)) {
                 yield* Effect.logWarning(`WebSocket Request has closed prior to running`);
                 return;
@@ -152,15 +177,6 @@ export class Router extends EventEmitter {
                   }),
                 ]),
               );
-            } finally {
-              runForkInServer(Effect.logDebug(`WebSocket Request handler has finished.`));
-              // Only the session owner (concurrency=true routes) should trigger
-              // lifecycle cleanup. Page-level routes (concurrency=false) access an
-              // existing session without owning it — calling complete() here would
-              // kill the browser while other handlers are still using it.
-              if (route.concurrency) {
-                router.browserManager.complete(browser);
-              }
             }
             return;
           }

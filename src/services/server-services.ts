@@ -180,7 +180,6 @@ export const BrowserManagerService = ServiceMap.Service<{
     session: BrowserlessSession,
     force?: boolean,
   ) => Effect.Effect<ReplayCompleteParams | null>;
-  readonly complete: (browser: BrowserInstance) => Effect.Effect<void>;
   readonly killSessions: (target: string) => Effect.Effect<ReplayCompleteParams[]>;
   readonly getAllSessions: (trackingId?: string) => Effect.Effect<BrowserlessSessionJSON[]>;
   readonly getProtocolJSON: () => Effect.Effect<object>;

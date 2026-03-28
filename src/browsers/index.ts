@@ -1,25 +1,28 @@
-import {
+import type {
   BrowserHTTPRoute,
   BrowserInstance,
   BrowserlessSession,
   BrowserlessSessionJSON,
   CDPJSONPayload,
-  ChromeCDP,
-  ChromiumCDP,
   Config,
-  EdgeCDP,
   FileSystem,
   Hooks,
-  NotFound,
   ReplayCompleteParams,
   Request,
-  ServerError,
   BrowserWebsocketRoute,
+} from "@browserless.io/browserless";
+import {
+  ChromeCDP,
+  ChromiumCDP,
+  EdgeCDP,
+  NotFound,
+  ServerError,
   availableBrowsers,
   isReplayCapable,
   makeExternalURL,
 } from "@browserless.io/browserless";
 import path from "path";
+import type { Scope } from "effect";
 import { Effect } from "effect";
 
 import { SessionRegistry } from "../session/session-registry.js";
@@ -372,23 +375,47 @@ export class BrowserManager {
   }
 
   /**
-   * Complete a browser session (WebSocket disconnect).
-   * Delegates to SessionLifecycleManager.
+   * Acquire a scoped browser resource for a request.
+   *
+   * Returns an Effect requiring Scope — when the scope closes, destroySession
+   * runs automatically. No manual complete() or numbConnected tracking needed.
+   * Use with Effect.scoped() in the router.
    */
-  private completeEffect(browser: BrowserInstance): Effect.Effect<void> {
+  private acquireBrowserForRequestEffect(
+    req: Request,
+    router: BrowserHTTPRoute | BrowserWebsocketRoute,
+  ): Effect.Effect<BrowserInstance, never, Scope.Scope> {
     const mgr = this;
-    return Effect.fn("browserManager.complete")(function* () {
-      yield* Effect.promise(() => mgr.lifecycle.complete(browser));
+    return Effect.fn("browserManager.acquireBrowser")({ self: mgr }, function* () {
+      const browser = yield* Effect.promise(() => this.launcher.getBrowserForRequest(req, router));
+
+      // Set up replay event handler for browsers that support it
+      if (isReplayCapable(browser)) {
+        browser.setOnBeforeClose(async () => {
+          await this.closeForBrowser(browser, true);
+        });
+      }
+
+      // Acquire the session scope — release = destroySession (guaranteed by Effect runtime)
+      const session = this.registry.get(browser);
+      if (session) {
+        yield* this.lifecycle.acquireSession(browser, session);
+      }
+
+      return browser;
     })();
   }
 
-  public async complete(browser: BrowserInstance): Promise<void> {
-    return Effect.runPromise(this.completeEffect(browser));
+  public acquireBrowserForRequest(
+    req: Request,
+    router: BrowserHTTPRoute | BrowserWebsocketRoute,
+  ): Effect.Effect<BrowserInstance, never, Scope.Scope> {
+    return this.acquireBrowserForRequestEffect(req, router);
   }
 
   /**
-   * Get a browser for a request.
-   * Delegates to BrowserLauncher.
+   * Get a browser for a request WITHOUT lifecycle ownership.
+   * Used by page-level routes (concurrency=false) that borrow an existing session.
    */
   private getBrowserForRequestEffect(
     req: Request,
@@ -397,15 +424,6 @@ export class BrowserManager {
     const mgr = this;
     return Effect.fn("browserManager.getBrowserForRequest")(function* () {
       const browser = yield* Effect.promise(() => mgr.launcher.getBrowserForRequest(req, router));
-
-      // Set up replay event handler for browsers that support it
-      if (isReplayCapable(browser)) {
-        // Ensure replayComplete can be emitted before client WS closes
-        browser.setOnBeforeClose(async () => {
-          await mgr.closeForBrowser(browser, true);
-        });
-      }
-
       return browser;
     })();
   }

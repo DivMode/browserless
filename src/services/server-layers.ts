@@ -172,7 +172,6 @@ export const browserManagerFromInstance = (manager: BrowserManagerClass) =>
       Effect.tryPromise(() => manager.getBrowserForRequest(req, route)),
     close: (browser, session, force) =>
       Effect.tryPromise(() => manager.close(browser, session, force)),
-    complete: (browser) => Effect.tryPromise(() => manager.complete(browser)),
     killSessions: (target) => Effect.tryPromise(() => manager.killSessions(target)),
     getAllSessions: (trackingId) => Effect.tryPromise(() => manager.getAllSessions(trackingId)),
     getProtocolJSON: () => Effect.tryPromise(() => manager.getProtocolJSON()),
