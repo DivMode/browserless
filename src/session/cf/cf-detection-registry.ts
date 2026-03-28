@@ -114,10 +114,7 @@ export class DetectionRegistry {
                   ? "verified_session_close"
                   : "session_close";
                 yield* active.resolution.fail(reason, duration);
-                // Only emit fallback if onSettle didn't already handle it
-                if (!active.resolution.settledSync) {
-                  self.emitFallback(active, reason);
-                }
+                self.emitFallback(active, reason);
               }
             }),
           );
@@ -141,7 +138,11 @@ export class DetectionRegistry {
 
     const self = this;
     return Effect.gen(function* () {
-      // Emit fallback if unresolved — even if aborted (abort doesn't emit markers)
+      // Emit fallback if unresolved — even if aborted (abort doesn't emit markers).
+      // Always emit regardless of settledSync — onSettle only pushes phase labels,
+      // it does NOT emit markers. The marker MUST come from here because the
+      // detection fiber (which would normally emit via awaitResolutionRace) was
+      // already interrupted by FiberMap.remove before unregister runs.
       if (!context.resolved) {
         const mutable = context.mutableActive;
         const duration = Date.now() - mutable.startTime;
@@ -149,10 +150,7 @@ export class DetectionRegistry {
         if (!mutable.resolution.isDone) {
           yield* mutable.resolution.fail(reason, duration);
         }
-        // Only emit fallback if onSettle didn't already handle it
-        if (!mutable.resolution.settledSync) {
-          self.emitFallback(context.active, reason);
-        }
+        self.emitFallback(context.active, reason);
         context.resolved = true;
       }
       yield* Scope.close(context.scope, Exit.void);
