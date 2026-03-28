@@ -81,9 +81,12 @@ export class Router extends EventEmitter {
           ) {
             // Effect.scoped guarantees destroySession runs on scope close —
             // no manual try/finally or numbConnected counter needed.
+            console.error(`[DIAG] HTTP: entering Effect.scoped`);
             return yield* Effect.scoped(
               Effect.fn("router.scopedBrowser")(function* () {
+                console.error(`[DIAG] HTTP: inside scope, acquiring browser`);
                 const browser = yield* router.browserManager.acquireBrowserForRequest(req, route);
+                console.error(`[DIAG] HTTP: browser acquired`);
 
                 if (!isConnected(res)) {
                   yield* Effect.logWarning(`HTTP Request has closed prior to running`);

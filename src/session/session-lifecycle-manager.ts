@@ -128,10 +128,14 @@ export class SessionLifecycleManager {
   ): Effect.Effect<BrowserInstance, never, Scope.Scope> {
     return Effect.acquireRelease(
       Effect.sync(() => {
+        console.error(`[DIAG] acquireSession ACQUIRE session=${session.id}`);
         this.registry.register(browser, session);
         return browser;
       }),
-      () => this.destroySession(browser, session).pipe(Effect.ignore),
+      () => {
+        console.error(`[DIAG] acquireSession RELEASE session=${session.id}`);
+        return this.destroySession(browser, session).pipe(Effect.ignore);
+      },
     );
   }
 
