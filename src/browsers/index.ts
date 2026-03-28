@@ -22,7 +22,6 @@ import {
   makeExternalURL,
 } from "@browserless.io/browserless";
 import path from "path";
-import type { Scope } from "effect";
 import { Effect } from "effect";
 
 import { SessionRegistry } from "../session/session-registry.js";
@@ -375,47 +374,8 @@ export class BrowserManager {
   }
 
   /**
-   * Acquire a scoped browser resource for a request.
-   *
-   * Returns an Effect requiring Scope — when the scope closes, destroySession
-   * runs automatically. No manual complete() or numbConnected tracking needed.
-   * Use with Effect.scoped() in the router.
-   */
-  private acquireBrowserForRequestEffect(
-    req: Request,
-    router: BrowserHTTPRoute | BrowserWebsocketRoute,
-  ): Effect.Effect<BrowserInstance, never, Scope.Scope> {
-    const mgr = this;
-    return Effect.fn("browserManager.acquireBrowser")({ self: mgr }, function* () {
-      const browser = yield* Effect.promise(() => this.launcher.getBrowserForRequest(req, router));
-
-      // Set up replay event handler for browsers that support it
-      if (isReplayCapable(browser)) {
-        browser.setOnBeforeClose(async () => {
-          await this.closeForBrowser(browser, true);
-        });
-      }
-
-      // Acquire the session scope — release = destroySession (guaranteed by Effect runtime)
-      const session = this.registry.get(browser);
-      if (session) {
-        yield* this.lifecycle.acquireSession(browser, session);
-      }
-
-      return browser;
-    })();
-  }
-
-  public acquireBrowserForRequest(
-    req: Request,
-    router: BrowserHTTPRoute | BrowserWebsocketRoute,
-  ): Effect.Effect<BrowserInstance, never, Scope.Scope> {
-    return this.acquireBrowserForRequestEffect(req, router);
-  }
-
-  /**
-   * Get a browser for a request WITHOUT lifecycle ownership.
-   * Used by page-level routes (concurrency=false) that borrow an existing session.
+   * Get a browser for a request.
+   * Delegates to BrowserLauncher.
    */
   private getBrowserForRequestEffect(
     req: Request,
@@ -424,6 +384,14 @@ export class BrowserManager {
     const mgr = this;
     return Effect.fn("browserManager.getBrowserForRequest")(function* () {
       const browser = yield* Effect.promise(() => mgr.launcher.getBrowserForRequest(req, router));
+
+      // Set up replay event handler for browsers that support it
+      if (isReplayCapable(browser)) {
+        browser.setOnBeforeClose(async () => {
+          await mgr.closeForBrowser(browser, true);
+        });
+      }
+
       return browser;
     })();
   }
@@ -433,6 +401,38 @@ export class BrowserManager {
     router: BrowserHTTPRoute | BrowserWebsocketRoute,
   ): Promise<BrowserInstance> {
     return Effect.runPromise(this.getBrowserForRequestEffect(req, router));
+  }
+
+  /**
+   * Destroy a browser session.
+   * Looks up the session from the registry and calls destroySession.
+   * Used by acquireUseRelease's release phase in the router.
+   */
+  public async destroy(browser: BrowserInstance): Promise<void> {
+    const session = this.registry.get(browser);
+    if (!session) {
+      await browser.close();
+      return;
+    }
+
+    // Resolve the session's pending promise (signals end to limiter/waiters)
+    if (session.id && session.resolver) {
+      session.resolver(null);
+    }
+
+    // Wait for the proxyWebSocket close handler to finish its onBeforeClose
+    // callback (replay flush, tabReplayComplete). The close handler and this
+    // destroy() are both triggered by socket.close — without this wait, we'd
+    // race: destroySession kills Chrome while onBeforeClose is still flushing.
+    const onBeforeClose = (browser as { onBeforeClosePromise?: Promise<void> | null })
+      .onBeforeClosePromise;
+    if (onBeforeClose) {
+      await onBeforeClose.catch(() => {});
+    }
+
+    // destroySession handles: registry removal, replay cleanup (60s timeout),
+    // browser.close() with SIGKILL fallback, and data dir cleanup via Effect.ensuring.
+    return Effect.runPromise(this.lifecycle.destroyForBrowser(browser).pipe(Effect.ignore));
   }
 
   /**

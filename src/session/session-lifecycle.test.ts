@@ -279,76 +279,45 @@ describe("watchdog per-session TTL", () => {
   });
 });
 
-effectDescribe("acquireSession", () => {
-  effectIt.effect("registers on acquire, removes on scope close", () =>
-    Effect.gen(function* () {
-      const registry = new SessionRegistry();
-      const lifecycle = new SessionLifecycleManager(registry);
-      const browser = makeBrowser("b1");
-      const session = makeSession("s1");
+describe("destroyForBrowser", () => {
+  let registry: SessionRegistry;
+  let lifecycle: SessionLifecycleManager;
 
-      const scope = yield* Scope.make();
+  beforeEach(() => {
+    registry = new SessionRegistry();
+    lifecycle = new SessionLifecycleManager(registry);
+  });
 
-      yield* lifecycle
-        .acquireSession(browser, session)
-        .pipe(Effect.provideService(Scope.Scope, scope));
+  it("destroys session and removes from registry", async () => {
+    const browser = makeBrowser("b1");
+    const session = makeSession("s1");
+    registry.register(browser, session);
 
-      // After acquire, session should be registered
-      expect(registry.size()).toBe(1);
-      expect(registry.get(browser)).toBe(session);
+    expect(registry.size()).toBe(1);
 
-      // Close scope — triggers release (guaranteed cleanup)
-      yield* Scope.close(scope, Effect.void);
+    await Effect.runPromise(lifecycle.destroyForBrowser(browser));
 
-      // After release, session should be removed
-      expect(registry.size()).toBe(0);
-    }),
-  );
+    expect(registry.size()).toBe(0);
+    expect(browser.close).toHaveBeenCalled();
+  });
 
-  effectIt.effect("cleanup runs even when browser.close() fails", () =>
-    Effect.gen(function* () {
-      const registry = new SessionRegistry();
-      const lifecycle = new SessionLifecycleManager(registry);
-      const browser = makeBrowser("b1", {
-        close: vi.fn().mockRejectedValue(new Error("crash")),
-      });
-      const session = makeSession("s1");
+  it("closes browser directly when no session found", async () => {
+    const browser = makeBrowser("b-unknown");
 
-      const scope = yield* Scope.make();
+    await Effect.runPromise(lifecycle.destroyForBrowser(browser));
 
-      yield* lifecycle
-        .acquireSession(browser, session)
-        .pipe(Effect.provideService(Scope.Scope, scope));
+    expect(browser.close).toHaveBeenCalled();
+  });
 
-      expect(registry.size()).toBe(1);
+  it("cleanup runs even when browser.close() fails", async () => {
+    const browser = makeBrowser("b1", {
+      close: vi.fn().mockRejectedValue(new Error("crash")),
+    });
+    const session = makeSession("s1");
+    registry.register(browser, session);
 
-      yield* Scope.close(scope, Effect.void);
+    await Effect.runPromise(lifecycle.destroyForBrowser(browser).pipe(Effect.ignore));
 
-      // Must still be cleaned up despite browser.close() failure
-      expect(registry.size()).toBe(0);
-    }),
-  );
-
-  effectIt.effect("scoped usage auto-cleans on completion", () =>
-    Effect.gen(function* () {
-      const registry = new SessionRegistry();
-      const lifecycle = new SessionLifecycleManager(registry);
-      const browser = makeBrowser("b1");
-      const session = makeSession("s1");
-
-      yield* Effect.scoped(
-        lifecycle.acquireSession(browser, session).pipe(
-          Effect.tap(() =>
-            Effect.sync(() => {
-              // Inside scope — session is registered
-              expect(registry.size()).toBe(1);
-            }),
-          ),
-        ),
-      );
-
-      // After Effect.scoped completes, release has run
-      expect(registry.size()).toBe(0);
-    }),
-  );
+    expect(registry.size()).toBe(0);
+  });
 });

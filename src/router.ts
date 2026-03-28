@@ -79,22 +79,15 @@ export class Router extends EventEmitter {
             "browser" in route &&
             route.browser
           ) {
-            // Effect.scoped guarantees destroySession runs on scope close —
-            // no manual try/finally or numbConnected counter needed.
-            console.error(`[DIAG] HTTP: entering Effect.scoped`);
-            return yield* Effect.scoped(
-              Effect.fn("router.scopedBrowser")(function* () {
-                console.error(`[DIAG] HTTP: inside scope, acquiring browser`);
-                const browser = yield* router.browserManager.acquireBrowserForRequest(req, route);
-                console.error(`[DIAG] HTTP: browser acquired`);
-
+            // acquireUseRelease guarantees destroySession runs after the handler —
+            // no scope management, no fiber lifecycle issues, no manual counter.
+            return yield* Effect.acquireUseRelease(
+              Effect.promise(() => router.browserManager.getBrowserForRequest(req, route)),
+              (browser) => {
                 if (!isConnected(res)) {
-                  yield* Effect.logWarning(`HTTP Request has closed prior to running`);
-                  return;
+                  return Effect.logWarning(`HTTP Request has closed prior to running`);
                 }
-
-                yield* Effect.logTrace(`Running found HTTP handler.`);
-                return yield* Effect.promise(() =>
+                return Effect.promise(() =>
                   Promise.race([
                     handler(req, res, browser),
                     new Promise((resolve, reject) => {
@@ -107,7 +100,9 @@ export class Router extends EventEmitter {
                     }),
                   ]),
                 );
-              })(),
+              },
+              (browser) =>
+                Effect.promise(() => router.browserManager.destroy(browser)).pipe(Effect.ignore),
             );
           }
 
@@ -135,28 +130,22 @@ export class Router extends EventEmitter {
             route.browser
           ) {
             if (route.concurrency) {
-              // Session owner — Effect.scoped guarantees destroySession on scope close.
-              yield* Effect.scoped(
-                Effect.fn("router.scopedBrowser")(function* () {
-                  const browser = yield* router.browserManager.acquireBrowserForRequest(req, route);
-
+              // Session owner — acquireUseRelease guarantees destroySession after handler.
+              // Do NOT use Promise.race with socket.close here — the handler
+              // (proxyWebSocket) already resolves on socket close AFTER completing
+              // its internal cleanup (onBeforeClose, cdpProxy close, replay flush).
+              // Racing bypasses that cleanup and causes the release to kill Chrome
+              // while replay data is still being flushed.
+              yield* Effect.acquireUseRelease(
+                Effect.promise(() => router.browserManager.getBrowserForRequest(req, route)),
+                (browser) => {
                   if (!isConnected(socket)) {
-                    yield* Effect.logWarning(`WebSocket Request has closed prior to running`);
-                    return;
+                    return Effect.logWarning(`WebSocket Request has closed prior to running`);
                   }
-
-                  yield* Effect.logTrace(`Running found WebSocket handler.`);
-                  yield* Effect.promise(() =>
-                    Promise.race([
-                      handler(req, socket, head, browser),
-                      new Promise<void>((resolve) => {
-                        socket.once("close", resolve);
-                        socket.once("end", resolve);
-                        socket.once("error", resolve);
-                      }),
-                    ]),
-                  );
-                })(),
+                  return Effect.promise(() => handler(req, socket, head, browser));
+                },
+                (browser) =>
+                  Effect.promise(() => router.browserManager.destroy(browser)).pipe(Effect.ignore),
               );
             } else {
               // Page-level route — borrows existing browser, no lifecycle ownership.

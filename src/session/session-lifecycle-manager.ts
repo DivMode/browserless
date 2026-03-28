@@ -116,27 +116,16 @@ export class SessionLifecycleManager {
   }
 
   /**
-   * Acquire a session resource with guaranteed cleanup.
-   *
-   * Registration happens on acquire, removal + full close on release.
-   * Release runs GUARANTEED by Effect runtime, even on interrupt/defect.
-   * Use with Effect.scoped() for automatic scope management.
+   * Destroy the session associated with a browser instance.
+   * Looks up the session from the registry and calls destroySession.
+   * Used by the router's acquireUseRelease release phase.
    */
-  acquireSession(
-    browser: BrowserInstance,
-    session: BrowserlessSession,
-  ): Effect.Effect<BrowserInstance, never, Scope.Scope> {
-    return Effect.acquireRelease(
-      Effect.sync(() => {
-        console.error(`[DIAG] acquireSession ACQUIRE session=${session.id}`);
-        this.registry.register(browser, session);
-        return browser;
-      }),
-      () => {
-        console.error(`[DIAG] acquireSession RELEASE session=${session.id}`);
-        return this.destroySession(browser, session).pipe(Effect.ignore);
-      },
-    );
+  destroyForBrowser(browser: BrowserInstance): Effect.Effect<void> {
+    const session = this.registry.get(browser);
+    if (!session) {
+      return Effect.promise(() => browser.close()).pipe(Effect.ignore);
+    }
+    return this.destroySession(browser, session);
   }
 
   /**
