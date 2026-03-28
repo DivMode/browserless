@@ -1,23 +1,24 @@
-import {
-  BadRequest,
+import type {
   BrowserHTTPRoute,
   BrowserInstance,
   BrowserServerOptions,
   BrowserlessSession,
   CDPLaunchOptions,
+  Config,
+  Hooks,
+  Request,
+  BrowserWebsocketRoute} from "@browserless.io/browserless";
+import {
+  BadRequest,
   ChromeCDP,
   ChromePlaywright,
   ChromiumCDP,
   ChromiumPlaywright,
-  Config,
   EdgeCDP,
   EdgePlaywright,
   FirefoxPlaywright,
-  Hooks,
   NotFound,
-  Request,
   WebKitPlaywright,
-  BrowserWebsocketRoute,
   convertIfBase64,
   generateDataDir,
   getFinalPathSegment,
@@ -28,13 +29,13 @@ import {
   pwVersionRegex,
 } from "@browserless.io/browserless";
 import { Effect } from "effect";
-import { Page } from "puppeteer-core";
+import type { Page } from "puppeteer-core";
 import micromatch from "micromatch";
 import path from "path";
 
 import { runForkInServer } from "../otel-runtime.js";
-import { SessionRegistry } from "../session/session-registry.js";
-import { SessionCoordinator } from "../session/session-coordinator.js";
+import type { SessionRegistry } from "../session/session-registry.js";
+import type { SessionCoordinator } from "../session/session-coordinator.js";
 
 /**
  * BrowserLauncher handles browser launch logic and option parsing.
@@ -289,8 +290,7 @@ export class BrowserLauncher {
 
     const found = this.registry.findByWsEndpoint(id);
     if (found) {
-      const [browser, session] = found;
-      ++session.numbConnected;
+      const [browser] = found;
       runForkInServer(Effect.logDebug(`Located browser with ID ${id}`));
       return browser;
     }
@@ -328,13 +328,7 @@ export class BrowserLauncher {
       const found = allPages.flat().find((b) => b.id === id);
 
       if (found) {
-        const session = this.registry.get(found.browser)!;
-        ++session.numbConnected;
-        runForkInServer(
-          Effect.logDebug(
-            `Page connection: session ${session.id} numbConnected=${session.numbConnected} pageId=${id}`,
-          ),
-        );
+        runForkInServer(Effect.logDebug(`Page connection: pageId=${id}`));
         return found.browser;
       }
 

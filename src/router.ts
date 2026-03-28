@@ -1,16 +1,17 @@
-import {
-  BrowserHTTPRoute,
+import type {
   BrowserManager,
-  BrowserWebsocketRoute,
   Config,
-  HTTPManagementRoutes,
   HTTPRoute,
   Limiter,
   Methods,
   PathTypes,
   Request,
   Response,
-  WebSocketRoute,
+  WebSocketRoute} from "@browserless.io/browserless";
+import {
+  BrowserHTTPRoute,
+  BrowserWebsocketRoute,
+  HTTPManagementRoutes,
   contentTypes,
   isConnected,
   writeResponse,
@@ -18,7 +19,7 @@ import {
 import { Effect } from "effect";
 import { EventEmitter } from "events";
 import micromatch from "micromatch";
-import stream from "stream";
+import type stream from "stream";
 
 import { runForkInServer } from "./otel-runtime.js";
 
@@ -153,7 +154,13 @@ export class Router extends EventEmitter {
               );
             } finally {
               runForkInServer(Effect.logDebug(`WebSocket Request handler has finished.`));
-              router.browserManager.complete(browser);
+              // Only the session owner (concurrency=true routes) should trigger
+              // lifecycle cleanup. Page-level routes (concurrency=false) access an
+              // existing session without owning it — calling complete() here would
+              // kill the browser while other handlers are still using it.
+              if (route.concurrency) {
+                router.browserManager.complete(browser);
+              }
             }
             return;
           }

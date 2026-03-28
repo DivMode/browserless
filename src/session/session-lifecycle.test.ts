@@ -74,6 +74,18 @@ describe("SessionLifecycleManager", () => {
     expect(registry.size()).toBe(0);
   });
 
+  it("complete() skips destroy when numbConnected stays above 0", async () => {
+    const browser = makeBrowser("b1");
+    const session = makeSession("s1", { numbConnected: 2 });
+    registry.register(browser, session);
+
+    await lifecycle.complete(browser);
+
+    // numbConnected went from 2 to 1 — session stays alive
+    expect(registry.size()).toBe(1);
+    expect(session.numbConnected).toBe(1);
+  });
+
   it("complete() on unknown browser does not throw", async () => {
     const browser = makeBrowser("b-unknown", {
       close: vi.fn().mockResolvedValue(undefined),

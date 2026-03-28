@@ -1,16 +1,16 @@
-import {
+import type {
   BrowserInstance,
   BrowserlessSession,
   ReplayCompleteParams,
-  exists,
 } from "@browserless.io/browserless";
+import { exists } from "@browserless.io/browserless";
 import { rm } from "fs/promises";
 
 import { Effect, Exit, Fiber, FiberMap, Schedule, Scope } from "effect";
 import { observeHistogram, sessionDuration } from "../effect-metrics.js";
 import { runForkInServer } from "../otel-runtime.js";
-import { SessionCoordinator } from "./session-coordinator.js";
-import { SessionRegistry } from "./session-registry.js";
+import type { SessionCoordinator } from "./session-coordinator.js";
+import type { SessionRegistry } from "./session-registry.js";
 
 /**
  * SessionLifecycleManager handles browser session lifecycle.
@@ -283,9 +283,13 @@ export class SessionLifecycleManager {
         Effect.annotateLogs({ session_id: id, numb_connected: session.numbConnected }),
       );
 
-      // CRITICAL: Must await close to ensure session is removed from registry
-      // before returning. This method is called when a WebSocket client disconnects.
-      yield* lifecycle.closeEffect(browser, session, false);
+      // Only the main browser connection (numbConnected drops to 0) should
+      // trigger session destruction. Page-level (/devtools/page/) and reconnection
+      // handlers also call complete(), but they no longer increment numbConnected,
+      // so their complete() is a no-op.
+      if (session.numbConnected <= 0) {
+        yield* lifecycle.closeEffect(browser, session, true);
+      }
     })();
   }
 
