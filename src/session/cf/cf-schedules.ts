@@ -145,3 +145,13 @@ export const BROWSER_WS_PING_INTERVAL = "10 seconds" as const;
 
 /** Browser WS heartbeat: max wait for pong response (ms). */
 export const BROWSER_WS_PONG_TIMEOUT_MS = 5_000;
+
+/** Client WS heartbeat: fixed ping interval. */
+export const CLIENT_WS_PING_INTERVAL = "10 seconds" as const;
+
+/** Client WS heartbeat: max wait for pong response (ms). */
+export const CLIENT_WS_PONG_TIMEOUT_MS = 5_000;
+
+/** Client WS heartbeat: consecutive missed pongs before closing.
+ * 2 misses = ~25-30s unresponsive. Single miss can be GC pause. */
+export const CLIENT_WS_MAX_MISSED_PONGS = 2;

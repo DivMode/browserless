@@ -58,8 +58,16 @@ export class Router extends EventEmitter {
   }
 
   protected onWebsocketTimeout(_req: Request, socket: stream.Duplex) {
-    runForkInServer(Effect.logError(`Websocket job has timedout, sending 408 response`));
-    return writeResponse(socket, 408, "Request has timed out");
+    runForkInServer(
+      Effect.logError(`Websocket job has timedout, sending 408 and destroying socket`),
+    );
+    writeResponse(socket, 408, "Request has timed out");
+    // socket.end() only sends FIN — useless for half-open connections where pydoll crashed.
+    // socket.destroy() tears down the fd, triggering 'close' on CDPProxy's upgraded WS,
+    // which fires handleClose() → proxyWebSocket resolve → finally → destroy(browser).
+    if (!socket.destroyed) {
+      socket.destroy();
+    }
   }
 
   protected wrapHTTPHandler(

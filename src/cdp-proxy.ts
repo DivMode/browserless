@@ -11,7 +11,13 @@ import { runForkInServer } from "./otel-runtime.js";
 import { CloudflareConfig } from "./shared/cloudflare-detection.js";
 import type { CdpSessionId } from "./shared/cloudflare-detection.js";
 import { TargetId } from "./shared/cloudflare-detection.js";
-import { BROWSER_WS_PING_INTERVAL, BROWSER_WS_PONG_TIMEOUT_MS } from "./session/cf/cf-schedules.js";
+import {
+  BROWSER_WS_PING_INTERVAL,
+  BROWSER_WS_PONG_TIMEOUT_MS,
+  CLIENT_WS_MAX_MISSED_PONGS,
+  CLIENT_WS_PING_INTERVAL,
+  CLIENT_WS_PONG_TIMEOUT_MS,
+} from "./session/cf/cf-schedules.js";
 import {
   decodeCDPCommand,
   decodeCDPMessage,
@@ -528,6 +534,11 @@ export class CDPProxy {
     // that don't emit close events. Without this, pydoll waits the full
     // 60s+ timeout and gets cf_events=0 → "No Data".
     this.startHeartbeat();
+
+    // Client heartbeat: ping pydoll's WS every 10s, close after 2 missed pongs (~25-30s).
+    // Detects dead pydoll connections (crash, network death, half-open TCP).
+    // Without this, zombie sessions survive until the limiter timeout (minutes).
+    this.startClientHeartbeat();
   }
 
   private async runBeforeCloseAndForward(
@@ -901,6 +912,83 @@ export class CDPProxy {
           }),
         ),
         Effect.repeat(Schedule.fixed(BROWSER_WS_PING_INTERVAL)),
+      ),
+    );
+  }
+
+  /**
+   * Start WS-level ping/pong heartbeat to the client (pydoll).
+   *
+   * Detects dead pydoll connections (crash, network death, half-open TCP)
+   * within ~25-30s. Without this, zombie sessions survive until the limiter
+   * timeout fires (minutes), consuming a Chrome process and RAM the entire time.
+   */
+  private startClientHeartbeat(): void {
+    if (!this.clientWs) return;
+
+    let missedPongs = 0;
+
+    const tick = Effect.fn("cdp.clientHeartbeat")({ self: this }, function* () {
+      const ws = this.clientWs;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+      yield* Effect.try({
+        try: () => ws.ping(),
+        catch: () => new Error("client_ping_failed"),
+      });
+
+      const gotPong = yield* Effect.callback<boolean>((resume) => {
+        let settled = false;
+        const timeout = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          ws.removeListener("pong", onPong);
+          resume(Effect.succeed(false));
+        }, CLIENT_WS_PONG_TIMEOUT_MS);
+        const onPong = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          resume(Effect.succeed(true));
+        };
+        ws.once("pong", onPong);
+        return Effect.sync(() => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timeout);
+            ws.removeListener("pong", onPong);
+          }
+        });
+      });
+
+      if (gotPong) {
+        missedPongs = 0;
+      } else {
+        missedPongs++;
+        if (missedPongs >= CLIENT_WS_MAX_MISSED_PONGS) {
+          runForkInServer(
+            Effect.logWarning(
+              "Client WS heartbeat timeout — pydoll not responding, closing session",
+            ).pipe(Effect.annotateLogs({ missed_pongs: String(missedPongs) })),
+          );
+          this.handleClose();
+        }
+      }
+    });
+
+    this.forkManaged(
+      tick().pipe(
+        Effect.catch((e) =>
+          Effect.sync(() => {
+            runForkInServer(
+              Effect.logWarning("Client WS ping failed, closing session").pipe(
+                Effect.annotateLogs({ error: e instanceof Error ? e.message : String(e) }),
+              ),
+            );
+            this.handleClose();
+          }),
+        ),
+        Effect.repeat(Schedule.fixed(CLIENT_WS_PING_INTERVAL)),
       ),
     );
   }
