@@ -1697,6 +1697,24 @@ export class CdpSession {
         yield* session.send("Runtime.enable", {}, cdpSessionId).pipe(Effect.ignore);
         yield* session.send("Network.enable", {}, cdpSessionId).pipe(Effect.ignore);
 
+        // CF bridge: register BEFORE any navigation to eliminate race condition.
+        // addScriptToEvaluateOnNewDocument is declarative — registers for future
+        // document loads. On about:blank the bridge is dormant (no CF elements).
+        // On next navigation (e.g. ahrefs.com), it fires during document init,
+        // BEFORE the CF interstitial DOM is built → MutationObserver catches everything.
+        // Without this, retry tabs that start at about:blank race Phase 2 activation
+        // against CF interstitial loading, causing cf_events=0 (solver blind).
+        yield* session
+          .send(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+              source: CF_BRIDGE_JS,
+              runImmediately: true,
+            },
+            cdpSessionId,
+          )
+          .pipe(Effect.ignore);
+
         yield* session
           .send(
             "Target.setAutoAttach",
@@ -1843,17 +1861,8 @@ export class CdpSession {
         }
       }
 
-      // ── CF bridge injection ──
-      yield* session
-        .send(
-          "Page.addScriptToEvaluateOnNewDocument",
-          {
-            source: CF_BRIDGE_JS,
-            runImmediately: true,
-          },
-          resolvedCdpSessionId,
-        )
-        .pipe(Effect.ignore);
+      // CF bridge: already registered in Phase 1 (handleAttachedToTargetEffect)
+      // before any navigation — no duplicate registration needed here.
 
       // ── Antibot detection ──
       if (session.antibot) {
@@ -2012,11 +2021,11 @@ export class CdpSession {
 
         const target = session.targets.getByTarget(changedTargetId);
         if (!target) {
-          yield* Effect.logWarning('cf.targetInfoChanged.untracked').pipe(
+          yield* Effect.logWarning("cf.targetInfoChanged.untracked").pipe(
             Effect.annotateLogs({
               target_id: changedTargetId.slice(0, 16),
-              url: targetInfo.url?.substring(0, 80) ?? '',
-              type: targetInfo.type ?? '',
+              url: targetInfo.url?.substring(0, 80) ?? "",
+              type: targetInfo.type ?? "",
               tracked_count: session.targets.size,
             }),
           );
