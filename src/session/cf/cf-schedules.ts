@@ -143,10 +143,12 @@ export const CDP_CALL_TIMEOUT = "5 seconds" as const;
 // ── Verification stuck detection ─────────────────────────────────────
 
 /** Max wait for non-interactive verification to complete (ms).
- * CF non-interactive verification typically finishes in 5-15s.
- * If no beacon after 20s, the Turnstile WASM is stuck at the spinner.
- * Triggers widget_reload instead of waiting the full 60s resolution timeout. */
-export const VERIFICATION_STUCK_TIMEOUT_MS = 20_000;
+ * CF non-interactive verification takes 5-15s single-tab, but under
+ * concurrent load (10+ tabs) V8 contention pushes it to 20-25s.
+ * 30s catches stuck spinners while fitting within the 60s subprocess budget
+ * (detection ~24s + 30s timer = 54s, leaves 6s for result emission).
+ * Must be < EMBEDDED_RESOLUTION_TIMEOUT (60s) to be useful. */
+export const VERIFICATION_STUCK_TIMEOUT_MS = 30_000;
 
 // ── CDPProxy heartbeat ────────────────────────────────────────────────
 

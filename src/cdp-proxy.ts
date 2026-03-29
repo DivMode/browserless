@@ -1033,9 +1033,26 @@ export class CDPProxy {
       ),
     );
 
-    // Await scope close so all acquireRelease finalizers fire before onClose
-    this.closePromise = Effect.runPromise(Scope.close(this.proxyScope, Exit.void))
-      .catch(() => {})
+    // Run onBeforeClose if the CLIENT initiated the close (WS closing/closed)
+    // and Browser.close CDP interception hasn't already handled it.
+    // This ensures replay flush on direct WS disconnect (pydoll/puppeteer close
+    // without sending Browser.close CDP command).
+    // SKIP when Chrome's WS closed first (browser crash) — the browser is already
+    // dead, onBeforeClose would try to send CDP commands on a dead connection.
+    const clientInitiated = clientState !== undefined && clientState !== WebSocket.OPEN;
+    const beforeClose =
+      this.onBeforeClose && !this.closeRequested && clientInitiated
+        ? Effect.runPromise(
+            Effect.tryPromise(() => this.onBeforeClose!()).pipe(
+              Effect.timeout(Duration.millis(ON_BEFORE_CLOSE_TIMEOUT_MS)),
+              Effect.ignore,
+            ),
+          ).catch(() => {})
+        : Promise.resolve();
+
+    // Await onBeforeClose, then scope close, then fire onClose
+    this.closePromise = beforeClose
+      .then(() => Effect.runPromise(Scope.close(this.proxyScope, Exit.void)).catch(() => {}))
       .then(() => {
         this.onClose?.();
       });

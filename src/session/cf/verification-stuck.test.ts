@@ -3,7 +3,7 @@
  *
  * When the CF solver detects a rendered widget (shadow >= 1) but no checkbox,
  * it must NOT wait the full 60s EMBEDDED_RESOLUTION_TIMEOUT. Instead it must
- * trigger a widget_reload after VERIFICATION_STUCK_TIMEOUT_MS (~20s).
+ * trigger a widget_reload after VERIFICATION_STUCK_TIMEOUT_MS.
  *
  * These tests verify:
  * 1. VERIFICATION_STUCK_TIMEOUT_MS exists and is correctly bounded
@@ -30,15 +30,15 @@ describe("VERIFICATION_STUCK_TIMEOUT_MS", () => {
   });
 
   it("is long enough for legitimate non-interactive verification (>= 15s)", () => {
-    // CF non-interactive verification takes 5-15s. Below 15s risks
-    // false positive reloads on legitimate verification.
+    // CF non-interactive verification takes 5-15s single-tab.
+    // Below 15s risks false positive reloads on legitimate verification.
     expect(VERIFICATION_STUCK_TIMEOUT_MS).toBeGreaterThanOrEqual(15_000);
   });
 
-  it("is 20 seconds", () => {
+  it("is 30 seconds", () => {
     // Pinned value — changing this affects solve rate.
-    // 20s = enough for CF verification (5-15s) with margin, but catches
-    // stuck spinners 40s before the 60s resolution timeout would.
-    expect(VERIFICATION_STUCK_TIMEOUT_MS).toBe(20_000);
+    // 45s = enough for concurrent-load verification (30-40s under V8 contention)
+    // while still catching stuck spinners 15s before the 60s resolution timeout.
+    expect(VERIFICATION_STUCK_TIMEOUT_MS).toBe(30_000);
   });
 });

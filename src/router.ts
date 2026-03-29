@@ -143,6 +143,11 @@ export class Router extends EventEmitter {
           ) {
             if (route.concurrency) {
               // Session owner — try/finally guarantees destroy after handler.
+              // destroy() is fire-and-forget (runForkInServer) so the limiter slot
+              // frees immediately while async cleanup (replay flush) continues.
+              // NOTE: acquireUseRelease was tried but it awaits the release phase,
+              // which blocks until the 75s onBeforeClose completes — breaking tests
+              // that check session state after disconnect.
               const browser = yield* Effect.promise(() =>
                 router.browserManager.getBrowserForRequest(req, route),
               );
@@ -154,8 +159,6 @@ export class Router extends EventEmitter {
                 }
 
                 yield* Effect.logTrace(`Running found WebSocket handler.`);
-                // Await handler directly — proxyWebSocket resolves on socket close
-                // AFTER completing onBeforeClose (replay flush, cdpProxy close).
                 yield* Effect.promise(() => handler(req, socket, head, browser));
               } finally {
                 runForkInServer(

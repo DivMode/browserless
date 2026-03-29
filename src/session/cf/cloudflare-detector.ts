@@ -1819,8 +1819,32 @@ export class CloudflareDetector {
           );
         } else {
           // Widget NOT rendered — proceed with reload logic
+          const bodyLen = typeof diag?.bodyLen === "number" ? diag.bodyLen : 0;
           const reloadCount = self.state.widgetReloadCount.get(targetId) ?? 0;
-          if (reloadCount < MAX_WIDGET_RELOADS) {
+
+          // Fast-fail: if bodyLen <= 1, the OOPIF script never loaded at all
+          // (empty iframe body). Under concurrent V8 contention this won't
+          // resolve via reload — skip the reload cycle and fail immediately.
+          if (bodyLen <= 1 && reloadCount > 0) {
+            yield* Effect.logWarning("CF lifecycle: oopif_script_never_loaded").pipe(
+              Effect.annotateLogs({
+                target_id: targetId.slice(0, 8),
+                session_id: self.sid,
+                body_len: bodyLen,
+                reload_count: reloadCount,
+              }),
+            );
+            self.cfPublish(
+              CFEvent.Marker({
+                targetId,
+                tag: "cf.oopif_empty",
+                payload: { body_len: bodyLen, reload_count: reloadCount },
+              }),
+            );
+            const duration = Date.now() - active.startTime;
+            yield* active.resolution.fail("oopif_empty", duration);
+            // Fall through to awaitResolutionRace which handles emission
+          } else if (reloadCount < MAX_WIDGET_RELOADS) {
             // Grace period — bridge might auto-solve without checkbox (non-interactive)
             yield* Effect.sleep(WIDGET_RELOAD_GRACE).pipe(
               Effect.withSpan("cf.widgetReloadGrace", {

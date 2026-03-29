@@ -655,11 +655,11 @@ describe.concurrent("CF Solver Multi-Site", () => {
 // `npx vitest run --config vitest.integration.config.ts` command.
 
 describe("Pydoll Pipeline", () => {
-  it("ahrefs-fast produces valid DR and CF summary", { timeout: 30_000 }, async () => {
+  it("ahrefs-fast produces valid DR and CF summary", { timeout: 40_000 }, async () => {
     // 1. Run pydoll → structured JSON result (replaces regex parsing)
     const result = await runPydoll(
       ["ahrefs-fast", "etsy.com", "--chrome-endpoint=local-browserless"],
-      25_000,
+      35_000,
     );
     expect(result.success, "ahrefs-fast scrape failed").toBe(true);
 
