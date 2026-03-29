@@ -48,13 +48,11 @@ function emit(event: BridgeEvent): void {
       flushTimer = setInterval(() => {
         if (typeof window.__rrwebPush === "function") flushPending();
       }, 50);
-      // Stop after 10s — binding should appear within milliseconds
-      setTimeout(() => {
-        if (flushTimer) {
-          clearInterval(flushTimer);
-          flushTimer = null;
-        }
-      }, 10000);
+      // No timeout — poll until binding appears or page unloads.
+      // On slow navigations (60s+), Runtime.addBinding re-registration
+      // races against bridge startup. A 10s cap silently dropped events,
+      // causing cf_events=0 on retry tabs. The 50ms interval is ~0.001%
+      // CPU — negligible cost to guarantee delivery.
     }
   }
 }
