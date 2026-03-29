@@ -1,6 +1,6 @@
-import { BrowserServerOptions, CDPLaunchOptions } from "@browserless.io/browserless";
+import type { BrowserServerOptions, CDPLaunchOptions } from "@browserless.io/browserless";
 
-import http from "http";
+import type http from "http";
 
 export const errorCodes = {
   400: {
@@ -151,6 +151,7 @@ export enum HTTPManagementRoutes {
   videoStatus = "/video/+([0-9a-zA-Z-_])/status?(/)",
   videoHls = "/video/+([0-9a-zA-Z-_])/hls/**",
   cfSolved = "/internal/cf-solved?(/)",
+  ahrefsScrape = "/internal/ahrefs-scrape?(/)",
   sessions = "/sessions?(/)",
   static = "/",
 }

@@ -1,6 +1,6 @@
-import * as http from "http";
-import * as stream from "stream";
-import {
+import type * as http from "http";
+import type * as stream from "stream";
+import type {
   APITags,
   Browserless,
   ChromiumCDP,
@@ -17,7 +17,7 @@ import {
   contentTypes,
 } from "@browserless.io/browserless";
 import type { VideoManager } from "./video/video-manager.js";
-import { HTTPRequest, Page, ResponseForRequest, ScreenshotOptions } from "puppeteer-core";
+import type { HTTPRequest, Page, ResponseForRequest, ScreenshotOptions } from "puppeteer-core";
 
 export type PathTypes = HTTPRoutes | WebsocketRoutes | HTTPManagementRoutes | string;
 
@@ -718,6 +718,7 @@ export const BrowserlessManagementRoutes = {
   VideoHlsGetRoute: "VideoHlsGetRoute",
   ReplaysGetRoute: "ReplaysGetRoute",
   CfSolvedPostRoute: "CfSolvedPostRoute",
+  AhrefsScrapePostRoute: "AhrefsScrapePostRoute",
   SessionsGetRoute: "SessionsGetRoute",
   StaticGetRoute: "StaticGetRoute",
 };

@@ -1,4 +1,5 @@
 import { Cause, Data, Effect, Latch, Match, pipe } from "effect";
+import { findCheckboxInTree } from "./cf-phase-checkbox.js";
 import { runForkInServer } from "../../otel-runtime.js";
 import type {
   CdpSessionId,
@@ -1759,20 +1760,54 @@ export class CloudflareDetector {
             }),
           );
 
-          // V8 heartbeat: under concurrent tabs, Chrome's V8 engine may not schedule
-          // Turnstile WASM processing unless something triggers DOM tree evaluation.
-          // Periodic DOM.getDocument queries act as "heartbeats" that keep V8 active.
-          // Without this, 10-tab stress tests see the widget stuck in "verifying."
+          // V8 heartbeat + late checkbox detection: under concurrent tabs,
+          // Chrome's V8 may not schedule Turnstile WASM unless prodded.
+          // Periodic DOM.getDocument queries keep V8 active AND check if the
+          // checkbox appeared after Phase 3 gave up. If found, LOG IT —
+          // this tells us the polling window was too short, not that the
+          // widget is broken. Previously we were blind after Phase 3: the
+          // solver would report no_checkbox while the user could SEE the
+          // checkbox render seconds later.
           const oopifSessionId = active.iframeCdpSessionId;
           if (oopifSessionId) {
             yield* Effect.forkIn(
               Effect.fn("cf.v8Heartbeat")(function* () {
                 const cdp = yield* CdpSender;
+                let checkboxFoundLate = false;
                 for (let beat = 0; beat < 60; beat++) {
                   if (active.aborted || active.resolution.isDone) return;
-                  yield* cdp
-                    .send("DOM.getDocument", { depth: 1 }, oopifSessionId)
-                    .pipe(Effect.ignore);
+                  // Full DOM walk (depth=-1, pierce=true) — same as Phase 3
+                  // but now AFTER Phase 3 gave up. If we find the checkbox
+                  // here, it proves Phase 3's window was too short.
+                  const doc = yield* cdp
+                    .send("DOM.getDocument", { depth: -1, pierce: true }, oopifSessionId)
+                    .pipe(Effect.orElseSucceed(() => null as any));
+                  if (doc?.root && !checkboxFoundLate) {
+                    const cb = findCheckboxInTree(doc.root);
+                    if (cb) {
+                      checkboxFoundLate = true;
+                      const lateMs = Date.now() - active.startTime;
+                      yield* Effect.logWarning(
+                        "CF heartbeat: checkbox appeared LATE — Phase 3 window was too short",
+                      ).pipe(
+                        Effect.annotateLogs({
+                          target_id: targetId.slice(0, 8),
+                          session_id: self.sid,
+                          late_ms: lateMs,
+                          beat,
+                          shadow: diag!.shadow,
+                          body_len: diag!.bodyLen,
+                        }),
+                      );
+                      self.cfPublish(
+                        CFEvent.Marker({
+                          targetId,
+                          tag: "cf.checkbox_late",
+                          payload: { late_ms: lateMs, beat, phase3_budget_ms: 8000 },
+                        }),
+                      );
+                    }
+                  }
                   yield* Effect.sleep("500 millis");
                 }
               })(),

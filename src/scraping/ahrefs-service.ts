@@ -1,0 +1,299 @@
+/**
+ * Ahrefs scrape service — executes scrape flow on a Puppeteer Page.
+ *
+ * Uses the BrowserHTTPRoute pattern: the framework launches Chrome,
+ * we get a BrowserInstance with proxy + fingerprint + CF solver.
+ * We create a page, run the scrape, return the result.
+ *
+ * Session pooling (Effect Pool) replaces per-request browser launch later.
+ */
+import { Effect } from "effect";
+import type { Page, CDPSession } from "puppeteer-core";
+import { minimalTurnstileHtml, minimalTrafficHtml } from "./ahrefs-html.js";
+import {
+  AHREFS_BASE_URL,
+  AHREFS_DEFAULT_ACTION,
+  AHREFS_DEFAULT_SITEKEY,
+  AHREFS_TRAFFIC_URL,
+  MAX_INTERCEPT_WAIT_MS,
+  NAV_TIMEOUT_MS,
+} from "./ahrefs-types.js";
+import type { AhrefsScrapeResult, ScrapeType } from "./ahrefs-types.js";
+
+// ── JS to poll for window.__ahrefsResult ─────────────────────────────
+
+const WAIT_FOR_RESULT_JS = `new Promise((resolve, reject) => {
+  if (window.__ahrefsResult) return resolve(window.__ahrefsResult);
+  var id = setInterval(() => {
+    if (window.__ahrefsResult) { clearInterval(id); resolve(window.__ahrefsResult); }
+  }, 50);
+  setTimeout(() => { clearInterval(id); reject(new Error('timeout')); }, 90000);
+})`;
+
+// ── Build URL ────────────────────────────────────────────────────────
+
+const buildUrl = (domain: string, scrapeType: ScrapeType): string => {
+  const base = scrapeType === "traffic" ? AHREFS_TRAFFIC_URL : AHREFS_BASE_URL;
+  return `${base}?input=${encodeURIComponent(domain)}&mode=subdomains`;
+};
+
+// ── Fetch interception via raw CDP ───────────────────────────────────
+
+const setupFetchInterception = (
+  cdp: CDPSession,
+  domain: string,
+  scrapeType: ScrapeType,
+  sitekey: string,
+  sessionId: string,
+  targetId: string,
+): Promise<void> =>
+  new Promise<void>((resolveIntercepted, rejectIntercepted) => {
+    let fulfilled = false;
+    let timedOut = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      rejectIntercepted(new Error("interception_timeout"));
+    }, MAX_INTERCEPT_WAIT_MS);
+
+    const html =
+      scrapeType === "traffic"
+        ? minimalTrafficHtml({
+            domain,
+            sitekey,
+            action: AHREFS_DEFAULT_ACTION,
+            sessionId,
+            targetId,
+          })
+        : minimalTurnstileHtml({
+            domain,
+            sitekey,
+            action: AHREFS_DEFAULT_ACTION,
+            sessionId,
+            targetId,
+          });
+    const htmlBase64 = Buffer.from(html).toString("base64");
+
+    void (async () => {
+      try {
+        await cdp.send("Fetch.disable" as any);
+        await cdp.send("Fetch.enable" as any, {
+          patterns: [
+            { urlPattern: "*", requestStage: "Request" },
+            { urlPattern: "https://ahrefs.com/*", requestStage: "Response" },
+          ],
+          handleAuthRequests: true,
+        });
+      } catch (e) {
+        clearTimeout(timer);
+        rejectIntercepted(e instanceof Error ? e : new Error(String(e)));
+        return;
+      }
+
+      cdp.on("Fetch.requestPaused" as any, (params: any) => {
+        if (timedOut) return;
+        const requestId = params.requestId;
+
+        if (params.responseStatusCode !== undefined) {
+          const url = (params.request?.url ?? "") as string;
+          const status = params.responseStatusCode as number;
+          const resourceType = (params.resourceType ?? "") as string;
+          const responseHeaders = (params.responseHeaders ?? []) as Array<{
+            name: string;
+            value: string;
+          }>;
+
+          const isAhrefsDoc =
+            url.includes("ahrefs.com") && status === 200 && resourceType === "Document";
+
+          if (isAhrefsDoc) {
+            const isCfChallenge = responseHeaders.some(
+              (h) => h.name.toLowerCase() === "cf-mitigated",
+            );
+
+            if (isCfChallenge) {
+              cdp.send("Fetch.continueResponse" as any, { requestId }).catch(() => {});
+            } else if (!fulfilled) {
+              fulfilled = true;
+              cdp
+                .send("Fetch.fulfillRequest" as any, {
+                  requestId,
+                  responseCode: 200,
+                  responseHeaders: [{ name: "Content-Type", value: "text/html; charset=utf-8" }],
+                  body: htmlBase64,
+                })
+                .then(() => {
+                  clearTimeout(timer);
+                  resolveIntercepted();
+                })
+                .catch((e: unknown) => {
+                  clearTimeout(timer);
+                  rejectIntercepted(e instanceof Error ? e : new Error(String(e)));
+                });
+            } else {
+              cdp.send("Fetch.continueResponse" as any, { requestId }).catch(() => {});
+            }
+          } else {
+            cdp.send("Fetch.continueResponse" as any, { requestId }).catch(() => {});
+          }
+        } else {
+          cdp.send("Fetch.continueRequest" as any, { requestId }).catch(() => {});
+        }
+      });
+    })();
+  });
+
+// ── Parse API result ─────────────────────────────────────────────────
+
+interface ScrapeTimings {
+  navMs: number;
+  interceptMs: number;
+  resultMs: number;
+  totalMs: number;
+}
+
+const parseResult = (
+  apiResult: Record<string, unknown> | undefined,
+  domain: string,
+  scrapeType: ScrapeType,
+  timings: ScrapeTimings,
+): AhrefsScrapeResult => {
+  if (!apiResult) {
+    return {
+      success: false,
+      domain,
+      error: "No API result (turnstile timeout or solver failure)",
+      errorType: `turnstile_timeout_${scrapeType}`,
+      timings,
+    };
+  }
+
+  if (apiResult.error) {
+    return {
+      success: false,
+      domain,
+      error: String(apiResult.message ?? apiResult.error),
+      errorType: "api_error",
+      data: apiResult,
+      timings,
+    };
+  }
+
+  if (scrapeType === "backlinks") {
+    const bl = apiResult.backlinks as Record<string, unknown> | undefined;
+    if (bl?.error === "backlinks_fetch_failed") {
+      return {
+        success: false,
+        domain,
+        error: `backlinks_fetch_failed: ${String(bl.message ?? "?")}`,
+        errorType: "backlinks_fetch_failed",
+        data: { websiteData: apiResult.overview, backlinksData: apiResult.backlinks },
+        timings,
+      };
+    }
+    return {
+      success: true,
+      domain,
+      data: { websiteData: apiResult.overview, backlinksData: apiResult.backlinks },
+      timings,
+    };
+  }
+
+  return {
+    success: true,
+    domain,
+    data: { trafficData: apiResult.overview },
+    timings,
+  };
+};
+
+// ── Main scrape function ─────────────────────────────────────────────
+
+/**
+ * Execute an Ahrefs scrape on a Puppeteer Page.
+ *
+ * The page must be in a browser session with proxy and CF solver enabled.
+ * The framework handles browser launch, proxy config, and CF solving.
+ */
+export const executeAhrefsScrape = (
+  page: Page,
+  domain: string,
+  scrapeType: ScrapeType,
+  sitekey: string = AHREFS_DEFAULT_SITEKEY,
+) =>
+  Effect.fn("ahrefs.scrape")(function* () {
+    const timings: ScrapeTimings = { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 };
+    const t0 = Date.now();
+
+    // Get raw CDP session for Fetch interception
+    const cdp = yield* Effect.promise(() => page.createCDPSession());
+
+    // ── Phase 1+2: Setup interception + Navigate ──
+    const navStart = Date.now();
+    const url = buildUrl(domain, scrapeType);
+    yield* Effect.logInfo(`Scraping ${domain} (${scrapeType}) → ${url}`);
+
+    const interceptedPromise = setupFetchInterception(cdp, domain, scrapeType, sitekey, "", "");
+
+    // Navigate (don't await — interception resolves on first non-CF 200)
+    const navPromise = page
+      .goto(url, {
+        timeout: NAV_TIMEOUT_MS,
+        waitUntil: "domcontentloaded",
+      })
+      .catch(() => null);
+
+    // Wait for interception
+    yield* Effect.promise(() => interceptedPromise).pipe(
+      Effect.catch(() =>
+        // Backup: check if title is already "Verifying"
+        Effect.promise(async () => {
+          const title = await page.title().catch(() => "");
+          if (title === "Verifying") return;
+          throw new Error("Interception failed and title is not Verifying");
+        }),
+      ),
+    );
+    timings.navMs = Date.now() - navStart;
+
+    // Let navigation settle
+    yield* Effect.promise(() => navPromise);
+    timings.interceptMs = Date.now() - navStart - timings.navMs;
+
+    yield* Effect.logInfo(`Interception complete for ${domain} (${timings.navMs}ms)`);
+
+    // ── Phase 3: Wait for Turnstile solve + API result ──
+    const resStart = Date.now();
+    const apiResult = yield* Effect.promise(async () => {
+      try {
+        const raw = await page.evaluate(WAIT_FOR_RESULT_JS);
+        if (typeof raw === "string") return JSON.parse(raw) as Record<string, unknown>;
+        return raw as Record<string, unknown> | undefined;
+      } catch {
+        return undefined;
+      }
+    });
+    timings.resultMs = Date.now() - resStart;
+    timings.totalMs = Date.now() - t0;
+
+    const result = parseResult(apiResult, domain, scrapeType, timings);
+
+    // Wide event
+    yield* Effect.logInfo("ahrefs.scrape.wide_event").pipe(
+      Effect.annotateLogs({
+        domain,
+        success: String(result.success),
+        duration_ms: String(timings.totalMs),
+        nav_ms: String(timings.navMs),
+        intercept_ms: String(timings.interceptMs),
+        result_ms: String(timings.resultMs),
+        error_type: result.errorType ?? "",
+        scrape_type: scrapeType,
+      }),
+    );
+
+    // Clean up CDP session
+    yield* Effect.promise(() => cdp.detach().catch(() => {}));
+
+    return result;
+  })();

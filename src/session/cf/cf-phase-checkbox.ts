@@ -7,7 +7,7 @@
  *   2. Runtime.callFunctionOn (DOM.getDocument → resolveNode → callFunctionOn)
  *   3. DOM tree walk (DOM.getDocument depth=-1 pierce=true → recursive walk)
  */
-import { Effect } from "effect";
+import { Effect, Fiber } from "effect";
 import type { CdpSessionId } from "../../shared/cloudflare-detection.js";
 import type { ReadonlyActiveDetection } from "./cloudflare-event-emitter.js";
 import { SolverEvents } from "./cf-services.js";
@@ -332,6 +332,23 @@ export function phase3CheckboxFind(
       via,
     });
 
+    // V8 heartbeat: keep WASM active during checkbox polling.
+    // Under concurrent tabs, Chrome may not schedule Turnstile WASM
+    // unless V8 is prodded. Without this, the checkbox never renders
+    // because WASM is dormant during the 8s polling window.
+    // Previously this only ran AFTER Phase 3 failed (in cloudflare-detector's
+    // NoClick handler), which was too late — the 8s window was already wasted.
+    const heartbeatFiber = yield* Effect.fn("cf.phase3.v8Heartbeat")(function* () {
+      for (let beat = 0; beat < 16; beat++) {
+        if (active.aborted || active.resolution.isDone) return;
+        yield* send("Runtime.evaluate", { expression: "1" }, oopifSessionId).pipe(
+          Effect.timeout("2 seconds"),
+          Effect.ignore,
+        );
+        yield* Effect.sleep("500 millis");
+      }
+    })().pipe(Effect.forkChild);
+
     // Find checkbox with polling
     let checkbox: { objectId: string; backendNodeId: number } | null = null;
     let method = "none";
@@ -386,6 +403,9 @@ export function phase3CheckboxFind(
         Effect.withSpan("cf.phase3.pollSleep", { attributes: { "cf.poll": poll } }),
       );
     }
+
+    // Stop heartbeat — checkbox loop is done (found or exhausted)
+    yield* Fiber.interrupt(heartbeatFiber).pipe(Effect.ignore);
 
     if (!checkbox) {
       yield* Effect.annotateCurrentSpan({ "cf.checkbox_found": false, "cf.poll_count": pollCount });

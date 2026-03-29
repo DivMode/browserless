@@ -100,11 +100,12 @@ export const OOPIF_POLL_DELAY = "200 millis" as const;
 export const OOPIF_PROBE_TIMEOUT = "3 seconds" as const;
 
 /** Phase 3 checkbox polling: max attempts.
- * 160 × 50ms = 8s total window. Matches pydoll's 15s query timeout
- * with margin — CF WASM needs 1-8s to render the checkbox on busy tabs.
- * Previous 64 × 50ms = 3.2s was causing NoClick failures (diag_alive=true,
- * shadow=1, bodyLen=119 but cbI=false — WASM rendered but checkbox not yet). */
-export const MAX_CHECKBOX_POLLS = 160;
+ * 400 × 50ms = 20s total window. Under 10+ concurrent tabs, CF WASM
+ * takes 10-15s to render the checkbox (shadow root present but span.cb-i
+ * absent). Previous 160 × 50ms = 8s window caused 50% no_checkbox failures
+ * under concurrency — users could SEE the checkbox appear AFTER the
+ * 8s window expired. 20s covers the worst observed case. */
+export const MAX_CHECKBOX_POLLS = 400;
 
 /** Phase 3 checkbox polling: interval between attempts (ms).
  * Reduced from 200 to 50 — DOM.getDocument is ~2-6ms, so 50ms gives

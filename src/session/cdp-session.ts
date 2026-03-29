@@ -20,6 +20,7 @@ import {
   Layer,
   ManagedRuntime,
   Metric,
+  Option,
   Queue,
   Schedule,
   Scope,
@@ -1640,9 +1641,12 @@ export class CdpSession {
             }
             // Await consumer fiber — guarantees replay file is written before callback
             if (session._fiberMap) {
-              const fiber = yield* FiberMap.get(session._fiberMap, `tab:${targetId}`);
-              if (fiber) {
-                yield* Fiber.await(fiber).pipe(Effect.timeout("45 seconds"), Effect.ignore);
+              const fiberOpt = yield* FiberMap.get(session._fiberMap, `tab:${targetId}`);
+              if (Option.isSome(fiberOpt)) {
+                yield* Fiber.await(fiberOpt.value).pipe(
+                  Effect.timeout("45 seconds"),
+                  Effect.ignore,
+                );
               }
             }
           }),
@@ -1713,7 +1717,13 @@ export class CdpSession {
             },
             cdpSessionId,
           )
-          .pipe(Effect.ignore);
+          .pipe(
+            Effect.catch((e) =>
+              Effect.logWarning(
+                `CF bridge injection failed for ${cdpSessionId.slice(0, 8)}: ${e instanceof Error ? e.message : String(e)} — tab will have cf_events=0`,
+              ),
+            ),
+          );
 
         yield* session
           .send(
