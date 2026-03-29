@@ -7,14 +7,12 @@
  * Body: { domain: string, scrapeType?: "backlinks" | "traffic", sitekey?: string }
  * Response: AhrefsScrapeResult
  */
-import type {
-  BrowserInstance,
-  Request} from "@browserless.io/browserless";
+import type { BrowserInstance, Request } from "@browserless.io/browserless";
 import {
   APITags,
   BrowserHTTPRoute,
   BrowserlessRoutes,
-  ChromeCDP,
+  ChromiumCDP,
   HTTPManagementRoutes,
   Methods,
   contentTypes,
@@ -25,17 +23,25 @@ import { Effect } from "effect";
 import { AHREFS_DEFAULT_SITEKEY, type ScrapeType } from "../../../scraping/ahrefs-types.js";
 import { executeAhrefsScrape } from "../../../scraping/ahrefs-service.js";
 
+const PROXY = process.env.LOCAL_MOBILE_PROXY ?? "";
+const proxyServer = PROXY ? new URL(PROXY).origin : "";
+
 export default class AhrefsScrapePostRoute extends BrowserHTTPRoute {
   name = BrowserlessRoutes.AhrefsScrapePostRoute;
   accepts = [contentTypes.json];
   auth = true;
-  browser = ChromeCDP;
+  browser = ChromiumCDP;
   concurrency = true;
   contentTypes = [contentTypes.json];
   description = "Scrape Ahrefs backlinks or traffic data for a domain.";
   method = Methods.post;
   path = HTTPManagementRoutes.ahrefsScrape;
   tags = [APITags.management];
+  defaultLaunchOptions = {
+    headless: false,
+    stealth: false,
+    args: proxyServer ? [`--proxy-server=${proxyServer}`] : [],
+  };
 
   async handler(req: Request, res: ServerResponse, browser: BrowserInstance): Promise<void> {
     return Effect.runPromise(
@@ -61,10 +67,20 @@ export default class AhrefsScrapePostRoute extends BrowserHTTPRoute {
 
         yield* Effect.logInfo(`Ahrefs scrape request: domain=${domain} type=${scrapeType}`);
 
-        // Get a page from the browser
+        // Get a page from the browser + set proxy auth
         const page = yield* Effect.promise(async () => {
           const pages = await browser.pages();
-          return pages[0] ?? (await browser.newPage());
+          const p = pages[0] ?? (await browser.newPage());
+          if (PROXY) {
+            const proxyUrl = new URL(PROXY);
+            if (proxyUrl.username) {
+              await p.authenticate({
+                username: decodeURIComponent(proxyUrl.username),
+                password: decodeURIComponent(proxyUrl.password),
+              });
+            }
+          }
+          return p;
         });
 
         const result = yield* executeAhrefsScrape(page, domain, scrapeType, sitekey).pipe(
