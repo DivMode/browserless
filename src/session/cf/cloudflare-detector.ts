@@ -24,6 +24,7 @@ import {
   RECHALLENGE_DELAY_MS,
   REJECTION_MONITOR_MAX_MS,
   REJECTION_MONITOR_POLL_MS,
+  VERIFICATION_STUCK_TIMEOUT_MS,
   WIDGET_RELOAD_GRACE,
 } from "./cf-schedules.js";
 import {
@@ -1743,16 +1744,18 @@ export class CloudflareDetector {
         const widgetRendered = diag && typeof diag.shadow === "number" && diag.shadow >= 1;
 
         if (widgetRendered) {
-          // Widget IS rendered — Turnstile is verifying (no checkbox in non-interactive mode).
-          // Don't reload — wait for the beacon via awaitResolutionRace below.
+          // Widget IS rendered — Turnstile may be in non-interactive verification mode.
+          // Wait up to VERIFICATION_STUCK_TIMEOUT_MS for a beacon. If no beacon,
+          // the verification is stuck — trigger widget_reload instead of waiting 60s.
           yield* Effect.logInfo(
-            "CF lifecycle: widget_rendered_no_checkbox — waiting for resolution",
+            "CF lifecycle: widget_rendered_no_checkbox — waiting for verification",
           ).pipe(
             Effect.annotateLogs({
               target_id: targetId.slice(0, 8),
               session_id: self.sid,
               shadow: diag.shadow,
               body_len: diag.bodyLen,
+              stuck_timeout_ms: VERIFICATION_STUCK_TIMEOUT_MS,
             }),
           );
 
@@ -1776,6 +1779,44 @@ export class CloudflareDetector {
               ctx.scope,
             );
           }
+
+          // Fork a timer: if verification doesn't complete within 20s, fail the
+          // resolution as "verification_stuck". This is non-blocking — if the beacon
+          // arrives in 5-15s, awaitResolutionRace sees it immediately and the timer
+          // is auto-interrupted via scope. No wasted time.
+          yield* Effect.forkIn(
+            Effect.fn("cf.verificationStuckTimer")(function* () {
+              yield* Effect.sleep(`${VERIFICATION_STUCK_TIMEOUT_MS} millis`);
+              if (active.aborted || active.resolution.isDone) return;
+              yield* Effect.logWarning("CF lifecycle: verification_stuck").pipe(
+                Effect.annotateLogs({
+                  target_id: targetId.slice(0, 8),
+                  session_id: self.sid,
+                  elapsed_ms: Date.now() - active.startTime,
+                  shadow: diag!.shadow,
+                  body_len: diag!.bodyLen,
+                }),
+              );
+              self.cfPublish(
+                CFEvent.Marker({
+                  targetId,
+                  tag: "cf.verification_stuck",
+                  payload: {
+                    elapsed_ms: Date.now() - active.startTime,
+                    shadow: diag!.shadow,
+                    body_len: diag!.bodyLen,
+                  },
+                }),
+              );
+              // Settle as failed — awaitResolutionRace will see this and emit metrics.
+              yield* active.resolution.fail(
+                "verification_stuck",
+                Date.now() - active.startTime,
+                "↻stuck",
+              );
+            })(),
+            ctx.scope,
+          );
         } else {
           // Widget NOT rendered — proceed with reload logic
           const reloadCount = self.state.widgetReloadCount.get(targetId) ?? 0;
@@ -1859,7 +1900,7 @@ export class CloudflareDetector {
             const duration = Date.now() - active.startTime;
             yield* active.resolution.fail("widget_not_found", duration);
           }
-        } // end else (!widgetRendered)
+        } // end if/else widgetRendered
       }
 
       // ── Click rejection monitor: detect late CF rejection during resolution wait ──

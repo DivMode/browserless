@@ -140,6 +140,14 @@ export const CDP_CALL_TIMEOUT_MS = 5_000;
 /** Duration-string version of CDP_CALL_TIMEOUT_MS for Effect.timeout. */
 export const CDP_CALL_TIMEOUT = "5 seconds" as const;
 
+// ── Verification stuck detection ─────────────────────────────────────
+
+/** Max wait for non-interactive verification to complete (ms).
+ * CF non-interactive verification typically finishes in 5-15s.
+ * If no beacon after 20s, the Turnstile WASM is stuck at the spinner.
+ * Triggers widget_reload instead of waiting the full 60s resolution timeout. */
+export const VERIFICATION_STUCK_TIMEOUT_MS = 20_000;
+
 // ── CDPProxy heartbeat ────────────────────────────────────────────────
 
 /** Browser WS heartbeat: fixed ping interval. */
