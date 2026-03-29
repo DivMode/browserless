@@ -1,8 +1,6 @@
+import type { BrowserLauncherOptions, Config, Request } from "@browserless.io/browserless";
 import {
   BLESS_PAGE_IDENTIFIER,
-  BrowserLauncherOptions,
-  Config,
-  Request,
   ServerError,
   chromeExecutablePath,
   edgeExecutablePath,
@@ -13,8 +11,9 @@ import {
   ublockLitePath,
 } from "@browserless.io/browserless";
 import type { TargetId } from "../shared/cloudflare-detection.js";
-import puppeteer, { Browser, Page, Target } from "puppeteer-core";
-import { Duplex } from "stream";
+import type { Browser, Page, Target } from "puppeteer-core";
+import puppeteer from "puppeteer-core";
+import type { Duplex } from "stream";
 import { Effect } from "effect";
 import { EventEmitter } from "events";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
@@ -25,13 +24,13 @@ import path from "path";
 import playwright from "playwright-core";
 import puppeteerStealth from "puppeteer-extra";
 
-import {
-  CDPProxy,
+import type {
   ReplayCapableBrowser,
   ReplayCompleteParams,
   TabReplayCompleteParams,
 } from "../cdp-proxy.js";
-import { CloudflareSolver } from "../session/cloudflare-solver.js";
+import { CDPProxy } from "../cdp-proxy.js";
+import type { CloudflareSolver } from "../session/cloudflare-solver.js";
 import { runForkInServer } from "../otel-runtime.js";
 import type { CloudflareConfig } from "../shared/cloudflare-detection.js";
 puppeteerStealth.use(StealthPlugin());
@@ -554,12 +553,10 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
         if (this.onBeforeClosePromise) {
           await this.onBeforeClosePromise;
         }
-        // Close CDPProxy BEFORE nulling — sends WS close frame to pydoll
-        // so it detects the dead session immediately instead of waiting 60s+.
-        // handleClose() is idempotent (isClosing guard), safe to call here
-        // even if CDPProxy.handleClose() fires later from browserWs 'close'.
+        // Close CDPProxy (sends WS close frame to pydoll) but do NOT null —
+        // destroySession needs it alive for sendTabReplayComplete during
+        // tab scope cleanup. handleClose() is idempotent (isClosing guard).
         this.cdpProxy?.close();
-        this.cdpProxy = null;
         return resolve();
       });
 

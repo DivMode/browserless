@@ -441,9 +441,9 @@ describe("CF Solver Integration (real nopecha.com)", () => {
           `  checkbox: found_at=${findMs}ms polls=${polls} method=${checkboxFound!.payload.method}`,
         );
 
-        // MAX_CHECKBOX_POLLS = 64 in cf-schedules.ts — solver's actual polling budget.
+        // MAX_CHECKBOX_POLLS = 160 in cf-schedules.ts — solver's actual polling budget.
         // nopecha.com's Turnstile widget render time varies by CF's server-side timing.
-        expect(polls).toBeLessThanOrEqual(64);
+        expect(polls).toBeLessThanOrEqual(160);
         expect(findMs).toBeLessThan(10_000);
 
         // Verify poll interval via phase3_strategy markers

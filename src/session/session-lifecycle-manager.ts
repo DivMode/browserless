@@ -89,14 +89,17 @@ export class SessionLifecycleManager {
       const durationSec = (Date.now() - session.startedOn) / 1000;
       yield* observeHistogram(sessionDuration, durationSec);
 
-      // Step 3: Replay + CF cleanup (with timeout)
-      yield* replayCleanup.pipe(Effect.timeout("65 seconds"), Effect.ignore);
-
-      // Step 4: Browser close (with timeout — SIGKILL fallback is in browsers.cdp.ts)
+      // Step 3: Kill Chrome FIRST — free system resources immediately.
+      // With fire-and-forget destroy (runForkInServer), Chrome stays alive
+      // during replay cleanup, consuming CPU/memory that other sessions need.
+      // Replay data is already buffered — Chrome doesn't need to be alive.
       yield* Effect.tryPromise(() => browser.close()).pipe(
         Effect.timeout("5 seconds"),
         Effect.ignore,
       );
+
+      // Step 4: Replay + CF cleanup (after Chrome is dead)
+      yield* replayCleanup.pipe(Effect.timeout("65 seconds"), Effect.ignore);
     })().pipe(
       // Step 5: Data dir cleanup — GUARANTEED by Effect.ensuring
       // Runs even if steps 1-4 throw, timeout, or get interrupted

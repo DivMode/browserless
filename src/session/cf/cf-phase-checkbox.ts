@@ -342,6 +342,8 @@ export function phase3CheckboxFind(
 
     for (let poll = 0; poll < maxPolls; poll++) {
       if (active.aborted) return null;
+      // Beacon may fire during polling — exit immediately to avoid wasting time
+      if (active.resolution.isDone) return null;
       pollCount = poll + 1;
 
       // Strategy 3 FIRST — single CDP call, most resilient under concurrent load

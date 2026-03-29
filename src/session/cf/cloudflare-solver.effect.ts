@@ -146,7 +146,6 @@ export const solveDetection = (active: SolverActiveDetection) =>
   })().pipe(
     Effect.catchCause((cause) => {
       // Interrupt = normal shutdown (target destroyed / FiberMap.remove).
-      // Let the scope finalizer in DetectionRegistry handle fallback emission.
       if (Cause.hasInterruptsOnly(cause)) return Effect.succeed(SO.Aborted());
 
       const err = Cause.squash(cause);

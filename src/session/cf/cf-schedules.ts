@@ -58,8 +58,10 @@ export const MAX_NO_CHECKBOX_BEFORE_BAILOUT = 2;
 
 /** Max page reloads when Turnstile widget fails to render (no checkbox found).
  * After solver exhausts click attempts with NoCheckbox, reload the page to give
- * CF a fresh chance to render the widget. Prevents 60s dead waits. */
-export const MAX_WIDGET_RELOADS = 2;
+ * CF a fresh chance to render the widget. 4 reloads handles high-concurrency
+ * scenarios (10+ tabs) where Chrome's WASM compiler is contended and the
+ * turnstile iframe body stays empty (bodyLen=117) for the first attempts. */
+export const MAX_WIDGET_RELOADS = 4;
 
 /** Grace period after solver returns NoClick before reloading.
  * Gives bridge time to push auto-solve signal for non-interactive widgets

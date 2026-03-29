@@ -1122,11 +1122,11 @@ export class CloudflareDetector {
         rechallengeCount,
         abortLatch: Latch.makeUnsafe(false),
         resolution: Resolution.makeUnsafe(INTERSTITIAL_RESOLUTION_TIMEOUT, (outcome) => {
-          // Guard: if aborted, scope finalizer or emitSolveFailure handles emission
+          // Guard: if aborted, cleanup path (unregister/emitFallback) handles emission
           if (active.aborted) return;
           // Synchronous pushPhase — must happen before fiber scheduling so compound
-          // labels are correct when awaitResolutionRace builds the label.
-          // Marker emission is handled by CFEvent.Solved/Failed in awaitResolutionRace.
+          // labels are correct. Marker emission handled by awaitResolutionRace (fiber)
+          // or emitFallback (cleanup). onSettle does NOT emit — races with replay flush.
           if (outcome._tag === "solved") {
             self.state.pushPhase(targetId, outcome.result.type, outcome.result.phase_label || "→");
           } else {
@@ -1449,8 +1449,115 @@ export class CloudflareDetector {
           return;
         }
 
+        // ── Bridge-initiated detection fallback ──────────────────────────
+        // Under concurrent tabs, Chrome may delay OOPIF creation (process
+        // consolidation). If the bridge confirmed CF on this target but the
+        // OOPIF poll can't find it after 30 polls (~6s), create a detection
+        // directly and wait for the beacon. The Turnstile WILL auto-solve
+        // eventually — we just can't see the OOPIF to click it.
+        if (
+          pollCount === 30 &&
+          self.state.bridgeDetectedTargets.has(targetId) &&
+          !self.state.registry.has(targetId) &&
+          !self.state.solvedPages.has(targetId) &&
+          !self.state.bindingSolvedTargets.has(targetId)
+        ) {
+          yield* Effect.logWarning("cf.detector.bridgeInitiatedDetection").pipe(
+            Effect.annotateLogs({
+              target_id: targetId.slice(0, 8),
+              session_id: self.sessionId,
+              poll_count: pollCount,
+              elapsed_ms: Date.now() - startTime,
+            }),
+          );
+          const pageInfo = self.strategies.getPageInfo(targetId as string);
+          yield* self.handleBridgeInitiatedDetection(
+            targetId,
+            cdpSessionId,
+            startTime,
+            pageInfo?.url,
+          );
+          return;
+        }
+
         yield* Effect.sleep(DETECTION_POLL_DELAY);
       }
+    })();
+  }
+
+  /**
+   * Bridge-initiated detection — created when the bridge confirms CF
+   * (challenges_domain) but no OOPIF is found after 30 polls.
+   * Registers a detection and goes straight to awaitResolutionRace.
+   * No solver dispatch — the Turnstile auto-solves via beacon.
+   */
+  private handleBridgeInitiatedDetection(
+    targetId: TargetId,
+    cdpSessionId: CdpSessionId,
+    startTime: number,
+    pageUrl?: string,
+  ): Effect.Effect<void, never, DetectorR> {
+    const self = this;
+    return Effect.fn("cf.handleBridgeInitiatedDetection")(function* () {
+      const info: EmbeddedInfo = {
+        type: "turnstile",
+        url: pageUrl ?? "",
+        detectionMethod: "bridge_fallback",
+      };
+      const active: EmbeddedDetection = {
+        info,
+        pageCdpSessionId: cdpSessionId,
+        pageTargetId: targetId,
+        sessionId: self.sessionId,
+        startTime,
+        attempt: 1,
+        aborted: false,
+        tracker: new CloudflareTracker(info),
+        abortLatch: Latch.makeUnsafe(false),
+        resolution: Resolution.makeUnsafe(EMBEDDED_RESOLUTION_TIMEOUT, (outcome) => {
+          if (active.aborted) return;
+          if (outcome._tag === "solved") {
+            self.state.solvedPages.add(targetId);
+            self.state.pushPhase(targetId, outcome.result.type, outcome.result.phase_label || "→");
+          } else {
+            const phase_label = outcome.phase_label ?? `✗ ${outcome.reason}`;
+            self.state.pushPhase(targetId, active.info.type, phase_label);
+          }
+        }),
+      };
+
+      if (self.state.registry.has(targetId)) return;
+
+      const ctx = yield* self.state.registry.register(targetId, active);
+      self.cfPublish(CFEvent.Detected({ active }));
+      self.cfPublish(
+        CFEvent.Marker({
+          targetId,
+          tag: "cf.detected",
+          payload: {
+            type: "turnstile",
+            method: "bridge_fallback",
+            oopif_count: 0,
+          },
+        }),
+      );
+      // Emit oopif_discovered so replay/test infrastructure recognizes the widget.
+      // Bridge confirmed the Turnstile is present — we just can't see the OOPIF
+      // via Target.getTargets() (Chrome process consolidation under concurrent load).
+      self.cfPublish(
+        CFEvent.Marker({
+          targetId,
+          tag: "cf.oopif_discovered",
+          payload: { method: "bridge_fallback" },
+        }),
+      );
+
+      // No solver dispatch — bridge-initiated means OOPIF not found,
+      // so we can't interact with the widget. Wait for beacon/auto-solve.
+      yield* self.awaitResolutionRace(ctx, {
+        addToSolvedPages: true,
+        counterLabel: "embedded_bridge",
+      });
     })();
   }
 
@@ -1503,14 +1610,12 @@ export class CloudflareDetector {
         abortLatch: Latch.makeUnsafe(false),
         oopifMeta: meta,
         resolution: Resolution.makeUnsafe(EMBEDDED_RESOLUTION_TIMEOUT, (outcome) => {
-          // Guard: if aborted, scope finalizer or emitSolveFailure handles emission
+          // Guard: if aborted, cleanup path (unregister/emitFallback) handles emission
           if (active.aborted) return;
-          // PHANTOM GUARD: Set solvedPages + pushPhase in the Resolution callback
-          // (synchronous) so guards fire immediately for ALL solve signals
-          // (bridge_solved, page_navigated, etc.). awaitResolutionRace also sets
-          // solvedPages, but there's a scheduling window between callback and
-          // Effect wakeup where phantom OOPIFs could trigger a false detection.
-          // Marker emission is handled by CFEvent.Solved/Failed in awaitResolutionRace.
+          // PHANTOM GUARD: Set solvedPages + pushPhase synchronously so guards
+          // fire immediately for ALL solve signals. Marker emission happens via
+          // awaitResolutionRace (fiber path) or emitFallback (cleanup path).
+          // onSettle does NOT emit markers — that would race with replay flush.
           if (outcome._tag === "solved") {
             self.state.solvedPages.add(targetId);
             self.state.pushPhase(targetId, outcome.result.type, outcome.result.phase_label || "→");
@@ -1628,88 +1733,133 @@ export class CloudflareDetector {
       // the solver exhausts click attempts with NoCheckbox and returns NoClick.
       // Instead of waiting the full 60s resolution timeout, reload the page
       // to give CF a fresh chance to render the widget.
+      //
+      // EXCEPTION: if the widget IS rendered (shadow >= 1), the Turnstile is
+      // in non-interactive/verification mode — no checkbox will ever appear.
+      // Skip reload and fall through to awaitResolutionRace (60s timeout)
+      // so the beacon arrives when verification completes.
       if (outcomeTag === "NoClick" && !active.aborted && !active.resolution.isDone) {
-        const reloadCount = self.state.widgetReloadCount.get(targetId) ?? 0;
-        if (reloadCount < MAX_WIDGET_RELOADS) {
-          // Grace period — bridge might auto-solve without checkbox (non-interactive)
-          yield* Effect.sleep(WIDGET_RELOAD_GRACE).pipe(
-            Effect.withSpan("cf.widgetReloadGrace", {
-              attributes: { "cf.reload_attempt": reloadCount },
+        const diag = active.tracker.getWidgetDiag();
+        const widgetRendered = diag && typeof diag.shadow === "number" && diag.shadow >= 1;
+
+        if (widgetRendered) {
+          // Widget IS rendered — Turnstile is verifying (no checkbox in non-interactive mode).
+          // Don't reload — wait for the beacon via awaitResolutionRace below.
+          yield* Effect.logInfo(
+            "CF lifecycle: widget_rendered_no_checkbox — waiting for resolution",
+          ).pipe(
+            Effect.annotateLogs({
+              target_id: targetId.slice(0, 8),
+              session_id: self.sid,
+              shadow: diag.shadow,
+              body_len: diag.bodyLen,
             }),
           );
 
-          if (!active.resolution.isDone && !active.aborted) {
-            // Widget didn't render and no bridge signal — reload page
-            self.state.widgetReloadCount.set(targetId, reloadCount + 1);
-            const duration = Date.now() - active.startTime;
+          // V8 heartbeat: under concurrent tabs, Chrome's V8 engine may not schedule
+          // Turnstile WASM processing unless something triggers DOM tree evaluation.
+          // Periodic DOM.getDocument queries act as "heartbeats" that keep V8 active.
+          // Without this, 10-tab stress tests see the widget stuck in "verifying."
+          const oopifSessionId = active.iframeCdpSessionId;
+          if (oopifSessionId) {
+            yield* Effect.forkIn(
+              Effect.fn("cf.v8Heartbeat")(function* () {
+                const cdp = yield* CdpSender;
+                for (let beat = 0; beat < 60; beat++) {
+                  if (active.aborted || active.resolution.isDone) return;
+                  yield* cdp
+                    .send("DOM.getDocument", { depth: 1 }, oopifSessionId)
+                    .pipe(Effect.ignore);
+                  yield* Effect.sleep("500 millis");
+                }
+              })(),
+              ctx.scope,
+            );
+          }
+        } else {
+          // Widget NOT rendered — proceed with reload logic
+          const reloadCount = self.state.widgetReloadCount.get(targetId) ?? 0;
+          if (reloadCount < MAX_WIDGET_RELOADS) {
+            // Grace period — bridge might auto-solve without checkbox (non-interactive)
+            yield* Effect.sleep(WIDGET_RELOAD_GRACE).pipe(
+              Effect.withSpan("cf.widgetReloadGrace", {
+                attributes: { "cf.reload_attempt": reloadCount },
+              }),
+            );
 
-            yield* Effect.logWarning("CF lifecycle: widget_reload").pipe(
+            if (!active.resolution.isDone && !active.aborted) {
+              // Widget didn't render and no bridge signal — reload page
+              self.state.widgetReloadCount.set(targetId, reloadCount + 1);
+              const duration = Date.now() - active.startTime;
+
+              yield* Effect.logWarning("CF lifecycle: widget_reload").pipe(
+                Effect.annotateLogs({
+                  target_id: targetId.slice(0, 8),
+                  session_id: self.sid,
+                  reload_count: reloadCount + 1,
+                  max_reloads: MAX_WIDGET_RELOADS,
+                  elapsed_ms: duration,
+                }),
+              );
+              self.cfPublish(
+                CFEvent.Marker({
+                  targetId,
+                  tag: "cf.widget_reload",
+                  payload: {
+                    reload_count: reloadCount + 1,
+                    max_reloads: MAX_WIDGET_RELOADS,
+                    elapsed_ms: duration,
+                  },
+                }),
+              );
+
+              // Settle current detection — phase label ↻ (reload) instead of ✗
+              yield* active.resolution.fail("widget_reload", duration, "↻");
+
+              // Emit CFEvent.Failed so pydoll receives the CDP event.
+              // awaitResolutionRace (below) won't run because we return early.
+              const label = self.state.buildCompoundLabel(targetId);
+              self.cfPublish(
+                CFEvent.Failed({
+                  active,
+                  reason: "widget_reload",
+                  duration,
+                  phaseLabel: "↻",
+                  cf_summary_label: label,
+                  skipMarker: active.resolution.solvedEmitted,
+                  cf_verified: false,
+                }),
+              );
+
+              yield* ctx.resolve();
+
+              // Reload the page — triggers new navigation → new detection cycle
+              const cdp = yield* CdpSender;
+              yield* cdp.send("Page.reload").pipe(Effect.ignore);
+              return;
+            }
+          } else {
+            // All widget reloads exhausted, checkbox never appeared.
+            // Fast-fail instead of waiting 60s for a resolution that won't come.
+            yield* Effect.logWarning("CF lifecycle: widget_not_found_exhausted").pipe(
               Effect.annotateLogs({
                 target_id: targetId.slice(0, 8),
                 session_id: self.sid,
-                reload_count: reloadCount + 1,
+                reload_count: reloadCount,
                 max_reloads: MAX_WIDGET_RELOADS,
-                elapsed_ms: duration,
               }),
             );
             self.cfPublish(
               CFEvent.Marker({
                 targetId,
-                tag: "cf.widget_reload",
-                payload: {
-                  reload_count: reloadCount + 1,
-                  max_reloads: MAX_WIDGET_RELOADS,
-                  elapsed_ms: duration,
-                },
+                tag: "cf.widget_reload_exhausted",
+                payload: { reload_count: reloadCount, max_reloads: MAX_WIDGET_RELOADS },
               }),
             );
-
-            // Settle current detection — phase label ↻ (reload) instead of ✗
-            yield* active.resolution.fail("widget_reload", duration, "↻");
-
-            // Emit CFEvent.Failed so pydoll receives the CDP event.
-            // awaitResolutionRace (below) won't run because we return early.
-            const label = self.state.buildCompoundLabel(targetId);
-            self.cfPublish(
-              CFEvent.Failed({
-                active,
-                reason: "widget_reload",
-                duration,
-                phaseLabel: "↻",
-                cf_summary_label: label,
-                skipMarker: active.resolution.solvedEmitted,
-                cf_verified: false,
-              }),
-            );
-
-            yield* ctx.resolve();
-
-            // Reload the page — triggers new navigation → new detection cycle
-            const cdp = yield* CdpSender;
-            yield* cdp.send("Page.reload").pipe(Effect.ignore);
-            return;
+            const duration = Date.now() - active.startTime;
+            yield* active.resolution.fail("widget_not_found", duration);
           }
-        } else {
-          // All widget reloads exhausted, checkbox never appeared.
-          // Fast-fail instead of waiting 60s for a resolution that won't come.
-          yield* Effect.logWarning("CF lifecycle: widget_not_found_exhausted").pipe(
-            Effect.annotateLogs({
-              target_id: targetId.slice(0, 8),
-              session_id: self.sid,
-              reload_count: reloadCount,
-              max_reloads: MAX_WIDGET_RELOADS,
-            }),
-          );
-          self.cfPublish(
-            CFEvent.Marker({
-              targetId,
-              tag: "cf.widget_reload_exhausted",
-              payload: { reload_count: reloadCount, max_reloads: MAX_WIDGET_RELOADS },
-            }),
-          );
-          const duration = Date.now() - active.startTime;
-          yield* active.resolution.fail("widget_not_found", duration);
-        }
+        } // end else (!widgetRendered)
       }
 
       // ── Click rejection monitor: detect late CF rejection during resolution wait ──

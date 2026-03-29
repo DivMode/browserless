@@ -94,16 +94,33 @@ export class Resolution {
     return Deferred.await(this.deferred);
   }
 
+  /**
+   * Synchronous fail — for use inside Effect.ensuring / Effect.onInterrupt.
+   * Settles the Resolution and fires onSettle without needing the Effect runtime.
+   * Returns true if this was the winning completion.
+   */
+  failUnsafe(reason: string, duration_ms: number, phase_label?: string): boolean {
+    const outcome: ResolvedOutcome = { _tag: "failed", reason, duration_ms, phase_label };
+    const won = Deferred.doneUnsafe(this.deferred, Effect.succeed(outcome));
+    if (won && this.onSettle && !this.settledSync) {
+      this.settledSync = true;
+      this.onSettle(outcome);
+    }
+    return won;
+  }
+
   /** Check if already resolved (non-blocking). */
   get isDone(): boolean {
     return Deferred.isDoneUnsafe(this.deferred);
   }
 }
 
-/** Read-only view of Resolution — can observe but cannot settle. */
+/** Read-only view of Resolution — can observe but cannot settle via Effect. */
 export interface ReadonlyResolution {
   readonly isDone: boolean;
   readonly awaitBounded: Effect.Effect<Option.Option<ResolvedOutcome>>;
   readonly settledSync: boolean;
   readonly solvedEmitted: boolean;
+  /** Sync fail for Effect.ensuring — settles without Effect runtime. */
+  failUnsafe(reason: string, duration_ms: number, phase_label?: string): boolean;
 }

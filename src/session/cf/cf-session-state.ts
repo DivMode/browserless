@@ -51,6 +51,13 @@ export class SessionSolverState {
   /** Per-page accumulator of solved/failed phases for compound summary labels. */
   private readonly summaryPhases = new Map<TargetId, { type: string; label: string }[]>();
 
+  /** Callback to retry detection when bridge fires but no active detection exists.
+   * Wired by the solver to the detector's detectTurnstileWidgetEffect. */
+  retryDetection?: (targetId: TargetId, cdpSessionId: CdpSessionId) => void;
+  /** Targets where bridge confirmed CF challenge (challenges_domain detection).
+   * Used by OOPIF poll to create bridge-initiated detection when OOPIF isn't found. */
+  readonly bridgeDetectedTargets = new Set<TargetId>();
+
   constructor(protected cfPublish: (event: CFEvent) => void) {
     this.registry = new DetectionRegistry((active, signal) => {
       const duration = Date.now() - active.startTime;

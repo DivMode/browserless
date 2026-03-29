@@ -138,20 +138,21 @@ export class DetectionRegistry {
 
     const self = this;
     return Effect.gen(function* () {
-      // Emit fallback if unresolved — even if aborted (abort doesn't emit markers).
-      // Always emit regardless of settledSync — onSettle only pushes phase labels,
-      // it does NOT emit markers. The marker MUST come from here because the
-      // detection fiber (which would normally emit via awaitResolutionRace) was
-      // already interrupted by FiberMap.remove before unregister runs.
       if (!context.resolved) {
         const mutable = context.mutableActive;
-        const duration = Date.now() - mutable.startTime;
-        const reason = mutable.verificationEvidence ? "verified_session_close" : "session_close";
-        if (!mutable.resolution.isDone) {
+        if (mutable.resolution.isDone) {
+          // Resolution already settled (solved or failed through normal path).
+          // Don't emit a false session_close — the detection fiber will emit
+          // the correct marker via awaitResolutionRace → CFEvent.Solved/Failed.
+          context.resolved = true;
+        } else {
+          // True orphan — resolution never completed. Emit session_close fallback.
+          const duration = Date.now() - mutable.startTime;
+          const reason = mutable.verificationEvidence ? "verified_session_close" : "session_close";
           yield* mutable.resolution.fail(reason, duration);
+          self.emitFallback(context.active, reason);
+          context.resolved = true;
         }
-        self.emitFallback(context.active, reason);
-        context.resolved = true;
       }
       yield* Scope.close(context.scope, Exit.void);
     });

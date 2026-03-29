@@ -229,9 +229,20 @@ export class CloudflareStateTracker extends SessionSolverState {
               Match.tag("EmbeddedErrorPage", (o) =>
                 active!.resolution.fail("cf_error_page", o.duration),
               ),
-              Match.tags({
-                Informational: () => Effect.void,
-                NoActiveDetection: () => Effect.void,
+              Match.tag("Informational", () => Effect.void),
+              Match.tag("NoActiveDetection", () => {
+                // Bridge detected turnstile script but no active detection exists.
+                // Mark target as bridge-confirmed CF — used by OOPIF poll to create
+                // bridge-initiated detection when Chrome delays OOPIF creation under load.
+                tracker.bridgeDetectedTargets.add(pageTargetId);
+                // Retry detection now that the bridge confirms turnstile is present.
+                if (tracker.retryDetection) {
+                  const cdpSessionId = tracker.knownPages.get(pageTargetId);
+                  if (cdpSessionId) {
+                    tracker.retryDetection(pageTargetId, cdpSessionId);
+                  }
+                }
+                return Effect.void;
               }),
               Match.exhaustive,
             );

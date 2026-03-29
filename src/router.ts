@@ -112,8 +112,8 @@ export class Router extends EventEmitter {
                 ]),
               );
             } finally {
-              yield* Effect.promise(() => router.browserManager.destroy(browser)).pipe(
-                Effect.ignore,
+              runForkInServer(
+                Effect.promise(() => router.browserManager.destroy(browser)).pipe(Effect.ignore),
               );
             }
           }
@@ -158,8 +158,8 @@ export class Router extends EventEmitter {
                 // AFTER completing onBeforeClose (replay flush, cdpProxy close).
                 yield* Effect.promise(() => handler(req, socket, head, browser));
               } finally {
-                yield* Effect.promise(() => router.browserManager.destroy(browser)).pipe(
-                  Effect.ignore,
+                runForkInServer(
+                  Effect.promise(() => router.browserManager.destroy(browser)).pipe(Effect.ignore),
                 );
               }
             } else {

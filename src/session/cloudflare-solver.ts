@@ -149,6 +149,13 @@ export class CloudflareSolver {
       sessionId ?? "",
     );
 
+    // Wire retry: when bridge detects turnstile but no active detection exists,
+    // re-trigger the detector's DOM walk. This handles the case where
+    // onPageNavigated's DOM walk ran before Chrome rendered the turnstile iframe.
+    this.stateTracker.retryDetection = (targetId, cdpSessionId) => {
+      this.startDetectionFiber(targetId, cdpSessionId);
+    };
+
     // Register upfront finalizer — stateTracker cleanup + queue shutdown.
     // Queue.shutdown signals the consumer fiber to exit cleanly.
     Effect.runSync(
@@ -545,18 +552,23 @@ export class CloudflareSolver {
       return this.runInSolver(this.stateTracker.unregisterPage(targetId));
     }
 
-    // PAGE target being destroyed (tab close) — kill the fiber, then
-    // unregister the page. Sequential order matters: fiber interrupt must
-    // complete before scope close so the catchCause handler (which would
-    // set aborted=true for defects) runs first. For interrupts, the
-    // catchCause bails early → aborted stays false → scope finalizer
-    // emits session_close fallback marker.
+    // PAGE target being destroyed (tab close) — emit markers FIRST, then
+    // kill the fiber. unregisterPage emits fallback markers via the CF event
+    // queue. The queue MUST still be alive when markers are offered. If we
+    // interrupt the fiber first (FiberMap.remove), the tab scope finalizer
+    // runs Queue.endUnsafe, killing the queue BEFORE unregisterPage can emit.
+    // Order: unregisterPage (markers into live queue) → FiberMap.remove (safe to hang).
     const fibers = this.detectionFibers;
     const tracker = this.stateTracker;
     return this.runInSolver(
       Effect.fn("cf.stopTargetDetection")(function* () {
-        yield* FiberMap.remove(fibers, targetId).pipe(Effect.ignore);
         yield* tracker.unregisterPage(targetId);
+        // Yield to let the CF event queue consumer process the fallback marker
+        // and inject it into the tab's rrweb stream BEFORE the tab queue ends.
+        // Without this yield, the consumer hasn't been scheduled yet when
+        // FINALIZER 3 (queue drain) runs, so the marker goes into a dead queue.
+        yield* Effect.sleep(0);
+        yield* FiberMap.remove(fibers, targetId).pipe(Effect.ignore);
       })(),
     );
   }
@@ -575,6 +587,29 @@ export class CloudflareSolver {
           Effect.annotateLogs({
             target_id: targetId,
             session_id: this.sessionId,
+          }),
+        ),
+      );
+      return;
+    }
+
+    // Guard: target already solved or detection already active.
+    // Prevents phantom re-detection when retryDetection fires after beacon
+    // already resolved, AND prevents interrupting an active detection
+    // (e.g., bridge-initiated awaitResolutionRace) when OOPIF appears late.
+    if (
+      this.stateTracker.solvedPages.has(targetId) ||
+      this.stateTracker.bindingSolvedTargets.has(targetId) ||
+      this.stateTracker.registry.has(targetId)
+    ) {
+      this.runtime.runFork(
+        Effect.logDebug("CF detection skipped — already solved or active").pipe(
+          Effect.annotateLogs({
+            target_id: targetId,
+            session_id: this.sessionId,
+            reason: this.stateTracker.registry.has(targetId)
+              ? "active_detection"
+              : "already_solved",
           }),
         ),
       );
@@ -800,7 +835,7 @@ export class CloudflareSolver {
       // Close the solver scope — this atomically:
       // 1. Drains ALL detection fibers (FiberMap is scope-bound)
       // 2. Runs stateTracker.destroy() (registered as scope finalizer)
-      // 3. Registry scope finalizers settle resolution + emit fallback
+      // 3. Registry scope finalizers settle resolution + emit fallback (idempotent)
       const fiberCount = yield* FiberMap.size(this.detectionFibers);
       yield* Scope.close(this.solverScope, Exit.void).pipe(
         Effect.timeout("10 seconds"),

@@ -1,4 +1,5 @@
-import { Latch, Match } from "effect";
+import type { Latch } from "effect";
+import { Match } from "effect";
 
 import type { CdpSessionId } from "../../shared/cloudflare-detection.js";
 import type {
@@ -9,7 +10,7 @@ import type {
   EmbeddedInfo,
 } from "../../shared/cloudflare-detection.js";
 import type { TurnstileOOPIFMeta } from "./cloudflare-solve-strategies.js";
-import { Resolution } from "./cf-resolution.js";
+import type { Resolution } from "./cf-resolution.js";
 import type { ReadonlyResolution } from "./cf-resolution.js";
 
 export type EmitClientEvent = (method: string, params: object) => Promise<void>;
@@ -135,6 +136,11 @@ export class CloudflareTracker {
       widget_error_type: this.lastErrorType,
       widget_diag: this.lastDiag,
     };
+  }
+
+  /** Get last widget diagnostic — used by detector to decide reload vs wait. */
+  getWidgetDiag(): Record<string, unknown> | null {
+    return this.lastDiag;
   }
 }
 
