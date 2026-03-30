@@ -289,6 +289,7 @@ export const executeAhrefsScrape = (
       .catch(() => null);
 
     // Wait for interception — tryPromise so rejection is a catchable failure, not a defect
+    let usedFallback = false;
     yield* Effect.tryPromise({
       try: () => interceptedPromise,
       catch: (e: unknown) =>
@@ -298,7 +299,32 @@ export const executeAhrefsScrape = (
         Effect.tryPromise({
           try: async () => {
             const title = await page.title().catch(() => "");
-            if (title === "Verifying") return;
+            // CF still solving — let it finish
+            if (title === "Verifying" || title === "Just a moment...") return;
+            // Ahrefs page loaded but Fetch missed the response — inject turnstile HTML directly
+            if (title.includes("Ahrefs")) {
+              const html =
+                scrapeType === "traffic"
+                  ? minimalTrafficHtml({
+                      domain,
+                      sitekey,
+                      action: AHREFS_DEFAULT_ACTION,
+                      sessionId: "",
+                      targetId: "",
+                    })
+                  : minimalTurnstileHtml({
+                      domain,
+                      sitekey,
+                      action: AHREFS_DEFAULT_ACTION,
+                      sessionId: "",
+                      targetId: "",
+                    });
+              // Disable Fetch interception before setContent (no more request pausing needed)
+              await cdp.send("Fetch.disable" as any).catch(() => {});
+              await page.setContent(html, { waitUntil: "domcontentloaded", timeout: 10_000 });
+              usedFallback = true;
+              return;
+            }
             throw new Error(`title_check_failed: title=${title}`);
           },
           catch: (e: unknown) =>
@@ -308,14 +334,19 @@ export const executeAhrefsScrape = (
     );
     timings.navMs = Date.now() - navStart;
 
-    // Let navigation settle
-    yield* Effect.tryPromise({
-      try: () => navPromise,
-      catch: (e: unknown) => new Error(`navigation: ${e instanceof Error ? e.message : String(e)}`),
-    });
+    // Let navigation settle (skip if fallback already set content)
+    if (!usedFallback) {
+      yield* Effect.tryPromise({
+        try: () => navPromise,
+        catch: (e: unknown) =>
+          new Error(`navigation: ${e instanceof Error ? e.message : String(e)}`),
+      });
+    }
     timings.interceptMs = Date.now() - navStart - timings.navMs;
 
-    yield* Effect.logInfo(`Interception complete for ${domain} (${timings.navMs}ms)`);
+    yield* Effect.logInfo(
+      `Interception complete for ${domain} (${timings.navMs}ms${usedFallback ? ", fallback" : ""})`,
+    );
 
     // ── Phase 3: Wait for Turnstile solve + API result ──
     const resStart = Date.now();
