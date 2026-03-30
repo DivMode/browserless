@@ -719,6 +719,8 @@ export const BrowserlessManagementRoutes = {
   ReplaysGetRoute: "ReplaysGetRoute",
   CfSolvedPostRoute: "CfSolvedPostRoute",
   AhrefsScrapePostRoute: "AhrefsScrapePostRoute",
+  AhrefsBacklinksDispatchRoute: "AhrefsBacklinksDispatchRoute",
+  AhrefsTrafficDispatchRoute: "AhrefsTrafficDispatchRoute",
   SessionsGetRoute: "SessionsGetRoute",
   StaticGetRoute: "StaticGetRoute",
 };

@@ -152,6 +152,8 @@ export enum HTTPManagementRoutes {
   videoHls = "/video/+([0-9a-zA-Z-_])/hls/**",
   cfSolved = "/internal/cf-solved?(/)",
   ahrefsScrape = "/internal/ahrefs-scrape?(/)",
+  ahrefsBacklinksDispatch = "/ahrefs/backlinks/dispatch?(/)",
+  ahrefsTrafficDispatch = "/ahrefs/traffic/dispatch?(/)",
   sessions = "/sessions?(/)",
   static = "/",
 }
