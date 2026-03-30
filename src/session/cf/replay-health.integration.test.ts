@@ -85,6 +85,31 @@ describe("Replay Recording Health", () => {
       "No replays found for our session — recording pipeline broken",
     ).toBeGreaterThan(0);
 
+    // ── 1b. Replay URL — MUST be a real, fetchable URL ─────────────
+    // This is the contract: every session produces a replay URL that works.
+    // If this fails, the wide event dashboard has no clickable replay links.
+    const REPLAY_PLAYER = process.env.REPLAY_PLAYER_URL ?? "https://replay.catchseo.com";
+    const replayUrl = `${REPLAY_PLAYER}/replay/${ourTabReplay!.id}`;
+    console.log(`\n  ★ REPLAY URL: ${replayUrl}\n`);
+
+    // Replay ID must be {uuid}--tab-{targetId} format — no garbage, no proxy URLs
+    expect(ourTabReplay!.id, "Replay ID must be in {sessionId}--tab-{targetId} format").toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}--tab-[A-F0-9]+$/,
+    );
+
+    // The replay data must be fetchable from the replay server
+    const replayDataRes = await fetch(`${REPLAY_HTTP}/replays/${ourTabReplay!.id}`);
+    expect(
+      replayDataRes.ok,
+      `Replay not accessible: ${REPLAY_HTTP}/replays/${ourTabReplay!.id} → ${replayDataRes.status}`,
+    ).toBe(true);
+    const replayData = (await replayDataRes.json()) as { events?: unknown[] };
+    expect(
+      replayData.events?.length ?? 0,
+      "Replay fetch returned zero events — recording pipeline broken",
+    ).toBeGreaterThan(0);
+    console.log(`  Replay verified: ${replayData.events?.length} events, URL works ✓`);
+
     // ── 2. Per-tab event counts + markers ──────────────────────────
     // Fetch markers from each tab via fetchMarkers (full replay fetch, not metadata)
     const tabAnalyses = await Promise.all(
