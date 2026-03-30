@@ -1,9 +1,15 @@
 /// <reference path="./globals.d.ts" />
 
-// Prevent double-init (extension re-injects on SPA navigations in some cases)
-if (window.__browserlessRecording) {
-  // Already initialized — bail out (this is the top-level early exit)
-} else {
+// Always re-initialize — CF redirects create new documents but
+// __browserlessRecording may persist from the previous page in MAIN world.
+// The old guard caused zero-event replays on redirected pages.
+if (window.__browserlessRecording && window.__browserlessStopRecording) {
+  try {
+    window.__browserlessStopRecording();
+  } catch {}
+}
+window.__browserlessRecording = undefined as any;
+{
   const isIframe = window !== window.top;
 
   // -- Iframe: minimal setup -----------------------------------------------
@@ -43,7 +49,8 @@ if (window.__browserlessRecording) {
       "record=" + typeof (window.rrweb && window.rrweb.record),
       "readyState=" + document.readyState,
       "body=" + !!document.body,
-      "docEl=" + !!document.documentElement,
+      "isTop=" + (window.parent === window),
+      "url=" + location.href.substring(0, 60),
     );
 
     const consolePlugin =
@@ -58,26 +65,31 @@ if (window.__browserlessRecording) {
       window.__browserlessStopRecording = window.rrweb.record({
         emit(event: any) {
           if (!rec || rec === (true as any)) return;
-          // Push-based delivery if CDP binding available
-          if (window.__rrwebPush) {
-            const buf = rec._buf || (rec._buf = []);
-            buf.push(event);
-            if (!rec._ft) {
-              rec._ft = setTimeout(() => {
-                rec._ft = null;
-                const b = rec._buf;
-                rec._buf = [];
-                if (b && b.length) {
+          // Always buffer first, push at flush time. The extension runs at
+          // document_start which races with Phase 1's Runtime.addBinding for
+          // __rrwebPush. If we check __rrwebPush at emit time, the initial
+          // FullSnapshot may land in rec.events (never pushed) because the
+          // binding isn't registered yet. By deferring the check to flush
+          // time (500ms later), Phase 1 has always completed.
+          const buf = rec._buf || (rec._buf = []);
+          buf.push(event);
+          if (!rec._ft) {
+            rec._ft = setTimeout(() => {
+              rec._ft = null;
+              const b = rec._buf;
+              rec._buf = [];
+              if (b && b.length) {
+                if (window.__rrwebPush) {
                   try {
-                    window.__rrwebPush!(JSON.stringify(b));
+                    window.__rrwebPush(JSON.stringify(b));
                   } catch (e) {
                     for (let i = 0; i < b.length; i++) rec.events.push(b[i]);
                   }
+                } else {
+                  for (let i = 0; i < b.length; i++) rec.events.push(b[i]);
                 }
-              }, 500);
-            }
-          } else {
-            rec.events.push(event);
+              }
+            }, 500);
           }
         },
         sampling: {
@@ -98,6 +110,8 @@ if (window.__browserlessRecording) {
       });
       console.log(
         "[browserless-ext] rrweb started, stopFn=" + typeof window.__browserlessStopRecording,
+        "pushAvail=" + !!window.__rrwebPush,
+        "url=" + location.href.substring(0, 60),
       );
     } catch (e: any) {
       console.error("[browserless-ext] rrweb.record() FAILED:", e.message, e.stack);

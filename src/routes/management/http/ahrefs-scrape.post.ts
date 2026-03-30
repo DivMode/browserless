@@ -1,59 +1,69 @@
 /**
  * POST /internal/ahrefs-scrape — Ahrefs scrape endpoint.
  *
- * BrowserHTTPRoute: the framework launches Chrome with proxy + CF solver.
- * We get a browser, use its default page, run the scrape, return the result.
+ * Plain HTTPRoute that creates an INTERNAL WebSocket session to localhost
+ * with cfSolver=true + replay=true + proxy. This ensures the full session
+ * management pipeline (CdpSession, CloudflareSolver, ReplayPipeline) is active.
+ *
+ * BrowserHTTPRoute can't be used because it doesn't enable the CF solver
+ * for HTTP-launched sessions — cfSolver is a query param parsed by
+ * browser-launcher.ts only for WebSocket connections.
  *
  * Body: { domain: string, scrapeType?: "backlinks" | "traffic", sitekey?: string }
  * Response: AhrefsScrapeResult
  */
-import type { BrowserInstance, Request } from "@browserless.io/browserless";
+import type { Request } from "@browserless.io/browserless";
 import {
   APITags,
-  BrowserHTTPRoute,
   BrowserlessRoutes,
-  ChromiumCDP,
   HTTPManagementRoutes,
+  HTTPRoute,
   Methods,
   contentTypes,
   jsonResponse,
 } from "@browserless.io/browserless";
 import type { ServerResponse } from "http";
 import { Effect } from "effect";
+import puppeteer from "puppeteer-core";
 import { AHREFS_DEFAULT_SITEKEY, type ScrapeType } from "../../../scraping/ahrefs-types.js";
 import { executeAhrefsScrape } from "../../../scraping/ahrefs-service.js";
 
+const PORT = process.env.PORT ?? "3000";
+const TOKEN = process.env.TOKEN ?? "";
 const PROXY = process.env.LOCAL_MOBILE_PROXY ?? "";
-const proxyServer = PROXY ? new URL(PROXY).origin : "";
 
-export default class AhrefsScrapePostRoute extends BrowserHTTPRoute {
+function buildInternalWsUrl(): string {
+  const params = new URLSearchParams();
+  if (TOKEN) params.set("token", TOKEN);
+  if (PROXY) {
+    const proxyUrl = new URL(PROXY);
+    params.set("--proxy-server", proxyUrl.origin);
+  }
+  params.set("headless", "false");
+  params.set("replay", "true");
+  params.set("cfSolver", "true");
+  params.set("launch", JSON.stringify({ args: ["--window-size=1280,900"] }));
+  return `ws://127.0.0.1:${PORT}/chromium?${params.toString()}`;
+}
+
+export default class AhrefsScrapePostRoute extends HTTPRoute {
   name = BrowserlessRoutes.AhrefsScrapePostRoute;
   accepts = [contentTypes.json];
   auth = true;
-  browser = ChromiumCDP;
-  concurrency = true;
+  browser = null;
+  concurrency = false;
   contentTypes = [contentTypes.json];
   description = "Scrape Ahrefs backlinks or traffic data for a domain.";
   method = Methods.post;
   path = HTTPManagementRoutes.ahrefsScrape;
   tags = [APITags.management];
-  defaultLaunchOptions = {
-    headless: false,
-    stealth: false,
-    args: proxyServer ? [`--proxy-server=${proxyServer}`] : [],
-  };
 
-  async handler(req: Request, res: ServerResponse, browser: BrowserInstance): Promise<void> {
+  async handler(req: Request, res: ServerResponse): Promise<void> {
     return Effect.runPromise(
       Effect.fn("route.ahrefs-scrape.post")(function* () {
-        // Parse body
         const rawBody = typeof req.body === "string" ? JSON.parse(req.body as string) : req.body;
         const body = rawBody as
-          | {
-              domain?: string;
-              scrapeType?: string;
-              sitekey?: string;
-            }
+          | { domain?: string; scrapeType?: string; sitekey?: string }
           | undefined;
 
         if (!body?.domain) {
@@ -65,37 +75,46 @@ export default class AhrefsScrapePostRoute extends BrowserHTTPRoute {
         const scrapeType = (body.scrapeType === "traffic" ? "traffic" : "backlinks") as ScrapeType;
         const sitekey = body.sitekey ?? AHREFS_DEFAULT_SITEKEY;
 
-        yield* Effect.logInfo(`Ahrefs scrape request: domain=${domain} type=${scrapeType}`);
+        yield* Effect.logInfo(`Ahrefs scrape: domain=${domain} type=${scrapeType}`);
 
-        // Get a page from the browser + set proxy auth
-        const page = yield* Effect.promise(async () => {
-          const pages = await browser.pages();
-          const p = pages[0] ?? (await browser.newPage());
-          if (PROXY) {
-            const proxyUrl = new URL(PROXY);
-            if (proxyUrl.username) {
-              await p.authenticate({
-                username: decodeURIComponent(proxyUrl.username),
-                password: decodeURIComponent(proxyUrl.password),
-              });
-            }
-          }
-          return p;
-        });
-
-        const result = yield* executeAhrefsScrape(page, domain, scrapeType, sitekey).pipe(
-          Effect.catch(() =>
-            Effect.succeed({
-              success: false as const,
-              domain,
-              error: "Scrape failed",
-              errorType: "scrape_error",
-              timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
-            }),
-          ),
+        // Connect to ourselves via internal WebSocket — full session pipeline
+        const wsUrl = buildInternalWsUrl();
+        const browser = yield* Effect.promise(() =>
+          puppeteer.connect({ browserWSEndpoint: wsUrl }),
         );
 
-        jsonResponse(res, result.success ? 200 : 500, result);
+        try {
+          const page = yield* Effect.promise(async () => {
+            const pages = await browser.pages();
+            const p = pages[0] ?? (await browser.newPage());
+            if (PROXY) {
+              const proxyUrl = new URL(PROXY);
+              if (proxyUrl.username) {
+                await p.authenticate({
+                  username: decodeURIComponent(proxyUrl.username),
+                  password: decodeURIComponent(proxyUrl.password),
+                });
+              }
+            }
+            return p;
+          });
+
+          const result = yield* executeAhrefsScrape(page, domain, scrapeType, sitekey).pipe(
+            Effect.catch((e: unknown) =>
+              Effect.succeed({
+                success: false as const,
+                domain,
+                error: e instanceof Error ? e.message : String(e),
+                errorType: "scrape_error",
+                timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
+              }),
+            ),
+          );
+
+          jsonResponse(res, result.success ? 200 : 500, result);
+        } finally {
+          browser.close().catch(() => {});
+        }
       })().pipe(
         Effect.catch((e: unknown) => {
           const msg = e instanceof Error ? e.message : String(e);

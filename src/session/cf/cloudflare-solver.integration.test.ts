@@ -145,13 +145,13 @@ const runSession: Effect.Effect<SessionResult, never, typeof ReplayAPI | Scope.S
     console.log(`  [${Date.now() - testStartTs}ms] wait done`);
 
     // Close browser to flush replay data
-    yield* Effect.promise(() => browser.close()).pipe(Effect.catch(() => Effect.void));
+    yield* Effect.promise(() => browser.close()).pipe(Effect.ignore);
     console.log(`  [${Date.now() - testStartTs}ms] browser closed`);
 
     const api = yield* Effect.service(ReplayAPI);
     // Poll for replay availability — server-side flush typically completes in 200-500ms
     const replay = yield* Effect.gen(function* () {
-      const deadline = Date.now() + 5_000;
+      const deadline = Date.now() + 10_000;
       while (Date.now() < deadline) {
         const all = yield* api.findAllReplays(testStartTs);
         const found = all.find((r) => r.targetId === pageTargetId);

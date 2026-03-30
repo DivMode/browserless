@@ -7,7 +7,8 @@
  * First flush creates the replay (writeTabReplay with metadata).
  * Subsequent flushes append events (appendTabEvents).
  */
-import { Cause, Effect, Queue, Stream } from "effect";
+import type { Cause, Queue} from "effect";
+import { Deferred, Effect, Stream } from "effect";
 import type { ReplayEvent, ReplayMetadata, SessionId, TabEvent } from "../shared/replay-schemas.js";
 import type { TargetId } from "../shared/cloudflare-detection.js";
 import { ReplayWriter, ReplayMetrics } from "./replay-services.js";
@@ -17,11 +18,14 @@ const BATCH_SIZE = 200;
 /**
  * Per-tab replay consumer. One fiber per tab.
  * Reads from a per-tab Queue, flushes in batches, writes final batch when Queue ends.
+ * Signals `done` Deferred when the final POST completes — FINALIZER 3 awaits this
+ * instead of FiberMap.get (which breaks under Effect v4's auto-removal).
  */
 export const tabConsumer = (
   queue: Queue.Queue<TabEvent, Cause.Done>,
   sessionId: SessionId,
   targetId: TargetId,
+  done?: Deferred.Deferred<void>,
 ): Effect.Effect<void, never, typeof ReplayWriter.Identifier | typeof ReplayMetrics.Identifier> =>
   Effect.fn("replay.tab")(function* () {
     yield* Effect.annotateCurrentSpan({ "replay.target_id": targetId });
@@ -91,9 +95,21 @@ export const tabConsumer = (
     // Queue ended — final flush of remaining events
     yield* flush;
 
+    // Zero-event replays are a defect — every activated tab MUST produce at least
+    // one rrweb snapshot. If this fires, the extension re-init or rrweb itself is broken.
+    if (totalFlushed === 0) {
+      yield* Effect.logError("REPLAY BUG: tab consumer flushed zero events").pipe(
+        Effect.annotateLogs({ target_id: targetId, session_id: sessionId }),
+      );
+    }
+
     yield* Effect.annotateCurrentSpan({
       "replay.event_count": totalFlushed,
       "replay.batch_count": Math.ceil(totalFlushed / BATCH_SIZE) || 1,
     });
     yield* metrics.observeTabDuration((Date.now() - startedAt) / 1000);
+
+    // Signal completion — FINALIZER 3 awaits this Deferred to ensure the POST
+    // has finished before session teardown kills in-flight requests.
+    if (done) yield* Deferred.succeed(done, void 0);
   })();

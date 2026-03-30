@@ -13,14 +13,13 @@ import { type TabReplayCompleteParams } from "@browserless.io/browserless";
 
 import {
   Cause,
+  Deferred,
   Effect,
   Exit,
-  Fiber,
   FiberMap,
   Layer,
   ManagedRuntime,
   Metric,
-  Option,
   Queue,
   Schedule,
   Scope,
@@ -122,6 +121,9 @@ export class CdpSession {
   private pageWsCmdId = 100_000;
 
   private readonly tabs = new Map<string, TabState>();
+  // Per-tab completion Deferreds — signaled by tabConsumer when final POST completes.
+  // FINALIZER 3 awaits these instead of FiberMap.get (which breaks under auto-removal).
+  private readonly tabDeferreds = new Map<string, Deferred.Deferred<void>>();
 
   // Single runtime + FiberMap for all fibers (replay consumers + per-page WS + probes)
   private _fiberMap: FiberMap.FiberMap<string> | null = null;
@@ -1639,15 +1641,13 @@ export class CdpSession {
               Queue.endUnsafe(tabQueue);
               session.tabQueues.delete(targetId);
             }
-            // Await consumer fiber — guarantees replay file is written before callback
-            if (session._fiberMap) {
-              const fiberOpt = yield* FiberMap.get(session._fiberMap, `tab:${targetId}`);
-              if (Option.isSome(fiberOpt)) {
-                yield* Fiber.await(fiberOpt.value).pipe(
-                  Effect.timeout("45 seconds"),
-                  Effect.ignore,
-                );
-              }
+            // Await consumer completion — Deferred is signaled after the final
+            // POST completes. This replaces FiberMap.get which breaks under
+            // Effect v4's auto-removal (completed fiber removed before await).
+            const consumerDone = session.tabDeferreds.get(targetId);
+            if (consumerDone) {
+              yield* Deferred.await(consumerDone).pipe(Effect.timeout("45 seconds"), Effect.ignore);
+              session.tabDeferreds.delete(targetId);
             }
           }),
         );
@@ -1817,12 +1817,15 @@ export class CdpSession {
         session.tabQueues.set(targetId, queue);
 
         const sessionIdBranded = SessionId.makeUnsafe(session.sessionId);
+        // Deferred signals when consumer's final POST completes — FINALIZER 3 awaits it.
+        const consumerDone = yield* Deferred.make<void>();
+        session.tabDeferreds.set(targetId, consumerDone);
         if (session._fiberMap) {
           forkTracedFiber(
             session.runtime,
             session._fiberMap,
             `tab:${targetId}`,
-            tabConsumer(queue, sessionIdBranded, targetId),
+            tabConsumer(queue, sessionIdBranded, targetId, consumerDone),
             tab.context,
           );
         }

@@ -248,12 +248,11 @@ export async function setup() {
   execFileSync("npx", ["tsc"], { cwd: BROWSERLESS_DIR, stdio: "inherit" });
   console.log(`[globalSetup] Build done (${Date.now() - buildStart}ms)`);
 
-  // Build rrweb Chrome extension if missing (needed for replay player debugging)
-  const extensionPath = path.join(BROWSERLESS_DIR, "extensions/replay/rrweb-recorder.js");
-  if (!existsSync(extensionPath)) {
-    console.log("[globalSetup] Building rrweb extension...");
-    execFileSync("bun", ["extensions/replay/build.js"], { cwd: BROWSERLESS_DIR, stdio: "inherit" });
-  }
+  // Always rebuild rrweb Chrome extension — the recorder.ts source may have
+  // changed but tsc doesn't trigger the esbuild bundle step. Stale bundles
+  // cause zero-event replays (extension double-init guard regression).
+  console.log("[globalSetup] Building rrweb extension...");
+  execFileSync("bun", ["extensions/replay/build.js"], { cwd: BROWSERLESS_DIR, stdio: "inherit" });
 
   // Kill AGAIN after build — tsc file changes trigger `node --watch` restarts
   await killPort(PORT);

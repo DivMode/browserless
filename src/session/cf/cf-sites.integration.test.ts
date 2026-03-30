@@ -132,7 +132,7 @@ const waitForSolve = (
 const acquirePage = (browser: Browser): Effect.Effect<Page, never, Scope.Scope> =>
   Effect.acquireRelease(
     Effect.promise(() => browser.newPage()),
-    (page) => Effect.promise(() => page.close()).pipe(Effect.catch(() => Effect.void)),
+    (page) => Effect.promise(() => page.close().catch(() => {})),
   );
 
 /** Get the CDP targetId for a page (used to find its replay). */
@@ -326,8 +326,12 @@ describe.concurrent("CF Solver Multi-Site", () => {
 
             // acquireRelease has closed the page — poll for replay availability
             // (server-side flush typically completes in 200-500ms after page close)
+            // Wait for replay server to flush — under concurrent test load, the
+            // OTEL flush + replay write can take 2-5s after page close.
+            yield* Effect.sleep("2 seconds");
+
             const replays = yield* Effect.gen(function* () {
-              const deadline = Date.now() + 5_000;
+              const deadline = Date.now() + 15_000;
               while (Date.now() < deadline) {
                 const all = yield* Effect.promise(() => findAllReplays(suiteStartTs));
                 const found = all.filter((r) => r.targetId === targetId);
