@@ -204,18 +204,27 @@ export const executeAhrefsScrape = (
       // Phase 8: Collect CF solver telemetry + construct replay URL from session ID
       const cfMetrics = cfListener.collect();
 
-      // Replay URL is deterministic from the browser's session ID
+      // Get session UUID from Chrome's Browser.getVersion (wsEndpoint returns proxy URL)
       const REPLAY_BASE = process.env.REPLAY_PLAYER_URL ?? "https://replay.catchseo.com";
-      const wsEndpoint = page.browser()?.wsEndpoint() ?? "";
-      const sessionId = wsEndpoint.split("/").pop() ?? "";
-      const replayMeta = sessionId
-        ? {
-            replay_url: `${REPLAY_BASE}/recording/${sessionId}`,
-            replay_id: sessionId,
-            replay_duration_ms: timings.totalMs,
-            replay_event_count: 0,
-          }
-        : null;
+      let replayMeta = cfListener.getReplayMetadata();
+      if (!replayMeta?.replay_url) {
+        const versionInfo = yield* Effect.tryPromise({
+          try: () => cdp.send("Browser.getVersion" as any) as Promise<Record<string, unknown>>,
+          catch: () => null,
+        }).pipe(Effect.catch(() => Effect.succeed(null)));
+        const debuggerUrl = String((versionInfo as any)?.webSocketDebuggerUrl ?? "");
+        const sessionId = debuggerUrl.includes("/devtools/browser/")
+          ? (debuggerUrl.split("/devtools/browser/").pop() ?? "")
+          : "";
+        replayMeta = sessionId
+          ? {
+              replay_url: `${REPLAY_BASE}/recording/${sessionId}`,
+              replay_id: sessionId,
+              replay_duration_ms: timings.totalMs,
+              replay_event_count: 0,
+            }
+          : null;
+      }
 
       // Phase 9: Emit wide event with ALL attributes
       const wideEvent = buildWideEvent({
