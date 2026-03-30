@@ -22,6 +22,7 @@ import { Effect } from "effect";
 import puppeteer from "puppeteer-core";
 import { executeAhrefsScrape } from "../../../scraping/ahrefs-service.js";
 import { readResult, writeResult, writeFailure } from "../../../scraping/r2-writer.js";
+import { runForkInServer } from "../../../otel-runtime.js";
 
 const PORT = process.env.PORT ?? "3000";
 const TOKEN = process.env.TOKEN ?? "";
@@ -75,8 +76,8 @@ export default class AhrefsBacklinksDispatchRoute extends HTTPRoute {
     res.writeHead(202, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "accepted", instance_id: instanceId, domain }));
 
-    // Background scrape + R2 write
-    Effect.runFork(
+    // Background scrape + R2 write (runForkInServer provides OTel logger)
+    runForkInServer(
       Effect.fn("dispatch.backlinks")(function* () {
         let browser: import("puppeteer-core").Browser | undefined;
         try {
