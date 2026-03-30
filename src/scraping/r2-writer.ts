@@ -123,20 +123,20 @@ export const writeFailure = (
     return key;
   })();
 
-/** Read a result from R2 (for deduplication). */
+/** Read a result from R2 (for deduplication). Returns null if not found. */
 export const readResult = (instanceId: string) =>
   Effect.fn("r2.readResult")(function* () {
     if (!s3) return null;
     const key = `${KEY_PREFIX}/${instanceId}.json`;
-    try {
-      const resp = yield* Effect.promise(() =>
-        s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key })),
-      );
-      const body = yield* Effect.promise(
-        () => resp.Body?.transformToString() ?? Promise.resolve(""),
-      );
-      return body ? (JSON.parse(body) as Record<string, unknown>) : null;
-    } catch {
-      return null;
-    }
+    // Use Effect.promise with async try/catch — yield* inside JS try/catch
+    // doesn't catch Effect failures (NoSuchKey throws in the Effect channel).
+    return yield* Effect.promise(async () => {
+      try {
+        const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
+        const body = await (resp.Body?.transformToString() ?? "");
+        return body ? (JSON.parse(body) as Record<string, unknown>) : null;
+      } catch {
+        return null;
+      }
+    });
   })();
