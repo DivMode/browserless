@@ -18,7 +18,6 @@ import {
   captureDiagnostics,
   cleanupCdp,
   enableFetchInterception,
-  navigateToAhrefs,
   setupFetchInterception,
   waitForDocumentInterception,
   waitForResult,
@@ -165,8 +164,10 @@ export const executeAhrefsScrape = (
 
       // Phase 4: Navigate — sequenced AFTER Fetch.enable via yield*
       const navStart = Date.now();
-      // Fire-and-forget navigation — Fetch interception resolves before nav completes
-      navigateToAhrefs(page, url).pipe(Effect.runFork);
+      // Fire-and-forget — Fetch interception resolves before nav completes.
+      // This is one of the few places a raw promise is correct: we genuinely
+      // don't care about the navigation result (Fetch fulfillment aborts it).
+      page.goto(url, { timeout: 60_000, waitUntil: "domcontentloaded" }).catch(() => {});
 
       // Phase 5: Wait for Document interception (fulfill with turnstile HTML)
       yield* waitForDocumentInterception(interception).pipe(
