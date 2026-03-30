@@ -72,10 +72,19 @@ const setupFetchInterception = (
   new Promise<void>((resolveIntercepted, rejectIntercepted) => {
     let fulfilled = false;
     let settled = false;
+    let requestCount = 0;
+    let responseCount = 0;
+    let docResponseCount = 0;
+    const t0 = Date.now();
+
+    const log = (msg: string) => console.log(`[fetch.${domain}] ${msg} (${Date.now() - t0}ms)`);
 
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true;
+        log(
+          `TIMEOUT: requests=${requestCount} responses=${responseCount} docs=${docResponseCount} fulfilled=${fulfilled}`,
+        );
         rejectIntercepted(new Error("interception_timeout"));
       }
     }, MAX_INTERCEPT_WAIT_MS);
@@ -108,8 +117,10 @@ const setupFetchInterception = (
           ],
           handleAuthRequests: true,
         });
+        log("Fetch.enable OK");
       } catch (e) {
         clearTimeout(timer);
+        log(`Fetch.enable FAILED: ${e instanceof Error ? e.message : String(e)}`);
         if (!settled) {
           settled = true;
           rejectIntercepted(e instanceof Error ? e : new Error(String(e)));
@@ -117,11 +128,22 @@ const setupFetchInterception = (
         return;
       }
 
+      // Monitor page navigations via CDP
+      cdp.on("Page.frameNavigated" as any, (params: any) => {
+        const frameUrl = params?.frame?.url ?? "?";
+        const frameId = params?.frame?.id ?? "?";
+        const parentId = params?.frame?.parentId ?? "none";
+        if (parentId === "none") {
+          log(`NAV: ${frameUrl.substring(0, 100)} frame=${frameId}`);
+        }
+      });
+      cdp.send("Page.enable" as any).catch(() => {});
+
       cdp.on("Fetch.requestPaused" as any, (params: any) => {
         const requestId = params.requestId;
 
         if (params.responseStatusCode !== undefined) {
-          // Response stage — only fires for https://ahrefs.com/*
+          responseCount++;
           const url = (params.request?.url ?? "") as string;
           const status = params.responseStatusCode as number;
           const resourceType = (params.resourceType ?? "") as string;
@@ -136,18 +158,19 @@ const setupFetchInterception = (
           const isAhrefsDoc =
             url.includes("ahrefs.com") && status === 200 && resourceType === "Document";
 
-          // Log every response-stage event for debugging
-          if (url.includes("ahrefs.com") && resourceType === "Document") {
-            console.log(
-              `[fetch.response] domain=${domain} url=${url.substring(0, 80)} status=${status} type=${resourceType} cf=${hasCfMitigated} fulfilled=${fulfilled} settled=${settled}`,
-            );
-          }
+          // Log ALL response-stage events (they only fire for ahrefs.com/* pattern)
+          log(
+            `RESP: status=${status} type=${resourceType} cf=${hasCfMitigated} url=${url.substring(0, 100)}`,
+          );
 
           if (isAhrefsDoc) {
+            docResponseCount++;
             if (hasCfMitigated) {
+              log("CF-MITIGATED: continuing (challenge response)");
               cdp.send("Fetch.continueResponse" as any, { requestId }).catch(() => {});
             } else if (!fulfilled) {
               fulfilled = true;
+              log("FULFILL: injecting turnstile HTML");
               cdp
                 .send("Fetch.fulfillRequest" as any, {
                   requestId,
@@ -157,6 +180,7 @@ const setupFetchInterception = (
                 })
                 .then(() => {
                   clearTimeout(timer);
+                  log("FULFILL OK");
                   if (!settled) {
                     settled = true;
                     resolveIntercepted();
@@ -164,20 +188,27 @@ const setupFetchInterception = (
                 })
                 .catch((e: unknown) => {
                   clearTimeout(timer);
+                  log(`FULFILL FAILED: ${e instanceof Error ? e.message : String(e)}`);
                   if (!settled) {
                     settled = true;
                     rejectIntercepted(e instanceof Error ? e : new Error(String(e)));
                   }
                 });
             } else {
+              log("ALREADY FULFILLED: continuing");
               cdp.send("Fetch.continueResponse" as any, { requestId }).catch(() => {});
             }
           } else {
             cdp.send("Fetch.continueResponse" as any, { requestId }).catch(() => {});
           }
         } else {
-          // Request stage — ALWAYS continue, even after timeout/settlement.
-          // Stopping here freezes the page permanently.
+          requestCount++;
+          // Log Document request-stage events (navigations)
+          const reqUrl = (params.request?.url ?? "") as string;
+          const reqType = (params.resourceType ?? "") as string;
+          if (reqType === "Document") {
+            log(`REQ-DOC: ${reqUrl.substring(0, 100)}`);
+          }
           cdp.send("Fetch.continueRequest" as any, { requestId }).catch(() => {});
         }
       });
@@ -288,6 +319,15 @@ export const executeAhrefsScrape = (
       })
       .catch(() => null);
 
+    // Periodic title poll — see page state evolving during wait
+    const titlePoll = setInterval(async () => {
+      const title = await page.title().catch(() => "???");
+      const pageUrl = page.url();
+      console.log(
+        `[title.${domain}] "${title}" url=${pageUrl.substring(0, 80)} (${Date.now() - t0}ms)`,
+      );
+    }, 5000);
+
     // Wait for interception — tryPromise so rejection is a catchable failure, not a defect
     let usedFallback = false;
     yield* Effect.tryPromise({
@@ -396,6 +436,7 @@ export const executeAhrefsScrape = (
         }),
       ),
     );
+    clearInterval(titlePoll);
     timings.navMs = Date.now() - navStart;
 
     // Let navigation settle (skip if fallback already set content)
