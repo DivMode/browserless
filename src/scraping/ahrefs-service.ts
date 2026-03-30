@@ -305,8 +305,9 @@ export const executeAhrefsScrape = (
             // Re-navigate to the same URL — CF clearance cookies are set from the first solve,
             // so no CF challenge this time. Fresh Fetch interception will catch the 200.
             if (title.includes("Ahrefs")) {
-              // Reset Fetch interception with fresh state
+              // Reset Fetch interception: disable + remove old listeners
               await cdp.send("Fetch.disable" as any).catch(() => {});
+              cdp.removeAllListeners("Fetch.requestPaused" as any);
               const retryHtml =
                 scrapeType === "traffic"
                   ? minimalTrafficHtml({
