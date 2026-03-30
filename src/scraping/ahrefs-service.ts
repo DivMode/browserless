@@ -201,16 +201,21 @@ export const executeAhrefsScrape = (
       // Phase 7: On failure, capture page diagnostics
       const diagnostics = result.success ? null : yield* captureDiagnostics(page);
 
-      // Phase 8: Close page to trigger tabReplayComplete event, then collect
-      yield* Effect.tryPromise({
-        try: () => page.close().catch(() => {}),
-        catch: () => new Error("page_close"),
-      }).pipe(Effect.ignore);
-      // Brief wait for the tabReplayComplete CDP event to arrive
-      yield* Effect.sleep("2 seconds");
-
+      // Phase 8: Collect CF solver telemetry + construct replay URL from session ID
       const cfMetrics = cfListener.collect();
-      const replayMeta = cfListener.getReplayMetadata();
+
+      // Replay URL is deterministic from the browser's session ID
+      const REPLAY_BASE = process.env.REPLAY_PLAYER_URL ?? "https://replay.catchseo.com";
+      const wsEndpoint = page.browser()?.wsEndpoint() ?? "";
+      const sessionId = wsEndpoint.split("/").pop() ?? "";
+      const replayMeta = sessionId
+        ? {
+            replay_url: `${REPLAY_BASE}/recording/${sessionId}`,
+            replay_id: sessionId,
+            replay_duration_ms: timings.totalMs,
+            replay_event_count: 0,
+          }
+        : null;
 
       // Phase 9: Emit wide event with ALL attributes
       const wideEvent = buildWideEvent({
