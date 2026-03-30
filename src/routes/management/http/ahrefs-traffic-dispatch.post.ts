@@ -104,22 +104,42 @@ export default class AhrefsTrafficDispatchRoute extends HTTPRoute {
             ),
           );
 
+          console.log(
+            `[dispatch.traffic] scrape done: domain=${domain} success=${result.success} error=${result.error ?? "none"}`,
+          );
+
           if (result.success) {
             yield* writeResult(instanceId, domain, "traffic", result as any).pipe(
-              Effect.catch(() => Effect.void),
+              Effect.tap(() =>
+                Effect.sync(() => console.log(`[dispatch.traffic] R2 write OK: ${instanceId}`)),
+              ),
+              Effect.catch((e: unknown) =>
+                Effect.sync(() =>
+                  console.error(
+                    `[dispatch.traffic] R2 write FAILED: ${e instanceof Error ? e.message : String(e)}`,
+                  ),
+                ),
+              ),
             );
           } else {
             yield* writeFailure(instanceId, domain, "traffic", result.error ?? "unknown").pipe(
-              Effect.catch(() => Effect.void),
+              Effect.tap(() =>
+                Effect.sync(() =>
+                  console.log(`[dispatch.traffic] R2 failure write OK: ${instanceId}`),
+                ),
+              ),
+              Effect.catch((e: unknown) =>
+                Effect.sync(() =>
+                  console.error(
+                    `[dispatch.traffic] R2 failure write FAILED: ${e instanceof Error ? e.message : String(e)}`,
+                  ),
+                ),
+              ),
             );
           }
 
-          yield* Effect.logInfo("dispatch.traffic.complete").pipe(
-            Effect.annotateLogs({
-              domain,
-              instance_id: instanceId,
-              success: String(result.success),
-            }),
+          console.log(
+            `[dispatch.traffic] complete: domain=${domain} instance=${instanceId} success=${result.success}`,
           );
         } finally {
           if (browser) browser.close().catch(() => {});

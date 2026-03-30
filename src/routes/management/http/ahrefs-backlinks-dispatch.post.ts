@@ -110,22 +110,42 @@ export default class AhrefsBacklinksDispatchRoute extends HTTPRoute {
             ),
           );
 
+          console.log(
+            `[dispatch.backlinks] scrape done: domain=${domain} success=${result.success} error=${result.error ?? "none"}`,
+          );
+
           if (result.success) {
             yield* writeResult(instanceId, domain, "backlinks", result as any).pipe(
-              Effect.catch(() => Effect.void),
+              Effect.tap(() =>
+                Effect.sync(() => console.log(`[dispatch.backlinks] R2 write OK: ${instanceId}`)),
+              ),
+              Effect.catch((e: unknown) =>
+                Effect.sync(() =>
+                  console.error(
+                    `[dispatch.backlinks] R2 write FAILED: ${e instanceof Error ? e.message : String(e)}`,
+                  ),
+                ),
+              ),
             );
           } else {
             yield* writeFailure(instanceId, domain, "backlinks", result.error ?? "unknown").pipe(
-              Effect.catch(() => Effect.void),
+              Effect.tap(() =>
+                Effect.sync(() =>
+                  console.log(`[dispatch.backlinks] R2 failure write OK: ${instanceId}`),
+                ),
+              ),
+              Effect.catch((e: unknown) =>
+                Effect.sync(() =>
+                  console.error(
+                    `[dispatch.backlinks] R2 failure write FAILED: ${e instanceof Error ? e.message : String(e)}`,
+                  ),
+                ),
+              ),
             );
           }
 
-          yield* Effect.logInfo("dispatch.backlinks.complete").pipe(
-            Effect.annotateLogs({
-              domain,
-              instance_id: instanceId,
-              success: String(result.success),
-            }),
+          console.log(
+            `[dispatch.backlinks] complete: domain=${domain} instance=${instanceId} success=${result.success}`,
           );
         } finally {
           if (browser) browser.close().catch(() => {});
