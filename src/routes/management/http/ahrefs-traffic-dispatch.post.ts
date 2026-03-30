@@ -41,7 +41,7 @@ function buildInternalWsUrl(): string {
 export default class AhrefsTrafficDispatchRoute extends HTTPRoute {
   name = BrowserlessRoutes.AhrefsTrafficDispatchRoute;
   accepts = [contentTypes.json, contentTypes.any];
-  auth = true;
+  auth = false; // CF Access on the Cloudflare Tunnel provides auth
   browser = null;
   concurrency = false;
   contentTypes = [contentTypes.json];
