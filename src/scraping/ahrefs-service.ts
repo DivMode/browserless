@@ -61,6 +61,12 @@ const buildUrl = (domain: string, scrapeType: ScrapeType): string => {
 
 // ── Fetch interception via raw CDP ───────────────────────────────────
 
+/**
+ * Sets up Fetch interception and returns { ready, intercepted }.
+ * CRITICAL: Caller MUST await `ready` before navigating — otherwise
+ * the Document response arrives before Fetch.enable completes and
+ * bypasses interception entirely.
+ */
 const setupFetchInterception = (
   cdp: CDPSession,
   domain: string,
@@ -68,17 +74,35 @@ const setupFetchInterception = (
   sitekey: string,
   sessionId: string,
   targetId: string,
-): Promise<void> =>
-  new Promise<void>((resolveIntercepted, rejectIntercepted) => {
-    let fulfilled = false;
-    let settled = false;
-    let requestCount = 0;
-    let responseCount = 0;
-    let docResponseCount = 0;
-    const t0 = Date.now();
+): { ready: Promise<void>; intercepted: Promise<void> } => {
+  let fulfilled = false;
+  let settled = false;
+  let requestCount = 0;
+  let responseCount = 0;
+  let docResponseCount = 0;
+  const t0 = Date.now();
 
-    const log = (msg: string) => console.log(`[fetch.${domain}] ${msg} (${Date.now() - t0}ms)`);
+  const log = (msg: string) => console.log(`[fetch.${domain}] ${msg} (${Date.now() - t0}ms)`);
 
+  const html =
+    scrapeType === "traffic"
+      ? minimalTrafficHtml({
+          domain,
+          sitekey,
+          action: AHREFS_DEFAULT_ACTION,
+          sessionId,
+          targetId,
+        })
+      : minimalTurnstileHtml({
+          domain,
+          sitekey,
+          action: AHREFS_DEFAULT_ACTION,
+          sessionId,
+          targetId,
+        });
+  const htmlBase64 = Buffer.from(html).toString("base64");
+
+  const intercepted = new Promise<void>((resolveIntercepted, rejectIntercepted) => {
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true;
@@ -89,131 +113,94 @@ const setupFetchInterception = (
       }
     }, MAX_INTERCEPT_WAIT_MS);
 
-    const html =
-      scrapeType === "traffic"
-        ? minimalTrafficHtml({
-            domain,
-            sitekey,
-            action: AHREFS_DEFAULT_ACTION,
-            sessionId,
-            targetId,
-          })
-        : minimalTurnstileHtml({
-            domain,
-            sitekey,
-            action: AHREFS_DEFAULT_ACTION,
-            sessionId,
-            targetId,
-          });
-    const htmlBase64 = Buffer.from(html).toString("base64");
+    cdp.on("Fetch.requestPaused" as any, (params: any) => {
+      const requestId = params.requestId;
 
-    void (async () => {
-      try {
-        await cdp.send("Fetch.disable" as any);
-        await cdp.send("Fetch.enable" as any, {
-          patterns: [
-            { urlPattern: "*", requestStage: "Request" },
-            { urlPattern: "https://ahrefs.com/*", requestStage: "Response" },
-          ],
-          handleAuthRequests: true,
-        });
-        log("Fetch.enable OK");
-      } catch (e) {
-        clearTimeout(timer);
-        log(`Fetch.enable FAILED: ${e instanceof Error ? e.message : String(e)}`);
-        if (!settled) {
-          settled = true;
-          rejectIntercepted(e instanceof Error ? e : new Error(String(e)));
-        }
-        return;
-      }
+      if (params.responseStatusCode !== undefined) {
+        responseCount++;
+        const url = (params.request?.url ?? "") as string;
+        const status = params.responseStatusCode as number;
+        const resourceType = (params.resourceType ?? "") as string;
+        const responseHeaders = (params.responseHeaders ?? []) as Array<{
+          name: string;
+          value: string;
+        }>;
 
-      // Monitor page navigations via CDP
-      cdp.on("Page.frameNavigated" as any, (params: any) => {
-        const frameUrl = params?.frame?.url ?? "?";
-        const frameId = params?.frame?.id ?? "?";
-        const parentId = params?.frame?.parentId ?? "none";
-        if (parentId === "none") {
-          log(`NAV: ${frameUrl.substring(0, 100)} frame=${frameId}`);
-        }
-      });
-      cdp.send("Page.enable" as any).catch(() => {});
+        const hasCfMitigated = responseHeaders.some((h) => h.name.toLowerCase() === "cf-mitigated");
+        const isAhrefsDoc =
+          url.includes("ahrefs.com") && status === 200 && resourceType === "Document";
 
-      cdp.on("Fetch.requestPaused" as any, (params: any) => {
-        const requestId = params.requestId;
-
-        if (params.responseStatusCode !== undefined) {
-          responseCount++;
-          const url = (params.request?.url ?? "") as string;
-          const status = params.responseStatusCode as number;
-          const resourceType = (params.resourceType ?? "") as string;
-          const responseHeaders = (params.responseHeaders ?? []) as Array<{
-            name: string;
-            value: string;
-          }>;
-
-          const hasCfMitigated = responseHeaders.some(
-            (h) => h.name.toLowerCase() === "cf-mitigated",
-          );
-          const isAhrefsDoc =
-            url.includes("ahrefs.com") && status === 200 && resourceType === "Document";
-
-          // Log ALL response-stage events (they only fire for ahrefs.com/* pattern)
+        // Log Document response-stage events
+        if (resourceType === "Document") {
           log(
             `RESP: status=${status} type=${resourceType} cf=${hasCfMitigated} url=${url.substring(0, 100)}`,
           );
+        }
 
-          if (isAhrefsDoc) {
-            docResponseCount++;
-            if (hasCfMitigated) {
-              log("CF-MITIGATED: continuing (challenge response)");
-              cdp.send("Fetch.continueResponse" as any, { requestId }).catch(() => {});
-            } else if (!fulfilled) {
-              fulfilled = true;
-              log("FULFILL: injecting turnstile HTML");
-              cdp
-                .send("Fetch.fulfillRequest" as any, {
-                  requestId,
-                  responseCode: 200,
-                  responseHeaders: [{ name: "Content-Type", value: "text/html; charset=utf-8" }],
-                  body: htmlBase64,
-                })
-                .then(() => {
-                  clearTimeout(timer);
-                  log("FULFILL OK");
-                  if (!settled) {
-                    settled = true;
-                    resolveIntercepted();
-                  }
-                })
-                .catch((e: unknown) => {
-                  clearTimeout(timer);
-                  log(`FULFILL FAILED: ${e instanceof Error ? e.message : String(e)}`);
-                  if (!settled) {
-                    settled = true;
-                    rejectIntercepted(e instanceof Error ? e : new Error(String(e)));
-                  }
-                });
-            } else {
-              log("ALREADY FULFILLED: continuing");
-              cdp.send("Fetch.continueResponse" as any, { requestId }).catch(() => {});
-            }
+        if (isAhrefsDoc) {
+          docResponseCount++;
+          if (hasCfMitigated) {
+            log("CF-MITIGATED: continuing (challenge response)");
+            cdp.send("Fetch.continueResponse" as any, { requestId }).catch(() => {});
+          } else if (!fulfilled) {
+            fulfilled = true;
+            log("FULFILL: injecting turnstile HTML");
+            cdp
+              .send("Fetch.fulfillRequest" as any, {
+                requestId,
+                responseCode: 200,
+                responseHeaders: [{ name: "Content-Type", value: "text/html; charset=utf-8" }],
+                body: htmlBase64,
+              })
+              .then(() => {
+                clearTimeout(timer);
+                log("FULFILL OK");
+                if (!settled) {
+                  settled = true;
+                  resolveIntercepted();
+                }
+              })
+              .catch((e: unknown) => {
+                clearTimeout(timer);
+                log(`FULFILL FAILED: ${e instanceof Error ? e.message : String(e)}`);
+                if (!settled) {
+                  settled = true;
+                  rejectIntercepted(e instanceof Error ? e : new Error(String(e)));
+                }
+              });
           } else {
             cdp.send("Fetch.continueResponse" as any, { requestId }).catch(() => {});
           }
         } else {
-          requestCount++;
-          // Log Document request-stage events (navigations)
-          const reqUrl = (params.request?.url ?? "") as string;
-          const reqType = (params.resourceType ?? "") as string;
-          if (reqType === "Document") {
-            log(`REQ-DOC: ${reqUrl.substring(0, 100)}`);
-          }
-          cdp.send("Fetch.continueRequest" as any, { requestId }).catch(() => {});
+          cdp.send("Fetch.continueResponse" as any, { requestId }).catch(() => {});
         }
-      });
-    })();
+      } else {
+        requestCount++;
+        const reqUrl = (params.request?.url ?? "") as string;
+        const reqType = (params.resourceType ?? "") as string;
+        if (reqType === "Document") {
+          log(`REQ-DOC: ${reqUrl.substring(0, 100)}`);
+        }
+        cdp.send("Fetch.continueRequest" as any, { requestId }).catch(() => {});
+      }
+    });
   });
+
+  // ready resolves AFTER Fetch.enable completes — caller must await before navigating
+  const ready = (async () => {
+    await cdp.send("Fetch.disable" as any).catch(() => {});
+    await cdp.send("Fetch.enable" as any, {
+      patterns: [
+        { urlPattern: "*", requestStage: "Request" },
+        { urlPattern: "https://ahrefs.com/*", requestStage: "Response" },
+      ],
+      handleAuthRequests: true,
+    });
+    log("Fetch.enable OK — safe to navigate");
+  })();
+
+  return { ready, intercepted };
+};
 
 // ── Parse API result ─────────────────────────────────────────────────
 
@@ -309,9 +296,17 @@ export const executeAhrefsScrape = (
     const url = buildUrl(domain, scrapeType);
     yield* Effect.logInfo(`Scraping ${domain} (${scrapeType}) → ${url}`);
 
-    const interceptedPromise = setupFetchInterception(cdp, domain, scrapeType, sitekey, "", "");
+    const { ready, intercepted } = setupFetchInterception(cdp, domain, scrapeType, sitekey, "", "");
 
-    // Navigate (don't await — interception resolves on first non-CF 200)
+    // CRITICAL: await Fetch.enable before navigating — otherwise the Document
+    // response arrives before interception is active and bypasses it entirely
+    yield* Effect.tryPromise({
+      try: () => ready,
+      catch: (e: unknown) =>
+        new Error(`fetch_enable: ${e instanceof Error ? e.message : String(e)}`),
+    });
+
+    // NOW navigate — Fetch is ready to intercept the Document response
     const navPromise = page
       .goto(url, {
         timeout: NAV_TIMEOUT_MS,
@@ -319,19 +314,10 @@ export const executeAhrefsScrape = (
       })
       .catch(() => null);
 
-    // Periodic title poll — see page state evolving during wait
-    const titlePoll = setInterval(async () => {
-      const title = await page.title().catch(() => "???");
-      const pageUrl = page.url();
-      console.log(
-        `[title.${domain}] "${title}" url=${pageUrl.substring(0, 80)} (${Date.now() - t0}ms)`,
-      );
-    }, 5000);
-
     // Wait for interception — tryPromise so rejection is a catchable failure, not a defect
     let usedFallback = false;
     yield* Effect.tryPromise({
-      try: () => interceptedPromise,
+      try: () => intercepted,
       catch: (e: unknown) =>
         new Error(`interception_timeout: ${e instanceof Error ? e.message : String(e)}`),
     }).pipe(
@@ -436,7 +422,6 @@ export const executeAhrefsScrape = (
         }),
       ),
     );
-    clearInterval(titlePoll);
     timings.navMs = Date.now() - navStart;
 
     // Let navigation settle (skip if fallback already set content)
