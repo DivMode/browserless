@@ -88,7 +88,8 @@ describe("Replay Recording Health", () => {
     // ── 1b. Replay URL — MUST be a real, fetchable URL ─────────────
     // This is the contract: every session produces a replay URL that works.
     // If this fails, the wide event dashboard has no clickable replay links.
-    const REPLAY_PLAYER = process.env.REPLAY_PLAYER_URL ?? "https://replay.catchseo.com";
+    const REPLAY_PLAYER = process.env.REPLAY_PLAYER_URL;
+    expect(REPLAY_PLAYER, "REPLAY_PLAYER_URL env var required").toBeTruthy();
     const replayUrl = `${REPLAY_PLAYER}/replay/${ourTabReplay!.id}`;
     console.log(`\n  ★ REPLAY URL: ${replayUrl}\n`);
 
