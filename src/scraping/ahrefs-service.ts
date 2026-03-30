@@ -18,6 +18,8 @@ import {
   captureDiagnostics,
   cleanupCdp,
   enableFetchInterception,
+  getSessionId,
+  getTargetId,
   setupFetchInterception,
   waitForDocumentInterception,
   waitForResult,
@@ -211,29 +213,24 @@ export const executeAhrefsScrape = (
       // Phase 7: On failure, capture page diagnostics
       const diagnostics = result.success ? null : yield* captureDiagnostics(page);
 
-      // Phase 8: Collect CF solver telemetry + construct replay URL from session ID
+      // Phase 8: Collect CF solver telemetry + replay URL
       const cfMetrics = cfListener.collect();
 
-      // Get session UUID from Chrome's Browser.getVersion (wsEndpoint returns proxy URL)
+      // Session UUID via connection.send("Browser.getVersion") — browser-level, not page-level
+      const sessionId = yield* getSessionId(cdp);
+      const targetId = yield* getTargetId(cdp);
+
       const REPLAY_BASE = process.env.REPLAY_PLAYER_URL ?? "https://replay.catchseo.com";
+      // Use tabReplayComplete data if available (from CF listener on Connection)
       let replayMeta = cfListener.getReplayMetadata();
-      if (!replayMeta?.replay_url) {
-        const versionInfo = yield* Effect.tryPromise({
-          try: () => cdp.send("Browser.getVersion" as any) as Promise<Record<string, unknown>>,
-          catch: () => null,
-        }).pipe(Effect.catch(() => Effect.succeed(null)));
-        const debuggerUrl = String((versionInfo as any)?.webSocketDebuggerUrl ?? "");
-        const sessionId = debuggerUrl.includes("/devtools/browser/")
-          ? (debuggerUrl.split("/devtools/browser/").pop() ?? "")
-          : "";
-        replayMeta = sessionId
-          ? {
-              replay_url: `${REPLAY_BASE}/recording/${sessionId}`,
-              replay_id: sessionId,
-              replay_duration_ms: timings.totalMs,
-              replay_event_count: 0,
-            }
-          : null;
+      if (!replayMeta?.replay_url && sessionId && targetId) {
+        const tabReplayId = `${sessionId}--tab-${targetId}`;
+        replayMeta = {
+          replay_url: `${REPLAY_BASE}/replay/${tabReplayId}`,
+          replay_id: tabReplayId,
+          replay_duration_ms: timings.totalMs,
+          replay_event_count: 0,
+        };
       }
 
       // Phase 9: Emit wide event with ALL attributes
@@ -245,6 +242,7 @@ export const executeAhrefsScrape = (
         domain,
         scrapeType,
         scrapeUrl: url,
+        sessionId,
       });
 
       yield* Effect.logInfo("ahrefs.scrape.wide_event").pipe(Effect.annotateLogs(wideEvent));

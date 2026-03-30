@@ -195,12 +195,18 @@ export function setupCfListener(cdp: CDPSession): CfListener {
     };
   };
 
-  // Register listeners
-  cdp.on("Browserless.cloudflareDetected" as any, onDetected);
-  cdp.on("Browserless.cloudflareProgress" as any, onProgress);
-  cdp.on("Browserless.cloudflareSolved" as any, onSolved);
-  cdp.on("Browserless.cloudflareFailed" as any, onFailed);
-  cdp.on("Browserless.tabReplayComplete" as any, onTabReplayComplete);
+  // Register listeners on the CONNECTION (not CDPSession).
+  // Browserless.* events are custom CDP messages sent without a sessionId,
+  // so puppeteer's Connection emits them via this.emit(method, params).
+  // Page-level CDPSession never receives them.
+  const connection = cdp.connection();
+  if (connection) {
+    connection.on("Browserless.cloudflareDetected" as any, onDetected);
+    connection.on("Browserless.cloudflareProgress" as any, onProgress);
+    connection.on("Browserless.cloudflareSolved" as any, onSolved);
+    connection.on("Browserless.cloudflareFailed" as any, onFailed);
+    connection.on("Browserless.tabReplayComplete" as any, onTabReplayComplete);
+  }
 
   return {
     collect(): CfSolveMetrics {
@@ -274,11 +280,13 @@ export function setupCfListener(cdp: CDPSession): CfListener {
     },
 
     cleanup() {
-      cdp.removeAllListeners("Browserless.cloudflareDetected" as any);
-      cdp.removeAllListeners("Browserless.cloudflareProgress" as any);
-      cdp.removeAllListeners("Browserless.cloudflareSolved" as any);
-      cdp.removeAllListeners("Browserless.cloudflareFailed" as any);
-      cdp.removeAllListeners("Browserless.tabReplayComplete" as any);
+      if (connection) {
+        connection.off("Browserless.cloudflareDetected" as any, onDetected);
+        connection.off("Browserless.cloudflareProgress" as any, onProgress);
+        connection.off("Browserless.cloudflareSolved" as any, onSolved);
+        connection.off("Browserless.cloudflareFailed" as any, onFailed);
+        connection.off("Browserless.tabReplayComplete" as any, onTabReplayComplete);
+      }
     },
   };
 }

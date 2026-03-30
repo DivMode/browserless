@@ -141,6 +141,7 @@ export interface WideEventInput {
   domain: string;
   scrapeType: ScrapeType;
   scrapeUrl: string;
+  sessionId?: string;
   retryContext?: { reason?: string; replayUrl?: string; replayDurationMs?: number };
 }
 
@@ -172,7 +173,7 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_AHREFS_DOMAIN]: domain,
     [ATTR_SCRAPER_TYPE]: scrapeType,
     [ATTR_SCRAPE_URL]: scrapeUrl,
-    [ATTR_SESSION_ID]: "",
+    [ATTR_SESSION_ID]: input.sessionId ?? "",
     [ATTR_CHROME_ENDPOINT]: "browserless",
     [ATTR_USE_PROXY]: "true",
 

@@ -25,6 +25,30 @@ export const acquireCdpSession = (page: Page) =>
       new CdpSessionError({ cause: e instanceof Error ? e.message : String(e) }),
   });
 
+// ── Session + target ID extraction ──────────────────────────────────
+
+/** Get Chrome's session UUID via browser-level Browser.getVersion on the Connection. */
+export const getSessionId = (cdp: CDPSession) =>
+  Effect.fn("ahrefs.getSessionId")(function* () {
+    const connection = cdp.connection();
+    if (!connection) return "";
+    const info = yield* Effect.tryPromise({
+      try: () =>
+        connection.send("Browser.getVersion") as unknown as Promise<Record<string, unknown>>,
+      catch: () => null,
+    }).pipe(Effect.catch(() => Effect.succeed(null)));
+    const url = String((info as any)?.webSocketDebuggerUrl ?? "");
+    return url.includes("/devtools/browser/") ? (url.split("/devtools/browser/").pop() ?? "") : "";
+  })();
+
+/** Get the page's target ID for the tab-specific replay ID. */
+export const getTargetId = (cdp: CDPSession) =>
+  Effect.tryPromise({
+    try: () =>
+      cdp.send("Target.getTargetInfo" as any).then((r: any) => r.targetInfo.targetId as string),
+    catch: () => "",
+  }).pipe(Effect.catch(() => Effect.succeed("")));
+
 export const cleanupCdp = (cdp: CDPSession) =>
   Effect.tryPromise({
     try: () => cdp.detach().catch(() => {}),
