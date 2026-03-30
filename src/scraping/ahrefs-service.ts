@@ -164,21 +164,27 @@ export const executeAhrefsScrape = (
 
       // Phase 4: Navigate — sequenced AFTER Fetch.enable via yield*
       const navStart = Date.now();
-      // Fire-and-forget — Fetch interception resolves before nav completes.
-      // This is one of the few places a raw promise is correct: we genuinely
-      // don't care about the navigation result (Fetch fulfillment aborts it).
-      page.goto(url, { timeout: 60_000, waitUntil: "domcontentloaded" }).catch(() => {});
+      // Start navigation (don't await — interception resolves on first non-CF 200)
+      const navPromise = page
+        .goto(url, { timeout: 60_000, waitUntil: "domcontentloaded" })
+        .catch(() => null);
 
       // Phase 5: Wait for Document interception (fulfill with turnstile HTML)
       yield* waitForDocumentInterception(interception).pipe(
-        Effect.catchTag("InterceptionTimeoutError", (e) => {
-          // Log timeout details for debugging — this should be rare now
-          return Effect.logWarning(
+        Effect.catchTag("InterceptionTimeoutError", (e) =>
+          Effect.logWarning(
             `Interception timeout: ${domain} requests=${e.requestCount} responses=${e.responseCount} docs=${e.docResponseCount}`,
-          ).pipe(Effect.flatMap(() => Effect.fail(e)));
-        }),
+          ).pipe(Effect.flatMap(() => Effect.fail(e))),
+        ),
       );
       timings.navMs = Date.now() - navStart;
+
+      // Let navigation settle — page needs to render the fulfilled HTML
+      yield* Effect.tryPromise({
+        try: () => navPromise,
+        catch: () => new Error("navigation_settle"),
+      }).pipe(Effect.ignore);
+      timings.interceptMs = Date.now() - navStart - timings.navMs;
 
       yield* Effect.logInfo(`Interception complete for ${domain} (${timings.navMs}ms)`);
 
