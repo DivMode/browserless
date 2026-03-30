@@ -201,7 +201,14 @@ export const executeAhrefsScrape = (
       // Phase 7: On failure, capture page diagnostics
       const diagnostics = result.success ? null : yield* captureDiagnostics(page);
 
-      // Phase 8: Collect CF solver telemetry
+      // Phase 8: Close page to trigger tabReplayComplete event, then collect
+      yield* Effect.tryPromise({
+        try: () => page.close().catch(() => {}),
+        catch: () => new Error("page_close"),
+      }).pipe(Effect.ignore);
+      // Brief wait for the tabReplayComplete CDP event to arrive
+      yield* Effect.sleep("2 seconds");
+
       const cfMetrics = cfListener.collect();
       const replayMeta = cfListener.getReplayMetadata();
 

@@ -185,15 +185,14 @@ export function setupCfListener(cdp: CDPSession): CfListener {
     }
   };
 
-  const onReplayComplete = (params: any) => {
-    if (params.replay_url) {
-      replayMeta = {
-        replay_url: params.replay_url ?? "",
-        replay_id: params.replay_id ?? "",
-        replay_duration_ms: params.duration_ms ?? 0,
-        replay_event_count: params.event_count ?? 0,
-      };
-    }
+  const onTabReplayComplete = (params: any) => {
+    // Matches pydoll's ReplayListener._on_tab_replay_complete
+    replayMeta = {
+      replay_url: params.replayUrl ?? "",
+      replay_id: params.sessionId ?? "",
+      replay_duration_ms: params.duration ?? 0,
+      replay_event_count: params.eventCount ?? 0,
+    };
   };
 
   // Register listeners
@@ -201,7 +200,7 @@ export function setupCfListener(cdp: CDPSession): CfListener {
   cdp.on("Browserless.cloudflareProgress" as any, onProgress);
   cdp.on("Browserless.cloudflareSolved" as any, onSolved);
   cdp.on("Browserless.cloudflareFailed" as any, onFailed);
-  cdp.on("Browserless.replayComplete" as any, onReplayComplete);
+  cdp.on("Browserless.tabReplayComplete" as any, onTabReplayComplete);
 
   return {
     collect(): CfSolveMetrics {
@@ -279,7 +278,7 @@ export function setupCfListener(cdp: CDPSession): CfListener {
       cdp.removeAllListeners("Browserless.cloudflareProgress" as any);
       cdp.removeAllListeners("Browserless.cloudflareSolved" as any);
       cdp.removeAllListeners("Browserless.cloudflareFailed" as any);
-      cdp.removeAllListeners("Browserless.replayComplete" as any);
+      cdp.removeAllListeners("Browserless.tabReplayComplete" as any);
     },
   };
 }
