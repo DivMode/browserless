@@ -79,25 +79,31 @@ export default class AhrefsBacklinksDispatchRoute extends HTTPRoute {
     // Background scrape + R2 write (runForkInServer provides OTel logger)
     runForkInServer(
       Effect.fn("dispatch.backlinks")(function* () {
-        const browser = yield* Effect.tryPromise(() =>
-          puppeteer.connect({ browserWSEndpoint: buildInternalWsUrl() }),
-        );
+        const browser = yield* Effect.tryPromise({
+          try: () => puppeteer.connect({ browserWSEndpoint: buildInternalWsUrl() }),
+          catch: (e: unknown) =>
+            new Error(`connect_browser: ${e instanceof Error ? e.message : String(e)}`),
+        });
 
         // Effect.ensuring guarantees cleanup even on fiber death (JS finally does NOT)
         yield* Effect.fn("dispatch.backlinks.scrape")(function* () {
-          const page = yield* Effect.tryPromise(async () => {
-            const pages = await browser.pages();
-            const p = pages[0] ?? (await browser.newPage());
-            if (PROXY) {
-              const proxyUrl = new URL(PROXY);
-              if (proxyUrl.username) {
-                await p.authenticate({
-                  username: decodeURIComponent(proxyUrl.username),
-                  password: decodeURIComponent(proxyUrl.password),
-                });
+          const page = yield* Effect.tryPromise({
+            try: async () => {
+              const pages = await browser.pages();
+              const p = pages[0] ?? (await browser.newPage());
+              if (PROXY) {
+                const proxyUrl = new URL(PROXY);
+                if (proxyUrl.username) {
+                  await p.authenticate({
+                    username: decodeURIComponent(proxyUrl.username),
+                    password: decodeURIComponent(proxyUrl.password),
+                  });
+                }
               }
-            }
-            return p;
+              return p;
+            },
+            catch: (e: unknown) =>
+              new Error(`page_setup: ${e instanceof Error ? e.message : String(e)}`),
           });
 
           const result = yield* executeAhrefsScrape(page, domain, "backlinks").pipe(

@@ -267,7 +267,11 @@ export const executeAhrefsScrape = (
     const t0 = Date.now();
 
     // Get raw CDP session for Fetch interception
-    const cdp = yield* Effect.promise(() => page.createCDPSession());
+    const cdp = yield* Effect.tryPromise({
+      try: () => page.createCDPSession(),
+      catch: (e: unknown) =>
+        new Error(`cdp_session: ${e instanceof Error ? e.message : String(e)}`),
+    });
 
     // ── Phase 1+2: Setup interception + Navigate ──
     const navStart = Date.now();
@@ -285,19 +289,30 @@ export const executeAhrefsScrape = (
       .catch(() => null);
 
     // Wait for interception — tryPromise so rejection is a catchable failure, not a defect
-    yield* Effect.tryPromise(() => interceptedPromise).pipe(
+    yield* Effect.tryPromise({
+      try: () => interceptedPromise,
+      catch: (e: unknown) =>
+        new Error(`interception_timeout: ${e instanceof Error ? e.message : String(e)}`),
+    }).pipe(
       Effect.catch(() =>
-        Effect.tryPromise(async () => {
-          const title = await page.title().catch(() => "");
-          if (title === "Verifying") return;
-          throw new Error(`Interception timeout (title=${title})`);
+        Effect.tryPromise({
+          try: async () => {
+            const title = await page.title().catch(() => "");
+            if (title === "Verifying") return;
+            throw new Error(`title_check_failed: title=${title}`);
+          },
+          catch: (e: unknown) =>
+            new Error(`interception_fallback: ${e instanceof Error ? e.message : String(e)}`),
         }),
       ),
     );
     timings.navMs = Date.now() - navStart;
 
     // Let navigation settle
-    yield* Effect.tryPromise(() => navPromise);
+    yield* Effect.tryPromise({
+      try: () => navPromise,
+      catch: (e: unknown) => new Error(`navigation: ${e instanceof Error ? e.message : String(e)}`),
+    });
     timings.interceptMs = Date.now() - navStart - timings.navMs;
 
     yield* Effect.logInfo(`Interception complete for ${domain} (${timings.navMs}ms)`);

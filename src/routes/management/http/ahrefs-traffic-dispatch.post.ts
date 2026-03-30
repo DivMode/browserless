@@ -73,24 +73,28 @@ export default class AhrefsTrafficDispatchRoute extends HTTPRoute {
 
     runForkInServer(
       Effect.fn("dispatch.traffic")(function* () {
-        const browser = yield* Effect.tryPromise(() =>
-          puppeteer.connect({ browserWSEndpoint: buildInternalWsUrl() }),
-        );
+        const browser = yield* Effect.tryPromise({
+          try: () => puppeteer.connect({ browserWSEndpoint: buildInternalWsUrl() }),
+          catch: (e) => new Error(`connect_browser: ${e instanceof Error ? e.message : String(e)}`),
+        });
 
         yield* Effect.fn("dispatch.traffic.scrape")(function* () {
-          const page = yield* Effect.tryPromise(async () => {
-            const pages = await browser.pages();
-            const p = pages[0] ?? (await browser.newPage());
-            if (PROXY) {
-              const proxyUrl = new URL(PROXY);
-              if (proxyUrl.username) {
-                await p.authenticate({
-                  username: decodeURIComponent(proxyUrl.username),
-                  password: decodeURIComponent(proxyUrl.password),
-                });
+          const page = yield* Effect.tryPromise({
+            try: async () => {
+              const pages = await browser.pages();
+              const p = pages[0] ?? (await browser.newPage());
+              if (PROXY) {
+                const proxyUrl = new URL(PROXY);
+                if (proxyUrl.username) {
+                  await p.authenticate({
+                    username: decodeURIComponent(proxyUrl.username),
+                    password: decodeURIComponent(proxyUrl.password),
+                  });
+                }
               }
-            }
-            return p;
+              return p;
+            },
+            catch: (e) => new Error(`page_setup: ${e instanceof Error ? e.message : String(e)}`),
           });
 
           const result = yield* executeAhrefsScrape(page, domain, "traffic").pipe(
