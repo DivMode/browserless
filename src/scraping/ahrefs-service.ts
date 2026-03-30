@@ -301,9 +301,13 @@ export const executeAhrefsScrape = (
             const title = await page.title().catch(() => "");
             // CF still solving — let it finish
             if (title === "Verifying" || title === "Just a moment...") return;
-            // Ahrefs page loaded but Fetch missed the response — inject turnstile HTML directly
+            // Ahrefs page loaded but Fetch missed the response.
+            // Re-navigate to the same URL — CF clearance cookies are set from the first solve,
+            // so no CF challenge this time. Fresh Fetch interception will catch the 200.
             if (title.includes("Ahrefs")) {
-              const html =
+              // Reset Fetch interception with fresh state
+              await cdp.send("Fetch.disable" as any).catch(() => {});
+              const retryHtml =
                 scrapeType === "traffic"
                   ? minimalTrafficHtml({
                       domain,
@@ -319,16 +323,68 @@ export const executeAhrefsScrape = (
                       sessionId: "",
                       targetId: "",
                     });
-              // Disable Fetch interception (no more request pausing needed)
-              await cdp.send("Fetch.disable" as any).catch(() => {});
-              // Replace page content while preserving the ahrefs.com origin.
-              // page.setContent() changes origin to about:blank, breaking turnstile.
-              // CDP Page.setDocumentContent replaces the document without changing origin.
-              const { frameTree } = (await cdp.send("Page.getFrameTree" as any)) as any;
-              const frameId = frameTree?.frame?.id;
-              await cdp.send("Page.setDocumentContent" as any, { frameId, html });
-              // Wait for turnstile script to load
-              await new Promise((r) => setTimeout(r, 2000));
+              const retryBase64 = Buffer.from(retryHtml).toString("base64");
+              // Re-enable Fetch to intercept the retry navigation
+              let retryResolved = false;
+              const retryPromise = new Promise<void>((resolve, reject) => {
+                const retryTimer = setTimeout(
+                  () => reject(new Error("retry_interception_timeout")),
+                  15_000,
+                );
+                cdp
+                  .send("Fetch.enable" as any, {
+                    patterns: [
+                      { urlPattern: "*", requestStage: "Request" },
+                      { urlPattern: "https://ahrefs.com/*", requestStage: "Response" },
+                    ],
+                  })
+                  .then(() => {
+                    cdp.on("Fetch.requestPaused" as any, (params: any) => {
+                      const rid = params.requestId;
+                      if (params.responseStatusCode !== undefined) {
+                        const rUrl = (params.request?.url ?? "") as string;
+                        const rStatus = params.responseStatusCode as number;
+                        const rType = (params.resourceType ?? "") as string;
+                        if (
+                          rUrl.includes("ahrefs.com") &&
+                          rStatus === 200 &&
+                          rType === "Document" &&
+                          !retryResolved
+                        ) {
+                          retryResolved = true;
+                          cdp
+                            .send("Fetch.fulfillRequest" as any, {
+                              requestId: rid,
+                              responseCode: 200,
+                              responseHeaders: [
+                                { name: "Content-Type", value: "text/html; charset=utf-8" },
+                              ],
+                              body: retryBase64,
+                            })
+                            .then(() => {
+                              clearTimeout(retryTimer);
+                              resolve();
+                            })
+                            .catch(reject);
+                        } else {
+                          cdp
+                            .send("Fetch.continueResponse" as any, { requestId: rid })
+                            .catch(() => {});
+                        }
+                      } else {
+                        cdp
+                          .send("Fetch.continueRequest" as any, { requestId: rid })
+                          .catch(() => {});
+                      }
+                    });
+                    // Re-navigate — CF cookies already set, should get direct 200
+                    page
+                      .goto(url, { timeout: 15_000, waitUntil: "domcontentloaded" })
+                      .catch(() => {});
+                  })
+                  .catch(reject);
+              });
+              await retryPromise;
               usedFallback = true;
               return;
             }
