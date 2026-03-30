@@ -55,6 +55,7 @@
     "start": "env-cmd -f .env bun build"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1019.0",
     "@divmode/rrweb": "^0.0.40",
     "@divmode/rrweb-plugin-console-record": "^0.0.40",
     "@hapi/bourne": "^3.0.0",
