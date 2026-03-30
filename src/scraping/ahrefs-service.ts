@@ -319,9 +319,16 @@ export const executeAhrefsScrape = (
                       sessionId: "",
                       targetId: "",
                     });
-              // Disable Fetch interception before setContent (no more request pausing needed)
+              // Disable Fetch interception (no more request pausing needed)
               await cdp.send("Fetch.disable" as any).catch(() => {});
-              await page.setContent(html, { waitUntil: "domcontentloaded", timeout: 10_000 });
+              // Replace page content while preserving the ahrefs.com origin.
+              // page.setContent() changes origin to about:blank, breaking turnstile.
+              // CDP Page.setDocumentContent replaces the document without changing origin.
+              const { frameTree } = (await cdp.send("Page.getFrameTree" as any)) as any;
+              const frameId = frameTree?.frame?.id;
+              await cdp.send("Page.setDocumentContent" as any, { frameId, html });
+              // Wait for turnstile script to load
+              await new Promise((r) => setTimeout(r, 2000));
               usedFallback = true;
               return;
             }
