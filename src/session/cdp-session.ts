@@ -732,13 +732,37 @@ export class CdpSession {
     })();
   }
 
-  /** Finalize a tab — flush buffer, mark as finalized (Effect-native). */
+  /** Finalize a tab — flush _buf + events buffer, mark as finalized (Effect-native). */
   private finalizeTabEffect(targetId: TargetId, timeoutMs = 30_000): Effect.Effect<void> {
     const session = this;
     return Effect.fn("cdp.finalizeTab")(function* () {
       yield* Effect.annotateCurrentSpan({ "cdp.target_id": targetId });
       const target = session.targets.getByTarget(targetId);
       if (target?.finalizedResult) return; // prevent double-finalization
+
+      // Flush _buf before collecting — same as collectAllEventsEffect.
+      // Without this, events buffered in _buf since the last push are lost.
+      if (target) {
+        yield* session
+          .send(
+            "Runtime.evaluate",
+            {
+              expression: `(function() {
+            var rec = window.__browserlessRecording;
+            if (!rec) return;
+            if (rec._ft) { clearTimeout(rec._ft); rec._ft = null; }
+            if (rec._buf?.length) {
+              for (var i = 0; i < rec._buf.length; i++) rec.events.push(rec._buf[i]);
+              rec._buf = [];
+            }
+          })()`,
+              returnByValue: true,
+            },
+            target.cdpSessionId,
+            timeoutMs,
+          )
+          .pipe(Effect.ignore);
+      }
 
       yield* session.collectEventsEffect(targetId, timeoutMs);
 
@@ -1696,7 +1720,13 @@ export class CdpSession {
         // ── Phase 1: Lightweight CDP enables (all tabs, including about:blank keepalive) ──
         yield* session
           .send("Runtime.addBinding", { name: "__rrwebPush" }, cdpSessionId)
-          .pipe(Effect.ignore);
+          .pipe(
+            Effect.catch((e) =>
+              Effect.logWarning(
+                `__rrwebPush binding failed for ${cdpSessionId.slice(0, 8)}: ${e instanceof Error ? e.message : String(e)} — tab will have zero-event replay`,
+              ),
+            ),
+          );
         yield* session.send("Page.enable", {}, cdpSessionId).pipe(Effect.ignore);
         yield* session.send("Runtime.enable", {}, cdpSessionId).pipe(Effect.ignore);
         yield* session.send("Network.enable", {}, cdpSessionId).pipe(Effect.ignore);
@@ -1735,7 +1765,13 @@ export class CdpSession {
             },
             cdpSessionId,
           )
-          .pipe(Effect.ignore);
+          .pipe(
+            Effect.catch((e) =>
+              Effect.logWarning(
+                `Target.setAutoAttach failed for ${cdpSessionId.slice(0, 8)}: ${e instanceof Error ? e.message : String(e)} — iframes will not be attached`,
+              ),
+            ),
+          );
 
         // Resume the target
         if (waitingForDebugger) {
@@ -2045,25 +2081,38 @@ export class CdpSession {
           );
         }
         if (target) {
-          // Re-enable CDP domains that Chrome resets on same-target navigation
+          // Re-enable CDP domains that Chrome resets on same-target navigation.
+          // Each command logs on failure instead of silently ignoring — a failed
+          // re-enable means the tab loses replay, CF solving, or iframe detection.
+          const tid = target.cdpSessionId.slice(0, 8);
+          const warn = (cmd: string) => (e: unknown) =>
+            Effect.logWarning(
+              `Navigation re-enable ${cmd} failed for ${tid}: ${e instanceof Error ? e.message : String(e)}`,
+            );
           yield* Effect.all(
             [
-              session.send("Runtime.addBinding", { name: "__rrwebPush" }, target.cdpSessionId),
-              session.send("Runtime.enable", {}, target.cdpSessionId),
-              session.send("Page.enable", {}, target.cdpSessionId),
-              session.send("Network.enable", {}, target.cdpSessionId),
-              session.send(
-                "Target.setAutoAttach",
-                {
-                  autoAttach: true,
-                  waitForDebuggerOnStart: true,
-                  flatten: true,
-                },
-                target.cdpSessionId,
-              ),
+              session
+                .send("Runtime.addBinding", { name: "__rrwebPush" }, target.cdpSessionId)
+                .pipe(Effect.catch(warn("addBinding"))),
+              session
+                .send("Runtime.enable", {}, target.cdpSessionId)
+                .pipe(Effect.catch(warn("Runtime.enable"))),
+              session
+                .send("Page.enable", {}, target.cdpSessionId)
+                .pipe(Effect.catch(warn("Page.enable"))),
+              session
+                .send("Network.enable", {}, target.cdpSessionId)
+                .pipe(Effect.catch(warn("Network.enable"))),
+              session
+                .send(
+                  "Target.setAutoAttach",
+                  { autoAttach: true, waitForDebuggerOnStart: true, flatten: true },
+                  target.cdpSessionId,
+                )
+                .pipe(Effect.catch(warn("setAutoAttach"))),
             ],
             { concurrency: "unbounded" },
-          ).pipe(Effect.ignore);
+          );
 
           // Page navigated — no-op for replay (extension handles re-injection)
           yield* session.cloudflareHooks
