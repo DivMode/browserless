@@ -99,19 +99,27 @@ export default class AhrefsScrapePostRoute extends HTTPRoute {
             return p;
           });
 
-          const result = yield* executeAhrefsScrape(page, domain, scrapeType, sitekey).pipe(
+          const scrapeOutput = yield* executeAhrefsScrape(page, domain, scrapeType, sitekey).pipe(
             Effect.catch((e: unknown) =>
               Effect.succeed({
-                success: false as const,
+                result: {
+                  success: false as const,
+                  domain,
+                  error: e instanceof Error ? e.message : String(e),
+                  errorType: "scrape_error",
+                  timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
+                },
+                cfMetrics: null as any,
+                diagnostics: null,
                 domain,
-                error: e instanceof Error ? e.message : String(e),
-                errorType: "scrape_error",
+                scrapeType: scrapeType as any,
+                scrapeUrl: "",
                 timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
               }),
             ),
           );
 
-          jsonResponse(res, result.success ? 200 : 500, result);
+          jsonResponse(res, scrapeOutput.result.success ? 200 : 500, scrapeOutput.result);
         } finally {
           browser.close().catch(() => {});
         }

@@ -18,12 +18,13 @@ import {
   captureDiagnostics,
   cleanupCdp,
   enableFetchInterception,
-  getSessionId,
   setupFetchInterception,
   waitForDocumentInterception,
   waitForResult,
 } from "./ahrefs-cdp.js";
 import { setupCfListener } from "./ahrefs-cf-listener.js";
+import type { CfSolveMetrics } from "./ahrefs-cf-listener.js";
+import type { DiagnosticInfo } from "./ahrefs-cdp.js";
 import { minimalTrafficHtml, minimalTurnstileHtml } from "./ahrefs-html.js";
 import {
   AHREFS_BASE_URL,
@@ -32,7 +33,17 @@ import {
   AHREFS_TRAFFIC_URL,
 } from "./ahrefs-types.js";
 import type { AhrefsScrapeResult, ScrapeType } from "./ahrefs-types.js";
-import { buildWideEvent } from "./ahrefs-wide-event.js";
+
+/** Full scrape output — dispatch route uses this to build the wide event AFTER browser.close(). */
+export interface ScrapeOutput {
+  result: AhrefsScrapeResult;
+  cfMetrics: CfSolveMetrics;
+  diagnostics: DiagnosticInfo | null;
+  domain: string;
+  scrapeType: ScrapeType;
+  scrapeUrl: string;
+  timings: { navMs: number; interceptMs: number; resultMs: number; totalMs: number };
+}
 
 // ── Build URL ────────────────────────────────────────────────────────
 
@@ -212,42 +223,16 @@ export const executeAhrefsScrape = (
       // Phase 7: On failure, capture page diagnostics
       const diagnostics = result.success ? null : yield* captureDiagnostics(page);
 
-      // Phase 8: Collect CF solver telemetry + replay URL
+      // Phase 8: Collect CF solver telemetry
       const cfMetrics = cfListener.collect();
 
-      // Session UUID via connection.send("Browser.getVersion") — browser-level, not page-level
-      const sessionId = yield* getSessionId(cdp);
-
-      // Construct replay URL from session UUID — always use sessionId, never rely on
-      // tabReplayComplete event (fires during browser.close, after wide event is emitted)
-      const REPLAY_BASE = process.env.REPLAY_PLAYER_URL ?? "https://replay.catchseo.com";
-      const replayMeta = sessionId
-        ? {
-            replay_url: `${REPLAY_BASE}/recording/${sessionId}`,
-            replay_id: sessionId,
-            replay_duration_ms: timings.totalMs,
-            replay_event_count: 0,
-          }
-        : null;
-
-      // Phase 9: Emit wide event with ALL attributes
-      const wideEvent = buildWideEvent({
-        result,
-        cfMetrics,
-        replayMeta,
-        diagnostics,
-        domain,
-        scrapeType,
-        scrapeUrl: url,
-        sessionId,
-      });
-
-      yield* Effect.logInfo("ahrefs.scrape.wide_event").pipe(Effect.annotateLogs(wideEvent));
-
-      // Phase 10: Cleanup CF listener
+      // Cleanup listeners
       cfListener.cleanup();
       interception.cleanup();
 
-      return result;
+      // Return everything the dispatch route needs to build the wide event.
+      // The wide event is emitted by the dispatch route AFTER browser.close()
+      // so that replay URL can be resolved from the replay server.
+      return { result, cfMetrics, diagnostics, domain, scrapeType, scrapeUrl: url, timings };
     })().pipe(Effect.ensuring(cleanupCdp(cdp)));
   })();
