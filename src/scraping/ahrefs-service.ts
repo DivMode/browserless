@@ -71,11 +71,13 @@ const setupFetchInterception = (
 ): Promise<void> =>
   new Promise<void>((resolveIntercepted, rejectIntercepted) => {
     let fulfilled = false;
-    let timedOut = false;
+    let settled = false;
 
     const timer = setTimeout(() => {
-      timedOut = true;
-      rejectIntercepted(new Error("interception_timeout"));
+      if (!settled) {
+        settled = true;
+        rejectIntercepted(new Error("interception_timeout"));
+      }
     }, MAX_INTERCEPT_WAIT_MS);
 
     const html =
@@ -108,15 +110,18 @@ const setupFetchInterception = (
         });
       } catch (e) {
         clearTimeout(timer);
-        rejectIntercepted(e instanceof Error ? e : new Error(String(e)));
+        if (!settled) {
+          settled = true;
+          rejectIntercepted(e instanceof Error ? e : new Error(String(e)));
+        }
         return;
       }
 
       cdp.on("Fetch.requestPaused" as any, (params: any) => {
-        if (timedOut) return;
         const requestId = params.requestId;
 
         if (params.responseStatusCode !== undefined) {
+          // Response stage — only fires for https://ahrefs.com/*
           const url = (params.request?.url ?? "") as string;
           const status = params.responseStatusCode as number;
           const resourceType = (params.resourceType ?? "") as string;
@@ -125,15 +130,21 @@ const setupFetchInterception = (
             value: string;
           }>;
 
+          const hasCfMitigated = responseHeaders.some(
+            (h) => h.name.toLowerCase() === "cf-mitigated",
+          );
           const isAhrefsDoc =
             url.includes("ahrefs.com") && status === 200 && resourceType === "Document";
 
-          if (isAhrefsDoc) {
-            const isCfChallenge = responseHeaders.some(
-              (h) => h.name.toLowerCase() === "cf-mitigated",
+          // Log every response-stage event for debugging
+          if (url.includes("ahrefs.com") && resourceType === "Document") {
+            console.log(
+              `[fetch.response] domain=${domain} url=${url.substring(0, 80)} status=${status} type=${resourceType} cf=${hasCfMitigated} fulfilled=${fulfilled} settled=${settled}`,
             );
+          }
 
-            if (isCfChallenge) {
+          if (isAhrefsDoc) {
+            if (hasCfMitigated) {
               cdp.send("Fetch.continueResponse" as any, { requestId }).catch(() => {});
             } else if (!fulfilled) {
               fulfilled = true;
@@ -146,11 +157,17 @@ const setupFetchInterception = (
                 })
                 .then(() => {
                   clearTimeout(timer);
-                  resolveIntercepted();
+                  if (!settled) {
+                    settled = true;
+                    resolveIntercepted();
+                  }
                 })
                 .catch((e: unknown) => {
                   clearTimeout(timer);
-                  rejectIntercepted(e instanceof Error ? e : new Error(String(e)));
+                  if (!settled) {
+                    settled = true;
+                    rejectIntercepted(e instanceof Error ? e : new Error(String(e)));
+                  }
                 });
             } else {
               cdp.send("Fetch.continueResponse" as any, { requestId }).catch(() => {});
@@ -159,6 +176,8 @@ const setupFetchInterception = (
             cdp.send("Fetch.continueResponse" as any, { requestId }).catch(() => {});
           }
         } else {
+          // Request stage — ALWAYS continue, even after timeout/settlement.
+          // Stopping here freezes the page permanently.
           cdp.send("Fetch.continueRequest" as any, { requestId }).catch(() => {});
         }
       });
@@ -265,21 +284,20 @@ export const executeAhrefsScrape = (
       })
       .catch(() => null);
 
-    // Wait for interception
-    yield* Effect.promise(() => interceptedPromise).pipe(
+    // Wait for interception — tryPromise so rejection is a catchable failure, not a defect
+    yield* Effect.tryPromise(() => interceptedPromise).pipe(
       Effect.catch(() =>
-        // Backup: check if title is already "Verifying"
-        Effect.promise(async () => {
+        Effect.tryPromise(async () => {
           const title = await page.title().catch(() => "");
           if (title === "Verifying") return;
-          throw new Error("Interception failed and title is not Verifying");
+          throw new Error(`Interception timeout (title=${title})`);
         }),
       ),
     );
     timings.navMs = Date.now() - navStart;
 
     // Let navigation settle
-    yield* Effect.promise(() => navPromise);
+    yield* Effect.tryPromise(() => navPromise);
     timings.interceptMs = Date.now() - navStart - timings.navMs;
 
     yield* Effect.logInfo(`Interception complete for ${domain} (${timings.navMs}ms)`);

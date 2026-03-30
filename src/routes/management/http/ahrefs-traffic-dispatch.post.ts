@@ -73,14 +73,14 @@ export default class AhrefsTrafficDispatchRoute extends HTTPRoute {
 
     runForkInServer(
       Effect.fn("dispatch.traffic")(function* () {
-        let browser: import("puppeteer-core").Browser | undefined;
-        try {
-          browser = yield* Effect.promise(() =>
-            puppeteer.connect({ browserWSEndpoint: buildInternalWsUrl() }),
-          );
-          const page = yield* Effect.promise(async () => {
-            const pages = await browser!.pages();
-            const p = pages[0] ?? (await browser!.newPage());
+        const browser = yield* Effect.tryPromise(() =>
+          puppeteer.connect({ browserWSEndpoint: buildInternalWsUrl() }),
+        );
+
+        yield* Effect.fn("dispatch.traffic.scrape")(function* () {
+          const page = yield* Effect.tryPromise(async () => {
+            const pages = await browser.pages();
+            const p = pages[0] ?? (await browser.newPage());
             if (PROXY) {
               const proxyUrl = new URL(PROXY);
               if (proxyUrl.username) {
@@ -105,46 +105,33 @@ export default class AhrefsTrafficDispatchRoute extends HTTPRoute {
             ),
           );
 
-          console.log(
-            `[dispatch.traffic] scrape done: domain=${domain} success=${result.success} error=${result.error ?? "none"}`,
+          yield* Effect.logInfo(`Dispatch done: ${domain} success=${result.success}`).pipe(
+            Effect.annotateLogs({
+              dispatch_domain: domain,
+              dispatch_instance_id: instanceId,
+              dispatch_success: String(result.success),
+              dispatch_error: result.error ?? "",
+            }),
           );
 
           if (result.success) {
             yield* writeResult(instanceId, domain, "traffic", result as any).pipe(
-              Effect.tap(() =>
-                Effect.sync(() => console.log(`[dispatch.traffic] R2 write OK: ${instanceId}`)),
-              ),
+              Effect.tap(() => Effect.logInfo(`R2 write OK: ${instanceId}`)),
               Effect.catch((e: unknown) =>
-                Effect.sync(() =>
-                  console.error(
-                    `[dispatch.traffic] R2 write FAILED: ${e instanceof Error ? e.message : String(e)}`,
-                  ),
-                ),
+                Effect.logError(`R2 write FAILED: ${e instanceof Error ? e.message : String(e)}`),
               ),
             );
           } else {
             yield* writeFailure(instanceId, domain, "traffic", result.error ?? "unknown").pipe(
-              Effect.tap(() =>
-                Effect.sync(() =>
-                  console.log(`[dispatch.traffic] R2 failure write OK: ${instanceId}`),
-                ),
-              ),
+              Effect.tap(() => Effect.logInfo(`R2 failure write OK: ${instanceId}`)),
               Effect.catch((e: unknown) =>
-                Effect.sync(() =>
-                  console.error(
-                    `[dispatch.traffic] R2 failure write FAILED: ${e instanceof Error ? e.message : String(e)}`,
-                  ),
+                Effect.logError(
+                  `R2 failure write FAILED: ${e instanceof Error ? e.message : String(e)}`,
                 ),
               ),
             );
           }
-
-          console.log(
-            `[dispatch.traffic] complete: domain=${domain} instance=${instanceId} success=${result.success}`,
-          );
-        } finally {
-          if (browser) browser.close().catch(() => {});
-        }
+        })().pipe(Effect.ensuring(Effect.sync(() => browser.close().catch(() => {}))));
       })(),
     );
   }
