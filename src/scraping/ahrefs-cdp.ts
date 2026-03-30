@@ -27,18 +27,29 @@ export const acquireCdpSession = (page: Page) =>
 
 // ── Session + target ID extraction ──────────────────────────────────
 
-/** Get Chrome's session UUID via browser-level Browser.getVersion on the Connection. */
+/**
+ * Get Chrome's session UUID via connection.send("Browser.getVersion").
+ * Retries once after 500ms if the Connection isn't ready yet.
+ */
 export const getSessionId = (cdp: CDPSession) =>
   Effect.fn("ahrefs.getSessionId")(function* () {
     const connection = cdp.connection();
     if (!connection) return "";
-    const info = yield* Effect.tryPromise({
-      try: () =>
-        connection.send("Browser.getVersion") as unknown as Promise<Record<string, unknown>>,
-      catch: () => null,
-    }).pipe(Effect.catch(() => Effect.succeed(null)));
-    const url = String((info as any)?.webSocketDebuggerUrl ?? "");
-    return url.includes("/devtools/browser/") ? (url.split("/devtools/browser/").pop() ?? "") : "";
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt > 0) yield* Effect.sleep("500 millis");
+      const info = yield* Effect.tryPromise({
+        try: () =>
+          connection.send("Browser.getVersion") as unknown as Promise<Record<string, unknown>>,
+        catch: () => null,
+      }).pipe(Effect.catch(() => Effect.succeed(null)));
+      const debugUrl = String((info as any)?.webSocketDebuggerUrl ?? "");
+      if (debugUrl.includes("/devtools/browser/")) {
+        return debugUrl.split("/devtools/browser/").pop() ?? "";
+      }
+    }
+
+    return "";
   })();
 
 /** Get the page's target ID for the tab-specific replay ID. */
