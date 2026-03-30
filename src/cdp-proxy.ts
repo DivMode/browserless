@@ -1033,28 +1033,25 @@ export class CDPProxy {
       ),
     );
 
-    // Run onBeforeClose if the CLIENT initiated the close (WS closing/closed)
-    // and Browser.close CDP interception hasn't already handled it.
-    // This ensures replay flush on direct WS disconnect (pydoll/puppeteer close
-    // without sending Browser.close CDP command).
-    // SKIP when Chrome's WS closed first (browser crash) — the browser is already
-    // dead, onBeforeClose would try to send CDP commands on a dead connection.
+    // Scope close → onClose (frees limiter slot) → fire-and-forget onBeforeClose.
+    // Order matters:
+    //   1. Scope close: interrupts all fibers, runs acquireRelease finalizers
+    //   2. onClose: frees the limiter slot (MUST be fast, never blocked)
+    //   3. onBeforeClose: replay flush (fire-and-forget, runs in background)
+    // onBeforeClose MUST be after scope close — it kills Chrome, which would
+    // crash any fibers still running inside the scope.
     const clientInitiated = clientState !== undefined && clientState !== WebSocket.OPEN;
-    const beforeClose =
-      this.onBeforeClose && !this.closeRequested && clientInitiated
-        ? Effect.runPromise(
-            Effect.tryPromise(() => this.onBeforeClose!()).pipe(
-              Effect.timeout(Duration.millis(ON_BEFORE_CLOSE_TIMEOUT_MS)),
-              Effect.ignore,
-            ),
-          ).catch(() => {})
-        : Promise.resolve();
-
-    // Await onBeforeClose, then scope close, then fire onClose
-    this.closePromise = beforeClose
-      .then(() => Effect.runPromise(Scope.close(this.proxyScope, Exit.void)).catch(() => {}))
+    this.closePromise = Effect.runPromise(Scope.close(this.proxyScope, Exit.void))
+      .catch(() => {})
       .then(() => {
         this.onClose?.();
+        // Replay flush after limiter slot freed. Only on client-initiated
+        // disconnect (not Chrome crash) when Browser.close CDP didn't handle it.
+        // Sets onBeforeClosePromise so destroy() (fire-and-forget from router)
+        // awaits the flush before killing Chrome — replays saved before teardown.
+        if (this.onBeforeClose && !this.closeRequested && clientInitiated) {
+          this.onBeforeClose().catch(() => {});
+        }
       });
   }
 
