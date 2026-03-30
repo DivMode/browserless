@@ -1802,12 +1802,13 @@ export class CdpSession {
     return Effect.fn("tab.activate")(function* () {
       const tab = session.tabs.get(targetId);
       if (!tab || tab.activated) return; // Idempotent
-      tab.activated = true;
 
       // Resolve cdpSessionId if not provided (called from handleTargetInfoChangedEffect)
       const resolvedCdpSessionId =
         cdpSessionId ?? session.targets.getByTarget(targetId)?.cdpSessionId;
-      if (!resolvedCdpSessionId) return;
+      if (!resolvedCdpSessionId) return; // Don't set activated — allow retry on next navigation
+
+      tab.activated = true;
 
       yield* Effect.annotateCurrentSpan({ "tab.target_id": targetId });
 
