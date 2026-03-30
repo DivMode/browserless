@@ -125,8 +125,10 @@ export default class AhrefsTrafficDispatchRoute extends HTTPRoute {
         yield* Effect.sleep("2 seconds");
 
         // Query replay server
-        const REPLAY_INGEST = process.env.REPLAY_INGEST_URL ?? "http://replay:3000";
-        const REPLAY_BASE = process.env.REPLAY_PLAYER_URL ?? "https://replay.catchseo.com";
+        const REPLAY_INGEST = process.env.REPLAY_INGEST_URL;
+        const REPLAY_BASE = process.env.REPLAY_PLAYER_URL;
+        if (!REPLAY_INGEST) throw new Error("REPLAY_INGEST_URL env var required");
+        if (!REPLAY_BASE) throw new Error("REPLAY_PLAYER_URL env var required");
         const replayMeta = yield* Effect.tryPromise({
           try: async () => {
             const res = await fetch(`${REPLAY_INGEST}/replays`);
