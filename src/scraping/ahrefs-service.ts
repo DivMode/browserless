@@ -218,18 +218,17 @@ export const executeAhrefsScrape = (
       // Session UUID via connection.send("Browser.getVersion") — browser-level, not page-level
       const sessionId = yield* getSessionId(cdp);
 
+      // Construct replay URL from session UUID — always use sessionId, never rely on
+      // tabReplayComplete event (fires during browser.close, after wide event is emitted)
       const REPLAY_BASE = process.env.REPLAY_PLAYER_URL ?? "https://replay.catchseo.com";
-      // Use tabReplayComplete data if available (from CF listener on Connection)
-      let replayMeta = cfListener.getReplayMetadata();
-      if (!replayMeta?.replay_url && sessionId) {
-        // Single-tab dispatch: replay URL uses session ID directly
-        replayMeta = {
-          replay_url: `${REPLAY_BASE}/recording/${sessionId}`,
-          replay_id: sessionId,
-          replay_duration_ms: timings.totalMs,
-          replay_event_count: 0,
-        };
-      }
+      const replayMeta = sessionId
+        ? {
+            replay_url: `${REPLAY_BASE}/recording/${sessionId}`,
+            replay_id: sessionId,
+            replay_duration_ms: timings.totalMs,
+            replay_event_count: 0,
+          }
+        : null;
 
       // Phase 9: Emit wide event with ALL attributes
       const wideEvent = buildWideEvent({
