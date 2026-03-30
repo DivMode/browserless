@@ -38,6 +38,8 @@ export interface ScrapeTimings {
 export interface AhrefsScrapeResult {
   readonly success: boolean;
   readonly domain: string;
+  readonly url?: string;
+  readonly scrapedAt?: number;
   readonly data?: unknown;
   readonly error?: string;
   readonly errorType?: string;

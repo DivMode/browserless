@@ -74,10 +74,14 @@ const parseResult = (
   scrapeType: ScrapeType,
   timings: ScrapeTimings,
 ): AhrefsScrapeResult => {
+  const url = buildUrl(domain, scrapeType);
+  const scrapedAt = Math.floor(Date.now() / 1000);
+
   if (!apiResult) {
     return {
       success: false,
       domain,
+      scrapedAt,
       error: "No API result (turnstile timeout or solver failure)",
       errorType: `turnstile_timeout_${scrapeType}`,
       timings,
@@ -88,6 +92,7 @@ const parseResult = (
     return {
       success: false,
       domain,
+      scrapedAt,
       error: String(apiResult.message ?? apiResult.error),
       errorType: "api_error",
       data: apiResult,
@@ -101,6 +106,7 @@ const parseResult = (
       return {
         success: false,
         domain,
+        scrapedAt,
         error: `backlinks_fetch_failed: ${String(bl.message ?? "?")}`,
         errorType: "backlinks_fetch_failed",
         data: { websiteData: apiResult.overview, backlinksData: apiResult.backlinks },
@@ -110,6 +116,8 @@ const parseResult = (
     return {
       success: true,
       domain,
+      url,
+      scrapedAt,
       data: { websiteData: apiResult.overview, backlinksData: apiResult.backlinks },
       timings,
     };
@@ -118,6 +126,8 @@ const parseResult = (
   return {
     success: true,
     domain,
+    url,
+    scrapedAt,
     data: { trafficData: apiResult.overview },
     timings,
   };
