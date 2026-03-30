@@ -369,13 +369,14 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
             ].join(","),
 
           // ── WebGL rendering ──────────────────────────────────────────
-          // DO NOT use SwiftShader — Akamai detects it as headless Chrome.
-          // Xvfb is running on :99 with Mesa/LLVMpipe which provides
-          // a real-looking WebGL renderer string instead of "SwiftShader".
-          // The pydoll fingerprint injection also overrides getParameter()
-          // to return NVIDIA GTX 1080 as the renderer for extra safety.
-          // `--use-gl=angle`,               // REMOVED: forces ANGLE backend
-          // `--use-angle=swiftshader-webgl`, // REMOVED: Akamai detects SwiftShader
+          // SwiftShader provides WORKING WebGL in Docker/Xvfb (required for
+          // canvas/audio fingerprinting). Without it, Chrome has NO WebGL and
+          // fingerprint data is incomplete (fewer fields = instant bot detection).
+          // Akamai detects the "Google SwiftShader" renderer STRING, but the
+          // pydoll fingerprint injection overrides getParameter(UNMASKED_RENDERER)
+          // to return a real GPU name, so the string is never exposed to scripts.
+          `--use-gl=angle`,
+          `--use-angle=swiftshader-webgl`,
 
           // ── Background throttling prevention ─────────────────────────
           `--disable-background-timer-throttling`,
