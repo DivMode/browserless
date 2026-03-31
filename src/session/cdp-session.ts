@@ -2160,6 +2160,12 @@ export class CdpSession {
     const target = this.targets.getByCdpSession(frameCdpSessionId);
     if (!target) return Effect.void;
 
+    // Skip OOPIF navigations — they report frame.parentId=null (root of their own
+    // renderer) but are NOT page navigations. Without this check, a turnstile OOPIF
+    // self-redirect after solving is misattributed as click_navigation, destroying
+    // the page's JS context in the solver's resolution logic.
+    if (this.targets.getParentCdpSession(frameCdpSessionId)) return Effect.void;
+
     const isCFUrl =
       url.includes("__cf_chl_rt_tk=") ||
       url.includes("__cf_chl_f_tk=") ||
