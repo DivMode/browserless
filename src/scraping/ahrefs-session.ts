@@ -348,16 +348,26 @@ export class AhrefsSessionManager {
           ),
         );
 
+        // Get this page's targetId for replay matching
+        const pageTargetId: string = yield* Effect.tryPromise({
+          try: async () => {
+            const t = page.target();
+            return ((t as any)?._targetId as string) ?? "";
+          },
+          catch: (): Error => new Error("targetId"),
+        }).pipe(Effect.catch(() => Effect.succeed("")));
+
         // Close page (triggers replay flush for this tab)
         yield* Effect.tryPromise({
           try: () => page.close(),
           catch: () => undefined,
         }).pipe(Effect.ignore);
 
-        // Use per-tab replay metadata from CF listener (matched by targetId).
-        // The old resolveReplayUrl heuristic grabbed the "most recent" replay
-        // which was wrong with concurrent tabs — every tab got the same replay.
-        const replayMeta = scrapeOutput.replayMeta ?? null;
+        // Wait for replay flush then query server, filtered by this tab's targetId.
+        // tabReplayComplete CDP event fires AFTER page.close, so cfListener can't
+        // capture it in time. Server query + targetId filter is the reliable path.
+        yield* Effect.sleep("2 seconds");
+        const replayMeta = yield* this.resolveReplayUrl(scrapeOutput, pageTargetId);
 
         // Emit wide event with session context
         const wideEvent = buildWideEvent({
@@ -386,6 +396,45 @@ export class AhrefsSessionManager {
         this.releaseTabSlot();
       }
     }).bind(this)();
+  }
+
+  // ── Replay URL resolution (filtered by targetId) ──────────────
+
+  private resolveReplayUrl(
+    scrapeOutput: ScrapeOutput,
+    pageTargetId: string,
+  ): Effect.Effect<import("./ahrefs-cf-listener.js").ReplayMetadata | null> {
+    return Effect.tryPromise({
+      try: async () => {
+        const REPLAY_INGEST = process.env.REPLAY_INGEST_URL;
+        const REPLAY_BASE = process.env.REPLAY_PLAYER_URL;
+        if (!REPLAY_INGEST || !REPLAY_BASE) return null;
+
+        const res = await fetch(`${REPLAY_INGEST}/replays`);
+        if (!res.ok) return null;
+        const replays = (await res.json()) as Array<{
+          id: string;
+          startedAt: number | null;
+          eventCount: number;
+        }>;
+
+        // Match by targetId — the replay ID format is "{sessionUUID}--tab-{targetId}"
+        const ours = pageTargetId
+          ? replays.find((r) => r.id.includes(pageTargetId))
+          : replays
+              .filter((r) => (r.startedAt ?? 0) > Date.now() - 60_000)
+              .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0];
+
+        if (!ours) return null;
+        return {
+          replay_url: `${REPLAY_BASE}/replay/${ours.id}`,
+          replay_id: ours.id,
+          replay_duration_ms: scrapeOutput.result.timings?.totalMs ?? 0,
+          replay_event_count: ours.eventCount ?? 0,
+        };
+      },
+      catch: () => null,
+    }).pipe(Effect.catch(() => Effect.succeed(null)));
   }
 
   // ── Health counter updates ────────────────────────────────────
