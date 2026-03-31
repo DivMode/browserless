@@ -158,21 +158,11 @@ export function setupFetchInterception(
         }).catch(() => {});
       }
 
-      // Block CF challenge-platform scripts REGARDLESS of fulfilled state.
-      // These scripts load during the CF challenge AND persist into our fulfilled page.
-      // The flow script triggers the redirect that destroys our JS context.
-      if (reqUrl.includes("cdn-cgi/challenge-platform") && !reqUrl.includes("turnstile")) {
-        cdpSend(cdp, "Fetch.failRequest", { requestId, reason: "BlockedByClient" }).catch(() => {});
-        return;
-      }
-
-      // Block Document navigations to ahrefs.com AFTER fulfillment — this is CF's redirect
-      if (
-        fulfilled &&
-        resourceType === "Document" &&
-        reqUrl.includes("ahrefs.com") &&
-        !reqUrl.includes("/v4/")
-      ) {
+      // Block ONLY the CF flow script — it triggers the redirect after turnstile solve.
+      // DO NOT block orchestrate (sets up challenge) or turnstile (widget resources).
+      // Flow URL: cdn-cgi/challenge-platform/h/g/flow/ov1/...
+      // Orchestrate URL: cdn-cgi/challenge-platform/h/g/orchestrate/... (MUST NOT BLOCK)
+      if (reqUrl.includes("cdn-cgi/challenge-platform") && reqUrl.includes("/flow/")) {
         cdpSend(cdp, "Fetch.failRequest", { requestId, reason: "BlockedByClient" }).catch(() => {});
         return;
       }
