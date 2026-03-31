@@ -39,6 +39,7 @@ import type { AhrefsScrapeResult, ScrapeType } from "./ahrefs-types.js";
 export interface ScrapeOutput {
   result: AhrefsScrapeResult;
   cfMetrics: CfSolveMetrics;
+  replayMeta?: import("./ahrefs-cf-listener.js").ReplayMetadata | null;
   diagnostics: DiagnosticInfo | null;
   domain: string;
   scrapeType: ScrapeType;
@@ -237,19 +238,19 @@ export const executeAhrefsScrape = (
       // Phase 7: On failure, capture page diagnostics
       const diagnostics = result.success ? null : yield* captureDiagnostics(page);
 
-      // Phase 8: Collect CF solver telemetry
+      // Phase 8: Collect CF solver telemetry + per-tab replay metadata
       const cfMetrics = cfListener.collect();
+      const replayMeta = cfListener.getReplayMetadata();
 
       // Cleanup listeners
       cfListener.cleanup();
       interception.cleanup();
 
       // Return everything the dispatch route needs to build the wide event.
-      // The wide event is emitted by the dispatch route AFTER browser.close()
-      // so that replay URL can be resolved from the replay server.
       return {
         result,
         cfMetrics,
+        replayMeta,
         diagnostics,
         domain,
         scrapeType,

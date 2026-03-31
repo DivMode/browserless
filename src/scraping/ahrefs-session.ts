@@ -16,7 +16,6 @@ import { buildWideEvent } from "./ahrefs-wide-event.js";
 import { MAX_CF_SOLVES_PER_SESSION } from "./ahrefs-types.js";
 import type { ScrapeType } from "./ahrefs-types.js";
 import { emptyCfMetrics } from "./ahrefs-cf-listener.js";
-import type { ReplayMetadata } from "./ahrefs-cf-listener.js";
 import { runForkInServer } from "../otel-runtime.js";
 
 // ── Config ──────────────────────────────────────────────────────────
@@ -338,6 +337,7 @@ export class AhrefsSessionManager {
                 timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
               },
               cfMetrics: emptyCfMetrics(),
+              replayMeta: null,
               diagnostics: null,
               domain,
               scrapeType,
@@ -348,17 +348,16 @@ export class AhrefsSessionManager {
           ),
         );
 
-        // Close page (flushes replay for this tab)
+        // Close page (triggers replay flush for this tab)
         yield* Effect.tryPromise({
           try: () => page.close(),
           catch: () => undefined,
         }).pipe(Effect.ignore);
 
-        // Wait for replay flush
-        yield* Effect.sleep("2 seconds");
-
-        // Query replay server for this tab's recording
-        const replayMeta = yield* this.resolveReplayUrl(scrapeOutput);
+        // Use per-tab replay metadata from CF listener (matched by targetId).
+        // The old resolveReplayUrl heuristic grabbed the "most recent" replay
+        // which was wrong with concurrent tabs — every tab got the same replay.
+        const replayMeta = scrapeOutput.replayMeta ?? null;
 
         // Emit wide event with session context
         const wideEvent = buildWideEvent({
@@ -387,38 +386,6 @@ export class AhrefsSessionManager {
         this.releaseTabSlot();
       }
     }).bind(this)();
-  }
-
-  // ── Replay URL resolution ─────────────────────────────────────
-
-  private resolveReplayUrl(scrapeOutput: ScrapeOutput): Effect.Effect<ReplayMetadata | null> {
-    return Effect.tryPromise({
-      try: async () => {
-        const REPLAY_INGEST = process.env.REPLAY_INGEST_URL;
-        const REPLAY_BASE = process.env.REPLAY_PLAYER_URL;
-        if (!REPLAY_INGEST || !REPLAY_BASE) return null;
-
-        const res = await fetch(`${REPLAY_INGEST}/replays`);
-        if (!res.ok) return null;
-        const replays = (await res.json()) as Array<{
-          id: string;
-          startedAt: number | null;
-          eventCount: number;
-        }>;
-        const recent = replays
-          .filter((r) => (r.startedAt ?? 0) > Date.now() - 60_000)
-          .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
-        const ours = recent[0];
-        if (!ours) return null;
-        return {
-          replay_url: `${REPLAY_BASE}/replay/${ours.id}`,
-          replay_id: ours.id,
-          replay_duration_ms: scrapeOutput.result.timings?.totalMs ?? 0,
-          replay_event_count: ours.eventCount ?? 0,
-        };
-      },
-      catch: () => null,
-    }).pipe(Effect.catch(() => Effect.succeed(null)));
   }
 
   // ── Health counter updates ────────────────────────────────────
