@@ -26,7 +26,8 @@ export const minimalTurnstileHtml = (p: HtmlParams): string => `<!DOCTYPE html>
 <head><title>Verifying</title></head>
 <body>
 <div id="ts"></div>
-<div id="status">Solving Turnstile challenge...</div>
+<div id="status" style="font-family:monospace;font-size:16px;padding:8px;">Solving Turnstile challenge...</div>
+<div id="err" style="display:none;background:#dc2626;color:#fff;font-family:monospace;font-size:18px;font-weight:bold;padding:14px 16px;margin:8px 0;border-radius:4px;white-space:pre-wrap;"></div>
 <script>
 window.__ahrefsResult = null;
 window.__turnstileToken = null;
@@ -36,6 +37,14 @@ function mark(tag, payload) {
   if (window.__rrwebPush) { try { window.__rrwebPush(JSON.stringify([event])); return; } catch(e) {} }
   var r = window.__browserlessRecording;
   if (r && r.events) r.events.push(event);
+}
+
+function showError(type, msg) {
+  var el = document.getElementById('err');
+  el.style.display = 'block';
+  el.textContent = '\\u274C ' + type + '\\n' + msg;
+  document.getElementById('status').textContent = 'FAILED: ' + type;
+  document.title = 'FAIL: ' + type;
 }
 
 mark('turnstile.solving', {});
@@ -93,6 +102,7 @@ async function onToken(token) {
       } catch(e) {
         if (e.apiError) apiErrors.push(Object.assign({retried: false}, e.apiError));
         bl = {error: 'backlinks_fetch_failed', message: e.message};
+        showError('backlinks_fetch_failed', e.message);
       }
     }
 
@@ -103,7 +113,11 @@ async function onToken(token) {
       apiErrors: apiErrors.length ? apiErrors : undefined
     });
     mark('ahrefs.complete', {success: true});
-    document.getElementById('status').textContent = 'Complete';
+    if (!bl || !bl.error) {
+      document.getElementById('status').style.color = '#16a34a';
+      document.getElementById('status').textContent = '\\u2705 Complete';
+      document.title = 'OK';
+    }
   } catch(e) {
     if (e.apiError) apiErrors.push(Object.assign({retried: false}, e.apiError));
     window.__ahrefsResult = JSON.stringify({
@@ -112,7 +126,7 @@ async function onToken(token) {
       apiErrors: apiErrors.length ? apiErrors : undefined
     });
     mark('ahrefs.error', {message: e.message});
-    document.getElementById('status').textContent = 'Error: ' + e.message;
+    showError('api_error', e.message);
   }
 }
 </script>
@@ -131,7 +145,8 @@ export const minimalTrafficHtml = (p: HtmlParams): string => `<!DOCTYPE html>
 <head><title>Verifying</title></head>
 <body>
 <div id="ts"></div>
-<div id="status">Solving Turnstile challenge...</div>
+<div id="status" style="font-family:monospace;font-size:16px;padding:8px;">Solving Turnstile challenge...</div>
+<div id="err" style="display:none;background:#dc2626;color:#fff;font-family:monospace;font-size:18px;font-weight:bold;padding:14px 16px;margin:8px 0;border-radius:4px;white-space:pre-wrap;"></div>
 <script>
 window.__ahrefsResult = null;
 window.__turnstileToken = null;
@@ -141,6 +156,14 @@ function mark(tag, payload) {
   if (window.__rrwebPush) { try { window.__rrwebPush(JSON.stringify([event])); return; } catch(e) {} }
   var r = window.__browserlessRecording;
   if (r && r.events) r.events.push(event);
+}
+
+function showError(type, msg) {
+  var el = document.getElementById('err');
+  el.style.display = 'block';
+  el.textContent = '\\u274C ' + type + '\\n' + msg;
+  document.getElementById('status').textContent = 'FAILED: ' + type;
+  document.title = 'FAIL: ' + type;
 }
 
 mark('turnstile.solving', {});
@@ -189,7 +212,9 @@ async function onToken(token) {
       apiErrors: apiErrors.length ? apiErrors : undefined
     });
     mark('ahrefs.complete', {success: true});
-    document.getElementById('status').textContent = 'Complete';
+    document.getElementById('status').style.color = '#16a34a';
+    document.getElementById('status').textContent = '\\u2705 Complete';
+    document.title = 'OK';
   } catch(e) {
     if (e.apiError) apiErrors.push(Object.assign({retried: false}, e.apiError));
     window.__ahrefsResult = JSON.stringify({
@@ -198,7 +223,7 @@ async function onToken(token) {
       apiErrors: apiErrors.length ? apiErrors : undefined
     });
     mark('ahrefs.error', {message: e.message});
-    document.getElementById('status').textContent = 'Error: ' + e.message;
+    showError('api_error', e.message);
   }
 }
 </script>
