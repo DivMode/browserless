@@ -154,14 +154,15 @@ export function setupFetchInterception(
       requestCount++;
       const reqUrl = ((params.request as Record<string, unknown>)?.url as string) ?? "";
 
-      // After our HTML is fulfilled, block Document navigations back to ahrefs.com.
-      // CF's challenge-platform/flow script redirects the page to the original URL
-      // after turnstile solve, destroying our JS context before the API call completes.
+      // After our HTML is fulfilled, block CF challenge-platform scripts.
+      // These scripts (cdn-cgi/challenge-platform/h/g/flow) trigger a redirect to
+      // the original URL after turnstile solve, destroying our JS context before
+      // the API call completes. Block the SCRIPTS, not the navigation — failing
+      // a Document navigation with BlockedByClient destroys the page context too.
       if (
         fulfilled &&
-        (params.resourceType ?? "") === "Document" &&
-        reqUrl.includes("ahrefs.com") &&
-        !reqUrl.includes("/v4/") // Don't block API calls
+        reqUrl.includes("cdn-cgi/challenge-platform") &&
+        !reqUrl.includes("turnstile") // Don't block turnstile widget resources
       ) {
         cdp
           .send("Fetch.failRequest" as never, { requestId, reason: "BlockedByClient" } as never)
