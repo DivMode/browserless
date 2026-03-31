@@ -191,15 +191,18 @@ export const executeAhrefsScrape = (
     }).pipe(Effect.ignore);
 
     // Navigation guard — blocks CF's post-solve redirect by calling Page.stopLoading.
-    // Only fires for the MAIN frame. Page.frameStartedLoading only has frameId (no parentId),
-    // so we capture the main frame ID from the page and compare.
+    // Activated by Browserless.cloudflareSolved event for THIS tab (event-driven, no polling).
+    // Has a ~7% race window where the redirect fires before the guard activates.
     let navigationGuardActive = false;
-    const mainFrameId = (page.mainFrame() as any)?._id ?? "";
-    const navGuardHandler = (params: any) => {
+    const connection = cdp.connection();
+    const navGuardHandler = () => {
       if (!navigationGuardActive) return;
-      // Only stop main frame navigations — subframe/OOPIF loads must proceed
-      if (params?.frameId !== mainFrameId) return;
       (cdp.send as Function)("Page.stopLoading").catch(() => {});
+    };
+    const onSolvedGuard = (params: any) => {
+      if (params.targetId !== targetId) return;
+      navigationGuardActive = true;
+      connection?.off("Browserless.cloudflareSolved" as any, onSolvedGuard);
     };
 
     // All phases wrapped in ensuring — cleanup runs even on fiber death
@@ -250,7 +253,7 @@ export const executeAhrefsScrape = (
       // redirect starts (race condition). Safe to activate now because our Fetch
       // interception already handled the initial CF challenge navigation.
       cdp.on("Page.frameStartedLoading" as any, navGuardHandler);
-      navigationGuardActive = true;
+      connection?.on("Browserless.cloudflareSolved" as any, onSolvedGuard);
 
       // Phase 6: Wait for Turnstile solve + API result
       const resStart = Date.now();
@@ -275,6 +278,7 @@ export const executeAhrefsScrape = (
       // Cleanup listeners + navigation guard
       navigationGuardActive = false;
       cdp.off("Page.frameStartedLoading" as any, navGuardHandler);
+      connection?.off("Browserless.cloudflareSolved" as any, onSolvedGuard);
       cfListener.cleanup();
       interception.cleanup();
 
@@ -296,6 +300,7 @@ export const executeAhrefsScrape = (
         Effect.sync(() => {
           navigationGuardActive = false;
           cdp.off("Page.frameStartedLoading" as any, navGuardHandler);
+          connection?.off("Browserless.cloudflareSolved" as any, onSolvedGuard);
         }).pipe(Effect.andThen(cleanupCdp(cdp))),
       ),
     );
