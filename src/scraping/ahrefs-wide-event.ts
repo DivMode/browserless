@@ -131,7 +131,8 @@ const ATTR_EMBEDDED_PASSED = "embedded_passed";
 const ATTR_INTERSTITIAL_DETECTED = "interstitial_detected";
 const ATTR_INTERSTITIAL_PASSED = "interstitial_passed";
 
-// Session telemetry
+// Session telemetry — registered in registry/ahrefs.yaml (ahrefs.session group)
+// Values MUST match ahrefs_gen.ts. Hardcoded because browserless is not in bun workspace.
 const ATTR_SESSION_AGE_MS = "session_age_ms";
 const ATTR_SESSION_CF_SOLVES = "session_cf_solves";
 const ATTR_SESSION_CONCURRENT_TABS = "session_concurrent_tabs";
