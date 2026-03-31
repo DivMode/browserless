@@ -65,6 +65,8 @@ import { afterAll, beforeAll } from "vitest";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 
 import {
+  BROWSERLESS_HTTP,
+  BROWSERLESS_TOKEN,
   PROXY,
   PYDOLL_DIR,
   REPLAY_HTTP,
@@ -706,6 +708,64 @@ describe("Pydoll Pipeline", () => {
     const inconsistency = assertSummaryConsistency(signals!.summary!, markers);
     expect(inconsistency, `Summary/replay mismatch: ${inconsistency}`).toBeNull();
   });
+
+  it(
+    "session manager dispatch produces replay with correct targetId",
+    { timeout: 45_000 },
+    async () => {
+      const domain = "example.com";
+      const instanceId = `test-replay-${Date.now()}`;
+
+      // 1. Hit the session manager dispatch endpoint
+      const dispatchRes = await fetch(
+        `${BROWSERLESS_HTTP}/ahrefs/backlinks/dispatch?domain=${domain}&instance_id=${instanceId}`,
+        {
+          method: "POST",
+          headers: BROWSERLESS_TOKEN ? { Authorization: `Bearer ${BROWSERLESS_TOKEN}` } : {},
+        },
+      );
+      expect(dispatchRes.status, "Dispatch should return 202").toBe(202);
+
+      // 2. Poll replay server until a replay appears for this scrape (max 30s)
+      let replayId: string | null = null;
+      let replayEventCount = 0;
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const replaysRes = await fetch(`${REPLAY_HTTP}/replays`);
+        if (!replaysRes.ok) continue;
+        const replays = (await replaysRes.json()) as Array<{
+          id: string;
+          startedAt: number | null;
+          eventCount: number;
+        }>;
+        // Find a replay started in the last 60s (our scrape)
+        const recent = replays
+          .filter((r) => (r.startedAt ?? 0) > Date.now() - 60_000 && r.eventCount > 0)
+          .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+        if (recent.length > 0) {
+          replayId = recent[0].id;
+          replayEventCount = recent[0].eventCount;
+          break;
+        }
+      }
+
+      expect(replayId, "No replay found after dispatch").toBeTruthy();
+      expect(replayEventCount, "Replay has zero events").toBeGreaterThan(0);
+
+      // 3. Replay ID must contain a tab targetId (format: sessionUUID--tab-TARGETID)
+      expect(replayId, "Replay ID missing --tab- separator").toContain("--tab-");
+
+      // 4. Fetch the replay JSON and verify content
+      const signals = await fetchSignals(replayId!);
+      expect(signals, `/signals 404 for ${replayId}`).not.toBeNull();
+      expect(signals!.event_count, "Empty replay").toBeGreaterThan(10);
+
+      console.log(
+        `  Session manager replay: ${replayId} (${replayEventCount} events, ${signals!.cf_marker_count} CF markers)`,
+      );
+    },
+  );
 
   // WARNING: cf-stress burns proxy IP. Run ONCE per session — back-to-back runs
   // degrade pass rates as Ahrefs/CF rate-limits the carrier block after ~30 rapid
