@@ -105,18 +105,20 @@ async function onToken(token) {
         if (e.apiError) apiErrors.push(Object.assign({retried: false}, e.apiError));
         bl = {error: 'backlinks_fetch_failed', message: e.message};
         showError('backlinks_fetch_failed', e.message);
+        await new Promise(function(r) { setTimeout(r, 600); });
       }
     }
 
+    var hasBlError = bl && bl.error;
     window.__ahrefsResult = JSON.stringify({
-      success: true,
+      success: !hasBlError,
       overview: ov,
       backlinks: bl,
       apiErrors: apiErrors.length ? apiErrors : undefined
     });
-    mark('ahrefs.complete', {success: true});
-    window.__apiCallStatus = bl && bl.error ? 'responded_error' : 'responded_ok';
-    if (!bl || !bl.error) {
+    mark('ahrefs.complete', {success: !hasBlError, error: hasBlError ? bl.error : undefined});
+    window.__apiCallStatus = hasBlError ? 'responded_error' : 'responded_ok';
+    if (!hasBlError) {
       document.getElementById('status').style.color = '#16a34a';
       document.getElementById('status').textContent = '\\u2705 Complete';
       document.title = 'OK';
@@ -131,6 +133,7 @@ async function onToken(token) {
     });
     mark('ahrefs.error', {message: e.message});
     showError('api_error', e.message);
+    await new Promise(function(r) { setTimeout(r, 600); });
   }
 }
 </script>
@@ -232,6 +235,7 @@ async function onToken(token) {
     });
     mark('ahrefs.error', {message: e.message});
     showError('api_error', e.message);
+    await new Promise(function(r) { setTimeout(r, 600); });
   }
 }
 </script>
