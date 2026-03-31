@@ -131,7 +131,21 @@ const ATTR_EMBEDDED_PASSED = "embedded_passed";
 const ATTR_INTERSTITIAL_DETECTED = "interstitial_detected";
 const ATTR_INTERSTITIAL_PASSED = "interstitial_passed";
 
+// Session telemetry
+const ATTR_SESSION_AGE_MS = "session_age_ms";
+const ATTR_SESSION_CF_SOLVES = "session_cf_solves";
+const ATTR_SESSION_CONCURRENT_TABS = "session_concurrent_tabs";
+const ATTR_SESSION_WARM = "session_warm";
+const ATTR_CF_CLEARANCE_PRESENT = "cf_clearance_present";
+
 // ── Builder ─────────────────────────────────────────────────────────
+
+export interface SessionContext {
+  session_age_ms: number;
+  session_cf_solves: number;
+  session_concurrent_tabs: number;
+  session_warm: boolean;
+}
 
 export interface WideEventInput {
   result: AhrefsScrapeResult;
@@ -143,6 +157,8 @@ export interface WideEventInput {
   scrapeUrl: string;
   sessionId?: string;
   retryContext?: { reason?: string; replayUrl?: string; replayDurationMs?: number };
+  sessionContext?: SessionContext;
+  cfClearancePresent?: boolean;
 }
 
 export function buildWideEvent(input: WideEventInput): Record<string, string> {
@@ -295,6 +311,13 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_RETRY_REPLAY_URL]: retry?.replayUrl ?? "",
     [ATTR_RETRY_REPLAY_DURATION_MS]: String(retry?.replayDurationMs ?? 0),
     [ATTR_AHREFS_RETRIED]: retry?.reason ? "true" : "",
+
+    // Session telemetry
+    [ATTR_SESSION_AGE_MS]: String(input.sessionContext?.session_age_ms ?? 0),
+    [ATTR_SESSION_CF_SOLVES]: String(input.sessionContext?.session_cf_solves ?? 0),
+    [ATTR_SESSION_CONCURRENT_TABS]: String(input.sessionContext?.session_concurrent_tabs ?? 0),
+    [ATTR_SESSION_WARM]: String(input.sessionContext?.session_warm ?? false),
+    [ATTR_CF_CLEARANCE_PRESENT]: String(input.cfClearancePresent ?? false),
 
     // Misc
     [ATTR_HARD_TIMEOUT_PHASE]: "",

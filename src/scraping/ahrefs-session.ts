@@ -342,6 +342,7 @@ export class AhrefsSessionManager {
               scrapeType,
               scrapeUrl: "",
               timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
+              cfClearancePresent: false,
             }),
           ),
         );
@@ -358,7 +359,7 @@ export class AhrefsSessionManager {
         // Query replay server for this tab's recording
         const replayMeta = yield* this.resolveReplayUrl(scrapeOutput);
 
-        // Emit wide event
+        // Emit wide event with session context
         const wideEvent = buildWideEvent({
           result: scrapeOutput.result,
           cfMetrics: scrapeOutput.cfMetrics ?? ({} as CfSolveMetrics),
@@ -367,6 +368,13 @@ export class AhrefsSessionManager {
           domain,
           scrapeType,
           scrapeUrl: scrapeOutput.scrapeUrl,
+          sessionContext: {
+            session_age_ms: Date.now() - this.sessionCreatedAt,
+            session_cf_solves: this.cfSolveCount,
+            session_concurrent_tabs: this.activeTabCount,
+            session_warm: this.cfSolveCount > 0,
+          },
+          cfClearancePresent: scrapeOutput.cfClearancePresent,
         });
         yield* Effect.logInfo("ahrefs.scrape.wide_event").pipe(Effect.annotateLogs(wideEvent));
 

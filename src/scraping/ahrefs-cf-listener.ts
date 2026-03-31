@@ -121,8 +121,12 @@ export interface CfListener {
 /**
  * Set up CDP event listeners for CF solver telemetry.
  * Call collect() after the scrape to get all metrics for the wide event.
+ *
+ * IMPORTANT: pageTargetId is required to filter events by tab. The Connection
+ * is shared across ALL tabs on the same browser, so without filtering each
+ * listener captures events from every concurrent tab (event bleeding).
  */
-export function setupCfListener(cdp: CDPSession): CfListener {
+export function setupCfListener(cdp: CDPSession, pageTargetId: string): CfListener {
   const events: SolveEvent[] = [];
   const interstitial = emptyPhase();
   const embedded = emptyPhase();
@@ -137,15 +141,21 @@ export function setupCfListener(cdp: CDPSession): CfListener {
   let failureReason = "";
   let errorDetected = false;
 
+  // Filter: only accept events for OUR tab (targetId match)
+  const isOurTab = (params: any): boolean => !params.targetId || params.targetId === pageTargetId;
+
   const onDetected = (params: any) => {
+    if (!isOurTab(params)) return;
     events.push({ type: "detected", params });
   };
 
   const onProgress = (params: any) => {
+    if (!isOurTab(params)) return;
     events.push({ type: "progress", params });
   };
 
   const onSolved = (params: any) => {
+    if (!isOurTab(params)) return;
     events.push({ type: "solved", params });
     lastResult = params;
     lastSnapshot = params.summary ?? null;
@@ -167,6 +177,7 @@ export function setupCfListener(cdp: CDPSession): CfListener {
   };
 
   const onFailed = (params: any) => {
+    if (!isOurTab(params)) return;
     events.push({ type: "failed", params });
     lastResult = params;
     lastSnapshot = params.summary ?? null;
@@ -186,7 +197,8 @@ export function setupCfListener(cdp: CDPSession): CfListener {
   };
 
   const onTabReplayComplete = (params: any) => {
-    // Matches pydoll's ReplayListener._on_tab_replay_complete
+    // Filter: sessionId format is "{sessionUUID}--tab-{targetId}"
+    if (pageTargetId && params.sessionId && !params.sessionId.includes(pageTargetId)) return;
     replayMeta = {
       replay_url: params.replayUrl ?? "",
       replay_id: params.sessionId ?? "",

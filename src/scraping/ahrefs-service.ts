@@ -18,6 +18,7 @@ import {
   captureDiagnostics,
   cleanupCdp,
   enableFetchInterception,
+  getTargetId,
   setupFetchInterception,
   waitForDocumentInterception,
   waitForResult,
@@ -43,6 +44,7 @@ export interface ScrapeOutput {
   scrapeType: ScrapeType;
   scrapeUrl: string;
   timings: { navMs: number; interceptMs: number; resultMs: number; totalMs: number };
+  cfClearancePresent?: boolean;
 }
 
 // ── Build URL ────────────────────────────────────────────────────────
@@ -167,10 +169,22 @@ export const executeAhrefsScrape = (
     // Phase 0: Acquire CDP session
     const cdp = yield* acquireCdpSession(page);
 
+    // Get this tab's targetId for filtering CF events (prevents cross-tab bleeding)
+    const targetId = yield* getTargetId(cdp);
+
+    // Check if cf_clearance cookie exists BEFORE navigation (proves session cookie sharing)
+    const cfClearancePresent = yield* Effect.tryPromise({
+      try: async () => {
+        const cookies = await page.cookies("https://ahrefs.com");
+        return cookies.some((c: { name: string }) => c.name === "cf_clearance");
+      },
+      catch: () => false,
+    });
+
     // All phases wrapped in ensuring — cleanup runs even on fiber death
     return yield* Effect.fn("ahrefs.scrape.phases")(function* () {
-      // Phase 1: Start CF listener (captures Browserless.cloudflare* events)
-      const cfListener = setupCfListener(cdp);
+      // Phase 1: Start CF listener — scoped to this tab's targetId
+      const cfListener = setupCfListener(cdp, targetId);
 
       // Phase 2: Set up Fetch interception
       const url = buildUrl(domain, scrapeType);
@@ -233,6 +247,15 @@ export const executeAhrefsScrape = (
       // Return everything the dispatch route needs to build the wide event.
       // The wide event is emitted by the dispatch route AFTER browser.close()
       // so that replay URL can be resolved from the replay server.
-      return { result, cfMetrics, diagnostics, domain, scrapeType, scrapeUrl: url, timings };
+      return {
+        result,
+        cfMetrics,
+        diagnostics,
+        domain,
+        scrapeType,
+        scrapeUrl: url,
+        timings,
+        cfClearancePresent,
+      };
     })().pipe(Effect.ensuring(cleanupCdp(cdp)));
   })();
