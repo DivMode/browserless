@@ -190,12 +190,15 @@ export const executeAhrefsScrape = (
       catch: () => undefined,
     }).pipe(Effect.ignore);
 
-    // Navigation guard — blocks CF's post-solve redirect by calling Page.stopLoading
-    // on any frameStartedLoading after our HTML is served. Activated immediately after
-    // Fetch fulfillment (not after solve event — that's too late due to race condition).
+    // Navigation guard — blocks CF's post-solve redirect by calling Page.stopLoading.
+    // Only fires for the MAIN frame. Page.frameStartedLoading only has frameId (no parentId),
+    // so we capture the main frame ID from the page and compare.
     let navigationGuardActive = false;
-    const navGuardHandler = () => {
+    const mainFrameId = (page.mainFrame() as any)?._id ?? "";
+    const navGuardHandler = (params: any) => {
       if (!navigationGuardActive) return;
+      // Only stop main frame navigations — subframe/OOPIF loads must proceed
+      if (params?.frameId !== mainFrameId) return;
       (cdp.send as Function)("Page.stopLoading").catch(() => {});
     };
 
