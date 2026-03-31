@@ -15,7 +15,8 @@ import { executeAhrefsScrape, type ScrapeOutput } from "./ahrefs-service.js";
 import { buildWideEvent } from "./ahrefs-wide-event.js";
 import { MAX_CF_SOLVES_PER_SESSION } from "./ahrefs-types.js";
 import type { ScrapeType } from "./ahrefs-types.js";
-import type { CfSolveMetrics, ReplayMetadata } from "./ahrefs-cf-listener.js";
+import { emptyCfMetrics } from "./ahrefs-cf-listener.js";
+import type { ReplayMetadata } from "./ahrefs-cf-listener.js";
 import { runForkInServer } from "../otel-runtime.js";
 
 // ── Config ──────────────────────────────────────────────────────────
@@ -336,7 +337,7 @@ export class AhrefsSessionManager {
                 errorType: "scrape_error",
                 timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
               },
-              cfMetrics: null as any,
+              cfMetrics: emptyCfMetrics(),
               diagnostics: null,
               domain,
               scrapeType,
@@ -362,7 +363,7 @@ export class AhrefsSessionManager {
         // Emit wide event with session context
         const wideEvent = buildWideEvent({
           result: scrapeOutput.result,
-          cfMetrics: scrapeOutput.cfMetrics ?? ({} as CfSolveMetrics),
+          cfMetrics: scrapeOutput.cfMetrics ?? emptyCfMetrics(),
           replayMeta,
           diagnostics: scrapeOutput.diagnostics,
           domain,

@@ -79,6 +79,56 @@ export interface ReplayMetadata {
   replay_event_count: number;
 }
 
+/** Empty CF metrics for error paths where no CF interaction occurred. */
+export const emptyCfMetrics = (): CfSolveMetrics => ({
+  cf_type: "",
+  cf_detection_method: "",
+  cf_cray: "",
+  cf_detection_poll_count: 0,
+  cf_events: 0,
+  cf_solved: false,
+  cf_method: "",
+  cf_signal: "",
+  cf_duration_ms: 0,
+  cf_auto_resolved: false,
+  cf_token_length: 0,
+  cf_verified: false,
+  cf_summary_label: "",
+  cf_widget_find_method: "",
+  cf_widget_find_methods: "",
+  cf_widget_x: "",
+  cf_widget_y: "",
+  cf_click_x: "",
+  cf_click_y: "",
+  cf_presence_duration_ms: 0,
+  cf_presence_phases: 0,
+  cf_approach_phases: 0,
+  cf_activity_poll_count: 0,
+  cf_false_positive_count: 0,
+  cf_widget_error_count: 0,
+  cf_widget_error_type: "",
+  cf_iframe_states: "",
+  cf_widget_find_debug: "",
+  interstitial_detected: false,
+  interstitial_passed: false,
+  interstitial_auto_resolved: false,
+  interstitial_method: "",
+  interstitial_duration_ms: 0,
+  interstitial_signal: "",
+  interstitial_click_count: 0,
+  embedded_detected: false,
+  embedded_passed: false,
+  embedded_auto_resolved: false,
+  embedded_method: "",
+  embedded_duration_ms: 0,
+  embedded_signal: "",
+  embedded_click_count: 0,
+  embedded_widget_found: false,
+  embedded_clicked: false,
+  error_detected: false,
+  failure_reason: "",
+});
+
 // ── Internal state ──────────────────────────────────────────────────
 
 interface SolveEvent {
@@ -141,8 +191,9 @@ export function setupCfListener(cdp: CDPSession, pageTargetId: string): CfListen
   let failureReason = "";
   let errorDetected = false;
 
-  // Filter: only accept events for OUR tab (targetId match)
-  const isOurTab = (params: any): boolean => !params.targetId || params.targetId === pageTargetId;
+  // Filter: only accept events for OUR tab (strict targetId match).
+  // Events without targetId are REJECTED — passing them causes cross-tab bleeding.
+  const isOurTab = (params: any): boolean => !!params.targetId && params.targetId === pageTargetId;
 
   const onDetected = (params: any) => {
     if (!isOurTab(params)) return;
