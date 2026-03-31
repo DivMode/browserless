@@ -150,8 +150,25 @@ export function setupFetchInterception(
       // Non-document ahrefs response — continue
       cdp.send("Fetch.continueResponse" as never, { requestId } as never).catch(() => {});
     } else {
-      // Request stage — always continue
+      // Request stage
       requestCount++;
+      const reqUrl = ((params.request as Record<string, unknown>)?.url as string) ?? "";
+
+      // After our HTML is fulfilled, block Document navigations back to ahrefs.com.
+      // CF's challenge-platform/flow script redirects the page to the original URL
+      // after turnstile solve, destroying our JS context before the API call completes.
+      if (
+        fulfilled &&
+        (params.resourceType ?? "") === "Document" &&
+        reqUrl.includes("ahrefs.com") &&
+        !reqUrl.includes("/v4/") // Don't block API calls
+      ) {
+        cdp
+          .send("Fetch.failRequest" as never, { requestId, reason: "BlockedByClient" } as never)
+          .catch(() => {});
+        return;
+      }
+
       cdp.send("Fetch.continueRequest" as never, { requestId } as never).catch(() => {});
     }
   };
