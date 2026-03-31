@@ -33,7 +33,6 @@ window.__ahrefsResult = null;
 window.__turnstileToken = null;
 window.__apiCallStatus = 'not_called';
 
-
 function mark(tag, payload) {
   var event = {type: 5, timestamp: Date.now(), data: {tag: tag, payload: payload || {}}};
   if (window.__rrwebPush) { try { window.__rrwebPush(JSON.stringify([event])); return; } catch(e) {} }
@@ -74,7 +73,6 @@ async function fetchJSON(endpoint, url, options) {
 async function onToken(token) {
   window.__turnstileToken = token;
   window.__turnstileSolved = true;
-  window.__blockNavigation = true;
   mark('turnstile.token_received', {});
   try {
     navigator.sendBeacon('http://127.0.0.1:3000/internal/cf-solved',
@@ -158,7 +156,6 @@ window.__ahrefsResult = null;
 window.__turnstileToken = null;
 window.__apiCallStatus = 'not_called';
 
-
 function mark(tag, payload) {
   var event = {type: 5, timestamp: Date.now(), data: {tag: tag, payload: payload || {}}};
   if (window.__rrwebPush) { try { window.__rrwebPush(JSON.stringify([event])); return; } catch(e) {} }
@@ -199,7 +196,6 @@ async function fetchJSON(endpoint, url, options) {
 async function onToken(token) {
   window.__turnstileToken = token;
   window.__turnstileSolved = true;
-  window.__blockNavigation = true;
   mark('turnstile.token_received', {});
   try {
     navigator.sendBeacon('http://127.0.0.1:3000/internal/cf-solved',

@@ -186,9 +186,22 @@ export const executeAhrefsScrape = (
 
     // Enable Page domain for frameStartedLoading events (navigation guard)
     yield* Effect.tryPromise({
-      try: () => cdp.send("Page.enable" as never),
+      try: () => (cdp.send as Function)("Page.enable"),
       catch: () => undefined,
     }).pipe(Effect.ignore);
+
+    // Navigation guard state — declared here so Effect.ensuring can clean up on fiber death
+    let navigationGuardActive = false;
+    const connection = cdp.connection();
+    const navGuardHandler = () => {
+      if (!navigationGuardActive) return;
+      (cdp.send as Function)("Page.stopLoading").catch(() => {});
+    };
+    const onSolvedGuard = (params: any) => {
+      if (params.targetId !== targetId) return;
+      navigationGuardActive = true;
+      connection?.off("Browserless.cloudflareSolved" as any, onSolvedGuard);
+    };
 
     // All phases wrapped in ensuring — cleanup runs even on fiber death
     return yield* Effect.fn("ahrefs.scrape.phases")(function* () {
@@ -233,35 +246,9 @@ export const executeAhrefsScrape = (
 
       yield* Effect.logInfo(`Interception complete for ${domain} (${timings.navMs}ms)`);
 
-      // Block CF's post-solve page redirect at the CDP level.
-      // After turnstile solve, CF's flow script navigates to the original URL
-      // (window.location = "..."), destroying our JS context. JS-level overrides
-      // can't intercept direct window.location assignment.
-      // Fix: listen for Page.frameStartedLoading AFTER our HTML is served.
-      // When it fires, immediately send Page.stopLoading to abort the navigation
-      // before Chrome destroys the JS context. Only activate after __turnstileSolved
-      // is set (checked via page.evaluate) to avoid blocking the initial navigation.
-      let navigationGuardActive = false;
-      const navGuardHandler = () => {
-        if (!navigationGuardActive) return;
-        cdp.send("Page.stopLoading" as never).catch(() => {});
-      };
+      // Activate navigation guard listeners for this scrape
       cdp.on("Page.frameStartedLoading" as any, navGuardHandler);
-
-      // Activate the guard only after the turnstile token is received.
-      // The waitForResult polling loop below checks __ahrefsResult every 50ms.
-      // We piggyback on that: once __turnstileSolved is true, activate the guard.
-      const activateGuardInterval = setInterval(async () => {
-        try {
-          const solved = await page.evaluate("!!window.__turnstileSolved");
-          if (solved) {
-            navigationGuardActive = true;
-            clearInterval(activateGuardInterval);
-          }
-        } catch {
-          clearInterval(activateGuardInterval);
-        }
-      }, 100);
+      connection?.on("Browserless.cloudflareSolved" as any, onSolvedGuard);
 
       // Phase 6: Wait for Turnstile solve + API result
       const resStart = Date.now();
@@ -284,9 +271,9 @@ export const executeAhrefsScrape = (
       const replayMeta = cfListener.getReplayMetadata();
 
       // Cleanup listeners + navigation guard
-      clearInterval(activateGuardInterval);
       navigationGuardActive = false;
       cdp.off("Page.frameStartedLoading" as any, navGuardHandler);
+      connection?.off("Browserless.cloudflareSolved" as any, onSolvedGuard);
       cfListener.cleanup();
       interception.cleanup();
 
@@ -303,5 +290,14 @@ export const executeAhrefsScrape = (
         cfClearancePresent,
         apiCallStatus,
       };
-    })().pipe(Effect.ensuring(cleanupCdp(cdp)));
+    })().pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          // Guaranteed cleanup on fiber death — prevents interval/listener leaks
+          navigationGuardActive = false;
+          cdp.off("Page.frameStartedLoading" as any, navGuardHandler);
+          connection?.off("Browserless.cloudflareSolved" as any, onSolvedGuard);
+        }).pipe(Effect.andThen(cleanupCdp(cdp))),
+      ),
+    );
   })();

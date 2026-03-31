@@ -11,10 +11,15 @@ import {
   CdpSessionError,
   FetchEnableError,
   InterceptionTimeoutError,
-  NavigationError,
   ResultTimeoutError,
 } from "./ahrefs-errors.js";
-import { MAX_INTERCEPT_WAIT_MS, NAV_TIMEOUT_MS } from "./ahrefs-types.js";
+import { MAX_INTERCEPT_WAIT_MS } from "./ahrefs-types.js";
+
+// ── Typed CDP send — eliminates `as never` casts ───────────────────
+
+/** Typed CDP send for puppeteer CDPSession (which only types known methods). */
+const cdpSend = (cdp: CDPSession, method: string, params?: Record<string, unknown>) =>
+  (cdp.send as (m: string, p?: Record<string, unknown>) => Promise<unknown>)(method, params);
 
 // ── CDP session ─────────────────────────────────────────────────────
 
@@ -27,43 +32,18 @@ export const acquireCdpSession = (page: Page) =>
 
 // ── Session + target ID extraction ──────────────────────────────────
 
-/**
- * Get Chrome's session UUID via connection.send("Browser.getVersion").
- * Retries once after 500ms if the Connection isn't ready yet.
- */
-export const getSessionId = (cdp: CDPSession) =>
-  Effect.fn("ahrefs.getSessionId")(function* () {
-    const connection = cdp.connection();
-    if (!connection) return "";
-
-    for (let attempt = 0; attempt < 2; attempt++) {
-      if (attempt > 0) yield* Effect.sleep("500 millis");
-      const info = yield* Effect.tryPromise({
-        try: () =>
-          connection.send("Browser.getVersion") as unknown as Promise<Record<string, unknown>>,
-        catch: () => null,
-      }).pipe(Effect.catch(() => Effect.succeed(null)));
-      const debugUrl = String((info as any)?.webSocketDebuggerUrl ?? "");
-      if (debugUrl.includes("/devtools/browser/")) {
-        return debugUrl.split("/devtools/browser/").pop() ?? "";
-      }
-    }
-
-    return "";
-  })();
-
 /** Get the page's target ID for the tab-specific replay ID. */
 export const getTargetId = (cdp: CDPSession) =>
   Effect.tryPromise({
     try: () =>
-      cdp.send("Target.getTargetInfo" as any).then((r: any) => r.targetInfo.targetId as string),
+      cdpSend(cdp, "Target.getTargetInfo").then((r) => (r as any).targetInfo.targetId as string),
     catch: () => "",
   }).pipe(Effect.catch(() => Effect.succeed("")));
 
 export const cleanupCdp = (cdp: CDPSession) =>
   Effect.tryPromise({
     try: () => cdp.detach().catch(() => {}),
-    catch: () => undefined as never, // detach never meaningfully fails
+    catch: () => undefined as void, // detach never meaningfully fails
   }).pipe(Effect.ignore);
 
 // ── Fetch interception ──────────────────────────────────────────────
@@ -117,16 +97,12 @@ export function setupFetchInterception(
 
         if (status === 200 && !hasCfMitigated && !fulfilled) {
           fulfilled = true;
-          cdp
-            .send(
-              "Fetch.fulfillRequest" as never,
-              {
-                requestId,
-                responseCode: 200,
-                responseHeaders: [{ name: "Content-Type", value: "text/html; charset=utf-8" }],
-                body: htmlBase64,
-              } as never,
-            )
+          cdpSend(cdp, "Fetch.fulfillRequest", {
+            requestId,
+            responseCode: 200,
+            responseHeaders: [{ name: "Content-Type", value: "text/html; charset=utf-8" }],
+            body: htmlBase64,
+          })
             .then(() => {
               clearTimeout(timer);
               if (!settled) {
@@ -144,11 +120,11 @@ export function setupFetchInterception(
           return;
         }
         // CF challenge or already fulfilled — continue the response
-        cdp.send("Fetch.continueResponse" as never, { requestId } as never).catch(() => {});
+        cdpSend(cdp, "Fetch.continueResponse", { requestId }).catch(() => {});
         return;
       }
       // Non-document ahrefs response — continue
-      cdp.send("Fetch.continueResponse" as never, { requestId } as never).catch(() => {});
+      cdpSend(cdp, "Fetch.continueResponse", { requestId }).catch(() => {});
     } else {
       // Request stage
       requestCount++;
@@ -164,13 +140,11 @@ export function setupFetchInterception(
         reqUrl.includes("cdn-cgi/challenge-platform") &&
         !reqUrl.includes("turnstile") // Don't block turnstile widget resources
       ) {
-        cdp
-          .send("Fetch.failRequest" as never, { requestId, reason: "BlockedByClient" } as never)
-          .catch(() => {});
+        cdpSend(cdp, "Fetch.failRequest", { requestId, reason: "BlockedByClient" }).catch(() => {});
         return;
       }
 
-      cdp.send("Fetch.continueRequest" as never, { requestId } as never).catch(() => {});
+      cdpSend(cdp, "Fetch.continueRequest", { requestId }).catch(() => {});
     }
   };
 
@@ -195,23 +169,19 @@ export function setupFetchInterception(
   cdp.on("Fetch.requestPaused" as any, handler);
 
   const ready = (async () => {
-    await cdp.send("Fetch.disable" as never);
-    await cdp.send(
-      "Fetch.enable" as never,
-      {
-        patterns: [
-          { urlPattern: "*", requestStage: "Request" },
-          { urlPattern: "https://ahrefs.com/*", requestStage: "Response" },
-        ],
-        handleAuthRequests: true,
-      } as never,
-    );
+    await cdpSend(cdp, "Fetch.disable");
+    await cdpSend(cdp, "Fetch.enable", {
+      patterns: [
+        { urlPattern: "*", requestStage: "Request" },
+        { urlPattern: "https://ahrefs.com/*", requestStage: "Response" },
+      ],
+    });
   })();
 
   const cleanup = () => {
     clearTimeout(timer);
-    cdp.removeAllListeners("Fetch.requestPaused" as any);
-    cdp.send("Fetch.disable" as never).catch(() => {});
+    cdp.off("Fetch.requestPaused" as any, handler);
+    cdpSend(cdp, "Fetch.disable").catch(() => {});
   };
 
   return { ready, intercepted, cleanup };
@@ -244,16 +214,6 @@ export const waitForDocumentInterception = (result: FetchInterceptionResult) =>
       });
     },
   });
-
-// ── Navigation ──────────────────────────────────────────────────────
-
-export const navigateToAhrefs = (page: Page, url: string) =>
-  Effect.tryPromise({
-    try: () =>
-      page.goto(url, { timeout: NAV_TIMEOUT_MS, waitUntil: "domcontentloaded" }).then(() => {}),
-    catch: (e: unknown) =>
-      new NavigationError({ url, cause: e instanceof Error ? e.message : String(e) }),
-  }).pipe(Effect.ignore); // Navigation errors are expected (Fetch fulfillment aborts nav)
 
 // ── Result polling ──────────────────────────────────────────────────
 
