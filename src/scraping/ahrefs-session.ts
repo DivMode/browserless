@@ -135,10 +135,14 @@ export class AhrefsSessionManager {
         if (this.connection) {
           this.cfSolveHandler = () => {
             this.cfSolveCount++;
-            // Ungate warmup on first solve — navigation guard is now active
+            // Ungate warmup 500ms AFTER first solve — gives Page.stopLoading time to
+            // handle the CF redirect on the first tab before other tabs start navigating.
+            // Without this delay, the solve event and redirect fire simultaneously,
+            // and concurrent tabs start before the guard can process the redirect.
             if (this.cfSolveCount === 1 && this.warmupResolve) {
-              this.warmupResolve();
+              const resolve = this.warmupResolve;
               this.warmupResolve = null;
+              setTimeout(() => resolve(), 500);
             }
             if (this.cfSolveCount >= MAX_CF_SOLVES_PER_SESSION) {
               this.cfSolveTtlExceeded = true;
