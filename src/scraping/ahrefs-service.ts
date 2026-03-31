@@ -227,6 +227,31 @@ export const executeAhrefsScrape = (
 
       yield* Effect.logInfo(`Interception complete for ${domain} (${timings.navMs}ms)`);
 
+      // Set up deferred navigation blocker. CF's flow script navigates after turnstile
+      // solve, destroying our JS context. We can't block ALL navigations (the solver
+      // needs them for interstitial challenges). Instead, set a flag in our HTML's
+      // onToken() callback that activates the block only after the token is received.
+      // The injected HTML sets window.__blockNavigation = true in onToken().
+      yield* Effect.tryPromise({
+        try: () =>
+          page.evaluate(`
+            try {
+              // Watch for __blockNavigation flag (set by onToken in our HTML)
+              var origAssign = window.location.assign.bind(window.location);
+              var origReplace = window.location.replace.bind(window.location);
+              window.location.assign = function(url) {
+                if (window.__blockNavigation) return;
+                origAssign(url);
+              };
+              window.location.replace = function(url) {
+                if (window.__blockNavigation) return;
+                origReplace(url);
+              };
+            } catch(e) {}
+          `),
+        catch: () => undefined,
+      }).pipe(Effect.ignore);
+
       // Phase 6: Wait for Turnstile solve + API result
       const resStart = Date.now();
       const apiResult = yield* waitForResult(page, domain).pipe(

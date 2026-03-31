@@ -764,6 +764,16 @@ describe("Pydoll Pipeline", () => {
       console.log(
         `  Session manager replay: ${replayId} (${replayEventCount} events, ${signals!.cf_marker_count} CF markers)`,
       );
+
+      // Clean up: shut down the session manager's persistent browser so it doesn't
+      // consume Chrome resources during cf-stress (which creates its own 10-tab browser).
+      // The dispatch endpoint creates a singleton AhrefsSessionManager that stays alive.
+      try {
+        const { getAhrefsSession } = await import("../../../scraping/ahrefs-session.js");
+        await getAhrefsSession().shutdown();
+      } catch {
+        // Non-fatal — session manager may not have been initialized
+      }
     },
   );
 
