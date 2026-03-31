@@ -129,16 +129,49 @@ export function setupFetchInterception(
       // Request stage
       requestCount++;
       const reqUrl = ((params.request as Record<string, unknown>)?.url as string) ?? "";
+      const resourceType = (params.resourceType ?? "") as string;
 
-      // After our HTML is fulfilled, block CF challenge-platform scripts.
-      // These scripts (cdn-cgi/challenge-platform/h/g/flow) trigger a redirect to
-      // the original URL after turnstile solve, destroying our JS context before
-      // the API call completes. Block the SCRIPTS, not the navigation — failing
-      // a Document navigation with BlockedByClient destroys the page context too.
+      // TRACE: log every request with timing relative to fulfillment
+      if (
+        reqUrl.includes("cdn-cgi") ||
+        reqUrl.includes("challenge-platform") ||
+        resourceType === "Document"
+      ) {
+        const marker = {
+          type: 5,
+          timestamp: Date.now(),
+          data: {
+            tag: "fetch.request_intercepted",
+            payload: {
+              url: reqUrl.substring(0, 100),
+              resourceType,
+              fulfilled: fulfilled,
+              requestCount,
+              action: "continue",
+            },
+          },
+        };
+        // Push to rrweb recording if available
+        cdpSend(cdp, "Runtime.evaluate", {
+          expression: `try { var e=${JSON.stringify(marker)}; if(window.__rrwebPush) window.__rrwebPush(JSON.stringify([e])); else if(window.__browserlessRecording && window.__browserlessRecording.events) window.__browserlessRecording.events.push(e); } catch(e){}`,
+          returnByValue: false,
+        }).catch(() => {});
+      }
+
+      // Block CF challenge-platform scripts REGARDLESS of fulfilled state.
+      // These scripts load during the CF challenge AND persist into our fulfilled page.
+      // The flow script triggers the redirect that destroys our JS context.
+      if (reqUrl.includes("cdn-cgi/challenge-platform") && !reqUrl.includes("turnstile")) {
+        cdpSend(cdp, "Fetch.failRequest", { requestId, reason: "BlockedByClient" }).catch(() => {});
+        return;
+      }
+
+      // Block Document navigations to ahrefs.com AFTER fulfillment — this is CF's redirect
       if (
         fulfilled &&
-        reqUrl.includes("cdn-cgi/challenge-platform") &&
-        !reqUrl.includes("turnstile") // Don't block turnstile widget resources
+        resourceType === "Document" &&
+        reqUrl.includes("ahrefs.com") &&
+        !reqUrl.includes("/v4/")
       ) {
         cdpSend(cdp, "Fetch.failRequest", { requestId, reason: "BlockedByClient" }).catch(() => {});
         return;
