@@ -138,6 +138,8 @@ const ATTR_SESSION_CF_SOLVES = "session_cf_solves";
 const ATTR_SESSION_CONCURRENT_TABS = "session_concurrent_tabs";
 const ATTR_SESSION_WARM = "session_warm";
 const ATTR_CF_CLEARANCE_PRESENT = "cf_clearance_present";
+// API call lifecycle — registered in registry/ahrefs.yaml (ahrefs.session group)
+const ATTR_API_CALL_STATUS = "api_call_status";
 
 // ── Builder ─────────────────────────────────────────────────────────
 
@@ -160,6 +162,7 @@ export interface WideEventInput {
   retryContext?: { reason?: string; replayUrl?: string; replayDurationMs?: number };
   sessionContext?: SessionContext;
   cfClearancePresent?: boolean;
+  apiCallStatus?: string;
 }
 
 export function buildWideEvent(input: WideEventInput): Record<string, string> {
@@ -319,6 +322,7 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_SESSION_CONCURRENT_TABS]: String(input.sessionContext?.session_concurrent_tabs ?? 0),
     [ATTR_SESSION_WARM]: String(input.sessionContext?.session_warm ?? false),
     [ATTR_CF_CLEARANCE_PRESENT]: String(input.cfClearancePresent ?? false),
+    [ATTR_API_CALL_STATUS]: input.apiCallStatus ?? "unknown",
 
     // Misc
     [ATTR_HARD_TIMEOUT_PHASE]: "",

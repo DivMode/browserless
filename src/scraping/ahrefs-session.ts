@@ -344,6 +344,7 @@ export class AhrefsSessionManager {
               scrapeUrl: "",
               timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
               cfClearancePresent: false,
+              apiCallStatus: "scrape_error",
             }),
           ),
         );
@@ -385,6 +386,7 @@ export class AhrefsSessionManager {
             session_warm: this.cfSolveCount > 0,
           },
           cfClearancePresent: scrapeOutput.cfClearancePresent,
+          apiCallStatus: scrapeOutput.apiCallStatus,
         });
         yield* Effect.logInfo("ahrefs.scrape.wide_event").pipe(Effect.annotateLogs(wideEvent));
 

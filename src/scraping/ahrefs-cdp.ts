@@ -257,6 +257,13 @@ export const waitForResult = (page: Page, domain: string) =>
     catch: () => new ResultTimeoutError({ domain }),
   });
 
+/** Read the API call status from the page — tells you if the API was never called, pending, or got a response. */
+export const getApiCallStatus = (page: Page) =>
+  Effect.tryPromise({
+    try: () => page.evaluate("window.__apiCallStatus || 'unknown'") as Promise<string>,
+    catch: () => "page_destroyed",
+  }).pipe(Effect.catch(() => Effect.succeed("page_destroyed")));
+
 // ── Diagnostics ─────────────────────────────────────────────────────
 
 export interface DiagnosticInfo {

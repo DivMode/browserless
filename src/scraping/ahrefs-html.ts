@@ -31,6 +31,7 @@ export const minimalTurnstileHtml = (p: HtmlParams): string => `<!DOCTYPE html>
 <script>
 window.__ahrefsResult = null;
 window.__turnstileToken = null;
+window.__apiCallStatus = 'not_called';
 
 function mark(tag, payload) {
   var event = {type: 5, timestamp: Date.now(), data: {tag: tag, payload: payload || {}}};
@@ -79,6 +80,7 @@ async function onToken(token) {
   } catch(e) {}
 
   document.getElementById('status').textContent = 'Token received, calling API...';
+  window.__apiCallStatus = 'pending';
   var apiErrors = [];
   try {
     var ov = await fetchJSON('overview', '/v4/stGetFreeBacklinksOverview', {
@@ -113,6 +115,7 @@ async function onToken(token) {
       apiErrors: apiErrors.length ? apiErrors : undefined
     });
     mark('ahrefs.complete', {success: true});
+    window.__apiCallStatus = bl && bl.error ? 'responded_error' : 'responded_ok';
     if (!bl || !bl.error) {
       document.getElementById('status').style.color = '#16a34a';
       document.getElementById('status').textContent = '\\u2705 Complete';
@@ -120,6 +123,7 @@ async function onToken(token) {
     }
   } catch(e) {
     if (e.apiError) apiErrors.push(Object.assign({retried: false}, e.apiError));
+    window.__apiCallStatus = e.apiError ? 'responded_' + e.apiError.status : 'responded_error';
     window.__ahrefsResult = JSON.stringify({
       error: 'api_error',
       message: e.message,
@@ -150,6 +154,7 @@ export const minimalTrafficHtml = (p: HtmlParams): string => `<!DOCTYPE html>
 <script>
 window.__ahrefsResult = null;
 window.__turnstileToken = null;
+window.__apiCallStatus = 'not_called';
 
 function mark(tag, payload) {
   var event = {type: 5, timestamp: Date.now(), data: {tag: tag, payload: payload || {}}};
@@ -198,6 +203,7 @@ async function onToken(token) {
   } catch(e) {}
 
   document.getElementById('status').textContent = 'Token received, calling API...';
+  window.__apiCallStatus = 'pending';
   var apiErrors = [];
   try {
     var ov = await fetchJSON('traffic', '/v4/stGetFreeTrafficOverview', {
@@ -212,11 +218,13 @@ async function onToken(token) {
       apiErrors: apiErrors.length ? apiErrors : undefined
     });
     mark('ahrefs.complete', {success: true});
+    window.__apiCallStatus = 'responded_ok';
     document.getElementById('status').style.color = '#16a34a';
     document.getElementById('status').textContent = '\\u2705 Complete';
     document.title = 'OK';
   } catch(e) {
     if (e.apiError) apiErrors.push(Object.assign({retried: false}, e.apiError));
+    window.__apiCallStatus = e.apiError ? 'responded_' + e.apiError.status : 'responded_error';
     window.__ahrefsResult = JSON.stringify({
       error: 'api_error',
       message: e.message,

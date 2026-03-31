@@ -20,6 +20,7 @@ import {
   enableFetchInterception,
   getTargetId,
   setupFetchInterception,
+  getApiCallStatus,
   waitForDocumentInterception,
   waitForResult,
 } from "./ahrefs-cdp.js";
@@ -46,6 +47,7 @@ export interface ScrapeOutput {
   scrapeUrl: string;
   timings: { navMs: number; interceptMs: number; resultMs: number; totalMs: number };
   cfClearancePresent?: boolean;
+  apiCallStatus?: string;
 }
 
 // ── Build URL ────────────────────────────────────────────────────────
@@ -235,10 +237,13 @@ export const executeAhrefsScrape = (
 
       const result = parseResult(apiResult, domain, scrapeType, timings);
 
-      // Phase 7: On failure, capture page diagnostics
+      // Phase 7: Read API call status from the page (not_called / pending / responded_ok / responded_429 / page_destroyed)
+      const apiCallStatus = yield* getApiCallStatus(page);
+
+      // Phase 8: On failure, capture page diagnostics
       const diagnostics = result.success ? null : yield* captureDiagnostics(page);
 
-      // Phase 8: Collect CF solver telemetry + per-tab replay metadata
+      // Phase 9: Collect CF solver telemetry + per-tab replay metadata
       const cfMetrics = cfListener.collect();
       const replayMeta = cfListener.getReplayMetadata();
 
@@ -257,6 +262,7 @@ export const executeAhrefsScrape = (
         scrapeUrl: url,
         timings,
         cfClearancePresent,
+        apiCallStatus,
       };
     })().pipe(Effect.ensuring(cleanupCdp(cdp)));
   })();
