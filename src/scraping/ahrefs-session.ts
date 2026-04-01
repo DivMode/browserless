@@ -1,13 +1,16 @@
 /**
- * Ahrefs Session Manager — singleton persistent browser with tab concurrency.
+ * Ahrefs Session Manager — generation-based browser pool with graceful drain.
  *
- * Replaces per-scrape browser launch with a single long-lived Chrome instance.
- * CF clearance cookies persist across all scrapes on the same browser.
- * Session recycled at MAX_CF_SOLVES_PER_SESSION (8) or on health failures.
+ * Each "generation" owns a Chrome browser, a Semaphore(15) for tab permits,
+ * a Scope for lifecycle, and health counters. A Ref<PoolState> tracks the
+ * current generation. On recycle, a new generation is created and the old one
+ * drains its active tabs independently — zero stall, zero killed scrapes.
  *
- * Effect v4 equivalent of pydoll's AhrefsSessionManager.
+ * Pattern: Nginx worker reload / Envoy hot restart / Linux RCU epoch reclamation.
+ *
+ * Effect v4 primitives: Ref, Scope, Semaphore, Exit.
  */
-import { Effect } from "effect";
+import { Effect, Exit, Ref, Scope, Semaphore } from "effect";
 import puppeteer from "puppeteer-core";
 import type { Browser } from "puppeteer-core";
 
@@ -30,6 +33,8 @@ const TAB_STAGGER_MS = 1500;
 const HEALTH_CHECK_INTERVAL_MS = 30_000;
 const MAX_CONSECUTIVE_FAILURES = 3;
 const MAX_TARGET_COUNT = 90;
+const DRAIN_TIMEOUT_MS = 60_000;
+const MAX_DRAINING_GENERATIONS = 3;
 
 // ── Internal WS URL ─────────────────────────────────────────────────
 
@@ -47,263 +52,440 @@ function buildInternalWsUrl(): string {
   return `ws://127.0.0.1:${PORT}/chromium?${params.toString()}`;
 }
 
+// ── Generation State ────────────────────────────────────────────────
+
+interface GenerationState {
+  readonly id: number;
+  readonly browser: Browser;
+  connection: any;
+  readonly semaphore: Semaphore.Semaphore;
+  readonly scope: Scope.Closeable;
+  readonly createdAt: number;
+  cfSolveCount: number;
+  cfSolveTtlExceeded: boolean;
+  cfSolverBroken: boolean;
+  proxyBroken: boolean;
+  consecutiveCfFailures: number;
+  consecutiveProxyFailures: number;
+  consecutiveHealthFailures: number;
+  lastHealthCheck: number;
+  draining: boolean;
+  recycleReason: string;
+}
+
+interface PoolState {
+  currentGenId: number;
+  generations: Map<number, GenerationState>;
+  nextGenId: number;
+}
+
 // ── Session Manager ─────────────────────────────────────────────────
 
 export class AhrefsSessionManager {
-  // Browser state
-  private browser: Browser | null = null;
-  private connection: any = null;
+  private readonly stateRef: Ref.Ref<PoolState> = Ref.makeUnsafe<PoolState>({
+    currentGenId: -1,
+    generations: new Map(),
+    nextGenId: 0,
+  });
 
-  // Health counters
-  private cfSolveCount = 0;
-  private consecutiveCfFailures = 0;
-  private consecutiveProxyFailures = 0;
-  private consecutiveHealthFailures = 0;
-  private cfSolverBroken = false;
-  private cfSolveTtlExceeded = false;
-  private proxyBroken = false;
-  private sessionCreatedAt = 0;
-  private lastHealthCheck = 0;
-  private lastRecycleReason = "";
+  private readonly recycleLock: Semaphore.Semaphore = Semaphore.makeUnsafe(1);
 
-  // Tab stagger
   private lastTabCreated = 0;
 
-  // Concurrency: semaphore for tab slots
-  private activeTabCount = 0;
-  private readonly tabWaiters: Array<() => void> = [];
+  // ── Generation lifecycle ──────────────────────────────────────
 
-  // CF event listener on Connection
-  private cfSolveHandler: ((params: any) => void) | null = null;
+  private createGeneration(): Effect.Effect<GenerationState, Error> {
+    return Effect.fn("session.createGeneration")(function* (this: AhrefsSessionManager) {
+      const state = yield* Ref.get(this.stateRef);
+      const genId = state.nextGenId;
 
-  // ── Session lifecycle ───────────────────────────────────────────
+      const browser = yield* Effect.tryPromise({
+        try: () => puppeteer.connect({ browserWSEndpoint: buildInternalWsUrl() }),
+        catch: (e: unknown) => new Error(`connect: ${e instanceof Error ? e.message : String(e)}`),
+      });
 
-  private async createSession(): Promise<Browser> {
-    await this.destroySession();
-
-    const browser = await puppeteer.connect({
-      browserWSEndpoint: buildInternalWsUrl(),
-    });
-
-    // Proxy auth on all new pages
-    if (PROXY) {
-      const proxyUrl = new URL(PROXY);
-      if (proxyUrl.username) {
-        const pages = await browser.pages();
-        for (const p of pages) {
-          await p
-            .authenticate({
-              username: decodeURIComponent(proxyUrl.username),
-              password: decodeURIComponent(proxyUrl.password),
-            })
-            .catch(() => {});
+      // Proxy auth on initial pages
+      if (PROXY) {
+        const proxyUrl = new URL(PROXY);
+        if (proxyUrl.username) {
+          const pages = yield* Effect.tryPromise({
+            try: () => browser.pages(),
+            catch: () => new Error("pages"),
+          });
+          for (const p of pages) {
+            yield* Effect.tryPromise({
+              try: () =>
+                p.authenticate({
+                  username: decodeURIComponent(proxyUrl.username),
+                  password: decodeURIComponent(proxyUrl.password),
+                }),
+              catch: () => new Error("auth"),
+            }).pipe(Effect.ignore);
+          }
         }
       }
-    }
 
-    this.browser = browser;
-    this.sessionCreatedAt = Date.now();
-    this.lastHealthCheck = Date.now();
-    this.cfSolveCount = 0;
-    this.consecutiveCfFailures = 0;
-    this.consecutiveProxyFailures = 0;
-    this.consecutiveHealthFailures = 0;
-    this.cfSolverBroken = false;
-    this.cfSolveTtlExceeded = false;
-    this.proxyBroken = false;
+      const scope = yield* Scope.make();
+      const semaphore = yield* Semaphore.make(MAX_CONCURRENT_TABS);
 
-    // Listen for CF solves on the Connection to track solve count + session TTL
-    const pages = await browser.pages();
-    if (pages[0]) {
-      try {
-        const cdp = await pages[0].createCDPSession();
-        this.connection = cdp.connection();
-        if (this.connection) {
-          this.cfSolveHandler = () => {
-            this.cfSolveCount++;
-            if (this.cfSolveCount >= MAX_CF_SOLVES_PER_SESSION) {
-              this.cfSolveTtlExceeded = true;
-            }
-          };
-          this.connection.on("Browserless.cloudflareSolved" as any, this.cfSolveHandler);
-        }
-        await cdp.detach().catch(() => {});
-      } catch {
-        // Non-fatal — CF tracking won't work but scraping will
-      }
-    }
+      const now = Date.now();
+      const gen: GenerationState = {
+        id: genId,
+        browser,
+        connection: null,
+        semaphore,
+        scope,
+        createdAt: now,
+        cfSolveCount: 0,
+        cfSolveTtlExceeded: false,
+        cfSolverBroken: false,
+        proxyBroken: false,
+        consecutiveCfFailures: 0,
+        consecutiveProxyFailures: 0,
+        consecutiveHealthFailures: 0,
+        lastHealthCheck: now,
+        draining: false,
+        recycleReason: "",
+      };
 
-    runForkInServer(
-      Effect.logInfo("Session created").pipe(
-        Effect.annotateLogs({ cf_solve_count: "0", session_age_ms: "0" }),
-      ),
-    );
+      // Set up CF solve tracking on Connection
+      yield* Effect.tryPromise({
+        try: async () => {
+          const pages = await browser.pages();
+          if (!pages[0]) return;
+          const cdp = await pages[0].createCDPSession();
+          const connection = cdp.connection();
+          if (connection) {
+            gen.connection = connection;
+            const handler = () => {
+              gen.cfSolveCount++;
+              if (gen.cfSolveCount >= MAX_CF_SOLVES_PER_SESSION) {
+                gen.cfSolveTtlExceeded = true;
+              }
+            };
+            connection.on("Browserless.cloudflareSolved" as any, handler);
+            Effect.runSync(
+              Scope.addFinalizer(
+                scope,
+                Effect.sync(() => {
+                  connection.off("Browserless.cloudflareSolved" as any, handler);
+                }),
+              ),
+            );
+          }
+          await cdp.detach().catch(() => {});
+        },
+        catch: () => new Error("cf_listener"),
+      }).pipe(Effect.ignore);
 
-    return browser;
+      // Register browser.close() as scope finalizer
+      Effect.runSync(
+        Scope.addFinalizer(
+          scope,
+          Effect.tryPromise({
+            try: () => browser.close(),
+            catch: () => undefined,
+          }).pipe(Effect.timeout("5 seconds"), Effect.ignore),
+        ),
+      );
+
+      yield* Ref.update(this.stateRef, (s) => ({ ...s, nextGenId: s.nextGenId + 1 }));
+
+      yield* Effect.logInfo("session.generation.created").pipe(
+        Effect.annotateLogs({ gen_id: String(genId) }),
+      );
+
+      return gen;
+    }).bind(this)();
   }
 
-  private async destroySession(): Promise<void> {
-    if (!this.browser) return;
+  private createAndSetGeneration(): Effect.Effect<GenerationState, Error> {
+    return Effect.fn("session.createAndSet")(function* (this: AhrefsSessionManager) {
+      const gen = yield* this.createGeneration();
+      yield* Ref.update(this.stateRef, (s) => ({
+        ...s,
+        currentGenId: gen.id,
+        generations: new Map(s.generations).set(gen.id, gen),
+      }));
+      return gen;
+    }).bind(this)();
+  }
 
-    // Remove CF listener
-    if (this.connection && this.cfSolveHandler) {
-      this.connection.off("Browserless.cloudflareSolved" as any, this.cfSolveHandler);
-      this.cfSolveHandler = null;
-    }
-    this.connection = null;
+  private destroyGeneration(genId: number): Effect.Effect<void> {
+    return Effect.fn("session.destroyGeneration")(function* (this: AhrefsSessionManager) {
+      const state = yield* Ref.get(this.stateRef);
+      const gen = state.generations.get(genId);
+      if (!gen) return;
 
-    const browser = this.browser;
-    this.browser = null;
-
-    const age = Date.now() - this.sessionCreatedAt;
-    runForkInServer(
-      Effect.logInfo("Session destroyed").pipe(
+      const age = Date.now() - gen.createdAt;
+      yield* Effect.logInfo("session.generation.destroyed").pipe(
         Effect.annotateLogs({
-          cf_solve_count: String(this.cfSolveCount),
+          gen_id: String(genId),
+          cf_solve_count: String(gen.cfSolveCount),
           session_age_ms: String(age),
-          reason: this.cfSolveTtlExceeded
-            ? "solve_ttl"
-            : this.cfSolverBroken
-              ? "cf_broken"
-              : this.proxyBroken
-                ? "proxy_broken"
-                : "unknown",
+          reason: gen.recycleReason || "shutdown",
         }),
-      ),
-    );
+      );
 
-    try {
-      await browser.close();
-    } catch {
-      // Browser may already be dead
-    }
+      yield* Scope.close(gen.scope, Exit.void).pipe(Effect.timeout("10 seconds"), Effect.ignore);
+
+      yield* Ref.update(this.stateRef, (s) => {
+        const newMap = new Map(s.generations);
+        newMap.delete(genId);
+        return { ...s, generations: newMap };
+      });
+    }).bind(this)();
   }
 
   // ── Health checks ─────────────────────────────────────────────
 
-  private needsRecycle(): boolean {
-    // NEVER recycle while tabs are active — destroying the browser kills in-flight scrapes.
-    // The recycle will happen when the last active tab finishes and the next scrape calls ensureSession().
-    if (this.activeTabCount > 0) return false;
+  private needsRecycle(gen: GenerationState): boolean {
+    if (gen.draining) return false;
 
-    if (this.cfSolveTtlExceeded) {
-      this.lastRecycleReason = "solve_ttl";
+    if (gen.cfSolveTtlExceeded) {
+      gen.recycleReason = "solve_ttl";
       return true;
     }
-    if (this.cfSolverBroken) {
-      this.lastRecycleReason = "cf_broken";
+    if (gen.cfSolverBroken) {
+      gen.recycleReason = "cf_broken";
       return true;
     }
-    if (this.proxyBroken) {
-      this.lastRecycleReason = "proxy_broken";
+    if (gen.proxyBroken) {
+      gen.recycleReason = "proxy_broken";
       return true;
     }
-    if (this.consecutiveCfFailures >= MAX_CONSECUTIVE_FAILURES) {
-      this.lastRecycleReason = "cf_failures";
+    if (gen.consecutiveCfFailures >= MAX_CONSECUTIVE_FAILURES) {
+      gen.recycleReason = "cf_failures";
       return true;
     }
-    if (this.consecutiveProxyFailures >= MAX_CONSECUTIVE_FAILURES) {
-      this.lastRecycleReason = "proxy_failures";
+    if (gen.consecutiveProxyFailures >= MAX_CONSECUTIVE_FAILURES) {
+      gen.recycleReason = "proxy_failures";
       return true;
     }
     return false;
   }
 
-  private async ensureSession(): Promise<Browser> {
-    // No browser → create
-    if (!this.browser) return this.createSession();
+  private ensureGeneration(): Effect.Effect<GenerationState, Error> {
+    return Effect.fn("session.ensureGeneration")(function* (this: AhrefsSessionManager) {
+      const state = yield* Ref.get(this.stateRef);
 
-    // Health flags → recycle
-    if (this.needsRecycle()) return this.createSession();
+      // No current generation -> create first one
+      if (state.currentGenId === -1 || !state.generations.has(state.currentGenId)) {
+        return yield* this.createAndSetGeneration();
+      }
 
-    // Periodic health check (every 30s)
-    if (Date.now() - this.lastHealthCheck >= HEALTH_CHECK_INTERVAL_MS) {
-      this.lastHealthCheck = Date.now();
-      const healthy = await this.healthCheck();
-      if (!healthy) return this.createSession();
-    }
+      const gen = state.generations.get(state.currentGenId)!;
 
-    return this.browser;
+      // Check health flags -> trigger recycle if needed (non-blocking)
+      if (this.needsRecycle(gen)) {
+        const reason = gen.recycleReason;
+        runForkInServer(this.triggerRecycle(reason));
+        // Re-read: recycle may have completed synchronously
+        const freshState = yield* Ref.get(this.stateRef);
+        const currentGen = freshState.generations.get(freshState.currentGenId);
+        if (currentGen && !currentGen.draining) return currentGen;
+        // Recycle hasn't completed yet, tab runs on old gen (still alive, just draining)
+        return gen;
+      }
+
+      // Periodic health check (every 30s)
+      if (Date.now() - gen.lastHealthCheck >= HEALTH_CHECK_INTERVAL_MS) {
+        gen.lastHealthCheck = Date.now();
+        const healthy = yield* this.healthCheck(gen);
+        if (!healthy) {
+          runForkInServer(this.triggerRecycle("health_failed"));
+          const freshState = yield* Ref.get(this.stateRef);
+          const currentGen = freshState.generations.get(freshState.currentGenId);
+          if (currentGen && !currentGen.draining) return currentGen;
+          return gen;
+        }
+      }
+
+      return gen;
+    }).bind(this)();
   }
 
-  private async healthCheck(): Promise<boolean> {
-    if (!this.browser) return false;
+  private healthCheck(gen: GenerationState): Effect.Effect<boolean> {
+    return Effect.tryPromise({
+      try: async () => {
+        const pages = await gen.browser.pages();
+        if (pages.length === 0) return false;
+        const cdp = await pages[0].createCDPSession();
+        const conn = cdp.connection();
+        if (!conn) {
+          await cdp.detach().catch(() => {});
+          return false;
+        }
 
-    try {
-      // CDP RTT check
-      const pages = await this.browser.pages();
-      if (pages.length === 0) return false;
-      const cdp = await pages[0].createCDPSession();
-      const conn = cdp.connection();
-      if (!conn) {
+        await Promise.race([
+          conn.send("Browser.getVersion"),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000)),
+        ]);
+
+        const result = (await Promise.race([
+          conn.send("Target.getTargets") as Promise<any>,
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000)),
+        ])) as any;
+        const targetCount = result?.targetInfos?.length ?? 0;
+
         await cdp.detach().catch(() => {});
-        return false;
-      }
 
-      await Promise.race([
-        conn.send("Browser.getVersion"),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000)),
-      ]);
+        if (targetCount > MAX_TARGET_COUNT) {
+          gen.recycleReason = "tab_leak";
+          runForkInServer(
+            Effect.logError("Tab leak detected").pipe(
+              Effect.annotateLogs({
+                gen_id: String(gen.id),
+                target_count: String(targetCount),
+                max_targets: String(MAX_TARGET_COUNT),
+              }),
+            ),
+          );
+          return false;
+        }
 
-      // Target count check (circuit breaker for tab leaks)
-      const result = (await Promise.race([
-        conn.send("Target.getTargets") as Promise<any>,
-        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000)),
-      ])) as any;
-      const targetCount = result?.targetInfos?.length ?? 0;
+        gen.consecutiveHealthFailures = 0;
+        return true;
+      },
+      catch: (e: unknown) => {
+        gen.consecutiveHealthFailures++;
+        if (gen.consecutiveHealthFailures >= MAX_CONSECUTIVE_FAILURES) {
+          gen.recycleReason = "health_failed";
+          runForkInServer(
+            Effect.logError("Health check failed, recycling").pipe(
+              Effect.annotateLogs({
+                gen_id: String(gen.id),
+                consecutive_health_failures: String(gen.consecutiveHealthFailures),
+                health_error: e instanceof Error ? e.message : String(e),
+              }),
+            ),
+          );
+        }
+        return undefined as unknown as boolean;
+      },
+    }).pipe(
+      Effect.map((result) => {
+        if (result === undefined) {
+          return gen.consecutiveHealthFailures < MAX_CONSECUTIVE_FAILURES;
+        }
+        return result;
+      }),
+      Effect.catch(() => Effect.succeed(true)),
+    );
+  }
 
-      await cdp.detach().catch(() => {});
+  // ── Recycle & drain ───────────────────────────────────────────
 
-      if (targetCount > MAX_TARGET_COUNT) {
-        this.lastRecycleReason = "tab_leak";
-        runForkInServer(
-          Effect.logError("Tab leak detected").pipe(
+  private triggerRecycle(reason: string): Effect.Effect<void> {
+    return this.recycleLock
+      .withPermits(1)(
+        Effect.fn("session.recycle")(function* (this: AhrefsSessionManager) {
+          const state = yield* Ref.get(this.stateRef);
+          const oldGen = state.generations.get(state.currentGenId);
+
+          // Guard: if current gen is already draining, another recycle beat us
+          if (!oldGen || oldGen.draining) return;
+
+          // Cap draining gens — force-kill oldest if needed
+          const drainingGens = [...state.generations.values()].filter((g) => g.draining);
+          if (drainingGens.length >= MAX_DRAINING_GENERATIONS) {
+            const oldest = drainingGens.sort((a, b) => a.createdAt - b.createdAt)[0];
+            if (oldest) {
+              yield* Effect.logWarning("session.drain.force_kill").pipe(
+                Effect.annotateLogs({
+                  killed_gen_id: String(oldest.id),
+                  reason: "max_draining_exceeded",
+                }),
+              );
+              yield* this.destroyGeneration(oldest.id);
+            }
+          }
+
+          yield* Effect.logInfo("session.recycle.start").pipe(
             Effect.annotateLogs({
-              target_count: String(targetCount),
-              max_targets: String(MAX_TARGET_COUNT),
+              old_gen_id: String(oldGen.id),
+              reason,
+              old_gen_age_ms: String(Date.now() - oldGen.createdAt),
+              old_gen_cf_solves: String(oldGen.cfSolveCount),
+            }),
+          );
+
+          // Create new generation — if this fails, don't mark old as draining
+          const newGen = yield* this.createAndSetGeneration().pipe(
+            Effect.catch((e: Error) =>
+              Effect.logError("session.recycle.create_failed").pipe(
+                Effect.annotateLogs({
+                  error: e.message,
+                  old_gen_id: String(oldGen.id),
+                }),
+                Effect.flatMap(() => Effect.fail(e)),
+              ),
+            ),
+          );
+
+          // Mark old gen as draining AFTER new gen successfully created
+          oldGen.draining = true;
+          oldGen.recycleReason = reason;
+
+          // Fire-and-forget drain monitor
+          runForkInServer(this.monitorDrain(oldGen.id));
+
+          yield* Effect.logInfo("session.recycle.complete").pipe(
+            Effect.annotateLogs({
+              new_gen_id: String(newGen.id),
+              old_gen_id: String(oldGen.id),
+            }),
+          );
+        }).bind(this)(),
+      )
+      .pipe(
+        Effect.catch((e: Error) =>
+          Effect.logError("session.recycle.failed").pipe(
+            Effect.annotateLogs({
+              error: e.message,
+              reason,
             }),
           ),
+        ),
+      );
+  }
+
+  private monitorDrain(genId: number): Effect.Effect<void> {
+    return Effect.fn("session.drain")(function* (this: AhrefsSessionManager) {
+      const state = yield* Ref.get(this.stateRef);
+      const gen = state.generations.get(genId);
+      if (!gen) return;
+
+      yield* Effect.logInfo("session.drain.start").pipe(
+        Effect.annotateLogs({ gen_id: String(genId) }),
+      );
+
+      // Wait for all 15 permits to be available (= all tabs finished)
+      // OR timeout after DRAIN_TIMEOUT_MS
+      const drainResult = yield* gen.semaphore
+        .take(MAX_CONCURRENT_TABS)
+        .pipe(Effect.timeout(`${DRAIN_TIMEOUT_MS} millis`), Effect.option);
+
+      if (drainResult._tag === "None") {
+        yield* Effect.logWarning("session.drain.timeout").pipe(
+          Effect.annotateLogs({
+            gen_id: String(genId),
+            drain_deadline_ms: String(DRAIN_TIMEOUT_MS),
+          }),
         );
-        return false;
+      } else {
+        yield* Effect.logInfo("session.drain.complete").pipe(
+          Effect.annotateLogs({ gen_id: String(genId) }),
+        );
+        // Release permits back so scope close doesn't block on semaphore state
+        yield* gen.semaphore.release(MAX_CONCURRENT_TABS);
       }
 
-      this.consecutiveHealthFailures = 0;
-      return true;
-    } catch (e) {
-      this.consecutiveHealthFailures++;
-      if (this.consecutiveHealthFailures >= MAX_CONSECUTIVE_FAILURES) {
-        this.lastRecycleReason = "health_failed";
-        runForkInServer(
-          Effect.logError("Health check failed, destroying").pipe(
-            Effect.annotateLogs({
-              consecutive_health_failures: String(this.consecutiveHealthFailures),
-              health_error: e instanceof Error ? e.message : String(e),
-            }),
-          ),
-        );
-        return false;
-      }
-      return true; // Allow transient failures
-    }
+      yield* this.destroyGeneration(genId);
+    }).bind(this)();
   }
 
-  // ── Tab concurrency ───────────────────────────────────────────
-
-  private async acquireTabSlot(): Promise<void> {
-    if (this.activeTabCount < MAX_CONCURRENT_TABS) {
-      this.activeTabCount++;
-      return;
-    }
-    // Wait for a slot
-    await new Promise<void>((resolve) => this.tabWaiters.push(resolve));
-    this.activeTabCount++;
-  }
-
-  private releaseTabSlot(): void {
-    this.activeTabCount--;
-    const waiter = this.tabWaiters.shift();
-    if (waiter) waiter();
-  }
+  // ── Tab stagger ───────────────────────────────────────────────
 
   private async staggerTab(): Promise<void> {
     const elapsed = Date.now() - this.lastTabCreated;
@@ -317,35 +499,28 @@ export class AhrefsSessionManager {
 
   /**
    * Run an ahrefs scrape on the shared browser session.
-   * Handles: tab acquisition, stagger, session health, page lifecycle,
-   * replay URL resolution, wide event emission, R2 write, health counter updates.
+   * Tab acquired from current generation's semaphore. Permit released
+   * back to THAT generation (not current), enabling graceful drain.
    */
   scrape(domain: string, scrapeType: ScrapeType): Effect.Effect<ScrapeOutput, Error> {
     return Effect.fn("session.scrape")(function* (this: AhrefsSessionManager) {
-      // Acquire tab slot (waits if all 15 are in use)
-      yield* Effect.tryPromise({
-        try: () => this.acquireTabSlot(),
-        catch: () => new Error("tab_slot_acquire"),
-      });
+      // 1. Get current generation (creates if needed, triggers recycle if needed)
+      const gen = yield* this.ensureGeneration();
+
+      // 2. Acquire tab permit on THIS generation's semaphore
+      yield* gen.semaphore.take(1);
 
       try {
-        // Tab stagger (1.5s between tab creations)
+        // 3. Tab stagger (1.5s between tab creations)
         yield* Effect.tryPromise({
           try: () => this.staggerTab(),
           catch: () => new Error("tab_stagger"),
         });
 
-        // Ensure browser session is healthy
-        const browser = yield* Effect.tryPromise({
-          try: () => this.ensureSession(),
-          catch: (e: unknown) =>
-            new Error(`ensure_session: ${e instanceof Error ? e.message : String(e)}`),
-        });
-
-        // Create fresh page (tab) on shared browser
+        // 4. Create fresh page (tab) on THIS generation's browser
         const page = yield* Effect.tryPromise({
           try: async () => {
-            const p = await browser.newPage();
+            const p = await gen.browser.newPage();
             if (PROXY) {
               const proxyUrl = new URL(PROXY);
               if (proxyUrl.username) {
@@ -361,10 +536,9 @@ export class AhrefsSessionManager {
             new Error(`new_page: ${e instanceof Error ? e.message : String(e)}`),
         });
 
-        // Run scrape on this tab — catch converts any untyped failure to ScrapeInfraError
+        // 5. Run scrape on this tab
         const scrapeOutput = yield* executeAhrefsScrape(page, domain, scrapeType).pipe(
           Effect.catch((e) => {
-            // Extract useful error info: tagged Effect errors have _tag, plain Errors have message
             const tag = (e as any)?._tag;
             const msg = e instanceof Error ? e.message : String(e);
             const cause = tag ? `${tag}${msg ? `: ${msg}` : ""}` : msg || "unknown";
@@ -394,7 +568,7 @@ export class AhrefsSessionManager {
           }),
         );
 
-        // Get this page's targetId for replay matching
+        // 6. Get this page's targetId for replay matching
         const pageTargetId: string = yield* Effect.tryPromise({
           try: async () => {
             const t = page.target();
@@ -403,7 +577,7 @@ export class AhrefsSessionManager {
           catch: (): Error => new Error("targetId"),
         }).pipe(Effect.catch(() => Effect.succeed("")));
 
-        // Close page (triggers replay flush for this tab)
+        // 7. Close page (triggers replay flush for this tab)
         yield* Effect.fn("ahrefs.page.close")(function* () {
           const closeStart = Date.now();
           yield* Effect.tryPromise({
@@ -413,13 +587,11 @@ export class AhrefsSessionManager {
           yield* Effect.annotateCurrentSpan({ "page.close_ms": Date.now() - closeStart });
         })();
 
-        // Wait for replay flush then query server, filtered by this tab's targetId.
-        // tabReplayComplete CDP event fires AFTER page.close, so cfListener can't
-        // capture it in time. Server query + targetId filter is the reliable path.
+        // 8. Wait for replay flush then query server, filtered by this tab's targetId
         yield* Effect.sleep("2 seconds");
         const replayMeta = yield* this.resolveReplayUrl(scrapeOutput, pageTargetId);
 
-        // Emit wide event with session context
+        // 9. Emit wide event with session + generation context
         const wideEvent = buildWideEvent({
           result: scrapeOutput.result,
           cfMetrics: scrapeOutput.cfMetrics ?? emptyCfMetrics(),
@@ -429,23 +601,26 @@ export class AhrefsSessionManager {
           scrapeType,
           scrapeUrl: scrapeOutput.scrapeUrl,
           sessionContext: {
-            session_age_ms: Date.now() - this.sessionCreatedAt,
-            session_cf_solves: this.cfSolveCount,
-            session_concurrent_tabs: this.activeTabCount,
-            session_warm: this.cfSolveCount > 0,
+            session_age_ms: Date.now() - gen.createdAt,
+            session_cf_solves: gen.cfSolveCount,
+            session_concurrent_tabs: 0,
+            session_warm: gen.cfSolveCount > 0,
+            generation_id: gen.id,
           },
           cfClearancePresent: scrapeOutput.cfClearancePresent,
           apiCallStatus: scrapeOutput.apiCallStatus,
-          sessionRecycleReason: this.lastRecycleReason || undefined,
+          sessionRecycleReason: gen.recycleReason || undefined,
         });
         yield* Effect.logInfo("ahrefs.scrape.wide_event").pipe(Effect.annotateLogs(wideEvent));
 
-        // Update health counters
-        this.updateHealthCounters(scrapeOutput);
+        // 10. Update health counters on THIS generation
+        this.updateHealthCounters(gen, scrapeOutput);
 
         return scrapeOutput;
       } finally {
-        this.releaseTabSlot();
+        // 11. Release permit back to THIS generation's semaphore
+        //     Key: returns to the gen we acquired from, NOT the current gen
+        Effect.runSync(gen.semaphore.release(1));
       }
     }).bind(this)();
   }
@@ -470,14 +645,12 @@ export class AhrefsSessionManager {
           eventCount: number;
         }>;
 
-        // Match by targetId — the replay ID format is "{sessionUUID}--tab-{targetId}"
         const ours = pageTargetId
           ? replays.find((r) => r.id.includes(pageTargetId))
           : replays
               .filter((r) => (r.startedAt ?? 0) > Date.now() - 60_000)
               .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0];
 
-        // Log replay resolution details — visible in Loki for debugging missing replays
         runForkInServer(
           Effect.logInfo("replay.resolve").pipe(
             Effect.annotateLogs({
@@ -504,34 +677,31 @@ export class AhrefsSessionManager {
 
   // ── Health counter updates ────────────────────────────────────
 
-  private updateHealthCounters(output: ScrapeOutput): void {
+  private updateHealthCounters(gen: GenerationState, output: ScrapeOutput): void {
     const { result, cfMetrics } = output;
 
     if (result.success) {
-      this.consecutiveCfFailures = 0;
-      this.consecutiveProxyFailures = 0;
+      gen.consecutiveCfFailures = 0;
+      gen.consecutiveProxyFailures = 0;
       return;
     }
 
     const error = result.scrapeError;
     if (!error) return;
 
-    // CF solver broken: turnstile timeout with zero CF events
     if (error._tag === "TurnstileTimeoutError" && cfMetrics?.cf_events === 0) {
-      this.cfSolverBroken = true;
+      gen.cfSolverBroken = true;
     }
 
-    // Use typed error category for routing
     const category = errorCategory(error);
     if (category === "solver" || error._tag === "InterceptionTimeoutError") {
-      this.consecutiveCfFailures++;
+      gen.consecutiveCfFailures++;
     }
 
-    // Proxy/navigation failures (consecutive)
     if (error._tag === "NavigationError") {
-      this.consecutiveProxyFailures++;
-      if (this.consecutiveProxyFailures >= MAX_CONSECUTIVE_FAILURES) {
-        this.proxyBroken = true;
+      gen.consecutiveProxyFailures++;
+      if (gen.consecutiveProxyFailures >= MAX_CONSECUTIVE_FAILURES) {
+        gen.proxyBroken = true;
       }
     }
   }
@@ -539,7 +709,14 @@ export class AhrefsSessionManager {
   // ── Shutdown ──────────────────────────────────────────────────
 
   async shutdown(): Promise<void> {
-    await this.destroySession();
+    await Effect.runPromise(
+      Effect.fn("session.shutdown")(function* (this: AhrefsSessionManager) {
+        const state = yield* Ref.get(this.stateRef);
+        for (const genId of state.generations.keys()) {
+          yield* this.destroyGeneration(genId);
+        }
+      }).bind(this)(),
+    );
   }
 }
 

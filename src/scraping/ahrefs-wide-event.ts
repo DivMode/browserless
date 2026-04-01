@@ -143,9 +143,10 @@ const ATTR_CF_CLEARANCE_PRESENT = "cf_clearance_present";
 // API call lifecycle — registered in registry/ahrefs.yaml (ahrefs.session group)
 const ATTR_API_CALL_STATUS = "api_call_status";
 
-// Observability: session recycle + API response body
+// Observability: session recycle + API response body + generation tracking
 const ATTR_SESSION_RECYCLE_REASON = "session_recycle_reason";
 const ATTR_API_RESPONSE_BODY = "api_response_body";
+const ATTR_SESSION_GENERATION_ID = "session_generation_id";
 
 // ── Builder ─────────────────────────────────────────────────────────
 
@@ -154,6 +155,7 @@ export interface SessionContext {
   session_cf_solves: number;
   session_concurrent_tabs: number;
   session_warm: boolean;
+  generation_id?: number;
 }
 
 export interface WideEventInput {
@@ -390,9 +392,10 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_CF_CLEARANCE_PRESENT]: String(input.cfClearancePresent ?? false),
     [ATTR_API_CALL_STATUS]: input.apiCallStatus ?? "unknown",
 
-    // Observability: session recycle + API response body
+    // Observability: session recycle + API response body + generation tracking
     [ATTR_SESSION_RECYCLE_REASON]: input.sessionRecycleReason ?? "",
     [ATTR_API_RESPONSE_BODY]: result.apiErrors?.[0]?.body ?? "",
+    [ATTR_SESSION_GENERATION_ID]: String(input.sessionContext?.generation_id ?? 0),
 
     // Misc
     [ATTR_HARD_TIMEOUT_PHASE]: "",
