@@ -237,8 +237,8 @@ describe("error type system — exhaustive mappers", () => {
     expect(errorCategory(trTimeout)).toBe("solver");
   });
 
-  it("errorTypeString returns specific message for API errors", () => {
-    // API errors: errorTypeString returns the message (specific cause from browser JS)
+  it("errorTypeString returns specific names for all error types", () => {
+    // API errors: returns the specific message from browser JS
     expect(
       errorTypeString(
         new ApiError({
@@ -251,11 +251,6 @@ describe("error type system — exhaustive mappers", () => {
     ).toBe("overview_http_429");
     expect(
       errorTypeString(
-        new ApiError({ domain: "t", message: "overview_http_400", apiErrors: [], cfBlocked: true }),
-      ),
-    ).toBe("overview_http_400");
-    expect(
-      errorTypeString(
         new BacklinksFetchFailed({
           domain: "t",
           message: "backlinks_list_http_429",
@@ -265,15 +260,32 @@ describe("error type system — exhaustive mappers", () => {
       ),
     ).toBe("backlinks_list_http_429");
 
-    // Non-API errors: errorTypeString returns tag-based string
+    // Turnstile timeout: tells you WHERE it stalled
     expect(
       errorTypeString(
-        new TurnstileTimeoutError({ domain: "t", scrapeType: "backlinks", apiCallStatus: "" }),
+        new TurnstileTimeoutError({
+          domain: "t",
+          scrapeType: "backlinks",
+          apiCallStatus: "not_called",
+        }),
       ),
-    ).toBe("turnstile_timeout_backlinks");
-    expect(errorTypeString(new ScrapeInfraError({ domain: "t", cause: "", phase: "" }))).toBe(
-      "scrape_error",
-    );
+    ).toBe("turnstile_unsolved");
+    expect(
+      errorTypeString(
+        new TurnstileTimeoutError({
+          domain: "t",
+          scrapeType: "backlinks",
+          apiCallStatus: "pending",
+        }),
+      ),
+    ).toBe("api_call_timeout");
+
+    // Infra errors: phase + cause
+    expect(
+      errorTypeString(
+        new ScrapeInfraError({ domain: "t", cause: "session_gone", phase: "execute" }),
+      ),
+    ).toBe("execute_session_gone");
   });
 });
 
@@ -338,7 +350,7 @@ describe("wide event — API health fields", () => {
     expect(event.scrape_error_category).toBe("upstream");
   });
 
-  it("api_diagnosis=turnstile_failed for turnstile timeouts", () => {
+  it("turnstile_unsolved for turnstile timeouts where solver never completed", () => {
     const result: AhrefsScrapeResult = {
       success: false,
       domain: "test.com",
@@ -362,7 +374,32 @@ describe("wide event — API health fields", () => {
     expect(event.api_diagnosis).toBe("turnstile_failed");
     expect(event.scrape_error_category).toBe("solver");
     expect(event.failure_point).toBe("turnstile");
-    expect(event.error_type).toBe("turnstile_timeout_backlinks");
+    expect(event.error_type).toBe("turnstile_unsolved");
+  });
+
+  it("api_call_timeout when turnstile solved but API hung", () => {
+    const result: AhrefsScrapeResult = {
+      success: false,
+      domain: "test.com",
+      error: "No API result",
+      scrapeError: new TurnstileTimeoutError({
+        domain: "test.com",
+        scrapeType: "backlinks",
+        apiCallStatus: "pending",
+      }),
+      timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
+    };
+    const event = buildWideEvent({
+      result,
+      cfMetrics: emptyCfMetrics,
+      replayMeta: null,
+      diagnostics: null,
+      domain: "test.com",
+      scrapeType: "backlinks",
+      scrapeUrl: "https://ahrefs.com/backlink-checker?input=test.com",
+    });
+    expect(event.error_type).toBe("api_call_timeout");
+    expect(event.scrape_error_category).toBe("solver");
   });
 
   it("API health fields empty for successful scrapes", () => {

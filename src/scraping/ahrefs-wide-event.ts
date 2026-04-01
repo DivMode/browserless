@@ -7,7 +7,7 @@
  */
 import type { CfSolveMetrics, ReplayMetadata } from "./ahrefs-cf-listener.js";
 import type { DiagnosticInfo } from "./ahrefs-cdp.js";
-import { errorCategory, errorTypeString, failurePoint } from "./ahrefs-errors.js";
+import { errorCategory, failurePoint } from "./ahrefs-errors.js";
 import type { AhrefsScrapeResult, ScrapeType } from "./ahrefs-types.js";
 
 // ── ATTR_* constants (from ahrefs_gen.ts) ───────────────────────────
@@ -175,21 +175,45 @@ export interface WideEventInput {
 /**
  * Derive error_type from the typed scrapeError.
  *
- * For API errors (ApiError, BacklinksFetchFailed): use the specific message
- * from the browser JS — e.g. "overview_http_429", "backlinks_list_http_400".
- *
- * For non-API errors: use the tag-based string — e.g. "turnstile_timeout_backlinks",
- * "scrape_error", "interception_timeout".
+ * Every error type tells you WHAT happened, not a vague category:
+ * - API errors: specific message from browser JS — "overview_http_429", "backlinks_list_http_400"
+ * - Turnstile timeout: WHERE it stalled — "turnstile_unsolved" (never solved) vs "api_call_timeout" (solved but API hung)
+ * - Infra errors: the cause — "cdp_session_gone", "page_create_failed", etc.
  *
  * Single source of truth. No priority logic. No fallback chains.
  */
 function deriveErrorType(result: AhrefsScrapeResult): string {
   if (!result.scrapeError) return "";
-  const tag = result.scrapeError._tag;
-  if (tag === "ApiError" || tag === "BacklinksFetchFailed") {
-    return result.scrapeError.message;
+  const e = result.scrapeError;
+  switch (e._tag) {
+    // API errors: use the specific message from browser JS
+    case "ApiError":
+    case "BacklinksFetchFailed":
+      return e.message;
+    // Turnstile timeout: tell us WHERE it stalled
+    case "TurnstileTimeoutError":
+      return e.apiCallStatus === "not_called"
+        ? "turnstile_unsolved" // solver never completed
+        : e.apiCallStatus === "pending"
+          ? "api_call_timeout" // solved, but API call hung
+          : `turnstile_timeout_${e.apiCallStatus}`; // other: responded_error, page_destroyed, etc.
+    // Infra errors: use the phase + cause for specificity
+    case "ScrapeInfraError":
+      return `${e.phase}_${e.cause}`.substring(0, 80);
+    // CDP/navigation errors: specific tag name
+    case "InterceptionTimeoutError":
+      return "interception_timeout";
+    case "NavigationError":
+      return "navigation_error";
+    case "ResultTimeoutError":
+      return "result_timeout";
+    case "CdpSessionError":
+      return "cdp_session_error";
+    case "FetchEnableError":
+      return "fetch_enable_error";
+    case "FulfillError":
+      return "fulfill_error";
   }
-  return errorTypeString(result.scrapeError);
 }
 
 export function buildWideEvent(input: WideEventInput): Record<string, string> {

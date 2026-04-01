@@ -195,17 +195,21 @@ export const failurePoint = (error: ScrapeError): string => {
 export const errorTypeString = (error: ScrapeError): string => {
   switch (error._tag) {
     case "TurnstileTimeoutError":
-      return `turnstile_timeout_${error.scrapeType}`;
+      return error.apiCallStatus === "not_called"
+        ? "turnstile_unsolved"
+        : error.apiCallStatus === "pending"
+          ? "api_call_timeout"
+          : `turnstile_timeout_${error.apiCallStatus}`;
     case "ResultTimeoutError":
       return "result_timeout";
     case "ApiError":
-      return error.message; // Specific: overview_http_429, overview_http_400, etc.
+      return error.message;
     case "BacklinksFetchFailed":
-      return error.message; // Specific: backlinks_list_http_429, etc.
+      return error.message;
     case "InterceptionTimeoutError":
       return "interception_timeout";
     case "NavigationError":
-      return "navigation";
+      return "navigation_error";
     case "FulfillError":
       return "fulfill_error";
     case "CdpSessionError":
@@ -213,7 +217,7 @@ export const errorTypeString = (error: ScrapeError): string => {
     case "FetchEnableError":
       return "fetch_enable_error";
     case "ScrapeInfraError":
-      return "scrape_error";
+      return `${error.phase}_${error.cause}`.substring(0, 80);
   }
 };
 
