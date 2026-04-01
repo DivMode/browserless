@@ -64,6 +64,7 @@ export class AhrefsSessionManager {
   private proxyBroken = false;
   private sessionCreatedAt = 0;
   private lastHealthCheck = 0;
+  private lastRecycleReason = "";
 
   // Tab stagger
   private lastTabCreated = 0;
@@ -207,11 +208,26 @@ export class AhrefsSessionManager {
   // ── Health checks ─────────────────────────────────────────────
 
   private needsRecycle(): boolean {
-    if (this.cfSolveTtlExceeded) return true;
-    if (this.cfSolverBroken) return true;
-    if (this.proxyBroken) return true;
-    if (this.consecutiveCfFailures >= MAX_CONSECUTIVE_FAILURES) return true;
-    if (this.consecutiveProxyFailures >= MAX_CONSECUTIVE_FAILURES) return true;
+    if (this.cfSolveTtlExceeded) {
+      this.lastRecycleReason = "solve_ttl";
+      return true;
+    }
+    if (this.cfSolverBroken) {
+      this.lastRecycleReason = "cf_broken";
+      return true;
+    }
+    if (this.proxyBroken) {
+      this.lastRecycleReason = "proxy_broken";
+      return true;
+    }
+    if (this.consecutiveCfFailures >= MAX_CONSECUTIVE_FAILURES) {
+      this.lastRecycleReason = "cf_failures";
+      return true;
+    }
+    if (this.consecutiveProxyFailures >= MAX_CONSECUTIVE_FAILURES) {
+      this.lastRecycleReason = "proxy_failures";
+      return true;
+    }
     return false;
   }
 
@@ -261,17 +277,31 @@ export class AhrefsSessionManager {
       await cdp.detach().catch(() => {});
 
       if (targetCount > MAX_TARGET_COUNT) {
-        runForkInServer(Effect.logError(`Tab leak: ${targetCount} targets, destroying session`));
+        this.lastRecycleReason = "tab_leak";
+        runForkInServer(
+          Effect.logError("Tab leak detected").pipe(
+            Effect.annotateLogs({
+              target_count: String(targetCount),
+              max_targets: String(MAX_TARGET_COUNT),
+            }),
+          ),
+        );
         return false;
       }
 
       this.consecutiveHealthFailures = 0;
       return true;
-    } catch {
+    } catch (e) {
       this.consecutiveHealthFailures++;
       if (this.consecutiveHealthFailures >= MAX_CONSECUTIVE_FAILURES) {
+        this.lastRecycleReason = "health_failed";
         runForkInServer(
-          Effect.logError(`${this.consecutiveHealthFailures}x health check failed, destroying`),
+          Effect.logError("Health check failed, destroying").pipe(
+            Effect.annotateLogs({
+              consecutive_health_failures: String(this.consecutiveHealthFailures),
+              health_error: e instanceof Error ? e.message : String(e),
+            }),
+          ),
         );
         return false;
       }
@@ -403,10 +433,14 @@ export class AhrefsSessionManager {
         }).pipe(Effect.catch(() => Effect.succeed("")));
 
         // Close page (triggers replay flush for this tab)
-        yield* Effect.tryPromise({
-          try: () => page.close(),
-          catch: () => undefined,
-        }).pipe(Effect.ignore);
+        yield* Effect.fn("ahrefs.page.close")(function* () {
+          const closeStart = Date.now();
+          yield* Effect.tryPromise({
+            try: () => page.close(),
+            catch: () => undefined,
+          }).pipe(Effect.ignore);
+          yield* Effect.annotateCurrentSpan({ "page.close_ms": Date.now() - closeStart });
+        })();
 
         // Wait for replay flush then query server, filtered by this tab's targetId.
         // tabReplayComplete CDP event fires AFTER page.close, so cfListener can't
@@ -431,6 +465,7 @@ export class AhrefsSessionManager {
           },
           cfClearancePresent: scrapeOutput.cfClearancePresent,
           apiCallStatus: scrapeOutput.apiCallStatus,
+          sessionRecycleReason: this.lastRecycleReason || undefined,
         });
         yield* Effect.logInfo("ahrefs.scrape.wide_event").pipe(Effect.annotateLogs(wideEvent));
 
@@ -470,6 +505,19 @@ export class AhrefsSessionManager {
           : replays
               .filter((r) => (r.startedAt ?? 0) > Date.now() - 60_000)
               .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0];
+
+        // Log replay resolution details — visible in Loki for debugging missing replays
+        runForkInServer(
+          Effect.logInfo("replay.resolve").pipe(
+            Effect.annotateLogs({
+              replay_server_count: String(replays.length),
+              replay_target_id: pageTargetId || "none",
+              replay_matched: ours ? "true" : "false",
+              replay_matched_id: ours?.id ?? "",
+              replay_matched_events: String(ours?.eventCount ?? 0),
+            }),
+          ),
+        );
 
         if (!ours) return null;
         return {

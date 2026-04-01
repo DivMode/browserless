@@ -108,6 +108,7 @@ const ATTR_TURNSTILE_CF_WIDGET_FIND_DEBUG = "turnstile_cf_widget_find_debug";
 const ATTR_TURNSTILE_SUMMARY = "turnstile_summary";
 const ATTR_TURNSTILE_FAILURE_REASON = "turnstile_failure_reason";
 const ATTR_TURNSTILE_ERROR_DETECTED = "turnstile_error_detected";
+const ATTR_TURNSTILE_CF_PHASE4_DURATION_MS = "turnstile_cf_phase4_duration_ms";
 
 // Interstitial (prefixed)
 const ATTR_TURNSTILE_INTERSTITIAL_DETECTED = "turnstile_interstitial_detected";
@@ -142,6 +143,10 @@ const ATTR_CF_CLEARANCE_PRESENT = "cf_clearance_present";
 // API call lifecycle — registered in registry/ahrefs.yaml (ahrefs.session group)
 const ATTR_API_CALL_STATUS = "api_call_status";
 
+// Observability: session recycle + API response body
+const ATTR_SESSION_RECYCLE_REASON = "session_recycle_reason";
+const ATTR_API_RESPONSE_BODY = "api_response_body";
+
 // ── Builder ─────────────────────────────────────────────────────────
 
 export interface SessionContext {
@@ -164,6 +169,7 @@ export interface WideEventInput {
   sessionContext?: SessionContext;
   cfClearancePresent?: boolean;
   apiCallStatus?: string;
+  sessionRecycleReason?: string;
 }
 
 export function buildWideEvent(input: WideEventInput): Record<string, string> {
@@ -270,6 +276,7 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_TURNSTILE_SUMMARY]: summaryLabel,
     [ATTR_TURNSTILE_FAILURE_REASON]: cfMetrics.failure_reason,
     [ATTR_TURNSTILE_ERROR_DETECTED]: String(cfMetrics.error_detected),
+    [ATTR_TURNSTILE_CF_PHASE4_DURATION_MS]: String(cfMetrics.cf_phase4_duration_ms),
 
     // Interstitial (prefixed)
     [ATTR_TURNSTILE_INTERSTITIAL_DETECTED]: String(cfMetrics.interstitial_detected),
@@ -348,6 +355,10 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_SESSION_WARM]: String(input.sessionContext?.session_warm ?? false),
     [ATTR_CF_CLEARANCE_PRESENT]: String(input.cfClearancePresent ?? false),
     [ATTR_API_CALL_STATUS]: input.apiCallStatus ?? "unknown",
+
+    // Observability: session recycle + API response body
+    [ATTR_SESSION_RECYCLE_REASON]: input.sessionRecycleReason ?? "",
+    [ATTR_API_RESPONSE_BODY]: result.apiErrors?.[0]?.body ?? "",
 
     // Misc
     [ATTR_HARD_TIMEOUT_PHASE]: "",

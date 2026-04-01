@@ -43,7 +43,9 @@ export const writeResult = (
 ) =>
   Effect.fn("r2.writeResult")(function* () {
     if (!s3) {
-      console.warn("[r2] credentials not configured — skipping write");
+      yield* Effect.logWarning("r2.credentials_missing").pipe(
+        Effect.annotateLogs({ operation: "writeResult", instance_id: instanceId }),
+      );
       return null;
     }
 
@@ -75,7 +77,9 @@ export const writeResult = (
       ),
     );
 
-    console.log(`[r2] write OK: ${key}`);
+    yield* Effect.logInfo("r2.write_ok").pipe(
+      Effect.annotateLogs({ key, instance_id: instanceId, domain }),
+    );
     return key;
   })();
 
@@ -88,7 +92,9 @@ export const writeFailure = (
 ) =>
   Effect.fn("r2.writeFailure")(function* () {
     if (!s3) {
-      console.warn("[r2] credentials not configured — skipping failure write");
+      yield* Effect.logWarning("r2.credentials_missing").pipe(
+        Effect.annotateLogs({ operation: "writeFailure", instance_id: instanceId }),
+      );
       return null;
     }
 
@@ -119,7 +125,9 @@ export const writeFailure = (
       ),
     );
 
-    console.log(`[r2] failure write OK: ${key}`);
+    yield* Effect.logInfo("r2.failure_write_ok").pipe(
+      Effect.annotateLogs({ key, instance_id: instanceId, domain, error }),
+    );
     return key;
   })();
 

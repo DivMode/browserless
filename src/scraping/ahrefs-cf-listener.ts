@@ -68,6 +68,9 @@ export interface CfSolveMetrics {
   // Error
   error_detected: boolean;
   failure_reason: string;
+
+  // Phase timing (from solver snapshot — available for click_solve path)
+  cf_phase4_duration_ms: number;
 }
 
 // ── Replay Metadata ─────────────────────────────────────────────────
@@ -127,6 +130,7 @@ export const emptyCfMetrics = (): CfSolveMetrics => ({
   embedded_clicked: false,
   error_detected: false,
   failure_reason: "",
+  cf_phase4_duration_ms: 0,
 });
 
 // ── Internal state ──────────────────────────────────────────────────
@@ -335,6 +339,9 @@ export function setupCfListener(cdp: CDPSession, pageTargetId: string): CfListen
         // Error
         error_detected: errorDetected,
         failure_reason: failureReason,
+
+        // Phase timing
+        cf_phase4_duration_ms: snap.phase4_duration_ms ?? 0,
       };
     },
 
