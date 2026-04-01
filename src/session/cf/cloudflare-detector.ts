@@ -1554,8 +1554,23 @@ export class CloudflareDetector {
         }),
       );
 
-      // No solver dispatch — bridge-initiated means OOPIF not found,
-      // so we can't interact with the widget. Wait for beacon/auto-solve.
+      // Dispatch solver — the OOPIF may appear lazily via Target.targetCreated,
+      // or phase 2 can discover it via DOM walk. Bridge detection just means the
+      // OOPIF wasn't visible at poll time, not that it won't ever appear.
+      yield* Effect.logInfo("CF lifecycle: bridge_dispatch_start").pipe(
+        Effect.annotateLogs({ target_id: targetId.slice(0, 8), session_id: self.sid }),
+      );
+      const dispatcher = yield* SolveDispatcher;
+      yield* dispatcher.dispatch(active).pipe(
+        Effect.catchCause((cause) => {
+          const err = Cause.squash(cause);
+          return Effect.logError("cf.bridgeFallback dispatch defect").pipe(
+            Effect.annotateLogs({ error: String(err) }),
+            Effect.andThen(Effect.succeed(SolveOutcome.Aborted())),
+          );
+        }),
+      );
+
       yield* self.awaitResolutionRace(ctx, {
         addToSolvedPages: true,
         counterLabel: "embedded_bridge",
