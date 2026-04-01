@@ -103,16 +103,19 @@ export default class AhrefsScrapePostRoute extends HTTPRoute {
 
           const scrapeOutput = yield* executeAhrefsScrape(page, domain, scrapeType, sitekey).pipe(
             Effect.catch((e: unknown) => {
+              const tag = (e as any)?._tag;
+              const msg = e instanceof Error ? e.message : String(e);
+              const cause = tag ? `${tag}${msg ? `: ${msg}` : ""}` : msg || "unknown";
               const infraError = new ScrapeInfraError({
                 domain,
-                cause: e instanceof Error ? e.message : String(e),
+                cause,
                 phase: "execute",
               });
               return Effect.succeed({
                 result: {
                   success: false as const,
                   domain,
-                  error: e instanceof Error ? e.message : String(e),
+                  error: cause,
                   scrapeError: infraError as ScrapeError,
                   timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
                 },

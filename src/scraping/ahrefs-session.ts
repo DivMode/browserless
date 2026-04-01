@@ -393,19 +393,23 @@ export class AhrefsSessionManager {
             new Error(`new_page: ${e instanceof Error ? e.message : String(e)}`),
         });
 
-        // Run scrape on this tab — catchAll converts any untyped failure to ScrapeInfraError
+        // Run scrape on this tab — catch converts any untyped failure to ScrapeInfraError
         const scrapeOutput = yield* executeAhrefsScrape(page, domain, scrapeType).pipe(
           Effect.catch((e) => {
+            // Extract useful error info: tagged Effect errors have _tag, plain Errors have message
+            const tag = (e as any)?._tag;
+            const msg = e instanceof Error ? e.message : String(e);
+            const cause = tag ? `${tag}${msg ? `: ${msg}` : ""}` : msg || "unknown";
             const infraError = new ScrapeInfraError({
               domain,
-              cause: e instanceof Error ? e.message : String(e),
+              cause,
               phase: "execute",
             });
             return Effect.succeed({
               result: {
                 success: false as const,
                 domain,
-                error: e instanceof Error ? e.message : String(e),
+                error: cause,
                 scrapeError: infraError as ScrapeError,
                 timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
               },
