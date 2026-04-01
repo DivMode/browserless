@@ -182,6 +182,10 @@ export class AhrefsSessionManager {
   // ── Health checks ─────────────────────────────────────────────
 
   private needsRecycle(): boolean {
+    // NEVER recycle while tabs are active — destroying the browser kills in-flight scrapes.
+    // The recycle will happen when the last active tab finishes and the next scrape calls ensureSession().
+    if (this.activeTabCount > 0) return false;
+
     if (this.cfSolveTtlExceeded) {
       this.lastRecycleReason = "solve_ttl";
       return true;
