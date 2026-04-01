@@ -27,6 +27,13 @@ import {
 import { setupCfListener } from "./ahrefs-cf-listener.js";
 import type { CfSolveMetrics } from "./ahrefs-cf-listener.js";
 import type { DiagnosticInfo } from "./ahrefs-cdp.js";
+import {
+  ApiError,
+  BacklinksFetchFailed,
+  TurnstileTimeoutError,
+  extractApiErrors,
+  errorTypeString,
+} from "./ahrefs-errors.js";
 import { minimalTrafficHtml, minimalTurnstileHtml } from "./ahrefs-html.js";
 import {
   AHREFS_BASE_URL,
@@ -85,69 +92,83 @@ interface ScrapeTimings {
   totalMs: number;
 }
 
+/**
+ * Parse the raw API result into a typed Effect.
+ *
+ * Failures go into the Effect E channel as typed errors (TurnstileTimeoutError,
+ * ApiError, BacklinksFetchFailed). The caller uses Effect.catchTags to convert
+ * them back to AhrefsScrapeResult with full error context for the wide event.
+ */
 const parseResult = (
   apiResult: Record<string, unknown> | undefined,
   domain: string,
   scrapeType: ScrapeType,
   timings: ScrapeTimings,
-): AhrefsScrapeResult => {
+  apiCallStatus: string,
+): Effect.Effect<AhrefsScrapeResult, TurnstileTimeoutError | ApiError | BacklinksFetchFailed> => {
   const url = buildUrl(domain, scrapeType);
   const scrapedAt = Math.floor(Date.now() / 1000);
 
+  // No result — turnstile solver timed out or API never responded
   if (!apiResult) {
-    return {
-      success: false,
-      domain,
-      scrapedAt,
-      error: "No API result (turnstile timeout or solver failure)",
-      errorType: `turnstile_timeout_${scrapeType}`,
-      timings,
-    };
+    return Effect.fail(
+      new TurnstileTimeoutError({
+        domain,
+        scrapeType: scrapeType as "backlinks" | "traffic",
+        apiCallStatus,
+      }),
+    );
   }
 
+  const apiErrors = extractApiErrors(apiResult);
+
+  // API returned an error (outer error — overview or traffic call failed)
   if (apiResult.error) {
-    return {
-      success: false,
-      domain,
-      scrapedAt,
-      error: String(apiResult.message ?? apiResult.error),
-      errorType: "api_error",
-      data: apiResult,
-      timings,
-    };
+    const hasCfBlock = apiErrors.some((e) => e.isCf);
+    return Effect.fail(
+      new ApiError({
+        domain,
+        message: String(apiResult.message ?? apiResult.error),
+        apiErrors,
+        cfBlocked: hasCfBlock,
+      }),
+    );
   }
 
+  // Backlinks mode — check for partial failure (overview OK, backlinks failed)
   if (scrapeType === "backlinks") {
     const bl = apiResult.backlinks as Record<string, unknown> | undefined;
     if (bl?.error === "backlinks_fetch_failed") {
-      return {
-        success: false,
-        domain,
-        scrapedAt,
-        error: `backlinks_fetch_failed: ${String(bl.message ?? "?")}`,
-        errorType: "backlinks_fetch_failed",
-        data: { websiteData: apiResult.overview, backlinksData: apiResult.backlinks },
-        timings,
-      };
+      return Effect.fail(
+        new BacklinksFetchFailed({
+          domain,
+          message: String(bl.message ?? "?"),
+          apiErrors,
+          overviewData: apiResult.overview,
+        }),
+      );
     }
-    return {
+    return Effect.succeed({
       success: true,
       domain,
       url,
       scrapedAt,
       data: { websiteData: apiResult.overview, backlinksData: apiResult.backlinks },
+      apiErrors,
       timings,
-    };
+    });
   }
 
-  return {
+  // Traffic mode — success
+  return Effect.succeed({
     success: true,
     domain,
     url,
     scrapedAt,
     data: { trafficData: apiResult.overview },
+    apiErrors,
     timings,
-  };
+  });
 };
 
 // ── Main scrape function ─────────────────────────────────────────────
@@ -263,10 +284,53 @@ export const executeAhrefsScrape = (
       timings.resultMs = Date.now() - resStart;
       timings.totalMs = Date.now() - t0;
 
-      const result = parseResult(apiResult, domain, scrapeType, timings);
-
       // Phase 7: Read API call status from the page (not_called / pending / responded_ok / responded_429 / page_destroyed)
       const apiCallStatus = yield* getApiCallStatus(page);
+
+      // Phase 7b: Parse result — errors go into E channel as typed errors,
+      // then catchTags converts them to AhrefsScrapeResult with full context.
+      const result = yield* parseResult(apiResult, domain, scrapeType, timings, apiCallStatus).pipe(
+        Effect.catchTag("TurnstileTimeoutError", (e) =>
+          Effect.succeed<AhrefsScrapeResult>({
+            success: false,
+            domain,
+            scrapedAt: Math.floor(Date.now() / 1000),
+            error: "No API result (turnstile timeout or solver failure)",
+            errorType: errorTypeString(e),
+            scrapeError: e,
+            timings,
+          }),
+        ),
+        Effect.catchTag("ApiError", (e) =>
+          Effect.succeed<AhrefsScrapeResult>({
+            success: false,
+            domain,
+            scrapedAt: Math.floor(Date.now() / 1000),
+            error: e.message,
+            errorType: errorTypeString(e),
+            apiErrors: e.typedApiErrors,
+            scrapeError: e,
+            data: apiResult,
+            timings,
+          }),
+        ),
+        Effect.catchTag("BacklinksFetchFailed", (e) =>
+          Effect.succeed<AhrefsScrapeResult>({
+            success: false,
+            domain,
+            scrapedAt: Math.floor(Date.now() / 1000),
+            error: `backlinks_fetch_failed: ${e.message}`,
+            errorType: errorTypeString(e),
+            apiErrors: e.typedApiErrors,
+            scrapeError: e,
+            data: {
+              websiteData: e.overviewData,
+              backlinksData: { error: "backlinks_fetch_failed" },
+            },
+            timings,
+          }),
+        ),
+      );
 
       // Phase 8: On failure, capture page diagnostics
       const diagnostics = result.success ? null : yield* captureDiagnostics(page);

@@ -4,6 +4,7 @@
  * Ported from packages/pydoll-scraper/src/ahrefs_fast.py.
  * All constants match the Python originals exactly.
  */
+import type { ApiErrorInfo, ScrapeError } from "./ahrefs-errors.js";
 
 // ── Constants (from ahrefs_fast.py) ──────────────────────────────────
 
@@ -42,7 +43,12 @@ export interface AhrefsScrapeResult {
   readonly scrapedAt?: number;
   readonly data?: unknown;
   readonly error?: string;
+  /** Legacy string for wide event backward compat. Use scrapeError for typed access. */
   readonly errorType?: string;
+  /** Structured API error details from browser-side JS (endpoint, status, isCf, body). */
+  readonly apiErrors?: readonly ApiErrorInfo[];
+  /** The actual typed Effect error — use errorCategory/failurePoint/errorTypeString mappers. */
+  readonly scrapeError?: ScrapeError;
   readonly timings: ScrapeTimings;
   readonly replayUrl?: string;
   readonly cloudflareMetrics?: unknown;

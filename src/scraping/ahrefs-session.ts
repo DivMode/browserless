@@ -15,6 +15,8 @@ import { executeAhrefsScrape, type ScrapeOutput } from "./ahrefs-service.js";
 import { buildWideEvent } from "./ahrefs-wide-event.js";
 import { MAX_CF_SOLVES_PER_SESSION } from "./ahrefs-types.js";
 import type { ScrapeType } from "./ahrefs-types.js";
+import { ScrapeInfraError, errorCategory } from "./ahrefs-errors.js";
+import type { ScrapeError } from "./ahrefs-errors.js";
 import { emptyCfMetrics } from "./ahrefs-cf-listener.js";
 import { runForkInServer } from "../otel-runtime.js";
 
@@ -361,15 +363,21 @@ export class AhrefsSessionManager {
             new Error(`new_page: ${e instanceof Error ? e.message : String(e)}`),
         });
 
-        // Run scrape on this tab
+        // Run scrape on this tab — catchAll converts any untyped failure to ScrapeInfraError
         const scrapeOutput = yield* executeAhrefsScrape(page, domain, scrapeType).pipe(
-          Effect.catch((e: unknown) =>
-            Effect.succeed({
+          Effect.catch((e) => {
+            const infraError = new ScrapeInfraError({
+              domain,
+              cause: e instanceof Error ? e.message : String(e),
+              phase: "execute",
+            });
+            return Effect.succeed({
               result: {
                 success: false as const,
                 domain,
                 error: e instanceof Error ? e.message : String(e),
                 errorType: "scrape_error",
+                scrapeError: infraError as ScrapeError,
                 timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
               },
               cfMetrics: emptyCfMetrics(),
@@ -381,8 +389,8 @@ export class AhrefsSessionManager {
               timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
               cfClearancePresent: false,
               apiCallStatus: "scrape_error",
-            }),
-          ),
+            });
+          }),
         );
 
         // Get this page's targetId for replay matching
@@ -481,36 +489,30 @@ export class AhrefsSessionManager {
     const { result, cfMetrics } = output;
 
     if (result.success) {
-      // Reset failure counters on success
       this.consecutiveCfFailures = 0;
       this.consecutiveProxyFailures = 0;
-    } else {
-      const errorType = result.errorType ?? "";
+      return;
+    }
 
-      // CF solver broken: turnstile timeout with zero CF events
-      if (
-        (errorType === "turnstile_timeout_backlinks" ||
-          errorType === "turnstile_timeout_traffic") &&
-        cfMetrics?.cf_events === 0
-      ) {
-        this.cfSolverBroken = true;
-      }
+    const error = result.scrapeError;
+    if (!error) return;
 
-      // CF failures (consecutive)
-      if (
-        errorType.includes("turnstile_timeout") ||
-        errorType === "interception_timeout" ||
-        errorType === "cf_access_denied"
-      ) {
-        this.consecutiveCfFailures++;
-      }
+    // CF solver broken: turnstile timeout with zero CF events
+    if (error._tag === "TurnstileTimeoutError" && cfMetrics?.cf_events === 0) {
+      this.cfSolverBroken = true;
+    }
 
-      // Proxy failures (consecutive)
-      if (errorType.includes("proxy") || errorType === "navigation") {
-        this.consecutiveProxyFailures++;
-        if (this.consecutiveProxyFailures >= MAX_CONSECUTIVE_FAILURES) {
-          this.proxyBroken = true;
-        }
+    // Use typed error category for routing
+    const category = errorCategory(error);
+    if (category === "solver" || error._tag === "InterceptionTimeoutError") {
+      this.consecutiveCfFailures++;
+    }
+
+    // Proxy/navigation failures (consecutive)
+    if (error._tag === "NavigationError") {
+      this.consecutiveProxyFailures++;
+      if (this.consecutiveProxyFailures >= MAX_CONSECUTIVE_FAILURES) {
+        this.proxyBroken = true;
       }
     }
   }

@@ -26,6 +26,8 @@ import type { ServerResponse } from "http";
 import { Effect } from "effect";
 import puppeteer from "puppeteer-core";
 import { AHREFS_DEFAULT_SITEKEY, type ScrapeType } from "../../../scraping/ahrefs-types.js";
+import { ScrapeInfraError } from "../../../scraping/ahrefs-errors.js";
+import type { ScrapeError } from "../../../scraping/ahrefs-errors.js";
 import { executeAhrefsScrape } from "../../../scraping/ahrefs-service.js";
 
 const PORT = process.env.PORT ?? "3000";
@@ -100,13 +102,19 @@ export default class AhrefsScrapePostRoute extends HTTPRoute {
           });
 
           const scrapeOutput = yield* executeAhrefsScrape(page, domain, scrapeType, sitekey).pipe(
-            Effect.catch((e: unknown) =>
-              Effect.succeed({
+            Effect.catch((e: unknown) => {
+              const infraError = new ScrapeInfraError({
+                domain,
+                cause: e instanceof Error ? e.message : String(e),
+                phase: "execute",
+              });
+              return Effect.succeed({
                 result: {
                   success: false as const,
                   domain,
                   error: e instanceof Error ? e.message : String(e),
                   errorType: "scrape_error",
+                  scrapeError: infraError as ScrapeError,
                   timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
                 },
                 cfMetrics: null as any,
@@ -115,8 +123,8 @@ export default class AhrefsScrapePostRoute extends HTTPRoute {
                 scrapeType: scrapeType as any,
                 scrapeUrl: "",
                 timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
-              }),
-            ),
+              });
+            }),
           );
 
           jsonResponse(res, scrapeOutput.result.success ? 200 : 500, scrapeOutput.result);

@@ -7,6 +7,7 @@
  */
 import type { CfSolveMetrics, ReplayMetadata } from "./ahrefs-cf-listener.js";
 import type { DiagnosticInfo } from "./ahrefs-cdp.js";
+import { errorCategory, errorTypeString, failurePoint } from "./ahrefs-errors.js";
 import type { AhrefsScrapeResult, ScrapeType } from "./ahrefs-types.js";
 
 // ── ATTR_* constants (from ahrefs_gen.ts) ───────────────────────────
@@ -197,15 +198,27 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_CHROME_ENDPOINT]: "browserless",
     [ATTR_USE_PROXY]: "true",
 
-    // Outcome
+    // Outcome — derived from typed scrapeError when available, falls back to legacy strings
     [ATTR_AHREFS_SUCCESS]: String(result.success),
-    [ATTR_ERROR_TYPE]: result.errorType ?? "",
+    [ATTR_ERROR_TYPE]: result.scrapeError
+      ? errorTypeString(result.scrapeError)
+      : (result.errorType ?? ""),
     [ATTR_ERROR_MESSAGE]: result.error ?? "",
-    [ATTR_FAILURE_POINT]: result.success ? "" : "turnstile",
-    [ATTR_FAILURE_CHAIN]: result.success
-      ? "turnstile_ok→success"
-      : `${result.errorType ?? "unknown"}`,
-    [ATTR_SCRAPE_ERROR_CATEGORY]: result.success ? "" : categorizeError(result.errorType),
+    [ATTR_FAILURE_POINT]: result.scrapeError
+      ? failurePoint(result.scrapeError)
+      : result.success
+        ? ""
+        : "unknown",
+    [ATTR_FAILURE_CHAIN]: result.scrapeError
+      ? `${result.scrapeError._tag}→${errorTypeString(result.scrapeError)}`
+      : result.success
+        ? "turnstile_ok→success"
+        : `${result.errorType ?? "unknown"}`,
+    [ATTR_SCRAPE_ERROR_CATEGORY]: result.scrapeError
+      ? errorCategory(result.scrapeError)
+      : result.success
+        ? ""
+        : "",
 
     // Timing
     [ATTR_DURATION_MS]: String(result.timings.totalMs),
@@ -296,12 +309,24 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_GEO_COUNTRY]: "",
     [ATTR_GEO_ATTEMPTS]: "",
 
-    // API health
-    [ATTR_API_ERRORS]: "",
-    [ATTR_API_STATUS_CODE]: "",
-    [ATTR_API_BLOCKED_BY_CF]: "",
-    [ATTR_API_ENDPOINT]: "",
-    [ATTR_API_DIAGNOSIS]: result.success ? "healthy" : "",
+    // API health — populated from result.apiErrors (extracted from browser-side JS)
+    [ATTR_API_ERRORS]: result.apiErrors?.length
+      ? JSON.stringify(
+          result.apiErrors.map((e) => `${e.endpoint}:${e.status}${e.isCf ? ":cf" : ""}`),
+        )
+      : "",
+    [ATTR_API_STATUS_CODE]: result.apiErrors?.[0]?.status ? String(result.apiErrors[0].status) : "",
+    [ATTR_API_BLOCKED_BY_CF]: result.apiErrors?.some((e) => e.isCf) ? "true" : "",
+    [ATTR_API_ENDPOINT]: result.apiErrors?.[0]?.endpoint ?? "",
+    [ATTR_API_DIAGNOSIS]: result.success
+      ? "healthy"
+      : result.apiErrors?.some((e) => e.isCf)
+        ? "cf_blocked"
+        : result.apiErrors?.length
+          ? `http_${result.apiErrors[0].status}`
+          : result.scrapeError?._tag === "TurnstileTimeoutError"
+            ? "turnstile_failed"
+            : "",
 
     // Diagnostics (only populated on failure)
     [ATTR_DIAGNOSTIC_PAGE_TITLE]: diagnostics?.page_title ?? "",
@@ -331,10 +356,6 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
   };
 }
 
-function categorizeError(errorType: string | undefined): string {
-  if (!errorType) return "";
-  if (errorType.includes("timeout") || errorType.includes("interception")) return "transient";
-  if (errorType === "api_error" || errorType === "backlinks_fetch_failed") return "upstream";
-  if (errorType.includes("solver") || errorType.includes("turnstile")) return "solver";
-  return "transient";
-}
+// categorizeError() removed — replaced by exhaustive errorCategory() from ahrefs-errors.ts.
+// The old implementation had a bug: turnstile_timeout_* matched "timeout" before "turnstile",
+// returning "transient" instead of the correct "solver" category.
