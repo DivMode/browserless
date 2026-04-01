@@ -265,25 +265,28 @@ export class AhrefsSessionManager {
     return false;
   }
 
+  /**
+   * Get a non-draining generation for a new scrape.
+   *
+   * INVARIANT: The returned GenerationState is NEVER draining.
+   * All code paths converge to currentNonDrainingGen() which enforces this.
+   */
   private ensureGeneration(): Effect.Effect<GenerationState, Error> {
     return Effect.fn("session.ensureGeneration")(function* (this: AhrefsSessionManager) {
       const state = yield* Ref.get(this.stateRef);
 
       // No current generation -> create first one
       if (state.currentGenId === -1 || !state.generations.has(state.currentGenId)) {
-        return yield* this.createAndSetGeneration();
+        yield* this.createAndSetGeneration();
+        return yield* this.currentNonDrainingGen();
       }
 
       const gen = state.generations.get(state.currentGenId)!;
 
-      // Check health flags -> recycle synchronously so new gen is ready before we return
+      // Health flags -> synchronous recycle (creates new gen, marks old as draining)
       if (this.needsRecycle(gen)) {
         yield* this.triggerRecycle(gen.recycleReason);
-        const freshState = yield* Ref.get(this.stateRef);
-        const currentGen = freshState.generations.get(freshState.currentGenId);
-        if (currentGen && !currentGen.draining) return currentGen;
-        // Recycle failed (logged internally) — create fresh gen as fallback
-        return yield* this.createAndSetGeneration();
+        return yield* this.currentNonDrainingGen();
       }
 
       // Periodic health check (every 30s)
@@ -292,14 +295,26 @@ export class AhrefsSessionManager {
         const healthy = yield* this.healthCheck(gen);
         if (!healthy) {
           yield* this.triggerRecycle("health_failed");
-          const freshState = yield* Ref.get(this.stateRef);
-          const currentGen = freshState.generations.get(freshState.currentGenId);
-          if (currentGen && !currentGen.draining) return currentGen;
-          return yield* this.createAndSetGeneration();
+          return yield* this.currentNonDrainingGen();
         }
       }
 
-      return gen;
+      return yield* this.currentNonDrainingGen();
+    }).bind(this)();
+  }
+
+  /**
+   * Single exit gate: read current gen from Ref, assert it's not draining.
+   * If it IS draining (recycle failed or race), create a fresh gen.
+   * Every return from ensureGeneration() goes through this.
+   */
+  private currentNonDrainingGen(): Effect.Effect<GenerationState, Error> {
+    return Effect.fn("session.currentNonDrainingGen")(function* (this: AhrefsSessionManager) {
+      const state = yield* Ref.get(this.stateRef);
+      const gen = state.generations.get(state.currentGenId);
+      if (gen && !gen.draining) return gen;
+      // Current gen is missing or draining — create fresh
+      return yield* this.createAndSetGeneration();
     }).bind(this)();
   }
 
