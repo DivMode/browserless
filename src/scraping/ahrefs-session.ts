@@ -276,16 +276,14 @@ export class AhrefsSessionManager {
 
       const gen = state.generations.get(state.currentGenId)!;
 
-      // Check health flags -> trigger recycle if needed (non-blocking)
+      // Check health flags -> recycle synchronously so new gen is ready before we return
       if (this.needsRecycle(gen)) {
-        const reason = gen.recycleReason;
-        runForkInServer(this.triggerRecycle(reason));
-        // Re-read: recycle may have completed synchronously
+        yield* this.triggerRecycle(gen.recycleReason);
         const freshState = yield* Ref.get(this.stateRef);
         const currentGen = freshState.generations.get(freshState.currentGenId);
         if (currentGen && !currentGen.draining) return currentGen;
-        // Recycle hasn't completed yet, tab runs on old gen (still alive, just draining)
-        return gen;
+        // Recycle failed (logged internally) — create fresh gen as fallback
+        return yield* this.createAndSetGeneration();
       }
 
       // Periodic health check (every 30s)
@@ -293,11 +291,11 @@ export class AhrefsSessionManager {
         gen.lastHealthCheck = Date.now();
         const healthy = yield* this.healthCheck(gen);
         if (!healthy) {
-          runForkInServer(this.triggerRecycle("health_failed"));
+          yield* this.triggerRecycle("health_failed");
           const freshState = yield* Ref.get(this.stateRef);
           const currentGen = freshState.generations.get(freshState.currentGenId);
           if (currentGen && !currentGen.draining) return currentGen;
-          return gen;
+          return yield* this.createAndSetGeneration();
         }
       }
 
