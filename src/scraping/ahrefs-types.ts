@@ -43,8 +43,6 @@ export interface AhrefsScrapeResult {
   readonly scrapedAt?: number;
   readonly data?: unknown;
   readonly error?: string;
-  /** Legacy string for wide event backward compat. Use scrapeError for typed access. */
-  readonly errorType?: string;
   /** Structured API error details from browser-side JS (endpoint, status, isCf, body). */
   readonly apiErrors?: readonly ApiErrorInfo[];
   /** The actual typed Effect error — use errorCategory/failurePoint/errorTypeString mappers. */

@@ -199,9 +199,9 @@ export const errorTypeString = (error: ScrapeError): string => {
     case "ResultTimeoutError":
       return "result_timeout";
     case "ApiError":
-      return error.cfBlocked ? "api_error_cf_blocked" : "api_error";
+      return error.message; // Specific: overview_http_429, overview_http_400, etc.
     case "BacklinksFetchFailed":
-      return "backlinks_fetch_failed";
+      return error.message; // Specific: backlinks_list_http_429, etc.
     case "InterceptionTimeoutError":
       return "interception_timeout";
     case "NavigationError":

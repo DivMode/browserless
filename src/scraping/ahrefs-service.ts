@@ -32,7 +32,6 @@ import {
   BacklinksFetchFailed,
   TurnstileTimeoutError,
   extractApiErrors,
-  errorTypeString,
 } from "./ahrefs-errors.js";
 import { minimalTrafficHtml, minimalTurnstileHtml } from "./ahrefs-html.js";
 import {
@@ -296,7 +295,6 @@ export const executeAhrefsScrape = (
             domain,
             scrapedAt: Math.floor(Date.now() / 1000),
             error: "No API result (turnstile timeout or solver failure)",
-            errorType: errorTypeString(e),
             scrapeError: e,
             timings,
           }),
@@ -307,7 +305,6 @@ export const executeAhrefsScrape = (
             domain,
             scrapedAt: Math.floor(Date.now() / 1000),
             error: e.message,
-            errorType: errorTypeString(e),
             apiErrors: e.typedApiErrors,
             scrapeError: e,
             data: apiResult,
@@ -320,7 +317,6 @@ export const executeAhrefsScrape = (
             domain,
             scrapedAt: Math.floor(Date.now() / 1000),
             error: `backlinks_fetch_failed: ${e.message}`,
-            errorType: errorTypeString(e),
             apiErrors: e.typedApiErrors,
             scrapeError: e,
             data: {

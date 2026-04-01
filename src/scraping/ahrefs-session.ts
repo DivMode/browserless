@@ -406,7 +406,6 @@ export class AhrefsSessionManager {
                 success: false as const,
                 domain,
                 error: e instanceof Error ? e.message : String(e),
-                errorType: "scrape_error",
                 scrapeError: infraError as ScrapeError,
                 timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
               },

@@ -172,6 +172,26 @@ export interface WideEventInput {
   sessionRecycleReason?: string;
 }
 
+/**
+ * Derive error_type from the typed scrapeError.
+ *
+ * For API errors (ApiError, BacklinksFetchFailed): use the specific message
+ * from the browser JS — e.g. "overview_http_429", "backlinks_list_http_400".
+ *
+ * For non-API errors: use the tag-based string — e.g. "turnstile_timeout_backlinks",
+ * "scrape_error", "interception_timeout".
+ *
+ * Single source of truth. No priority logic. No fallback chains.
+ */
+function deriveErrorType(result: AhrefsScrapeResult): string {
+  if (!result.scrapeError) return "";
+  const tag = result.scrapeError._tag;
+  if (tag === "ApiError" || tag === "BacklinksFetchFailed") {
+    return result.scrapeError.message;
+  }
+  return errorTypeString(result.scrapeError);
+}
+
 export function buildWideEvent(input: WideEventInput): Record<string, string> {
   const { result, cfMetrics, replayMeta, diagnostics, domain, scrapeType, scrapeUrl } = input;
   const retry = input.retryContext;
@@ -204,27 +224,17 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_CHROME_ENDPOINT]: "browserless",
     [ATTR_USE_PROXY]: "true",
 
-    // Outcome — derived from typed scrapeError when available, falls back to legacy strings
+    // Outcome — all derived from scrapeError (single source of truth)
     [ATTR_AHREFS_SUCCESS]: String(result.success),
-    [ATTR_ERROR_TYPE]: result.scrapeError
-      ? errorTypeString(result.scrapeError)
-      : (result.errorType ?? ""),
+    [ATTR_ERROR_TYPE]: deriveErrorType(result),
     [ATTR_ERROR_MESSAGE]: result.error ?? "",
-    [ATTR_FAILURE_POINT]: result.scrapeError
-      ? failurePoint(result.scrapeError)
-      : result.success
-        ? ""
-        : "unknown",
+    [ATTR_FAILURE_POINT]: result.scrapeError ? failurePoint(result.scrapeError) : "",
     [ATTR_FAILURE_CHAIN]: result.scrapeError
-      ? `${result.scrapeError._tag}→${errorTypeString(result.scrapeError)}`
+      ? `${result.scrapeError._tag}→${deriveErrorType(result)}`
       : result.success
         ? "turnstile_ok→success"
-        : `${result.errorType ?? "unknown"}`,
-    [ATTR_SCRAPE_ERROR_CATEGORY]: result.scrapeError
-      ? errorCategory(result.scrapeError)
-      : result.success
-        ? ""
         : "",
+    [ATTR_SCRAPE_ERROR_CATEGORY]: result.scrapeError ? errorCategory(result.scrapeError) : "",
 
     // Timing
     [ATTR_DURATION_MS]: String(result.timings.totalMs),

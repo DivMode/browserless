@@ -237,28 +237,40 @@ describe("error type system — exhaustive mappers", () => {
     expect(errorCategory(trTimeout)).toBe("solver");
   });
 
-  it("error type strings are backward-compatible with legacy values", () => {
+  it("errorTypeString returns specific message for API errors", () => {
+    // API errors: errorTypeString returns the message (specific cause from browser JS)
+    expect(
+      errorTypeString(
+        new ApiError({
+          domain: "t",
+          message: "overview_http_429",
+          apiErrors: [],
+          cfBlocked: false,
+        }),
+      ),
+    ).toBe("overview_http_429");
+    expect(
+      errorTypeString(
+        new ApiError({ domain: "t", message: "overview_http_400", apiErrors: [], cfBlocked: true }),
+      ),
+    ).toBe("overview_http_400");
+    expect(
+      errorTypeString(
+        new BacklinksFetchFailed({
+          domain: "t",
+          message: "backlinks_list_http_429",
+          apiErrors: [],
+          overviewData: null,
+        }),
+      ),
+    ).toBe("backlinks_list_http_429");
+
+    // Non-API errors: errorTypeString returns tag-based string
     expect(
       errorTypeString(
         new TurnstileTimeoutError({ domain: "t", scrapeType: "backlinks", apiCallStatus: "" }),
       ),
     ).toBe("turnstile_timeout_backlinks");
-    expect(
-      errorTypeString(
-        new TurnstileTimeoutError({ domain: "t", scrapeType: "traffic", apiCallStatus: "" }),
-      ),
-    ).toBe("turnstile_timeout_traffic");
-    expect(
-      errorTypeString(new ApiError({ domain: "t", message: "", apiErrors: [], cfBlocked: false })),
-    ).toBe("api_error");
-    expect(
-      errorTypeString(new ApiError({ domain: "t", message: "", apiErrors: [], cfBlocked: true })),
-    ).toBe("api_error_cf_blocked");
-    expect(
-      errorTypeString(
-        new BacklinksFetchFailed({ domain: "t", message: "", apiErrors: [], overviewData: null }),
-      ),
-    ).toBe("backlinks_fetch_failed");
     expect(errorTypeString(new ScrapeInfraError({ domain: "t", cause: "", phase: "" }))).toBe(
       "scrape_error",
     );
@@ -271,7 +283,6 @@ describe("wide event — API health fields", () => {
       success: false,
       domain: "test.com",
       error: "overview_http_429",
-      errorType: "api_error",
       apiErrors: [{ endpoint: "overview", status: 429, isCf: false }],
       scrapeError: new ApiError({
         domain: "test.com",
@@ -295,6 +306,7 @@ describe("wide event — API health fields", () => {
     expect(event.api_blocked_by_cf).toBe("");
     expect(event.api_errors).toBe(JSON.stringify(["overview:429"]));
     expect(event.api_diagnosis).toBe("http_429");
+    expect(event.error_type).toBe("overview_http_429");
   });
 
   it("api_blocked_by_cf=true when CF challenge detected in API response", () => {
@@ -302,7 +314,6 @@ describe("wide event — API health fields", () => {
       success: false,
       domain: "test.com",
       error: "overview_http_403",
-      errorType: "api_error_cf_blocked",
       apiErrors: [{ endpoint: "overview", status: 403, isCf: true }],
       scrapeError: new ApiError({
         domain: "test.com",
@@ -323,7 +334,7 @@ describe("wide event — API health fields", () => {
     });
     expect(event.api_blocked_by_cf).toBe("true");
     expect(event.api_diagnosis).toBe("cf_blocked");
-    expect(event.error_type).toBe("api_error_cf_blocked");
+    expect(event.error_type).toBe("overview_http_403");
     expect(event.scrape_error_category).toBe("upstream");
   });
 
@@ -332,7 +343,6 @@ describe("wide event — API health fields", () => {
       success: false,
       domain: "test.com",
       error: "No API result",
-      errorType: "turnstile_timeout_backlinks",
       scrapeError: new TurnstileTimeoutError({
         domain: "test.com",
         scrapeType: "backlinks",
@@ -352,6 +362,7 @@ describe("wide event — API health fields", () => {
     expect(event.api_diagnosis).toBe("turnstile_failed");
     expect(event.scrape_error_category).toBe("solver");
     expect(event.failure_point).toBe("turnstile");
+    expect(event.error_type).toBe("turnstile_timeout_backlinks");
   });
 
   it("API health fields empty for successful scrapes", () => {
@@ -369,5 +380,6 @@ describe("wide event — API health fields", () => {
     expect(event.api_blocked_by_cf).toBe("");
     expect(event.api_errors).toBe("");
     expect(event.api_diagnosis).toBe("healthy");
+    expect(event.error_type).toBe("");
   });
 });
