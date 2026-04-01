@@ -65,6 +65,7 @@ interface GenerationState {
   cfSolveTtlExceeded: boolean;
   cfSolverBroken: boolean;
   proxyBroken: boolean;
+  consecutiveFailures: number;
   consecutiveCfFailures: number;
   consecutiveProxyFailures: number;
   consecutiveHealthFailures: number;
@@ -140,6 +141,7 @@ export class AhrefsSessionManager {
         cfSolveTtlExceeded: false,
         cfSolverBroken: false,
         proxyBroken: false,
+        consecutiveFailures: 0,
         consecutiveCfFailures: 0,
         consecutiveProxyFailures: 0,
         consecutiveHealthFailures: 0,
@@ -260,6 +262,10 @@ export class AhrefsSessionManager {
     }
     if (gen.consecutiveProxyFailures >= MAX_CONSECUTIVE_FAILURES) {
       gen.recycleReason = "proxy_failures";
+      return true;
+    }
+    if (gen.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      gen.recycleReason = "consecutive_failures";
       return true;
     }
     return false;
@@ -694,10 +700,15 @@ export class AhrefsSessionManager {
     const { result, cfMetrics } = output;
 
     if (result.success) {
+      gen.consecutiveFailures = 0;
       gen.consecutiveCfFailures = 0;
       gen.consecutiveProxyFailures = 0;
       return;
     }
+
+    // ANY failure increments the general counter — catches ScrapeInfraError and
+    // every other error type that the specific counters below might miss.
+    gen.consecutiveFailures++;
 
     const error = result.scrapeError;
     if (!error) return;
