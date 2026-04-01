@@ -18,7 +18,7 @@ import { executeAhrefsScrape, type ScrapeOutput } from "./ahrefs-service.js";
 import { buildWideEvent } from "./ahrefs-wide-event.js";
 import { MAX_CF_SOLVES_PER_SESSION } from "./ahrefs-types.js";
 import type { ScrapeType } from "./ahrefs-types.js";
-import { ScrapeInfraError, errorCategory } from "./ahrefs-errors.js";
+import { ScrapeInfraError } from "./ahrefs-errors.js";
 import type { ScrapeError } from "./ahrefs-errors.js";
 import { emptyCfMetrics } from "./ahrefs-cf-listener.js";
 import { runForkInServer } from "../otel-runtime.js";
@@ -35,6 +35,7 @@ const MAX_CONSECUTIVE_FAILURES = 3;
 const MAX_TARGET_COUNT = 90;
 const DRAIN_TIMEOUT_MS = 60_000;
 const MAX_DRAINING_GENERATIONS = 3;
+const MAX_GENERATION_AGE_MS = 120_000;
 
 // ── Internal WS URL ─────────────────────────────────────────────────
 
@@ -63,11 +64,7 @@ interface GenerationState {
   readonly createdAt: number;
   cfSolveCount: number;
   cfSolveTtlExceeded: boolean;
-  cfSolverBroken: boolean;
-  proxyBroken: boolean;
   consecutiveFailures: number;
-  consecutiveCfFailures: number;
-  consecutiveProxyFailures: number;
   consecutiveHealthFailures: number;
   lastHealthCheck: number;
   draining: boolean;
@@ -139,11 +136,7 @@ export class AhrefsSessionManager {
         createdAt: now,
         cfSolveCount: 0,
         cfSolveTtlExceeded: false,
-        cfSolverBroken: false,
-        proxyBroken: false,
         consecutiveFailures: 0,
-        consecutiveCfFailures: 0,
-        consecutiveProxyFailures: 0,
         consecutiveHealthFailures: 0,
         lastHealthCheck: now,
         draining: false,
@@ -241,6 +234,16 @@ export class AhrefsSessionManager {
 
   // ── Health checks ─────────────────────────────────────────────
 
+  /**
+   * Three recycle triggers, ordered by priority:
+   * 1. CF solve TTL exceeded (proactive — session is stale)
+   * 2. Consecutive failures (reactive — something is broken)
+   * 3. Max age exceeded (safety net — catches everything else)
+   *
+   * No per-error-type counters. Any failure increments the ONE counter.
+   * The type system can't forget to count a new error type because
+   * there's nothing type-specific to implement.
+   */
   private needsRecycle(gen: GenerationState): boolean {
     if (gen.draining) return false;
 
@@ -248,24 +251,12 @@ export class AhrefsSessionManager {
       gen.recycleReason = "solve_ttl";
       return true;
     }
-    if (gen.cfSolverBroken) {
-      gen.recycleReason = "cf_broken";
-      return true;
-    }
-    if (gen.proxyBroken) {
-      gen.recycleReason = "proxy_broken";
-      return true;
-    }
-    if (gen.consecutiveCfFailures >= MAX_CONSECUTIVE_FAILURES) {
-      gen.recycleReason = "cf_failures";
-      return true;
-    }
-    if (gen.consecutiveProxyFailures >= MAX_CONSECUTIVE_FAILURES) {
-      gen.recycleReason = "proxy_failures";
-      return true;
-    }
     if (gen.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
       gen.recycleReason = "consecutive_failures";
+      return true;
+    }
+    if (Date.now() - gen.createdAt >= MAX_GENERATION_AGE_MS) {
+      gen.recycleReason = "max_age";
       return true;
     }
     return false;
@@ -696,37 +687,15 @@ export class AhrefsSessionManager {
 
   // ── Health counter updates ────────────────────────────────────
 
+  /**
+   * One counter. Success resets it. Any failure increments it.
+   * No per-error-type routing — that's the wide event's job.
+   */
   private updateHealthCounters(gen: GenerationState, output: ScrapeOutput): void {
-    const { result, cfMetrics } = output;
-
-    if (result.success) {
+    if (output.result.success) {
       gen.consecutiveFailures = 0;
-      gen.consecutiveCfFailures = 0;
-      gen.consecutiveProxyFailures = 0;
-      return;
-    }
-
-    // ANY failure increments the general counter — catches ScrapeInfraError and
-    // every other error type that the specific counters below might miss.
-    gen.consecutiveFailures++;
-
-    const error = result.scrapeError;
-    if (!error) return;
-
-    if (error._tag === "TurnstileTimeoutError" && cfMetrics?.cf_events === 0) {
-      gen.cfSolverBroken = true;
-    }
-
-    const category = errorCategory(error);
-    if (category === "solver" || error._tag === "InterceptionTimeoutError") {
-      gen.consecutiveCfFailures++;
-    }
-
-    if (error._tag === "NavigationError") {
-      gen.consecutiveProxyFailures++;
-      if (gen.consecutiveProxyFailures >= MAX_CONSECUTIVE_FAILURES) {
-        gen.proxyBroken = true;
-      }
+    } else {
+      gen.consecutiveFailures++;
     }
   }
 
