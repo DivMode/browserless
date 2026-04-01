@@ -76,11 +76,6 @@ export class AhrefsSessionManager {
   // CF event listener on Connection
   private cfSolveHandler: ((params: any) => void) | null = null;
 
-  // Warm-up gate: first scrape on a new session runs alone.
-  // All other scrapes wait until the first solve activates the navigation guard.
-  private warmupResolve: (() => void) | null = null;
-  private warmupPromise: Promise<void> = Promise.resolve();
-
   // ── Session lifecycle ───────────────────────────────────────────
 
   private async createSession(): Promise<Browser> {
@@ -117,19 +112,7 @@ export class AhrefsSessionManager {
     this.cfSolveTtlExceeded = false;
     this.proxyBroken = false;
 
-    // Set up warm-up gate — first scrape runs alone, others wait for first solve.
-    // This ensures the navigation guard (Page.stopLoading) is active before
-    // concurrent tabs start, preventing the CF redirect race condition.
-    this.warmupPromise = new Promise<void>((resolve) => {
-      this.warmupResolve = resolve;
-      // Timeout: if first solve doesn't happen in 15s, ungate anyway
-      setTimeout(() => {
-        this.warmupResolve = null;
-        resolve();
-      }, 15_000);
-    });
-
-    // Listen for CF solves on the Connection to track solve count + ungate warmup
+    // Listen for CF solves on the Connection to track solve count + session TTL
     const pages = await browser.pages();
     if (pages[0]) {
       try {
@@ -138,15 +121,6 @@ export class AhrefsSessionManager {
         if (this.connection) {
           this.cfSolveHandler = () => {
             this.cfSolveCount++;
-            // Ungate warmup 500ms AFTER first solve — gives Page.stopLoading time to
-            // handle the CF redirect on the first tab before other tabs start navigating.
-            // Without this delay, the solve event and redirect fire simultaneously,
-            // and concurrent tabs start before the guard can process the redirect.
-            if (this.cfSolveCount === 1 && this.warmupResolve) {
-              const resolve = this.warmupResolve;
-              this.warmupResolve = null;
-              setTimeout(() => resolve(), 500);
-            }
             if (this.cfSolveCount >= MAX_CF_SOLVES_PER_SESSION) {
               this.cfSolveTtlExceeded = true;
             }
@@ -356,16 +330,6 @@ export class AhrefsSessionManager {
           try: () => this.staggerTab(),
           catch: () => new Error("tab_stagger"),
         });
-
-        // Warm-up gate: if this is NOT the first tab, wait for the first solve.
-        // The first tab runs immediately and solves CF, which activates the
-        // navigation guard. All subsequent tabs wait here until that happens.
-        if (this.activeTabCount > 1) {
-          yield* Effect.tryPromise({
-            try: () => this.warmupPromise,
-            catch: () => new Error("warmup_wait"),
-          });
-        }
 
         // Ensure browser session is healthy
         const browser = yield* Effect.tryPromise({
