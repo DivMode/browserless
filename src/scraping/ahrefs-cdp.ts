@@ -158,11 +158,11 @@ export function setupFetchInterception(
         }).catch(() => {});
       }
 
-      // Block ONLY the CF flow script — it triggers the redirect after turnstile solve.
-      // DO NOT block orchestrate (sets up challenge) or turnstile (widget resources).
-      // Flow URL: cdn-cgi/challenge-platform/h/g/flow/ov1/...
-      // Orchestrate URL: cdn-cgi/challenge-platform/h/g/orchestrate/... (MUST NOT BLOCK)
-      if (reqUrl.includes("cdn-cgi/challenge-platform") && reqUrl.includes("/flow/")) {
+      // Block CF flow script ONLY AFTER fulfillment.
+      // Flow script loads TWICE: once during challenge (needed), once after solve (triggers redirect).
+      // We must allow the first load (sets up turnstile) but block the second (triggers redirect).
+      // The fulfilled flag distinguishes them: false = challenge phase, true = our HTML is served.
+      if (fulfilled && reqUrl.includes("cdn-cgi/challenge-platform") && reqUrl.includes("/flow/")) {
         cdpSend(cdp, "Fetch.failRequest", { requestId, reason: "BlockedByClient" }).catch(() => {});
         return;
       }
