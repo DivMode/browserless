@@ -117,7 +117,8 @@ async function onToken(token) {
       apiErrors: apiErrors.length ? apiErrors : undefined
     });
     mark('ahrefs.complete', {success: !hasBlError, error: hasBlError ? bl.error : undefined});
-    window.__apiCallStatus = hasBlError ? 'responded_error' : 'responded_ok';
+    var lastErr = apiErrors.length ? apiErrors[apiErrors.length - 1] : null;
+    window.__apiCallStatus = hasBlError ? (lastErr ? 'responded_' + lastErr.status : 'responded_error') : 'responded_ok';
     if (!hasBlError) {
       document.getElementById('status').style.color = '#16a34a';
       document.getElementById('status').textContent = '\\u2705 Complete';
