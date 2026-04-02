@@ -364,7 +364,9 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_API_DIAGNOSIS]: result.success
       ? "healthy"
       : result.apiErrors?.some((e) => e.isCf)
-        ? "cf_blocked"
+        ? cfMetrics.cf_solved
+          ? "cf_rechallenge"
+          : "cf_blocked"
         : result.apiErrors?.length
           ? `http_${result.apiErrors[0].status}`
           : result.scrapeError?._tag === "TurnstileTimeoutError"
