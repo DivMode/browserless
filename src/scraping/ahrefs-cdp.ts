@@ -15,12 +15,21 @@ import {
   ResultTimeoutError,
 } from "./ahrefs-errors.js";
 import { MAX_INTERCEPT_WAIT_MS } from "./ahrefs-types.js";
+import { runForkInServer } from "../otel-runtime.js";
 
-/** Write diagnostic line to /tmp file — bypasses all log pipelines */
+/** Write diagnostic to /tmp file AND OTLP pipeline */
 const diagLog = (data: Record<string, unknown>) => {
   try {
     appendFileSync("/tmp/fetch-diag.log", JSON.stringify(data) + "\n");
   } catch {}
+  // Also send via OTLP — testing if runForkInServer works from CDP callbacks
+  const annotations: Record<string, string> = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (k !== "message" && k !== "fetch_headers") annotations[k] = String(v);
+  }
+  runForkInServer(
+    Effect.logInfo(String(data.message ?? "fetch.diag")).pipe(Effect.annotateLogs(annotations)),
+  );
 };
 
 // ── Typed CDP send — eliminates `as never` casts ───────────────────
