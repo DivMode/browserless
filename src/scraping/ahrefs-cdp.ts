@@ -14,6 +14,7 @@ import {
   ResultTimeoutError,
 } from "./ahrefs-errors.js";
 import { MAX_INTERCEPT_WAIT_MS } from "./ahrefs-types.js";
+import { runForkInServer } from "../otel-runtime.js";
 
 // ── Typed CDP send — eliminates `as never` casts ───────────────────
 
@@ -93,9 +94,36 @@ export function setupFetchInterception(
 
       if (resourceType === "Document" && url.includes("ahrefs.com")) {
         const hasCfMitigated = responseHeaders.some((h) => h.name.toLowerCase() === "cf-mitigated");
+        const cfMitigatedValue = responseHeaders.find(
+          (h) => h.name.toLowerCase() === "cf-mitigated",
+        )?.value;
         docResponseCount++;
 
-        if (status === 200 && !hasCfMitigated && !fulfilled) {
+        // Diagnostic: log every ahrefs Document response for interstitial debugging
+        const willFulfill = status === 200 && !hasCfMitigated && !fulfilled;
+        const action = willFulfill ? "fulfill" : fulfilled ? "skip_already_fulfilled" : "continue";
+        runForkInServer(
+          Effect.logInfo("fetch.document_response").pipe(
+            Effect.annotateLogs({
+              fetch_domain: domain,
+              fetch_url: url.substring(0, 150),
+              fetch_status: String(status),
+              fetch_cf_mitigated: String(hasCfMitigated),
+              fetch_cf_mitigated_value: cfMitigatedValue ?? "",
+              fetch_doc_count: String(docResponseCount),
+              fetch_fulfilled: String(fulfilled),
+              fetch_action: action,
+              fetch_response_headers:
+                docResponseCount >= 2
+                  ? JSON.stringify(
+                      responseHeaders.map((h) => `${h.name}: ${h.value.substring(0, 80)}`),
+                    ).substring(0, 500)
+                  : "",
+            }),
+          ),
+        );
+
+        if (willFulfill) {
           fulfilled = true;
           cdpSend(cdp, "Fetch.fulfillRequest", {
             requestId,
