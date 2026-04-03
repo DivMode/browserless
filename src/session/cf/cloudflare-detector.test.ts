@@ -156,12 +156,21 @@ describe("classifyOOPIFDetection", () => {
     expect(result._tag).toBe("InlineInterstitial");
   });
 
-  it("stale CF title with destination URL → EmbeddedTurnstile (URL is fresh)", () => {
+  it("CF interstitial title at destination URL → InlineInterstitial (title is real)", () => {
+    // CF serves interstitial challenges AT the destination URL (e.g. ahrefs.com/...).
+    // The page title "Just a moment..." is set by CF's own JS. At detection time,
+    // Target.getTargets returns the real interstitial title, not a stale one.
+    // Verified in production replay: rrweb snapshot shows <title>Just a moment...</title>
+    // 500ms before cf.detected fires.
     const result = classifyOOPIFDetection(makeDetection(), {
       title: "Just a moment...",
       url: "https://ahrefs.com/backlink-checker?input=example.com&mode=subdomains",
     });
-    expect(result._tag).toBe("EmbeddedTurnstile");
+    expect(result._tag).toBe("InlineInterstitial");
+    if (result._tag === "InlineInterstitial") {
+      expect(result.pageTitle).toBe("Just a moment...");
+      expect(result.pageUrl).toContain("ahrefs.com");
+    }
   });
 
   it('returns EmbeddedTurnstile for "Verifying" (Ahrefs loading state)', () => {

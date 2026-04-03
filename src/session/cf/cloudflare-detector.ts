@@ -117,14 +117,15 @@ export const ClassifiedOOPIF = Data.taggedEnum<ClassifiedOOPIF>();
 /**
  * Classify an OOPIF detection using all available signals.
  *
- * Three signals, checked in order:
+ * Four signals, checked in order:
  * 1. URL-based: page URL is a CF challenge URL → InlineInterstitial
- * 2. DOM-based: CF interstitial DOM elements present → InlineInterstitial
- *    (#challenge-running, #challenge-form, .challenge-platform)
- * 3. Default: EmbeddedTurnstile
- *
- * The DOM probe (hasInterstitialDom) is performed by the caller via CDP
- * Runtime.evaluate before calling this function. Works for ANY site.
+ * 2. Title-based: page title matches CF interstitial pattern → InlineInterstitial
+ *    CF serves interstitials at the destination URL (e.g. ahrefs.com/...) so the
+ *    URL check misses them. The title "Just a moment..." is set by CF's own JS and
+ *    is the only reliable signal at detection time. Verified in production replays:
+ *    rrweb snapshot shows <title>Just a moment...</title> 500ms before cf.detected.
+ * 3. DOM-based: CF interstitial DOM elements present → InlineInterstitial
+ * 4. Default: EmbeddedTurnstile
  */
 export function classifyOOPIFDetection(
   detection: CFDetected,
@@ -136,6 +137,20 @@ export function classifyOOPIFDetection(
 
   // URL-based: CF challenge URL → interstitial
   if (pageInfo && isCFChallengeUrl(pageInfo.url)) {
+    return ClassifiedOOPIF.InlineInterstitial({
+      pageUrl: pageInfo.url,
+      pageTitle: pageInfo.title,
+      oopifUrl: firstTarget?.url,
+      meta,
+    });
+  }
+
+  // Title-based: CF interstitial title → interstitial.
+  // CF serves challenge pages at the destination URL (e.g. ahrefs.com/backlink-checker?...)
+  // so isCFChallengeUrl returns false. But the page title IS "Just a moment..." because
+  // CF's JS sets it. Target.getTargets returns the current title at detection time —
+  // by the time the turnstile OOPIF spawns, the <title> tag is already parsed.
+  if (pageInfo && isCFInterstitialTitle(pageInfo.title)) {
     return ClassifiedOOPIF.InlineInterstitial({
       pageUrl: pageInfo.url,
       pageTitle: pageInfo.title,
