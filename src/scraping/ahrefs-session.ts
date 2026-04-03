@@ -296,6 +296,22 @@ export class AhrefsSessionManager {
           });
           yield* Effect.logInfo("ahrefs.scrape.wide_event").pipe(Effect.annotateLogs(wideEvent));
 
+          // Patch replay with scrape context (domain, error_type, success) for debugging queries
+          const replayIngestUrl = process.env.REPLAY_INGEST_URL;
+          if (replayIngestUrl && replayMeta?.replay_id) {
+            yield* Effect.tryPromise(() =>
+              fetch(`${replayIngestUrl}/replays/${replayMeta.replay_id}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  domain,
+                  error_type: wideEvent.error_type ?? null,
+                  success: scrapeOutput.result.success,
+                }),
+              }),
+            ).pipe(Effect.ignore);
+          }
+
           // Invalidate browser on failure or CF solve TTL
           if (!scrapeOutput.result.success) {
             yield* Pool.invalidate(pool, managed);
