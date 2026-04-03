@@ -14,7 +14,6 @@ import {
   ResultTimeoutError,
 } from "./ahrefs-errors.js";
 import { MAX_INTERCEPT_WAIT_MS } from "./ahrefs-types.js";
-import { runForkInServer } from "../otel-runtime.js";
 
 // ── Typed CDP send — eliminates `as never` casts ───────────────────
 
@@ -102,25 +101,22 @@ export function setupFetchInterception(
         // Diagnostic: log every ahrefs Document response for interstitial debugging
         const willFulfill = status === 200 && !hasCfMitigated && !fulfilled;
         const action = willFulfill ? "fulfill" : fulfilled ? "skip_already_fulfilled" : "continue";
-        runForkInServer(
-          Effect.logInfo("fetch.document_response").pipe(
-            Effect.annotateLogs({
-              fetch_domain: domain,
-              fetch_url: url.substring(0, 150),
-              fetch_status: String(status),
-              fetch_cf_mitigated: String(hasCfMitigated),
-              fetch_cf_mitigated_value: cfMitigatedValue ?? "",
-              fetch_doc_count: String(docResponseCount),
-              fetch_fulfilled: String(fulfilled),
-              fetch_action: action,
-              fetch_response_headers:
-                docResponseCount >= 2
-                  ? JSON.stringify(
-                      responseHeaders.map((h) => `${h.name}: ${h.value.substring(0, 80)}`),
-                    ).substring(0, 500)
-                  : "",
-            }),
-          ),
+        console.error(
+          JSON.stringify({
+            message: "fetch.document_response",
+            fetch_domain: domain,
+            fetch_url: url.substring(0, 150),
+            fetch_status: status,
+            fetch_cf_mitigated: hasCfMitigated,
+            fetch_cf_mitigated_value: cfMitigatedValue ?? "",
+            fetch_doc_count: docResponseCount,
+            fetch_fulfilled: fulfilled,
+            fetch_action: action,
+            fetch_headers:
+              docResponseCount >= 2
+                ? responseHeaders.map((h) => `${h.name}: ${h.value.substring(0, 80)}`)
+                : undefined,
+          }),
         );
 
         if (willFulfill) {
