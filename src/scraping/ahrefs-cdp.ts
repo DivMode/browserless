@@ -5,7 +5,6 @@
  * No raw Promises, no cdp.on callbacks, no setTimeout.
  * Sequencing via yield* prevents races by construction.
  */
-import { appendFileSync } from "node:fs";
 import { Effect } from "effect";
 import type { CDPSession, Page } from "puppeteer-core";
 import {
@@ -17,12 +16,8 @@ import {
 import { MAX_INTERCEPT_WAIT_MS } from "./ahrefs-types.js";
 import { runForkInServer } from "../otel-runtime.js";
 
-/** Write diagnostic to /tmp file AND OTLP pipeline */
+/** Log Fetch Document response diagnostic via OTLP */
 const diagLog = (data: Record<string, unknown>) => {
-  try {
-    appendFileSync("/tmp/fetch-diag.log", JSON.stringify(data) + "\n");
-  } catch {}
-  // Also send via OTLP — testing if runForkInServer works from CDP callbacks
   const annotations: Record<string, string> = {};
   for (const [k, v] of Object.entries(data)) {
     if (k !== "message" && k !== "fetch_headers") annotations[k] = String(v);
@@ -156,6 +151,24 @@ export function setupFetchInterception(
             });
           return;
         }
+        // CF rechallenge detected — reset the timeout. The solver is still working
+        // on the interstitial and will eventually produce a clean 200 Document.
+        if (hasCfMitigated && !fulfilled) {
+          clearTimeout(timer);
+          timer = setTimeout(() => {
+            if (!settled) {
+              settled = true;
+              rejectIntercepted(
+                new InterceptionTimeoutError({
+                  domain,
+                  requestCount,
+                  responseCount,
+                  docResponseCount,
+                }),
+              );
+            }
+          }, MAX_INTERCEPT_WAIT_MS);
+        }
         // CF challenge or already fulfilled — continue the response
         cdpSend(cdp, "Fetch.continueResponse", { requestId }).catch(() => {});
         return;
@@ -216,7 +229,7 @@ export function setupFetchInterception(
     rejectIntercepted = reject;
   });
 
-  const timer = setTimeout(() => {
+  let timer = setTimeout(() => {
     if (!settled) {
       settled = true;
       rejectIntercepted(

@@ -116,26 +116,39 @@ export const ClassifiedOOPIF = Data.taggedEnum<ClassifiedOOPIF>();
 
 /**
  * Classify an OOPIF detection using all available signals.
- * Pure function — no side effects, no CDP calls, fully testable.
  *
- * Null pageInfo defaults to EmbeddedTurnstile (safe fallback — false negative
- * would skip bridge injection entirely → guaranteed no_resolution, which is worse
- * than false positive which gets caught by existing oopif_dead path).
+ * Three signals, checked in order:
+ * 1. URL-based: page URL is a CF challenge URL → InlineInterstitial
+ * 2. DOM-based: CF interstitial DOM elements present → InlineInterstitial
+ *    (#challenge-running, #challenge-form, .challenge-platform)
+ * 3. Default: EmbeddedTurnstile
+ *
+ * The DOM probe (hasInterstitialDom) is performed by the caller via CDP
+ * Runtime.evaluate before calling this function. Works for ANY site.
  */
 export function classifyOOPIFDetection(
   detection: CFDetected,
   pageInfo: { title: string; url: string } | null,
+  hasInterstitialDom: boolean = false,
 ): ClassifiedOOPIF {
   const firstTarget = detection.targets[0];
   const meta: TurnstileOOPIFMeta | undefined = firstTarget?.meta;
 
-  // URL is reliable (updated on navigation commit). Title is NOT — Chrome's
-  // Target.getTargets returns stale titles after cross-document navigations
-  // (see cloudflare-event-emitter.ts:173). Use URL to classify.
+  // URL-based: CF challenge URL → interstitial
   if (pageInfo && isCFChallengeUrl(pageInfo.url)) {
     return ClassifiedOOPIF.InlineInterstitial({
       pageUrl: pageInfo.url,
       pageTitle: pageInfo.title,
+      oopifUrl: firstTarget?.url,
+      meta,
+    });
+  }
+
+  // DOM-based: CF interstitial challenge DOM detected on the page
+  if (hasInterstitialDom) {
+    return ClassifiedOOPIF.InlineInterstitial({
+      pageUrl: pageInfo?.url ?? "",
+      pageTitle: pageInfo?.title ?? "",
       oopifUrl: firstTarget?.url,
       meta,
     });
@@ -1393,7 +1406,27 @@ export class CloudflareDetector {
         if (detection._tag === "detected") {
           // Classify using all signals BEFORE dispatching to handler
           const pageInfo = self.strategies.getPageInfo(targetId as string);
-          const classified = classifyOOPIFDetection(detection, pageInfo);
+
+          // DOM probe: check if CF's interstitial challenge DOM exists.
+          // Interstitial pages have #challenge-running or #challenge-form.
+          // Real pages (with embedded turnstile) don't have these elements.
+          // Works for ANY site — no site-specific markers needed.
+          const isInterstitialPage = yield* Effect.fn("cf.probeInterstitialDom")(function* () {
+            const sender = yield* CdpSender;
+            const result = yield* sender
+              .send("Runtime.evaluate", {
+                expression:
+                  "!!document.querySelector('#challenge-running, #challenge-form, .challenge-platform')",
+                returnByValue: true,
+              })
+              .pipe(
+                Effect.timeout("2 seconds"),
+                Effect.catch(() => Effect.succeed(null)),
+              );
+            return result?.result?.value === true;
+          })().pipe(Effect.catch(() => Effect.succeed(false)));
+
+          const classified = classifyOOPIFDetection(detection, pageInfo, isInterstitialPage);
 
           yield* Effect.logInfo("cf.detector.oopifClassification").pipe(
             Effect.annotateLogs({

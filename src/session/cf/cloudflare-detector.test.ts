@@ -611,3 +611,45 @@ describe("classifyBridgeDetected", () => {
     expect(outcome._tag).toBe("NoActiveDetection");
   });
 });
+
+// ── DOM probe (hasInterstitialDom) — interstitial classification fix ──
+
+describe("classifyOOPIFDetection — interstitial DOM probe", () => {
+  const makeDetection = (): CFDetected => ({
+    _tag: "detected",
+    targets: [
+      {
+        targetId: "OOPIF1" as TargetId,
+        url: "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/ov2",
+        parentFrameId: "PAGE1",
+        meta: { sitekey: "0xTestKey", mode: "normal", theme: null, appearance: null },
+      },
+    ],
+  });
+
+  it("returns InlineInterstitial when interstitial DOM is detected", () => {
+    const result = classifyOOPIFDetection(
+      makeDetection(),
+      { title: "Verifying", url: "https://ahrefs.com/backlink-checker?input=example.com" },
+      true,
+    );
+    expect(result._tag).toBe("InlineInterstitial");
+  });
+
+  it("returns EmbeddedTurnstile when no interstitial DOM detected", () => {
+    const result = classifyOOPIFDetection(
+      makeDetection(),
+      { title: "Verifying", url: "https://ahrefs.com/backlink-checker?input=example.com" },
+      false,
+    );
+    expect(result._tag).toBe("EmbeddedTurnstile");
+  });
+
+  it("defaults hasInterstitialDom to false (backward compat)", () => {
+    const result = classifyOOPIFDetection(makeDetection(), {
+      title: "Verifying",
+      url: "https://ahrefs.com/backlink-checker?input=example.com",
+    });
+    expect(result._tag).toBe("EmbeddedTurnstile");
+  });
+});
