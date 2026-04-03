@@ -5,6 +5,7 @@
  * No raw Promises, no cdp.on callbacks, no setTimeout.
  * Sequencing via yield* prevents races by construction.
  */
+import { appendFileSync } from "node:fs";
 import { Effect } from "effect";
 import type { CDPSession, Page } from "puppeteer-core";
 import {
@@ -14,6 +15,13 @@ import {
   ResultTimeoutError,
 } from "./ahrefs-errors.js";
 import { MAX_INTERCEPT_WAIT_MS } from "./ahrefs-types.js";
+
+/** Write diagnostic line to /tmp file — bypasses all log pipelines */
+const diagLog = (data: Record<string, unknown>) => {
+  try {
+    appendFileSync("/tmp/fetch-diag.log", JSON.stringify(data) + "\n");
+  } catch {}
+};
 
 // ── Typed CDP send — eliminates `as never` casts ───────────────────
 
@@ -101,23 +109,19 @@ export function setupFetchInterception(
         // Diagnostic: log every ahrefs Document response for interstitial debugging
         const willFulfill = status === 200 && !hasCfMitigated && !fulfilled;
         const action = willFulfill ? "fulfill" : fulfilled ? "skip_already_fulfilled" : "continue";
-        console.error(
-          JSON.stringify({
-            message: "fetch.document_response",
-            fetch_domain: domain,
-            fetch_url: url.substring(0, 150),
-            fetch_status: status,
-            fetch_cf_mitigated: hasCfMitigated,
-            fetch_cf_mitigated_value: cfMitigatedValue ?? "",
-            fetch_doc_count: docResponseCount,
-            fetch_fulfilled: fulfilled,
-            fetch_action: action,
-            fetch_headers:
-              docResponseCount >= 2
-                ? responseHeaders.map((h) => `${h.name}: ${h.value.substring(0, 80)}`)
-                : undefined,
-          }),
-        );
+        diagLog({
+          message: "fetch.document_response",
+          ts: Date.now(),
+          fetch_domain: domain,
+          fetch_url: url.substring(0, 150),
+          fetch_status: status,
+          fetch_cf_mitigated: hasCfMitigated,
+          fetch_cf_mitigated_value: cfMitigatedValue ?? "",
+          fetch_doc_count: docResponseCount,
+          fetch_fulfilled: fulfilled,
+          fetch_action: action,
+          fetch_headers: responseHeaders.map((h) => `${h.name}: ${h.value.substring(0, 80)}`),
+        });
 
         if (willFulfill) {
           fulfilled = true;
