@@ -661,178 +661,160 @@ export class CloudflareSolveStrategies {
       // ── Sub-span: Click dispatch (listener + mouse events) ──
       // Bare press + hold + release — NO mouseMoved (matches pydoll exactly).
       // mouseMoved causes 283-5600ms compositor init stall on isolated WS.
-      //
-      // UNINTERRUPTIBLE: once mousedown is dispatched, we MUST complete mouseup +
-      // verify + emitProgress("clicked") + return ClickResult.Verified atomically.
-      // Without this, raceFirst(clickLoop, abortLatch) interrupts the fiber mid-click
-      // when the bridge detects the token. The mousedown is dispatched (rrweb records it)
-      // but setClickDelivered() never fires → wrong "auto_solve" label.
-      // UNINTERRUPTIBLE: once mousedown is dispatched, we MUST complete mouseup +
-      // verify + emitProgress("clicked") + return ClickResult.Verified atomically.
-      // Without this, raceFirst(clickLoop, abortLatch) interrupts the fiber mid-click
-      // when the bridge detects the token. The mousedown is dispatched (rrweb records it)
-      // but setClickDelivered() never fires → wrong "auto_solve" label.
-      return yield* Effect.uninterruptible(
-        Effect.fn("cf.phase4_dispatch")(function* () {
-          yield* Effect.annotateCurrentSpan({
-            "cf.phase4.oopif_session_id": oopifSessionId.substring(0, 16),
-            "cf.phase4.click_x": clickX,
-            "cf.phase4.click_y": clickY,
-            "cf.phase4.page_abs_x": pageAbsX ?? "null",
-            "cf.phase4.page_abs_y": pageAbsY ?? "null",
+      return yield* Effect.fn("cf.phase4_dispatch")(function* () {
+        yield* Effect.annotateCurrentSpan({
+          "cf.phase4.oopif_session_id": oopifSessionId.substring(0, 16),
+          "cf.phase4.click_x": clickX,
+          "cf.phase4.click_y": clickY,
+          "cf.phase4.page_abs_x": pageAbsX ?? "null",
+          "cf.phase4.page_abs_y": pageAbsY ?? "null",
+        });
+
+        // ── Diagnostic: Verify OOPIF identity before click ──
+        const oopifUrlResult = yield* verifySend(
+          "Runtime.evaluate",
+          {
+            expression: "location.href",
+            returnByValue: true,
+          },
+          oopifSessionId,
+        ).pipe(Effect.orElseSucceed(() => null));
+        yield* Effect.annotateCurrentSpan({
+          "cf.phase4.oopif_url": ((oopifUrlResult as any)?.result?.value || "unknown").substring(
+            0,
+            100,
+          ),
+        });
+
+        // Install click verification listener (OOPIF session — safe, separate V8 isolate)
+        yield* verifySend(
+          "Runtime.evaluate",
+          {
+            expression: `window.__bClkV=false;document.addEventListener('mousedown',function(){window.__bClkV=true},{once:true,capture:true});true`,
+            returnByValue: true,
+          },
+          oopifSessionId,
+        ).pipe(Effect.orElseSucceed(() => null));
+
+        // UNINTERRUPTIBLE: mousedown → hold → mouseup must complete atomically.
+        // Without this, raceFirst interrupts mid-click when the bridge detects the
+        // token — mousedown fires (rrweb records it) but mouseup never follows.
+        const { pressResponse, releaseResponse, holdMs } = yield* Effect.uninterruptible(
+          Effect.fn("cf.phase4.click")(function* () {
+            const pressResponse = yield* inputSend(
+              "Input.dispatchMouseEvent",
+              { type: "mousePressed", x: clickX, y: clickY, button: "left", clickCount: 1 },
+              oopifSessionId,
+            );
+            const holdMs = 50 + Math.random() * 100;
+            yield* Effect.sleep(`${holdMs} millis`);
+            const releaseResponse = yield* inputSend(
+              "Input.dispatchMouseEvent",
+              { type: "mouseReleased", x: clickX, y: clickY, button: "left", clickCount: 1 },
+              oopifSessionId,
+            );
+            return { pressResponse, releaseResponse, holdMs };
+          })(),
+        );
+
+        yield* Effect.annotateCurrentSpan({
+          "cf.hold_ms": Math.round(holdMs),
+          "cf.press_ok": !!pressResponse,
+          "cf.release_ok": !!releaseResponse,
+        });
+
+        // Validate click delivery — if press/release returned null, CDP call failed
+        if (!pressResponse || !releaseResponse) {
+          yield* events.marker(pageTargetId, "cf.click_failed", {
+            press_null: !pressResponse,
+            release_null: !releaseResponse,
+            via,
+            attempt,
+            oopif_session_id: oopifSessionId.substring(0, 16),
           });
+          return ClickResult.ClickFailed();
+        }
 
-          // ── Diagnostic: Verify OOPIF identity before click ──
-          const oopifUrlResult = yield* verifySend(
-            "Runtime.evaluate",
-            {
-              expression: "location.href",
-              returnByValue: true,
-            },
-            oopifSessionId,
-          ).pipe(Effect.orElseSucceed(() => null));
-          yield* Effect.annotateCurrentSpan({
-            "cf.phase4.oopif_url": ((oopifUrlResult as any)?.result?.value || "unknown").substring(
-              0,
-              100,
-            ),
-          });
+        // ── Verify click landed ──
+        // If bridge already solved during the click, skip the 100ms verify sleep —
+        // the click worked (it caused the solve). Saves ~200ms per click.
+        let clickVerified = false;
+        let verifyError: string | null = null;
 
-          // Install click verification listener (OOPIF session — safe, separate V8 isolate)
-          yield* verifySend(
-            "Runtime.evaluate",
-            {
-              expression: `window.__bClkV=false;document.addEventListener('mousedown',function(){window.__bClkV=true},{once:true,capture:true});true`,
-              returnByValue: true,
-            },
-            oopifSessionId,
-          ).pipe(Effect.orElseSucceed(() => null));
-
-          const pressResponse = yield* inputSend(
-            "Input.dispatchMouseEvent",
-            {
-              type: "mousePressed",
-              x: clickX,
-              y: clickY,
-              button: "left",
-              clickCount: 1,
-            },
-            oopifSessionId,
-          );
-
-          const holdMs = 50 + Math.random() * 100;
-          yield* Effect.sleep(`${holdMs} millis`);
-
-          const releaseResponse = yield* inputSend(
-            "Input.dispatchMouseEvent",
-            {
-              type: "mouseReleased",
-              x: clickX,
-              y: clickY,
-              button: "left",
-              clickCount: 1,
-            },
-            oopifSessionId,
-          );
-
-          yield* Effect.annotateCurrentSpan({
-            "cf.hold_ms": Math.round(holdMs),
-            "cf.press_ok": !!pressResponse,
-            "cf.release_ok": !!releaseResponse,
-          });
-
-          // Validate click delivery — if press/release returned null, CDP call failed
-          if (!pressResponse || !releaseResponse) {
-            yield* events.marker(pageTargetId, "cf.click_failed", {
-              press_null: !pressResponse,
-              release_null: !releaseResponse,
-              via,
-              attempt,
-              oopif_session_id: oopifSessionId.substring(0, 16),
-            });
-            return ClickResult.ClickFailed();
-          }
-
-          // ── Verify click landed ──
+        if (active.resolution.isDone) {
+          // Bridge solved during click — click caused it, skip verify
+          clickVerified = true;
+        } else {
           yield* Effect.sleep("100 millis");
-          let clickVerified = false;
-          let verifyError: string | null = null;
-
           const verifyResult: true | string = yield* verifySend(
             "Runtime.evaluate",
-            {
-              expression: "window.__bClkV",
-              returnByValue: true,
-            },
+            { expression: "window.__bClkV", returnByValue: true },
             oopifSessionId,
           ).pipe(
             Effect.map((r: any) => (r?.result?.value === true ? (true as const) : "not_confirmed")),
             Effect.catch(() => Effect.succeed("oopif_gone" as const)),
           );
-
           if (verifyResult === true) {
             clickVerified = true;
           } else if (typeof verifyResult === "string") {
             verifyError = verifyResult;
           }
+        }
 
-          yield* Effect.annotateCurrentSpan({ "cf.click_delivered": clickVerified });
+        yield* Effect.annotateCurrentSpan({ "cf.click_delivered": clickVerified });
 
-          const clickNow = Date.now();
-          const checkbox_to_click_ms = clickNow - checkboxFoundAt;
-          const phase4_duration_ms = clickNow - phase4Start;
-          const total_solve_ms = clickNow - solveStart;
+        const clickNow = Date.now();
+        const checkbox_to_click_ms = clickNow - checkboxFoundAt;
+        const phase4_duration_ms = clickNow - phase4Start;
+        const total_solve_ms = clickNow - solveStart;
 
-          yield* events.emitProgress(active, "clicked", {
-            x: clickX,
-            y: clickY,
-            checkbox_to_click_ms,
-            phase4_duration_ms,
-          });
+        yield* events.emitProgress(active, "clicked", {
+          x: clickX,
+          y: clickY,
+          checkbox_to_click_ms,
+          phase4_duration_ms,
+        });
 
-          yield* events.marker(pageTargetId, "cf.oopif_click", {
-            ok: clickVerified,
-            click_verified: clickVerified,
-            verify_error: verifyError,
-            cdp_accepted: true,
-            method: "cdp_oopif_session",
-            via,
-            attempt,
-            x: clickX,
-            y: clickY,
-            page_x: pageAbsX,
-            page_y: pageAbsY,
-            hold_ms: Math.round(holdMs),
-            press_response: pressResponse
-              ? JSON.stringify(pressResponse).substring(0, 100)
-              : "empty",
-            release_response: releaseResponse
-              ? JSON.stringify(releaseResponse).substring(0, 100)
-              : "empty",
-            oopif_session_id: oopifSessionId.substring(0, 16),
-            elapsed_since_solve_start_ms: total_solve_ms,
-            checkbox_to_click_ms,
-            phase4_duration_ms,
-          });
+        yield* events.marker(pageTargetId, "cf.oopif_click", {
+          ok: clickVerified,
+          click_verified: clickVerified,
+          verify_error: verifyError,
+          cdp_accepted: true,
+          method: "cdp_oopif_session",
+          via,
+          attempt,
+          x: clickX,
+          y: clickY,
+          page_x: pageAbsX,
+          page_y: pageAbsY,
+          hold_ms: Math.round(holdMs),
+          press_response: pressResponse ? JSON.stringify(pressResponse).substring(0, 100) : "empty",
+          release_response: releaseResponse
+            ? JSON.stringify(releaseResponse).substring(0, 100)
+            : "empty",
+          oopif_session_id: oopifSessionId.substring(0, 16),
+          elapsed_since_solve_start_ms: total_solve_ms,
+          checkbox_to_click_ms,
+          phase4_duration_ms,
+        });
 
-          yield* events.marker(pageTargetId, "cf.click_latency", {
-            checkbox_to_click_ms,
-            phase4_duration_ms,
-            total_solve_ms,
-          });
-          yield* observeHistogram(cfPhase4Duration, phase4_duration_ms / 1000);
-          if (clickVerified) {
-            yield* incCounter(cfClickResultTotal, { result: "verified" });
-            return ClickResult.Verified({ clickDeliveredAt: Date.now() });
-          }
-          if (verifyError) {
-            yield* incCounter(cfClickResultTotal, { result: "not_verified" });
-            return ClickResult.NotVerified({ reason: verifyError });
-          }
-          yield* incCounter(cfClickResultTotal, { result: "click_failed" });
-          return ClickResult.ClickFailed();
-        })(),
-      ).pipe(Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())));
+        yield* events.marker(pageTargetId, "cf.click_latency", {
+          checkbox_to_click_ms,
+          phase4_duration_ms,
+          total_solve_ms,
+        });
+        yield* observeHistogram(cfPhase4Duration, phase4_duration_ms / 1000);
+        if (clickVerified) {
+          yield* incCounter(cfClickResultTotal, { result: "verified" });
+          return ClickResult.Verified({ clickDeliveredAt: Date.now() });
+        }
+        if (verifyError) {
+          yield* incCounter(cfClickResultTotal, { result: "not_verified" });
+          return ClickResult.NotVerified({ reason: verifyError });
+        }
+        yield* incCounter(cfClickResultTotal, { result: "click_failed" });
+        return ClickResult.ClickFailed();
+      })().pipe(Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())));
     })().pipe(Effect.catch(() => Effect.succeed(ClickResult.ClickFailed())));
   }
 
