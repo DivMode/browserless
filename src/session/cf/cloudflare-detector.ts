@@ -1422,26 +1422,11 @@ export class CloudflareDetector {
           // Classify using all signals BEFORE dispatching to handler
           const pageInfo = self.strategies.getPageInfo(targetId as string);
 
-          // DOM probe: check if CF's interstitial challenge DOM exists.
-          // Interstitial pages have #challenge-running or #challenge-form.
-          // Real pages (with embedded turnstile) don't have these elements.
-          // Works for ANY site — no site-specific markers needed.
-          const isInterstitialPage = yield* Effect.fn("cf.probeInterstitialDom")(function* () {
-            const sender = yield* CdpSender;
-            const result = yield* sender
-              .send("Runtime.evaluate", {
-                expression:
-                  "!!document.querySelector('#challenge-running, #challenge-form, .challenge-platform')",
-                returnByValue: true,
-              })
-              .pipe(
-                Effect.timeout("2 seconds"),
-                Effect.catch(() => Effect.succeed(null)),
-              );
-            return result?.result?.value === true;
-          })().pipe(Effect.catch(() => Effect.succeed(false)));
-
-          const classified = classifyOOPIFDetection(detection, pageInfo, isInterstitialPage);
+          // Title-based classification handles interstitials (PR #848).
+          // DOM probe removed — it used wrong selectors, had 2s timeout on
+          // interstitial pages (Runtime.evaluate forbidden), and was superseded
+          // by isCFInterstitialTitle check in classifyOOPIFDetection.
+          const classified = classifyOOPIFDetection(detection, pageInfo);
 
           yield* Effect.logInfo("cf.detector.oopifClassification").pipe(
             Effect.annotateLogs({
