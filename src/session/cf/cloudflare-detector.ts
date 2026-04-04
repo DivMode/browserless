@@ -347,7 +347,10 @@ export const classifyNavigationOutcome = (
     if (isParamStripOnly && !active.cosmeticNavSeen) {
       // Title still looks like a CF challenge → cosmetic (replaceState URL strip).
       // Title changed to non-CF content → real solve (cross-document navigation).
-      const titleStillCF = !title || isCFInterstitialTitle(title);
+      // Empty title means Chrome hasn't updated Target.getTargets yet — the
+      // destination page may have already loaded. Only treat as "still CF" when
+      // the title is an ACTUAL known CF interstitial title, not when it's empty.
+      const titleStillCF = title !== "" && isCFInterstitialTitle(title);
       if (titleStillCF) {
         return NavigationOutcome.CosmeticUrlChange({ title, url });
       }
