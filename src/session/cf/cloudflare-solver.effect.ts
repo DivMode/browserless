@@ -393,6 +393,9 @@ const solveTurnstile = (active: SolverActiveDetection, deps: SolveDepsI) =>
     });
 
     if (raceResult._tag === "Aborted") {
+      // Defense-in-depth: if click was delivered before the abort, attribute correctly.
+      // Primary fix is Effect.uninterruptible in phase4Click — this catches edge cases.
+      if (active.clickDelivered) return TR.Clicked({ attempt: 0 });
       return TR.Aborted();
     }
 

@@ -11,7 +11,7 @@ import { Effect, Fiber } from "effect";
 import type { CdpSessionId } from "../../shared/cloudflare-detection.js";
 import type { ReadonlyActiveDetection } from "./cloudflare-event-emitter.js";
 import { SolverEvents } from "./cf-services.js";
-import { CDP_CALL_TIMEOUT, MAX_CHECKBOX_POLLS, CHECKBOX_POLL_INTERVAL_MS } from "./cf-schedules.js";
+import { CDP_CALL_TIMEOUT, PHASE3_TIMEOUT_MS, CHECKBOX_POLL_INTERVAL_MS } from "./cf-schedules.js";
 import { cfPhase3Duration, observeHistogram } from "../../effect-metrics.js";
 
 /** Effect-returning CDP sender — eliminates the Promise bridge. */
@@ -296,7 +296,7 @@ function queryCheckboxInShadow(
 /**
  * Phase 3: Find the Turnstile checkbox in the OOPIF.
  *
- * Polls up to MAX_CHECKBOX_POLLS times with CHECKBOX_POLL_INTERVAL_MS gaps,
+ * Polls with CHECKBOX_POLL_INTERVAL_MS gaps until PHASE3_TIMEOUT_MS (30s),
  * matching pydoll's querySelector polling behavior. CF's WASM needs time to
  * render the widget after the OOPIF loads.
  */
@@ -349,15 +349,17 @@ export function phase3CheckboxFind(
       }
     })().pipe(Effect.forkChild);
 
-    // Find checkbox with polling
+    // Find checkbox with polling — time-based limit (not poll-count).
+    // 100% of successful solves complete in <10s. 30s timeout ensures we
+    // never hold a valuable slot for 75s+ waiting for a slow WASM render.
     let checkbox: { objectId: string; backendNodeId: number } | null = null;
     let method = "none";
     let pollCount = 0;
 
-    const maxPolls = MAX_CHECKBOX_POLLS;
+    const deadline = Date.now() + PHASE3_TIMEOUT_MS;
     const pollInterval = CHECKBOX_POLL_INTERVAL_MS;
 
-    for (let poll = 0; poll < maxPolls; poll++) {
+    for (let poll = 0; Date.now() < deadline; poll++) {
       if (active.aborted) return null;
       // Beacon may fire during polling — exit immediately to avoid wasting time
       if (active.resolution.isDone) return null;

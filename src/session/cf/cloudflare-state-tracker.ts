@@ -215,16 +215,23 @@ export class CloudflareStateTracker extends SessionSolverState {
               Match.value(outcome),
               Match.tag("InterstitialPostSolveErrorPage", (o) => {
                 const attr = deriveSolveAttribution("page_navigated", o.clickDelivered);
-                return active!.resolution.solve({
-                  solved: true,
+                const result = {
+                  solved: true as const,
                   type: o.type,
                   method: attr.method,
                   duration_ms: o.duration,
                   attempts: o.attempts,
                   auto_resolved: attr.autoResolved,
-                  signal: "page_navigated",
+                  signal: "page_navigated" as const,
                   phase_label: attr.label,
-                });
+                };
+                tracker.pushPhase(pageTargetId, o.type, attr.label);
+                const label = tracker.buildCompoundLabel(pageTargetId);
+                tracker.cfPublish(
+                  CFEvent.Solved({ active: active!, result, cf_summary_label: label }),
+                );
+                active!.resolution.solvedEmitted = true;
+                return active!.resolution.solve(result);
               }),
               Match.tag("EmbeddedErrorPage", (o) =>
                 active!.resolution.fail("cf_error_page", o.duration),

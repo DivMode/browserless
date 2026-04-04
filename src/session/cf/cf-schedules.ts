@@ -104,8 +104,8 @@ export const OOPIF_PROBE_TIMEOUT = "3 seconds" as const;
  * takes 10-15s to render the checkbox (shadow root present but span.cb-i
  * absent). Previous 160 × 50ms = 8s window caused 50% no_checkbox failures
  * under concurrency — users could SEE the checkbox appear AFTER the
- * 8s window expired. 20s covers the worst observed case. */
-export const MAX_CHECKBOX_POLLS = 400;
+ * 8s window expired. Time-based limit ensures we never hold a slot too long. */
+export const PHASE3_TIMEOUT_MS = 30_000;
 
 /** Phase 3 checkbox polling: interval between attempts (ms).
  * Reduced from 200 to 50 — DOM.getDocument is ~2-6ms, so 50ms gives
