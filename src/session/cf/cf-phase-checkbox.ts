@@ -333,7 +333,7 @@ export function phase3CheckboxFind(
     });
 
     // V8 heartbeat: keep WASM active during checkbox polling.
-    // Logs each heartbeat with timing for contention analysis.
+    // Logs slow heartbeats (>200ms) for CDP contention analysis.
     let heartbeatCount = 0;
     const heartbeatFiber = yield* Effect.fn("cf.phase3.v8Heartbeat")(function* () {
       for (let beat = 0; beat < 16; beat++) {
