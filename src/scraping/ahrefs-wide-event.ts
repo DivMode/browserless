@@ -228,8 +228,7 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
   const overview = Array.isArray(websiteData) && websiteData[1]?.data ? websiteData[1].data : {};
   const blList =
     Array.isArray(backlinksData) && backlinksData[1]?.backlinks ? backlinksData[1].backlinks : [];
-  const blFailed =
-    typeof backlinksData === "object" && backlinksData?.error === "backlinks_fetch_failed";
+  const blFailed = typeof backlinksData === "object" && !!backlinksData?.error;
 
   // Replay label
   const replayLabel = replayMeta

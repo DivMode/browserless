@@ -137,7 +137,7 @@ const parseResult = (
   // Backlinks mode — check for partial failure (overview OK, backlinks failed)
   if (scrapeType === "backlinks") {
     const bl = apiResult.backlinks as Record<string, unknown> | undefined;
-    if (bl?.error === "backlinks_fetch_failed") {
+    if (bl?.error) {
       return Effect.fail(
         new BacklinksFetchFailed({
           domain,

@@ -149,8 +149,8 @@ async function onToken(token) {
         mark('ahrefs.backlinks', {});
       } catch(e) {
         recordApiError(e);
-        bl = {error: 'backlinks_fetch_failed', message: e.message};
-        showError('backlinks_fetch_failed', e.message);
+        bl = {error: e.message, message: e.message};
+        showError(e.message, e.message);
         await new Promise(function(r) { setTimeout(r, 600); });
       }
     }
@@ -158,7 +158,7 @@ async function onToken(token) {
     var hasBlError = bl && bl.error;
     if (hasBlError) {
       completeError(bl.message || 'backlinks_fetch_failed', {
-        error: 'backlinks_fetch_failed',
+        error: bl.message || 'backlinks_fetch_failed',
         success: false,
         overview: ov,
         backlinks: bl
