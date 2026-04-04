@@ -14,18 +14,6 @@ import {
   ResultTimeoutError,
 } from "./ahrefs-errors.js";
 import { MAX_INTERCEPT_WAIT_MS } from "./ahrefs-types.js";
-import { runForkInServer } from "../otel-runtime.js";
-
-/** Log Fetch Document response diagnostic via OTLP */
-const diagLog = (data: Record<string, unknown>) => {
-  const annotations: Record<string, string> = {};
-  for (const [k, v] of Object.entries(data)) {
-    if (k !== "message" && k !== "fetch_headers") annotations[k] = String(v);
-  }
-  runForkInServer(
-    Effect.logInfo(String(data.message ?? "fetch.diag")).pipe(Effect.annotateLogs(annotations)),
-  );
-};
 
 // ── Typed CDP send — eliminates `as never` casts ───────────────────
 
@@ -60,6 +48,15 @@ export const cleanupCdp = (cdp: CDPSession) =>
 
 // ── Fetch interception ──────────────────────────────────────────────
 
+/** One Fetch Document decision — accumulated during interception, emitted in wide event. */
+export interface FetchDecision {
+  url: string;
+  status: number;
+  cf_mitigated: boolean;
+  action: "fulfill" | "continue_rechallenge" | "continue_already_fulfilled" | "continue_other";
+  doc_index: number;
+}
+
 interface FetchInterceptionResult {
   /** Resolves when Fetch.enable completes — caller MUST await before navigating */
   ready: Promise<void>;
@@ -67,6 +64,8 @@ interface FetchInterceptionResult {
   intercepted: Promise<void>;
   /** Cleanup: disable Fetch + remove listeners */
   cleanup: () => void;
+  /** Accumulated Fetch Document decisions — read after scrape for wide event */
+  fetchDecisions: FetchDecision[];
 }
 
 /**
@@ -89,6 +88,7 @@ export function setupFetchInterception(
   let requestCount = 0;
   let responseCount = 0;
   let docResponseCount = 0;
+  const fetchDecisions: FetchDecision[] = [];
 
   const handler = (params: any) => {
     const requestId = params.requestId as string;
@@ -105,29 +105,16 @@ export function setupFetchInterception(
 
       if (resourceType === "Document" && url.includes("ahrefs.com")) {
         const hasCfMitigated = responseHeaders.some((h) => h.name.toLowerCase() === "cf-mitigated");
-        const cfMitigatedValue = responseHeaders.find(
-          (h) => h.name.toLowerCase() === "cf-mitigated",
-        )?.value;
         docResponseCount++;
 
-        // Diagnostic: log every ahrefs Document response for interstitial debugging
-        const willFulfill = status === 200 && !hasCfMitigated && !fulfilled;
-        const action = willFulfill ? "fulfill" : fulfilled ? "skip_already_fulfilled" : "continue";
-        diagLog({
-          message: "fetch.document_response",
-          ts: Date.now(),
-          fetch_domain: domain,
-          fetch_url: url.substring(0, 150),
-          fetch_status: status,
-          fetch_cf_mitigated: hasCfMitigated,
-          fetch_cf_mitigated_value: cfMitigatedValue ?? "",
-          fetch_doc_count: docResponseCount,
-          fetch_fulfilled: fulfilled,
-          fetch_action: action,
-          fetch_headers: responseHeaders.map((h) => `${h.name}: ${h.value.substring(0, 80)}`),
-        });
-
-        if (willFulfill) {
+        if (status === 200 && !hasCfMitigated && !fulfilled) {
+          fetchDecisions.push({
+            url: url.substring(0, 150),
+            status,
+            cf_mitigated: false,
+            action: "fulfill",
+            doc_index: docResponseCount,
+          });
           fulfilled = true;
           cdpSend(cdp, "Fetch.fulfillRequest", {
             requestId,
@@ -151,9 +138,15 @@ export function setupFetchInterception(
             });
           return;
         }
-        // CF rechallenge detected — reset the timeout. The solver is still working
-        // on the interstitial and will eventually produce a clean 200 Document.
+        // CF rechallenge detected — reset the timeout.
         if (hasCfMitigated && !fulfilled) {
+          fetchDecisions.push({
+            url: url.substring(0, 150),
+            status,
+            cf_mitigated: true,
+            action: "continue_rechallenge",
+            doc_index: docResponseCount,
+          });
           clearTimeout(timer);
           timer = setTimeout(() => {
             if (!settled) {
@@ -170,6 +163,15 @@ export function setupFetchInterception(
           }, MAX_INTERCEPT_WAIT_MS);
         }
         // CF challenge or already fulfilled — continue the response
+        if (!fetchDecisions.some((d) => d.doc_index === docResponseCount)) {
+          fetchDecisions.push({
+            url: url.substring(0, 150),
+            status,
+            cf_mitigated: hasCfMitigated,
+            action: fulfilled ? "continue_already_fulfilled" : "continue_other",
+            doc_index: docResponseCount,
+          });
+        }
         cdpSend(cdp, "Fetch.continueResponse", { requestId }).catch(() => {});
         return;
       }
@@ -257,7 +259,7 @@ export function setupFetchInterception(
     cdpSend(cdp, "Fetch.disable").catch(() => {});
   };
 
-  return { ready, intercepted, cleanup };
+  return { ready, intercepted, cleanup, fetchDecisions };
 }
 
 /**

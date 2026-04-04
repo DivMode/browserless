@@ -54,6 +54,7 @@ export interface ScrapeOutput {
   timings: { navMs: number; interceptMs: number; resultMs: number; totalMs: number };
   cfClearancePresent?: boolean;
   apiCallStatus?: string;
+  fetchDecisions?: import("./ahrefs-cdp.js").FetchDecision[];
 }
 
 // ── Build URL ────────────────────────────────────────────────────────
@@ -366,6 +367,7 @@ export const executeAhrefsScrape = (
         timings,
         cfClearancePresent,
         apiCallStatus,
+        fetchDecisions: interception.fetchDecisions,
       };
     })().pipe(
       Effect.ensuring(

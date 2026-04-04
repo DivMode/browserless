@@ -172,6 +172,7 @@ export interface WideEventInput {
   cfClearancePresent?: boolean;
   apiCallStatus?: string;
   sessionRecycleReason?: string;
+  fetchDecisions?: import("./ahrefs-cdp.js").FetchDecision[];
 }
 
 /**
@@ -378,6 +379,11 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_DIAGNOSTIC_BODY_LENGTH]: String(diagnostics?.body_length ?? 0),
     [ATTR_DIAGNOSTIC_IFRAME_COUNT]: String(diagnostics?.iframe_count ?? 0),
     [ATTR_DIAGNOSTIC_CF_IFRAME_COUNT]: String(diagnostics?.cf_iframe_count ?? 0),
+
+    // Fetch decisions (accumulated per-scrape, zero hot-path overhead)
+    fetch_decisions: input.fetchDecisions?.length
+      ? JSON.stringify(input.fetchDecisions.map((d) => `${d.status}:${d.action}`))
+      : "",
 
     // Retry
     [ATTR_RETRY_REASON]: retry?.reason ?? "",
