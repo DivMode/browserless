@@ -1,6 +1,7 @@
 ARG BASE_IMAGE=ghcr.io/divmode/browserless-base:latest
 FROM ${BASE_IMAGE}
 LABEL org.opencontainers.image.source=https://github.com/browserless/browserless
+# Force rebuild: phase3 instrumentation 2026-04-04
 
 COPY src src/
 
