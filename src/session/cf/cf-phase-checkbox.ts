@@ -333,25 +333,29 @@ export function phase3CheckboxFind(
     });
 
     // V8 heartbeat: keep WASM active during checkbox polling.
-    // Under concurrent tabs, Chrome may not schedule Turnstile WASM
-    // unless V8 is prodded. Without this, the checkbox never renders
-    // because WASM is dormant during the 8s polling window.
-    // Previously this only ran AFTER Phase 3 failed (in cloudflare-detector's
-    // NoClick handler), which was too late — the 8s window was already wasted.
+    // Logs each heartbeat with timing for contention analysis.
+    let heartbeatCount = 0;
     const heartbeatFiber = yield* Effect.fn("cf.phase3.v8Heartbeat")(function* () {
       for (let beat = 0; beat < 16; beat++) {
         if (active.aborted || active.resolution.isDone) return;
+        const hbStart = Date.now();
         yield* send("Runtime.evaluate", { expression: "1" }, oopifSessionId).pipe(
           Effect.timeout("2 seconds"),
           Effect.ignore,
         );
+        heartbeatCount++;
+        const hbMs = Date.now() - hbStart;
+        if (hbMs > 200) {
+          yield* events.marker(pageTargetId, "cf.phase3_heartbeat_slow", {
+            beat,
+            elapsed_ms: hbMs,
+          });
+        }
         yield* Effect.sleep("500 millis");
       }
     })().pipe(Effect.forkChild);
 
-    // Find checkbox with polling — time-based limit (not poll-count).
-    // 100% of successful solves complete in <10s. 30s timeout ensures we
-    // never hold a valuable slot for 75s+ waiting for a slow WASM render.
+    // Find checkbox with polling — time-based limit.
     let checkbox: { objectId: string; backendNodeId: number } | null = null;
     let method = "none";
     let pollCount = 0;
@@ -359,14 +363,21 @@ export function phase3CheckboxFind(
     const deadline = Date.now() + PHASE3_TIMEOUT_MS;
     const pollInterval = CHECKBOX_POLL_INTERVAL_MS;
 
+    // Count DOM nodes for size tracking
+    const countNodes = (n: CDPNode): number => {
+      let count = 1;
+      for (const c of n.children ?? []) count += countNodes(c);
+      for (const s of n.shadowRoots ?? []) count += countNodes(s);
+      if (n.contentDocument) count += countNodes(n.contentDocument);
+      return count;
+    };
+
     for (let poll = 0; Date.now() < deadline; poll++) {
       if (active.aborted) return null;
-      // Beacon may fire during polling — exit immediately to avoid wasting time
       if (active.resolution.isDone) return null;
       pollCount = poll + 1;
 
-      // Strategy 3 FIRST — single CDP call, most resilient under concurrent load
-      const s3Start = Date.now();
+      const pollStart = Date.now();
       const doc = yield* cdpCall(
         send(
           "DOM.getDocument",
@@ -377,7 +388,11 @@ export function phase3CheckboxFind(
           oopifSessionId,
         ),
       );
+      const cdpMs = Date.now() - pollStart;
+
+      let nodeCount = 0;
       if (doc?.root) {
+        nodeCount = countNodes(doc.root);
         const node = findCheckboxInTree(doc.root);
         if (node) {
           checkbox = { objectId: "", backendNodeId: node.backendNodeId };
@@ -385,9 +400,11 @@ export function phase3CheckboxFind(
           yield* events.marker(pageTargetId, "cf.phase3_strategy", {
             strategy: "dom_tree_walk",
             poll,
-            elapsed_ms: Date.now() - s3Start,
+            elapsed_ms: cdpMs,
             found: true,
             doc_root: true,
+            node_count: nodeCount,
+            heartbeats: heartbeatCount,
           });
           break;
         }
@@ -395,12 +412,14 @@ export function phase3CheckboxFind(
       yield* events.marker(pageTargetId, "cf.phase3_strategy", {
         strategy: "dom_tree_walk",
         poll,
-        elapsed_ms: Date.now() - s3Start,
+        elapsed_ms: cdpMs,
         found: false,
         doc_root: !!doc?.root,
+        node_count: nodeCount,
+        heartbeats: heartbeatCount,
       });
 
-      // Checkbox not found yet — wait and retry (matching pydoll's polling)
+      // Checkbox not found yet — wait and retry
       yield* Effect.sleep(`${pollInterval} millis`).pipe(
         Effect.withSpan("cf.phase3.pollSleep", { attributes: { "cf.poll": poll } }),
       );
