@@ -7,7 +7,7 @@
  *   2. Runtime.callFunctionOn (DOM.getDocument → resolveNode → callFunctionOn)
  *   3. DOM tree walk (DOM.getDocument depth=-1 pierce=true → recursive walk)
  */
-import { Effect, Fiber } from "effect";
+import { Effect } from "effect";
 import type { CdpSessionId } from "../../shared/cloudflare-detection.js";
 import type { ReadonlyActiveDetection } from "./cloudflare-event-emitter.js";
 import { SolverEvents } from "./cf-services.js";
@@ -332,28 +332,11 @@ export function phase3CheckboxFind(
       via,
     });
 
-    // V8 heartbeat: keep WASM active during checkbox polling.
-    // Logs slow heartbeats (>200ms) for CDP contention analysis.
-    let heartbeatCount = 0;
-    const heartbeatFiber = yield* Effect.fn("cf.phase3.v8Heartbeat")(function* () {
-      for (let beat = 0; beat < 16; beat++) {
-        if (active.aborted || active.resolution.isDone) return;
-        const hbStart = Date.now();
-        yield* send("Runtime.evaluate", { expression: "1" }, oopifSessionId).pipe(
-          Effect.timeout("2 seconds"),
-          Effect.ignore,
-        );
-        heartbeatCount++;
-        const hbMs = Date.now() - hbStart;
-        if (hbMs > 200) {
-          yield* events.marker(pageTargetId, "cf.phase3_heartbeat_slow", {
-            beat,
-            elapsed_ms: hbMs,
-          });
-        }
-        yield* Effect.sleep("500 millis");
-      }
-    })().pipe(Effect.forkChild);
+    // V8 heartbeat REMOVED — hypothesis: Runtime.evaluate("1") every 500ms
+    // contends with DOM.getDocument on the same OOPIF CDP session, causing
+    // 4-6s overhead per solve. Removing to measure impact. If no_checkbox
+    // failures spike, re-add as injected setInterval (no CDP contention).
+    const heartbeatCount = 0; // kept for marker compatibility
 
     // Find checkbox with polling — time-based limit.
     let checkbox: { objectId: string; backendNodeId: number } | null = null;
@@ -425,8 +408,7 @@ export function phase3CheckboxFind(
       );
     }
 
-    // Stop heartbeat — checkbox loop is done (found or exhausted)
-    yield* Fiber.interrupt(heartbeatFiber).pipe(Effect.ignore);
+    // (heartbeat fiber removed — no interrupt needed)
 
     if (!checkbox) {
       yield* Effect.annotateCurrentSpan({ "cf.checkbox_found": false, "cf.poll_count": pollCount });
