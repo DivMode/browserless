@@ -10,7 +10,7 @@
  *
  * No hand-built Ref, Semaphore, Scope, drain monitors, or health counters.
  */
-import { Effect, Exit, Pool, Scope } from "effect";
+import { Deferred, Effect, Exit, Pool, Scope } from "effect";
 import puppeteer from "puppeteer-core";
 import type { Browser } from "puppeteer-core";
 
@@ -57,6 +57,7 @@ interface ManagedBrowser {
   readonly id: number;
   connection: any;
   cfSolveCount: number;
+  onFirstSolve: (() => void) | null;
 }
 
 let nextBrowserId = 0;
@@ -99,6 +100,7 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
       id,
       connection: null,
       cfSolveCount: 0,
+      onFirstSolve: null,
     };
 
     // Set up CF solve tracking on Connection
@@ -112,6 +114,12 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
           managed.connection = connection;
           connection.on("Browserless.cloudflareSolved" as any, () => {
             managed.cfSolveCount++;
+            if (managed.cfSolveCount === 1 && managed.onFirstSolve) {
+              const cb = managed.onFirstSolve;
+              managed.onFirstSolve = null;
+              // 500ms delay: let navigation guard activate before concurrent tabs start
+              setTimeout(cb, 500);
+            }
           });
         }
         await cdp.detach().catch(() => {});
@@ -149,6 +157,13 @@ export class AhrefsSessionManager {
   private pool: Pool.Pool<ManagedBrowser, Error> | null = null;
   private readonly poolScope: Scope.Closeable = Scope.makeUnsafe();
   private lastTabCreated = 0;
+
+  // Warmup gate: first tab on a new browser solves CF alone.
+  // Other tabs wait until first CF solve completes, reducing V8 contention.
+  // Without this, 15 concurrent WASM instances compete for CPU → 10s+ solves.
+  // With this, first tab gets full V8 → 2-3s solve, then others proceed.
+  private warmupLatch: Deferred.Deferred<void> | null = null;
+  private warmupActive = false;
 
   /**
    * Create the pool lazily on first use. The pool scope is held for the
@@ -195,12 +210,39 @@ export class AhrefsSessionManager {
         catch: () => new Error("tab_stagger"),
       });
 
+      // Warmup gate: first tab on a new browser solves CF alone.
+      // Without this, 15 concurrent WASM instances compete for V8 → 10s+ solves.
+      // With this, first tab gets full V8 resources → 2-3s solve.
+      if (!this.warmupActive) {
+        // First tab on fresh browser — set up gate, proceed immediately
+        this.warmupActive = true;
+        this.warmupLatch = yield* Deferred.make<void>();
+        // Timeout: if first solve doesn't happen in 15s, ungate anyway
+        const latch = this.warmupLatch;
+        setTimeout(() => {
+          runForkInServer(Deferred.succeed(latch, void 0));
+        }, 15_000);
+      } else if (this.warmupLatch) {
+        // Not the first tab — wait for first solve before proceeding
+        yield* Deferred.await(this.warmupLatch).pipe(Effect.timeout("20 seconds"), Effect.ignore);
+      }
+
+      // Capture latch for inner scoped block (closure, not this-alias)
+      const warmupLatch = this.warmupLatch;
+
       // Effect.scoped provides the Scope that Pool.get requires.
       // When this scope closes, the pool permit is auto-released.
       return yield* Effect.scoped(
         Effect.fn("session.scrape.scoped")(function* () {
           // Pool.get acquires a permit, returns the browser, auto-releases on scope close
           const managed = yield* Pool.get(pool);
+
+          // Wire first-solve callback to open warmup gate
+          if (managed.cfSolveCount === 0 && !managed.onFirstSolve && warmupLatch) {
+            managed.onFirstSolve = () => {
+              runForkInServer(Deferred.succeed(warmupLatch, void 0));
+            };
+          }
 
           // Create page on the pooled browser
           const page = yield* Effect.tryPromise({
