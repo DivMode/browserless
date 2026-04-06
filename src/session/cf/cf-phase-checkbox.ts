@@ -364,15 +364,6 @@ export function phase3CheckboxFind(
     const deadline = Date.now() + PHASE3_TIMEOUT_MS;
     const pollInterval = CHECKBOX_POLL_INTERVAL_MS;
 
-    // Count DOM nodes for size tracking
-    const countNodes = (n: CDPNode): number => {
-      let count = 1;
-      for (const c of n.children ?? []) count += countNodes(c);
-      for (const s of n.shadowRoots ?? []) count += countNodes(s);
-      if (n.contentDocument) count += countNodes(n.contentDocument);
-      return count;
-    };
-
     for (let poll = 0; Date.now() < deadline; poll++) {
       if (active.aborted) return null;
       if (active.resolution.isDone) return null;
@@ -391,9 +382,7 @@ export function phase3CheckboxFind(
       );
       const cdpMs = Date.now() - pollStart;
 
-      let nodeCount = 0;
       if (doc?.root) {
-        nodeCount = countNodes(doc.root);
         const node = findCheckboxInTree(doc.root);
         if (node) {
           checkbox = { objectId: "", backendNodeId: node.backendNodeId };
@@ -404,7 +393,6 @@ export function phase3CheckboxFind(
             elapsed_ms: cdpMs,
             found: true,
             doc_root: true,
-            node_count: nodeCount,
             heartbeats: heartbeatCount,
           });
           break;
@@ -416,7 +404,6 @@ export function phase3CheckboxFind(
         elapsed_ms: cdpMs,
         found: false,
         doc_root: !!doc?.root,
-        node_count: nodeCount,
         heartbeats: heartbeatCount,
       });
 
