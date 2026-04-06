@@ -91,6 +91,27 @@ export const METRIC_BROWSERLESS_CF_SOLVE_DURATION = {
   unit: "s",
   instrument: "histogram",
 } as const;
+/** Chrome main process RSS memory */
+export const METRIC_BROWSERLESS_CHROME_MEMORY_RSS = {
+  name: "browserless_chrome_memory_rss_bytes",
+  otel_name: "browserless.chrome.memory.rss",
+  unit: "By",
+  instrument: "gauge",
+} as const;
+/** Chrome renderer process count (zombie detection) */
+export const METRIC_BROWSERLESS_CHROME_RENDERER_COUNT = {
+  name: "browserless_chrome_renderer_count",
+  otel_name: "browserless.chrome.renderer.count",
+  unit: "{process}",
+  instrument: "gauge",
+} as const;
+/** Chrome CDP target count (active pages) */
+export const METRIC_BROWSERLESS_CHROME_TARGET_COUNT = {
+  name: "browserless_chrome_target_count",
+  otel_name: "browserless.chrome.target.count",
+  unit: "{target}",
+  instrument: "gauge",
+} as const;
 /** CPU usage percent gauge */
 export const METRIC_BROWSERLESS_CPU_PERCENT = {
   name: "browserless_cpu_percent_ratio",

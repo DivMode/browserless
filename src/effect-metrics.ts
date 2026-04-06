@@ -57,6 +57,9 @@ import {
   METRIC_BROWSERLESS_MAX_CONCURRENT_SESSIONS,
   METRIC_BROWSERLESS_MAX_QUEUED,
   METRIC_BROWSERLESS_SESSIONS_SUCCESSFUL,
+  METRIC_BROWSERLESS_CHROME_RENDERER_COUNT,
+  METRIC_BROWSERLESS_CHROME_TARGET_COUNT,
+  METRIC_BROWSERLESS_CHROME_MEMORY_RSS,
   METRIC_BROWSERLESS_SESSIONS_ERROR,
   METRIC_BROWSERLESS_SESSIONS_TIMEDOUT,
   METRIC_BROWSERLESS_SESSIONS_UNHEALTHY,
@@ -385,6 +388,20 @@ export const maxQueuedGauge = Metric.gauge(METRIC_BROWSERLESS_MAX_QUEUED.name, {
   attributes: { unit: METRIC_BROWSERLESS_MAX_QUEUED.unit },
 });
 
+// ── Chrome Process Health (zombie renderer detection) ──────────────────────
+export const chromeRendererCount = Metric.gauge(METRIC_BROWSERLESS_CHROME_RENDERER_COUNT.name, {
+  description: "Chrome renderer process count",
+  attributes: { unit: METRIC_BROWSERLESS_CHROME_RENDERER_COUNT.unit },
+});
+export const chromeTargetCount = Metric.gauge(METRIC_BROWSERLESS_CHROME_TARGET_COUNT.name, {
+  description: "Chrome CDP target count (active pages)",
+  attributes: { unit: METRIC_BROWSERLESS_CHROME_TARGET_COUNT.unit },
+});
+export const chromeMemoryRss = Metric.gauge(METRIC_BROWSERLESS_CHROME_MEMORY_RSS.name, {
+  description: "Chrome main process RSS memory",
+  attributes: { unit: METRIC_BROWSERLESS_CHROME_MEMORY_RSS.unit },
+});
+
 // ── Session total counters (monotonic — incremented directly in limiter/server) ──
 // Now proper counters: .name includes _total suffix which is correct for counters.
 // Mimir won't add _ratio because the instrument is counter, not gauge.
@@ -540,6 +557,61 @@ export const gaugeCollector = Effect.gen(function* () {
       yield* Metric.update(eventLoopLagP50, eventLoopHistogram.percentile(50) / 1e9); // ns → seconds
       yield* Metric.update(eventLoopLagP99, eventLoopHistogram.percentile(99) / 1e9);
       eventLoopHistogram.reset();
+
+      // ── Chrome Process Health (zombie renderer detection) ──
+      // Renderer count: pgrep -c for "type=renderer" processes
+      // Target count: Chrome's own count via /json/list
+      // Memory: VmRSS of Chrome main process
+      yield* Effect.tryPromise(async () => {
+        const { execFile } = await import("child_process");
+        const { promisify } = await import("util");
+        const execFileAsync = promisify(execFile);
+
+        // Renderer processes
+        try {
+          const { stdout } = await execFileAsync("pgrep", ["-c", "-f", "type=renderer"]);
+          return { renderers: parseInt(stdout.trim(), 10) || 0 };
+        } catch {
+          return { renderers: 0 };
+        }
+      }).pipe(
+        Effect.flatMap(({ renderers }) => Metric.update(chromeRendererCount, renderers)),
+        Effect.ignore,
+      );
+
+      // Target count via Chrome's /json/list endpoint
+      yield* Effect.tryPromise(async () => {
+        // Find Chrome's debug port from process args
+        const { execFile } = await import("child_process");
+        const { promisify } = await import("util");
+        const execFileAsync = promisify(execFile);
+        const { stdout } = await execFileAsync("pgrep", ["-a", "chrome"]);
+        const match = stdout.match(/remote-debugging-port=(\d+)/);
+        if (!match) return 0;
+        const resp = await fetch(`http://localhost:${match[1]}/json/list`);
+        const targets = (await resp.json()) as unknown[];
+        return targets.length;
+      }).pipe(
+        Effect.flatMap((count) => Metric.update(chromeTargetCount, count)),
+        Effect.ignore,
+      );
+
+      // Chrome main process RSS
+      yield* Effect.tryPromise(async () => {
+        const { execFile } = await import("child_process");
+        const { promisify } = await import("util");
+        const execFileAsync = promisify(execFile);
+        const { stdout } = await execFileAsync("pgrep", ["-f", "chrome --allow"]);
+        const pid = stdout.trim().split("\n")[0];
+        if (!pid) return 0;
+        const fs = await import("fs/promises");
+        const status = await fs.readFile(`/proc/${pid}/status`, "utf-8");
+        const rssMatch = status.match(/VmRSS:\s+(\d+)/);
+        return rssMatch ? parseInt(rssMatch[1], 10) * 1024 : 0; // kB → bytes
+      }).pipe(
+        Effect.flatMap((rss) => Metric.update(chromeMemoryRss, rss)),
+        Effect.ignore,
+      );
 
       // ── Pressure metrics (migrated from JSON exporter) ──
       // CPU and memory via systeminformation (same pattern as monitoring.ts)
