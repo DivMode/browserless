@@ -60,6 +60,7 @@ import {
   METRIC_BROWSERLESS_CHROME_RENDERER_COUNT,
   METRIC_BROWSERLESS_CHROME_TARGET_COUNT,
   METRIC_BROWSERLESS_CHROME_MEMORY_RSS,
+  METRIC_BROWSERLESS_CHROME_WORKER_COUNT,
   METRIC_BROWSERLESS_SESSIONS_ERROR,
   METRIC_BROWSERLESS_SESSIONS_TIMEDOUT,
   METRIC_BROWSERLESS_SESSIONS_UNHEALTHY,
@@ -401,6 +402,10 @@ export const chromeMemoryRss = Metric.gauge(METRIC_BROWSERLESS_CHROME_MEMORY_RSS
   description: "Chrome main process RSS memory",
   attributes: { unit: METRIC_BROWSERLESS_CHROME_MEMORY_RSS.unit },
 });
+export const chromeWorkerCount = Metric.gauge(METRIC_BROWSERLESS_CHROME_WORKER_COUNT.name, {
+  description: "Chrome blob worker count (orphan WASM leak)",
+  attributes: { unit: METRIC_BROWSERLESS_CHROME_WORKER_COUNT.unit },
+});
 
 // ── Session total counters (monotonic — incremented directly in limiter/server) ──
 // Now proper counters: .name includes _total suffix which is correct for counters.
@@ -579,20 +584,27 @@ export const gaugeCollector = Effect.gen(function* () {
         Effect.ignore,
       );
 
-      // Target count via Chrome's /json/list endpoint
+      // Target + worker count via Chrome's /json/list endpoint
       yield* Effect.tryPromise(async () => {
-        // Find Chrome's debug port from process args
         const { execFile } = await import("child_process");
         const { promisify } = await import("util");
         const execFileAsync = promisify(execFile);
         const { stdout } = await execFileAsync("pgrep", ["-a", "chrome"]);
         const match = stdout.match(/remote-debugging-port=(\d+)/);
-        if (!match) return 0;
+        if (!match) return { targets: 0, workers: 0 };
         const resp = await fetch(`http://localhost:${match[1]}/json/list`);
-        const targets = (await resp.json()) as unknown[];
-        return targets.length;
+        const list = (await resp.json()) as Array<{ type: string }>;
+        return {
+          targets: list.length,
+          workers: list.filter((t) => t.type === "worker").length,
+        };
       }).pipe(
-        Effect.flatMap((count) => Metric.update(chromeTargetCount, count)),
+        Effect.flatMap(({ targets, workers }) =>
+          Effect.all([
+            Metric.update(chromeTargetCount, targets),
+            Metric.update(chromeWorkerCount, workers),
+          ]),
+        ),
         Effect.ignore,
       );
 

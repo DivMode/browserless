@@ -112,6 +112,13 @@ export const METRIC_BROWSERLESS_CHROME_TARGET_COUNT = {
   unit: "{target}",
   instrument: "gauge",
 } as const;
+/** Chrome blob worker count (orphan WASM leak detection) */
+export const METRIC_BROWSERLESS_CHROME_WORKER_COUNT = {
+  name: "browserless_chrome_worker_count",
+  otel_name: "browserless.chrome.worker.count",
+  unit: "{worker}",
+  instrument: "gauge",
+} as const;
 /** CPU usage percent gauge */
 export const METRIC_BROWSERLESS_CPU_PERCENT = {
   name: "browserless_cpu_percent_ratio",
