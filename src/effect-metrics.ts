@@ -61,6 +61,7 @@ import {
   METRIC_BROWSERLESS_CHROME_TARGET_COUNT,
   METRIC_BROWSERLESS_CHROME_MEMORY_RSS,
   METRIC_BROWSERLESS_CHROME_WORKER_COUNT,
+  METRIC_BROWSERLESS_CONFIG_MAX_CONCURRENT_TABS,
   METRIC_BROWSERLESS_SESSIONS_ERROR,
   METRIC_BROWSERLESS_SESSIONS_TIMEDOUT,
   METRIC_BROWSERLESS_SESSIONS_UNHEALTHY,
@@ -406,6 +407,13 @@ export const chromeWorkerCount = Metric.gauge(METRIC_BROWSERLESS_CHROME_WORKER_C
   description: "Chrome blob worker count (orphan WASM leak)",
   attributes: { unit: METRIC_BROWSERLESS_CHROME_WORKER_COUNT.unit },
 });
+export const configMaxConcurrentTabs = Metric.gauge(
+  METRIC_BROWSERLESS_CONFIG_MAX_CONCURRENT_TABS.name,
+  {
+    description: "Configured max concurrent tabs (for dynamic thresholds)",
+    attributes: { unit: METRIC_BROWSERLESS_CONFIG_MAX_CONCURRENT_TABS.unit },
+  },
+);
 
 // ── Session total counters (monotonic — incremented directly in limiter/server) ──
 // Now proper counters: .name includes _total suffix which is correct for counters.
@@ -580,7 +588,12 @@ export const gaugeCollector = Effect.gen(function* () {
           return { renderers: 0 };
         }
       }).pipe(
-        Effect.flatMap(({ renderers }) => Metric.update(chromeRendererCount, renderers)),
+        Effect.flatMap(({ renderers }) =>
+          Effect.all([
+            Metric.update(chromeRendererCount, renderers),
+            Metric.update(configMaxConcurrentTabs, 15), // MAX_CONCURRENT_TABS from ahrefs-session.ts
+          ]),
+        ),
         Effect.ignore,
       );
 

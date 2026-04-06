@@ -119,6 +119,13 @@ export const METRIC_BROWSERLESS_CHROME_WORKER_COUNT = {
   unit: "{worker}",
   instrument: "gauge",
 } as const;
+/** Configured maximum concurrent tabs (for dynamic dashboard thresholds) */
+export const METRIC_BROWSERLESS_CONFIG_MAX_CONCURRENT_TABS = {
+  name: "browserless_config_max_concurrent_tabs",
+  otel_name: "browserless.config.max.concurrent.tabs",
+  unit: "{tab}",
+  instrument: "gauge",
+} as const;
 /** CPU usage percent gauge */
 export const METRIC_BROWSERLESS_CPU_PERCENT = {
   name: "browserless_cpu_percent_ratio",
