@@ -162,7 +162,7 @@ export class AhrefsSessionManager {
       const pool = yield* Pool.makeWithTTL({
         acquire: Effect.acquireRelease(acquireBrowser, releaseBrowser),
         min: 1,
-        max: 2,
+        max: 1,
         concurrency: MAX_CONCURRENT_TABS,
         timeToLive: BROWSER_TTL,
         timeToLiveStrategy: "creation",
