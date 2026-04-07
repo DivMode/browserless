@@ -670,22 +670,6 @@ export class CloudflareSolveStrategies {
           "cf.phase4.page_abs_y": pageAbsY ?? "null",
         });
 
-        // ── Diagnostic: Verify OOPIF identity before click ──
-        const oopifUrlResult = yield* verifySend(
-          "Runtime.evaluate",
-          {
-            expression: "location.href",
-            returnByValue: true,
-          },
-          oopifSessionId,
-        ).pipe(Effect.orElseSucceed(() => null));
-        yield* Effect.annotateCurrentSpan({
-          "cf.phase4.oopif_url": ((oopifUrlResult as any)?.result?.value || "unknown").substring(
-            0,
-            100,
-          ),
-        });
-
         // Install click verification listener (OOPIF session — safe, separate V8 isolate)
         yield* verifySend(
           "Runtime.evaluate",
