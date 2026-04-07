@@ -153,6 +153,7 @@ const ATTR_SESSION_GENERATION_ID = "session_generation_id";
 export interface SessionContext {
   session_age_ms: number;
   session_cf_solves: number;
+  session_cf_solves_at_start: number;
   session_concurrent_tabs: number;
   session_warm: boolean;
   generation_id?: number;
@@ -394,6 +395,7 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     // Session telemetry
     [ATTR_SESSION_AGE_MS]: String(input.sessionContext?.session_age_ms ?? 0),
     [ATTR_SESSION_CF_SOLVES]: String(input.sessionContext?.session_cf_solves ?? 0),
+    session_cf_solves_at_start: String(input.sessionContext?.session_cf_solves_at_start ?? 0),
     [ATTR_SESSION_CONCURRENT_TABS]: String(input.sessionContext?.session_concurrent_tabs ?? 0),
     [ATTR_SESSION_WARM]: String(input.sessionContext?.session_warm ?? false),
     [ATTR_CF_CLEARANCE_PRESENT]: String(input.cfClearancePresent ?? false),
