@@ -58,6 +58,7 @@ import {
   METRIC_BROWSERLESS_MAX_QUEUED,
   METRIC_BROWSERLESS_SESSIONS_SUCCESSFUL,
   METRIC_BROWSERLESS_CHROME_RENDERER_COUNT,
+  METRIC_BROWSERLESS_CHROME_RENDERER_MAX_CPU,
   METRIC_BROWSERLESS_CHROME_TARGET_COUNT,
   METRIC_BROWSERLESS_CHROME_MEMORY_RSS,
   METRIC_BROWSERLESS_CHROME_WORKER_COUNT,
@@ -395,6 +396,10 @@ export const chromeRendererCount = Metric.gauge(METRIC_BROWSERLESS_CHROME_RENDER
   description: "Chrome renderer process count",
   attributes: { unit: METRIC_BROWSERLESS_CHROME_RENDERER_COUNT.unit },
 });
+export const chromeRendererMaxCpu = Metric.gauge(METRIC_BROWSERLESS_CHROME_RENDERER_MAX_CPU.name, {
+  description: "CPU% of busiest renderer process (CF WASM bottleneck)",
+  attributes: { unit: METRIC_BROWSERLESS_CHROME_RENDERER_MAX_CPU.unit },
+});
 export const chromeTargetCount = Metric.gauge(METRIC_BROWSERLESS_CHROME_TARGET_COUNT.name, {
   description: "Chrome CDP target count (active pages)",
   attributes: { unit: METRIC_BROWSERLESS_CHROME_TARGET_COUNT.unit },
@@ -580,17 +585,28 @@ export const gaugeCollector = Effect.gen(function* () {
         const { promisify } = await import("util");
         const execFileAsync = promisify(execFile);
 
-        // Renderer processes
+        // Renderer processes + top renderer CPU
         try {
-          const { stdout } = await execFileAsync("pgrep", ["-c", "-f", "type=renderer"]);
-          return { renderers: parseInt(stdout.trim(), 10) || 0 };
+          const { stdout: countOut } = await execFileAsync("pgrep", ["-c", "-f", "type=renderer"]);
+          // Get CPU% of each renderer: ps -C chrome -o %cpu,args | grep type=renderer
+          let maxCpu = 0;
+          try {
+            const { stdout: psOut } = await execFileAsync("ps", ["aux"]);
+            const lines = psOut.split("\n").filter((l) => l.includes("type=renderer"));
+            for (const line of lines) {
+              const cpu = parseFloat(line.trim().split(/\s+/)[2] || "0");
+              if (cpu > maxCpu) maxCpu = cpu;
+            }
+          } catch {}
+          return { renderers: parseInt(countOut.trim(), 10) || 0, maxCpu };
         } catch {
-          return { renderers: 0 };
+          return { renderers: 0, maxCpu: 0 };
         }
       }).pipe(
-        Effect.flatMap(({ renderers }) =>
+        Effect.flatMap(({ renderers, maxCpu }) =>
           Effect.all([
             Metric.update(chromeRendererCount, renderers),
+            Metric.update(chromeRendererMaxCpu, maxCpu / 100), // ps gives %, gauge is ratio
             Metric.update(configMaxConcurrentTabs, 15), // MAX_CONCURRENT_TABS from ahrefs-session.ts
           ]),
         ),

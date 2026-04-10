@@ -105,6 +105,13 @@ export const METRIC_BROWSERLESS_CHROME_RENDERER_COUNT = {
   unit: "{process}",
   instrument: "gauge",
 } as const;
+/** CPU percent of the busiest Chrome renderer process (CF WASM bottleneck detector) */
+export const METRIC_BROWSERLESS_CHROME_RENDERER_MAX_CPU = {
+  name: "browserless_chrome_renderer_max_cpu_ratio",
+  otel_name: "browserless.chrome.renderer.max.cpu",
+  unit: "1",
+  instrument: "gauge",
+} as const;
 /** Chrome CDP target count (active pages) */
 export const METRIC_BROWSERLESS_CHROME_TARGET_COUNT = {
   name: "browserless_chrome_target_count",
