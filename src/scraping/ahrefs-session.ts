@@ -38,7 +38,7 @@ const BROWSER_TTL = "120 seconds";
 // renderer process. WASM proof-of-work from all tabs serializes on that
 // single process → one CPU core saturated while others idle.
 // Fix: multiple browsers, each with its own CF renderer process.
-const TABS_PER_BROWSER = 5;
+const TABS_PER_BROWSER = 2;
 const AVAILABLE_CORES = cpus().length;
 const BROWSER_COUNT = Math.min(Math.ceil(MAX_CONCURRENT_TABS / TABS_PER_BROWSER), AVAILABLE_CORES);
 
@@ -190,7 +190,7 @@ export class AhrefsSessionManager {
       );
       const pool = yield* Pool.makeWithTTL({
         acquire: Effect.acquireRelease(acquireBrowser, releaseBrowser),
-        min: 1,
+        min: BROWSER_COUNT,
         max: BROWSER_COUNT,
         concurrency: TABS_PER_BROWSER,
         timeToLive: BROWSER_TTL,

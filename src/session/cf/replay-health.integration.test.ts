@@ -69,7 +69,7 @@ describe("Replay Recording Health", () => {
       await browser.close().catch(() => {});
     }
 
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 6000));
 
     // ── 1. Replay existence — filter to THIS session's tabs only ───
     expect(targetId, "Failed to capture target ID from page").not.toBeNull();

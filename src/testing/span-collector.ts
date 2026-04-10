@@ -55,7 +55,7 @@ export function collectingTracerLayer(): Layer.Layer<never> {
   const tracer = Tracer.make({
     span(options) {
       const spanId = randomHex(16);
-      const parent = Option.getOrUndefined(options.parent);
+      const parent = Option.getOrUndefined(options.parent as any) as any;
       const traceId = parent?.traceId ?? randomHex(32);
       const parentSpanId = parent ? parent.spanId : undefined;
       const attributes = new Map<string, unknown>();
