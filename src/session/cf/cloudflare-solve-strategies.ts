@@ -363,6 +363,7 @@ export class CloudflareSolveStrategies {
       });
 
       // ── Phase 2: OOPIF resolution (isolated WS) ─────────────────────
+      const oopifStart = Date.now();
       const oopifSessionId = yield* phase2OOPIFResolution(
         send,
         pageSend,
@@ -403,7 +404,10 @@ export class CloudflareSolveStrategies {
         ).pipe(Effect.orElseSucceed(() => null));
       }
 
+      const oopifDiscoveryMs = Date.now() - oopifStart;
+
       // ── Phase 3: Isolated world + checkbox find (OOPIF session) ──────
+      const phase3Start = Date.now();
       const checkboxResult = yield* phase3CheckboxFind(
         send,
         oopifSessionId,
@@ -411,9 +415,17 @@ export class CloudflareSolveStrategies {
         via,
         solveStart,
       );
+      const phase3DurationMs = Date.now() - phase3Start;
       if (!checkboxResult) return ClickResult.NoCheckbox();
 
       const { checkbox, method: cbMethod } = checkboxResult;
+
+      // Emit phase timing so it flows to the wide event via the event emitter snapshot
+      yield* events.emitProgress(active, "widget_found", {
+        method: cbMethod,
+        phase3_duration_ms: phase3DurationMs,
+        oopif_discovery_ms: oopifDiscoveryMs,
+      });
 
       // ── Phase 4: Visibility check, scroll, bounds, click ─────────────
       // No delay — pydoll clicks immediately after finding the checkbox.

@@ -108,7 +108,9 @@ const ATTR_TURNSTILE_CF_WIDGET_FIND_DEBUG = "turnstile_cf_widget_find_debug";
 const ATTR_TURNSTILE_SUMMARY = "turnstile_summary";
 const ATTR_TURNSTILE_FAILURE_REASON = "turnstile_failure_reason";
 const ATTR_TURNSTILE_ERROR_DETECTED = "turnstile_error_detected";
+const ATTR_TURNSTILE_CF_PHASE3_DURATION_MS = "turnstile_cf_phase3_duration_ms";
 const ATTR_TURNSTILE_CF_PHASE4_DURATION_MS = "turnstile_cf_phase4_duration_ms";
+const ATTR_TURNSTILE_CF_OOPIF_DISCOVERY_MS = "turnstile_cf_oopif_discovery_ms";
 
 // Interstitial (prefixed)
 const ATTR_TURNSTILE_INTERSTITIAL_DETECTED = "turnstile_interstitial_detected";
@@ -157,6 +159,8 @@ export interface SessionContext {
   session_concurrent_tabs: number;
   session_warm: boolean;
   generation_id?: number;
+  browser_acquire_ms?: number;
+  page_create_ms?: number;
 }
 
 export interface WideEventInput {
@@ -313,7 +317,9 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_TURNSTILE_SUMMARY]: summaryLabel,
     [ATTR_TURNSTILE_FAILURE_REASON]: cfMetrics.failure_reason,
     [ATTR_TURNSTILE_ERROR_DETECTED]: String(cfMetrics.error_detected),
+    [ATTR_TURNSTILE_CF_PHASE3_DURATION_MS]: String(cfMetrics.cf_phase3_duration_ms),
     [ATTR_TURNSTILE_CF_PHASE4_DURATION_MS]: String(cfMetrics.cf_phase4_duration_ms),
+    [ATTR_TURNSTILE_CF_OOPIF_DISCOVERY_MS]: String(cfMetrics.cf_oopif_discovery_ms),
 
     // Interstitial (prefixed)
     [ATTR_TURNSTILE_INTERSTITIAL_DETECTED]: String(cfMetrics.interstitial_detected),
@@ -397,6 +403,8 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_SESSION_CF_SOLVES]: String(input.sessionContext?.session_cf_solves ?? 0),
     session_cf_solves_at_start: String(input.sessionContext?.session_cf_solves_at_start ?? 0),
     [ATTR_SESSION_CONCURRENT_TABS]: String(input.sessionContext?.session_concurrent_tabs ?? 0),
+    browser_acquire_ms: String(input.sessionContext?.browser_acquire_ms ?? 0),
+    page_create_ms: String(input.sessionContext?.page_create_ms ?? 0),
     [ATTR_SESSION_WARM]: String(input.sessionContext?.session_warm ?? false),
     [ATTR_CF_CLEARANCE_PRESENT]: String(input.cfClearancePresent ?? false),
     [ATTR_API_CALL_STATUS]: input.apiCallStatus ?? "unknown",

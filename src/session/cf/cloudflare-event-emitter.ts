@@ -45,7 +45,9 @@ export class CloudflareTracker {
   private lastErrorType: string | null = null;
   private lastDiag: Record<string, any> | null = null;
   private checkboxToClickMs: number | null = null;
+  private phase3DurationMs: number | null = null;
   private phase4DurationMs: number | null = null;
+  private oopifDiscoveryMs: number | null = null;
 
   constructor(info: CloudflareInfo) {
     this.detectionMethod = info.detectionMethod;
@@ -64,6 +66,8 @@ export class CloudflareTracker {
         if (extra?.x != null) this.widgetX = extra.x;
         if (extra?.y != null) this.widgetY = extra.y;
         if (extra?.debug) this.widgetFindDebug = extra.debug;
+        if (extra?.phase3_duration_ms != null) this.phase3DurationMs = extra.phase3_duration_ms;
+        if (extra?.oopif_discovery_ms != null) this.oopifDiscoveryMs = extra.oopif_discovery_ms;
       }),
       Match.when("clicked", () => {
         this.clicked = true;
@@ -124,7 +128,9 @@ export class CloudflareTracker {
       click_x: this.clickX,
       click_y: this.clickY,
       checkbox_to_click_ms: this.checkboxToClickMs,
+      phase3_duration_ms: this.phase3DurationMs,
       phase4_duration_ms: this.phase4DurationMs,
+      oopif_discovery_ms: this.oopifDiscoveryMs,
       presence_duration_ms: this.presenceDurationMs,
       presence_phases: this.presencePhases,
       approach_phases: this.approachPhases,

@@ -212,16 +212,20 @@ export class AhrefsSessionManager {
       return yield* Effect.scoped(
         Effect.fn("session.scrape.scoped")(function* () {
           // Pool.get acquires a permit, returns the browser, auto-releases on scope close
+          const acquireStart = Date.now();
           const managed = yield* Pool.get(pool);
+          const browserAcquireMs = Date.now() - acquireStart;
           const solveCountAtStart = managed.cfSolveCount;
           const sessionAgeAtStart = Date.now() - managed.createdAt;
           yield* Effect.annotateCurrentSpan({
             "session.browser_id": managed.id,
             "session.solve_count_at_start": solveCountAtStart,
             "session.age_ms_at_start": sessionAgeAtStart,
+            "session.browser_acquire_ms": browserAcquireMs,
           });
 
           // Create page on the pooled browser
+          const pageCreateStart = Date.now();
           const page = yield* Effect.tryPromise({
             try: async () => {
               const p = await managed.browser.newPage();
@@ -239,6 +243,8 @@ export class AhrefsSessionManager {
             catch: (e: unknown) =>
               new Error(`new_page: ${e instanceof Error ? e.message : String(e)}`),
           });
+          const pageCreateMs = Date.now() - pageCreateStart;
+          yield* Effect.annotateCurrentSpan({ "session.page_create_ms": pageCreateMs });
 
           // Run scrape
           const scrapeOutput = yield* executeAhrefsScrape(page, domain, scrapeType).pipe(
@@ -310,6 +316,8 @@ export class AhrefsSessionManager {
               session_concurrent_tabs: 0,
               session_warm: managed.cfSolveCount > 0,
               generation_id: managed.id,
+              browser_acquire_ms: browserAcquireMs,
+              page_create_ms: pageCreateMs,
             },
             cfClearancePresent: scrapeOutput.cfClearancePresent,
             apiCallStatus: scrapeOutput.apiCallStatus,

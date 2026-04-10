@@ -211,8 +211,14 @@ export const CloudflareSnapshot = Schema.Struct({
   checkbox_to_click_ms: Schema.optionalKey(Schema.NullOr(Int)).annotate({
     description: "Milliseconds from checkbox found to click dispatched",
   }),
+  phase3_duration_ms: Schema.optionalKey(Schema.NullOr(Int)).annotate({
+    description: "Phase 3 checkbox find duration in ms (WASM render time)",
+  }),
   phase4_duration_ms: Schema.optionalKey(Schema.NullOr(Int)).annotate({
     description: "Total Phase 4 duration in ms",
+  }),
+  oopif_discovery_ms: Schema.optionalKey(Schema.NullOr(Int)).annotate({
+    description: "OOPIF discovery duration in ms (Phase 2)",
   }),
   presence_duration_ms: Schema.optionalKey(Int).annotate({
     description: "Human presence simulation duration in ms",
