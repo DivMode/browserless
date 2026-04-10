@@ -66,6 +66,10 @@ interface ManagedBrowser {
   readonly id: number;
   connection: any;
   cfSolveCount: number;
+  /** Set by cloudflareSolved listener when cfSolveCount >= MAX. Checked on scrape completion. */
+  needsInvalidation: boolean;
+  /** Active tab count on this browser (incremented on acquire, decremented on release). */
+  activeTabs: number;
 }
 
 let nextBrowserId = 0;
@@ -108,6 +112,8 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
       id,
       connection: null,
       cfSolveCount: 0,
+      needsInvalidation: false,
+      activeTabs: 0,
     };
 
     // Set up CF solve tracking on Connection
@@ -121,17 +127,20 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
           managed.connection = connection;
           connection.on("Browserless.cloudflareSolved" as any, () => {
             managed.cfSolveCount++;
-            if (managed.cfSolveCount === MAX_CF_SOLVES_PER_SESSION) {
-              runForkInServer(
-                Effect.logWarning("session.solve_limit_reached").pipe(
-                  Effect.annotateLogs({
-                    browser_id: String(managed.id),
-                    cf_solve_count: String(managed.cfSolveCount),
-                    session_age_ms: String(Date.now() - managed.createdAt),
-                    max_cf_solves: String(MAX_CF_SOLVES_PER_SESSION),
-                  }),
-                ),
-              );
+            if (managed.cfSolveCount >= MAX_CF_SOLVES_PER_SESSION) {
+              managed.needsInvalidation = true;
+              if (managed.cfSolveCount === MAX_CF_SOLVES_PER_SESSION) {
+                runForkInServer(
+                  Effect.logWarning("session.solve_limit_reached").pipe(
+                    Effect.annotateLogs({
+                      browser_id: String(managed.id),
+                      cf_solve_count: String(managed.cfSolveCount),
+                      session_age_ms: String(Date.now() - managed.createdAt),
+                      max_cf_solves: String(MAX_CF_SOLVES_PER_SESSION),
+                    }),
+                  ),
+                );
+              }
             }
           });
         }
@@ -231,6 +240,7 @@ export class AhrefsSessionManager {
           // Pool.get acquires a permit, returns the browser, auto-releases on scope close
           const acquireStart = Date.now();
           const managed = yield* Pool.get(pool);
+          managed.activeTabs++;
           const browserAcquireMs = Date.now() - acquireStart;
           const solveCountAtStart = managed.cfSolveCount;
           const sessionAgeAtStart = Date.now() - managed.createdAt;
@@ -330,7 +340,7 @@ export class AhrefsSessionManager {
               session_age_ms: Date.now() - managed.createdAt,
               session_cf_solves: managed.cfSolveCount,
               session_cf_solves_at_start: solveCountAtStart,
-              session_concurrent_tabs: 0,
+              session_concurrent_tabs: managed.activeTabs,
               session_warm: managed.cfSolveCount > 0,
               generation_id: managed.id,
               browser_acquire_ms: browserAcquireMs,
@@ -359,7 +369,8 @@ export class AhrefsSessionManager {
             ).pipe(Effect.ignore);
           }
 
-          // Invalidate browser on failure or CF solve TTL
+          // Track concurrent tabs and invalidation
+          managed.activeTabs--;
           const solveCountAtEnd = managed.cfSolveCount;
           yield* Effect.annotateCurrentSpan({
             "session.solve_count_at_end": solveCountAtEnd,
@@ -375,7 +386,10 @@ export class AhrefsSessionManager {
               }),
             );
             yield* Pool.invalidate(pool, managed);
-          } else if (managed.cfSolveCount >= MAX_CF_SOLVES_PER_SESSION) {
+          } else if (
+            managed.needsInvalidation ||
+            managed.cfSolveCount >= MAX_CF_SOLVES_PER_SESSION
+          ) {
             yield* Effect.logWarning("session.pool.invalidate").pipe(
               Effect.annotateLogs({
                 reason: "solve_ttl",
