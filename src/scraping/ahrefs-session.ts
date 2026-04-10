@@ -1,15 +1,16 @@
 /**
- * Ahrefs Session Manager — Effect v4 Pool-based browser lifecycle.
+ * Ahrefs Session Manager — multi-browser pool for CF WASM parallelism.
  *
- * Uses Pool.makeWithTTL for all resource management:
- * - Concurrency: 15 tabs per browser (Pool concurrency param)
- * - TTL: 120s max browser age (Pool timeToLive)
- * - Invalidation: Pool.invalidate on failure or CF solve TTL
- * - Drain: Pool handles item lifecycle internally
- * - Scoped: Pool.get auto-releases permit on scope close
+ * Chrome site isolation puts all challenges.cloudflare.com iframes in ONE
+ * renderer process per browser. With one browser, all CF WASM serializes
+ * on one CPU core. Multiple browsers = multiple renderers = multiple cores.
  *
- * No hand-built Ref, Semaphore, Scope, drain monitors, or health counters.
+ * Pool config auto-computed from MAX_CONCURRENT_TABS and available CPU cores:
+ * - BROWSER_COUNT = min(ceil(tabs / TABS_PER_BROWSER), cores)
+ * - Each browser gets TABS_PER_BROWSER concurrent tab permits
+ * - TTL: 120s max browser age, invalidation on failure or CF solve TTL
  */
+import { cpus } from "os";
 import { Effect, Exit, Pool, Scope } from "effect";
 import puppeteer from "puppeteer-core";
 import type { Browser } from "puppeteer-core";
@@ -32,6 +33,14 @@ const PROXY = process.env.LOCAL_MOBILE_PROXY ?? "";
 const MAX_CONCURRENT_TABS = 15;
 const TAB_STAGGER_MS = 1500;
 const BROWSER_TTL = "120 seconds";
+
+// Chrome site isolation puts ALL challenges.cloudflare.com iframes in ONE
+// renderer process. WASM proof-of-work from all tabs serializes on that
+// single process → one CPU core saturated while others idle.
+// Fix: multiple browsers, each with its own CF renderer process.
+const TABS_PER_BROWSER = 5;
+const AVAILABLE_CORES = cpus().length;
+const BROWSER_COUNT = Math.min(Math.ceil(MAX_CONCURRENT_TABS / TABS_PER_BROWSER), AVAILABLE_CORES);
 
 // ── Internal WS URL ─────────────────────────────────────────────────
 
@@ -171,11 +180,19 @@ export class AhrefsSessionManager {
     return Effect.fn("session.getPool")(function* (this: AhrefsSessionManager) {
       if (this.pool) return this.pool;
 
+      yield* Effect.logInfo("session.pool.config").pipe(
+        Effect.annotateLogs({
+          max_concurrent_tabs: String(MAX_CONCURRENT_TABS),
+          tabs_per_browser: String(TABS_PER_BROWSER),
+          browser_count: String(BROWSER_COUNT),
+          available_cores: String(AVAILABLE_CORES),
+        }),
+      );
       const pool = yield* Pool.makeWithTTL({
         acquire: Effect.acquireRelease(acquireBrowser, releaseBrowser),
         min: 1,
-        max: 1,
-        concurrency: MAX_CONCURRENT_TABS,
+        max: BROWSER_COUNT,
+        concurrency: TABS_PER_BROWSER,
         timeToLive: BROWSER_TTL,
         timeToLiveStrategy: "creation",
       }).pipe(Effect.provideService(Scope.Scope, this.poolScope));
