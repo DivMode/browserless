@@ -34,10 +34,15 @@ const MAX_CONCURRENT_TABS = 15;
 const TAB_STAGGER_MS = 1500;
 const BROWSER_TTL = "120 seconds";
 
+// !! CRITICAL — READ docs/CF_SOLVE_SPEED_POSTMORTEM.md BEFORE CHANGING !!
+//
 // Chrome site isolation puts ALL challenges.cloudflare.com iframes in ONE
-// renderer process. WASM proof-of-work from all tabs serializes on that
-// single process → one CPU core saturated while others idle.
+// renderer process per browser. With max:1, all CF WASM serialized on one
+// CPU core (110%) while system showed 15%. Caused 7x regression (2s → 14s).
+//
 // Fix: multiple browsers, each with its own CF renderer process.
+// NEVER set max:1 or reduce BROWSER_COUNT. NEVER increase TABS_PER_BROWSER
+// above 3 without checking the CF Renderer CPU dashboard panel.
 const TABS_PER_BROWSER = 2;
 const AVAILABLE_CORES = cpus().length;
 const BROWSER_COUNT = Math.min(Math.ceil(MAX_CONCURRENT_TABS / TABS_PER_BROWSER), AVAILABLE_CORES);
@@ -197,6 +202,9 @@ export class AhrefsSessionManager {
           available_cores: String(AVAILABLE_CORES),
         }),
       );
+      // min MUST equal max to pre-create all browsers. Lazy creation (min:1)
+      // defeats round-robin — all tabs go to browser #1 before #2 is created.
+      // See docs/CF_SOLVE_SPEED_POSTMORTEM.md
       const pool = yield* Pool.makeWithTTL({
         acquire: Effect.acquireRelease(acquireBrowser, releaseBrowser),
         min: BROWSER_COUNT,
