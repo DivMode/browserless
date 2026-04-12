@@ -47,6 +47,7 @@ import { TARGET_GET_TIMEOUT_MS } from "./cf-schedules.js";
 import { phase2OOPIFResolution } from "./cf-phase-oopif.js";
 import { phase3CheckboxFind, getAttr } from "./cf-phase-checkbox.js";
 import { openCleanPageWsScoped } from "./cf-coords.js";
+import { captureTurnstileResources, isCaptureEnabled } from "./cf-turnstile-capture.js";
 
 /** Parsed metadata from a CF Turnstile OOPIF URL. */
 export interface TurnstileOOPIFMeta {
@@ -488,6 +489,18 @@ export class CloudflareSolveStrategies {
             }
           }
         })();
+      }
+
+      // ── Turnstile Capture (gated by TURNSTILE_CAPTURE=1) ──────────────
+      if (isCaptureEnabled()) {
+        yield* captureTurnstileResources(send, oopifSessionId).pipe(
+          Effect.tap((dir) =>
+            dir
+              ? Effect.logInfo(`cf.capture: saved to ${dir}`)
+              : Effect.logWarning("cf.capture: no resources captured"),
+          ),
+          Effect.catch(() => Effect.logWarning("cf.capture: failed")),
+        );
       }
 
       yield* observeHistogram(cfClickPipelineDuration, (Date.now() - solveStart) / 1000, {

@@ -6,7 +6,7 @@
  * adapter + ScreencastCapture together. Replay capture is now internal
  * to CdpSession (no separate ReplayCapture factory).
  */
-import { BrowserInstance, TabReplayCompleteParams } from "@browserless.io/browserless";
+import type { BrowserInstance, TabReplayCompleteParams } from "@browserless.io/browserless";
 
 import { Deferred, Effect } from "effect";
 import { TargetId } from "../shared/cloudflare-detection.js";
@@ -170,7 +170,10 @@ export class SessionCoordinator {
       });
 
       // Initialize — on success wire up, on failure cleanup and swallow error
-      yield* Effect.tryPromise(() => cdpSession.initialize()).pipe(
+      yield* Effect.tryPromise({
+        try: () => cdpSession.initialize(),
+        catch: (e) => (e instanceof Error ? e : new Error(String(e))),
+      }).pipe(
         Effect.tap(() =>
           Effect.sync(() => {
             sessionRef = cdpSession;

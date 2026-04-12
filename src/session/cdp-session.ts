@@ -1037,6 +1037,21 @@ export class CdpSession {
   }
 
   private async _doDestroy(source: "cleanup" | "ws_close" | "error"): Promise<void> {
+    // If initialize() never completed (state still PENDING), the runtime's layer
+    // was never fully evaluated. Running destroyEffect on a half-initialized runtime
+    // crashes when Effect's scope/fiber machinery accesses internal _tag properties
+    // that were never set. Skip the heavy path — there's nothing to clean up.
+    if (this.state === "INITIALIZING") {
+      // Dispose the partially-initialized runtime (ManagedRuntime.make was called
+      // but layer evaluation failed — dispose releases any acquired resources).
+      if (this.runtime) {
+        await this.runtime.dispose().catch(() => {});
+        this.runtime = null;
+      }
+      this.state = "DESTROYED";
+      return;
+    }
+
     // Run destroy in the session runtime with sessionContext as parent span.
     // This ensures destroy-time spans (cf.state.unregisterPage, etc.) join the
     // session trace instead of creating orphaned traces via the default runtime.
