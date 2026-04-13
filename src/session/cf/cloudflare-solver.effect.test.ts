@@ -15,7 +15,7 @@
  *   7. Interstitial solve paths (4 tests)
  */
 import { describe, expect, it } from "@effect/vitest";
-import type { Duration} from "effect";
+import type { Duration } from "effect";
 import { Effect, Fiber, Latch, Layer } from "effect";
 import * as TestClock from "effect/testing/TestClock";
 import { CdpSessionId, TargetId } from "../../shared/cloudflare-detection.js";

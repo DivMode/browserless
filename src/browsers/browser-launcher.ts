@@ -7,7 +7,8 @@ import type {
   Config,
   Hooks,
   Request,
-  BrowserWebsocketRoute} from "@browserless.io/browserless";
+  BrowserWebsocketRoute,
+} from "@browserless.io/browserless";
 import {
   BadRequest,
   ChromeCDP,

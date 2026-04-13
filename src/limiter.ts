@@ -3,10 +3,9 @@ import type {
   Config,
   Hooks,
   Monitoring,
-  WebHooks} from "@browserless.io/browserless";
-import {
-  TooManyRequests
+  WebHooks,
 } from "@browserless.io/browserless";
+import { TooManyRequests } from "@browserless.io/browserless";
 import { Effect } from "effect";
 import q from "queue";
 

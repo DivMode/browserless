@@ -1,5 +1,4 @@
-import type {
-  Request} from "@browserless.io/browserless";
+import type { Request } from "@browserless.io/browserless";
 import {
   APITags,
   BrowserlessRoutes,

@@ -7,7 +7,7 @@
  * First flush creates the replay (writeTabReplay with metadata).
  * Subsequent flushes append events (appendTabEvents).
  */
-import type { Cause, Queue} from "effect";
+import type { Cause, Queue } from "effect";
 import { Deferred, Effect, Stream } from "effect";
 import type { ReplayEvent, ReplayMetadata, SessionId, TabEvent } from "../shared/replay-schemas.js";
 import type { TargetId } from "../shared/cloudflare-detection.js";

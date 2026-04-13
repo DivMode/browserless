@@ -8,7 +8,8 @@ import type {
   Response,
   Router,
   Token,
-  WebSocketRoute} from "@browserless.io/browserless";
+  WebSocketRoute,
+} from "@browserless.io/browserless";
 import {
   BadRequest,
   NotFound,
