@@ -42,6 +42,18 @@ export const OtelLayer: Layer.Layer<never> = endpoint
       baseUrl: endpoint,
       resource,
       ...(grafanaAuth ? { headers: { authorization: `Basic ${grafanaAuth}` } } : {}),
+      // Disable the default Pretty console logger when OTLP is active. Without
+      // this, every Effect.logInfo with annotateLogs gets written twice: once
+      // to OTLP (clean record with attrs as log record attributes → Loki
+      // stream labels via Grafana Cloud) and once to stdout as multi-line
+      // util.inspect output. On Talos, k8s-monitoring's alloy-logs daemonset
+      // tails every pod's stdout, so the util.inspect lines also hit Loki —
+      // one noise row per object property, without the attribute labels.
+      // Those rows pollute wide_event dashboards (Recent Scrapes et al.) with
+      // empty-column rows that match the selector but carry no fields. The
+      // Flatcar deployment never had this because its bespoke Alloy config
+      // didn't tail the browserless container into Loki.
+      loggerMergeWithExisting: false,
     }).pipe(
       // MUST be protobuf — Grafana Cloud Mimir silently drops JSON-encoded OTLP
       // metrics (returns 200 OK but never ingests). Traces/logs work with JSON,

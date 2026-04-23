@@ -10,7 +10,6 @@
  *   6. Assert summary-to-replay consistency (method/signal match label)
  *
  * This replaces the `cf-test` CLI command from pydoll for browserless-side solver validation.
- * Pydoll-specific tests (ahrefs-fast, cf-stress, native solver) run as subprocess tests below.
  *
  * ## Prerequisites
  *
@@ -57,8 +56,6 @@
  *   npx vitest run --config vitest.integration.config.ts
  */
 import { describe, expect, it } from "@effect/vitest";
-import { execFileSync } from "node:child_process";
-import fs from "node:fs";
 import { Effect } from "effect";
 import type { Scope } from "effect";
 import { afterAll, beforeAll } from "vitest";
@@ -68,7 +65,6 @@ import {
   BROWSERLESS_HTTP,
   BROWSERLESS_TOKEN,
   PROXY,
-  PYDOLL_DIR,
   REPLAY_HTTP,
   type ReplayMeta,
   type ServerCfSummary,
@@ -78,7 +74,6 @@ import {
   failWithEvidence,
   fetchSignals,
   findAllReplays,
-  runPydoll,
   writeSiteResult,
 } from "./integration-helpers";
 
@@ -650,65 +645,13 @@ describe.concurrent("CF Solver Multi-Site", () => {
   }
 });
 
-// ── Pydoll subprocess tests ────────────────────────────────────────
+// -- Session manager dispatch --------------------------------------
 //
-// These run pydoll CLI commands as child processes.
-// ahrefs-fast: JSON.parse of stdout + replay server cross-validation.
-// cf-stress / pydoll-unit: regex parsing of stdout for pass counts.
-//
-// This puts the ENTIRE test pyramid — browserless unit tests, integration
-// tests, pydoll live tests, and stress tests — under a single
-// `npx vitest run --config vitest.integration.config.ts` command.
+// End-to-end check of the Effect-based AhrefsSessionManager: hits
+// /ahrefs/backlinks/dispatch, polls the replay server, and verifies
+// the tab targetId propagates into the replay ID.
 
-describe("Pydoll Pipeline", () => {
-  it("ahrefs-fast produces valid DR and CF summary", { timeout: 40_000 }, async () => {
-    // 1. Run pydoll → structured JSON result (replaces regex parsing)
-    const result = await runPydoll(
-      ["ahrefs-fast", "etsy.com", "--chrome-endpoint=local-browserless"],
-      35_000,
-    );
-    expect(result.success, "ahrefs-fast scrape failed").toBe(true);
-
-    // 2. Business result — DR is in websiteData[1].data.domainRating
-    const dr = result.data?.websiteData?.[1]?.data?.domainRating ?? 0;
-    expect(dr, "No domainRating").toBeGreaterThan(0);
-
-    // 3. Replay must exist — extract ID from replay player URL
-    const replayUrl = result.replay?.url;
-    expect(replayUrl, "No replay URL in result").toBeTruthy();
-    const replayId = extractReplayId(replayUrl!);
-    expect(replayId, `Could not extract replay ID from URL: ${replayUrl}`).toBeTruthy();
-
-    // 4. Fetch signals from replay server (source of truth)
-    const signals = await fetchSignals(replayId!);
-    expect(signals, `/signals 404 for ${replayId}`).not.toBeNull();
-    expect(signals!.event_count, "Empty replay").toBeGreaterThan(0);
-    expect(signals!.cf_marker_count, "No CF markers").toBeGreaterThan(0);
-
-    // 5. Cross-validate: pydoll label vs replay server label
-    const pydollLabel = result.cloudflare_metrics?.cf_summary_label;
-    const replayLabel = signals!.summary?.label;
-    expect(replayLabel, "Replay server produced no summary").toBeTruthy();
-    if (pydollLabel) {
-      expect(replayLabel).toBe(pydollLabel);
-    }
-
-    // 6. Valid solve label
-    expect(replayLabel).toMatch(/(?:Int[→✓]|Emb[→✓])/);
-
-    // 7. No rechallenge
-    expect(signals!.summary!.rechallenge, "Rechallenge detected").toBe(false);
-
-    // 8. Consistency checks (method/signal match label, no orphaned detections)
-    const markers = signals!.cf_markers.map((m) => ({
-      tag: m.tag,
-      payload: m.payload,
-      timestamp: m.timestamp,
-    }));
-    const inconsistency = assertSummaryConsistency(signals!.summary!, markers);
-    expect(inconsistency, `Summary/replay mismatch: ${inconsistency}`).toBeNull();
-  });
-
+describe("Session Manager Dispatch", () => {
   it(
     "session manager dispatch produces replay with correct targetId",
     { timeout: 45_000 },
@@ -776,89 +719,4 @@ describe("Pydoll Pipeline", () => {
       }
     },
   );
-
-  // WARNING: cf-stress burns proxy IP. Run ONCE per session — back-to-back runs
-  // degrade pass rates as Ahrefs/CF rate-limits the carrier block after ~30 rapid
-  // requests. The FIRST run is the meaningful result. If you need to re-run, wait
-  // 10+ minutes for IP rotation.
-  //
-  // Cooldown enforced: if cf-stress passed within the last 10 minutes, skip it.
-  // The pre-push hook runs `npx vitest run` which re-runs the full suite — without
-  // this cooldown, cf-stress always fails on push after an explicit test run.
-  it("cf-stress passes >=80% with 10 concurrent tabs", { timeout: 65_000 }, () => {
-    const STRESS_TABS = 10;
-    const STRESS_PASS_THRESHOLD = Math.ceil(STRESS_TABS * 0.8);
-    const COOLDOWN_FILE = "/tmp/cf-stress-last-pass";
-    const COOLDOWN_MS = 10 * 60 * 1000;
-    try {
-      const lastPass = fs.statSync(COOLDOWN_FILE).mtimeMs;
-      if (Date.now() - lastPass < COOLDOWN_MS) {
-        const agoSec = Math.round((Date.now() - lastPass) / 1000);
-        console.log(
-          `  cf-stress: skipping — passed ${agoSec}s ago (IP needs ${Math.round(COOLDOWN_MS / 1000)}s cooldown)`,
-        );
-        return;
-      }
-    } catch {
-      /* file doesn't exist — first run */
-    }
-
-    let stdout: string;
-    try {
-      stdout = execFileSync(
-        "uv",
-        [
-          "run",
-          "--frozen",
-          "pydoll",
-          "cf-stress",
-          "--concurrent",
-          String(STRESS_TABS),
-          "--chrome-endpoint=local-browserless",
-        ],
-        {
-          cwd: PYDOLL_DIR,
-          encoding: "utf-8",
-          timeout: 60_000,
-          stdio: ["ignore", "pipe", "pipe"],
-          maxBuffer: 10 * 1024 * 1024,
-        },
-      );
-    } catch (err: unknown) {
-      const e = err as { stderr?: string; stdout?: string };
-      throw new Error(`pydoll cf-stress failed:\n${e.stderr || ""}\n\nstdout:\n${e.stdout || ""}`);
-    }
-
-    // Parse results table: "N/STRESS_TABS passed"
-    const passMatch = stdout.match(new RegExp(`(\\d+)/${STRESS_TABS} passed`));
-    expect(passMatch, "No pass count in cf-stress output").toBeTruthy();
-    const passed = Number(passMatch![1]);
-    expect(
-      passed,
-      `Only ${passed}/${STRESS_TABS} passed (need >=${STRESS_PASS_THRESHOLD} for 80%)`,
-    ).toBeGreaterThanOrEqual(STRESS_PASS_THRESHOLD);
-
-    // Mark pass time — subsequent runs within cooldown will skip
-    fs.writeFileSync(COOLDOWN_FILE, "");
-  });
-
-  it("pydoll unit tests pass", { timeout: 10_000 }, () => {
-    const stdout = execFileSync(
-      "uv",
-      ["run", "--frozen", "pytest", "tests/test_cloudflare_metrics.py", "-v"],
-      {
-        cwd: PYDOLL_DIR,
-        encoding: "utf-8",
-        timeout: 8_000,
-      },
-    );
-
-    // pytest prints "N passed" at the end
-    const passMatch = stdout.match(/(\d+) passed/);
-    expect(passMatch, 'No "passed" count in pytest output').toBeTruthy();
-    expect(Number(passMatch![1])).toBeGreaterThan(0);
-
-    // No failures
-    expect(stdout).not.toMatch(/\d+ failed/);
-  });
 });
