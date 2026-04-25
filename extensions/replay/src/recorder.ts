@@ -18,24 +18,45 @@ window.__browserlessRecording = undefined as any;
   if (isIframe) {
     window.__browserlessRecording = true;
     const recordFn = window.rrweb && window.rrweb.record;
+    console.log(
+      "[browserless-ext] iframe-init:",
+      "rrweb=" + typeof window.rrweb,
+      "record=" + typeof recordFn,
+      "origin=" + location.origin,
+      "url=" + location.href.substring(0, 80),
+    );
     if (typeof recordFn === "function") {
-      recordFn({
-        emit() {},
-        recordCrossOriginIframes: true,
-        recordAfter: "DOMContentLoaded",
-        recordCanvas: true,
-        collectFonts: true,
-        inlineImages: false,
-        sampling: {
-          mousemove: true,
-          mouseInteraction: true,
-          scroll: 150,
-          media: 800,
-          input: "last",
-          canvas: 2,
-        },
-        dataURLOptions: { type: "image/webp", quality: 0.6, maxBase64ImageLength: 2097152 },
-      });
+      try {
+        const stop = recordFn({
+          emit() {},
+          recordCrossOriginIframes: true,
+          recordAfter: "DOMContentLoaded",
+          recordCanvas: true,
+          collectFonts: true,
+          inlineImages: false,
+          sampling: {
+            mousemove: true,
+            mouseInteraction: true,
+            scroll: 150,
+            media: 800,
+            input: "last",
+            canvas: 2,
+          },
+          dataURLOptions: { type: "image/webp", quality: 0.6, maxBase64ImageLength: 2097152 },
+        });
+        console.log(
+          "[browserless-ext] iframe-record-ok:",
+          "stop=" + typeof stop,
+          "origin=" + location.origin,
+        );
+      } catch (e) {
+        const err = e as Error;
+        console.error(
+          "[browserless-ext] iframe-record-FAILED:",
+          (err && err.message) || String(e),
+          "origin=" + location.origin,
+        );
+      }
     }
   } else {
     // -- Main frame: full recording ----------------------------------------
