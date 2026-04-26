@@ -23,14 +23,22 @@ window.__browserlessRecording = undefined as any;
       "rrweb=" + typeof window.rrweb,
       "record=" + typeof recordFn,
       "origin=" + location.origin,
+      "ready=" + document.readyState,
       "url=" + location.href.substring(0, 80),
     );
-    if (typeof recordFn === "function") {
+    // The actual rrweb call must run when document.readyState is past "loading".
+    // In cross-origin OOPIFs (Cloudflare Turnstile especially) the content_script
+    // can be injected at document_start AFTER DOMContentLoaded has already fired,
+    // so rrweb's internal `recordAfter: "DOMContentLoaded"` listener never receives
+    // the event and zt stays false → no FullSnapshot, no observers, no postMessage
+    // to parent. Calling record() only when readyState is interactive/complete
+    // forces rrweb's synchronous startup path (ee() runs immediately, zt=true).
+    const startIframeRecording = () => {
+      if (typeof recordFn !== "function") return;
       try {
         const stop = recordFn({
           emit() {},
           recordCrossOriginIframes: true,
-          recordAfter: "DOMContentLoaded",
           recordCanvas: true,
           collectFonts: true,
           inlineImages: false,
@@ -47,6 +55,7 @@ window.__browserlessRecording = undefined as any;
         console.log(
           "[browserless-ext] iframe-record-ok:",
           "stop=" + typeof stop,
+          "ready=" + document.readyState,
           "origin=" + location.origin,
         );
       } catch (e) {
@@ -57,6 +66,11 @@ window.__browserlessRecording = undefined as any;
           "origin=" + location.origin,
         );
       }
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", startIframeRecording, { once: true });
+    } else {
+      startIframeRecording();
     }
   } else {
     // -- Main frame: full recording ----------------------------------------
