@@ -358,6 +358,7 @@ export class AhrefsSessionManager {
             apiCallStatus: scrapeOutput.apiCallStatus,
             fetchDecisions:
               "fetchDecisions" in scrapeOutput ? scrapeOutput.fetchDecisions : undefined,
+            shellTimings: "shellTimings" in scrapeOutput ? scrapeOutput.shellTimings : undefined,
           });
           yield* Effect.logInfo("ahrefs.scrape.wide_event").pipe(Effect.annotateLogs(wideEvent));
 

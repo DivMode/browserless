@@ -20,6 +20,17 @@ const ATTR_DURATION_MS = "duration_ms";
 const ATTR_NAVIGATION_DURATION_MS = "navigation_duration_ms";
 const ATTR_PHASE_DURATION_MS = "phase_duration_ms";
 const ATTR_PHASE_SUCCESS = "phase_success";
+// Shell-side timing breakdown — decomposes `phase_duration_ms` into:
+//   shell→token | overview API call | (optional) backlinks-list call | result-set
+// Lets us prove which segment is the real bottleneck on slow scrapes
+// (the post-Talos p95 regression of +4s vs Flatcar baseline that PRs
+// #1570-#1572 only partially closed).
+const ATTR_SHELL_TO_TOKEN_MS = "shell_to_token_ms"; // shell loaded → CF Turnstile token (≈ cf_duration + load delay)
+const ATTR_OVERVIEW_CALL_MS = "overview_call_ms"; // ahrefs API call duration (the actual roundtrip)
+const ATTR_LIST_CALL_MS = "list_call_ms"; // optional 2nd call for backlinks list (or 0)
+const ATTR_LIST_CALLED = "list_called"; // distinguishes "no 2nd call" from "2nd call timed out at 0ms"
+const ATTR_TOKEN_TO_RESULT_MS = "token_to_result_ms"; // CF token → window.__ahrefsResult set
+const ATTR_SHELL_TIMINGS_OK = "shell_timings_ok"; // true if we successfully read window.__shellTimings
 const ATTR_ERROR_TYPE = "error_type";
 const ATTR_ERROR_MESSAGE = "error_message";
 const ATTR_FAILURE_POINT = "failure_point";
@@ -178,6 +189,15 @@ export interface WideEventInput {
   apiCallStatus?: string;
   sessionRecycleReason?: string;
   fetchDecisions?: import("./ahrefs-cdp.js").FetchDecision[];
+  /**
+   * In-page shell-side timestamps captured by ahrefs-html.ts. Lets the
+   * wide event report API-call duration separately from CF solve time
+   * — the only way to attribute the post-Talos p95 regression to
+   * either the network/DNS path (already addressed in PRs #1570-#1572)
+   * or the ahrefs API call itself (was previously hidden inside
+   * `phase_duration_ms`).
+   */
+  shellTimings?: import("./ahrefs-cdp.js").ShellTimings;
 }
 
 /**
@@ -222,6 +242,51 @@ function deriveErrorType(result: AhrefsScrapeResult): string {
     case "FulfillError":
       return "fulfill_error";
   }
+}
+
+/**
+ * Compute shell-timing-derived label values. Returns "0" / "false" for
+ * any field whose source is null/missing — flat strings only because
+ * Loki labels are stringly typed. We use `shell_timings_ok` as the
+ * "we successfully read the timings" flag so a downstream query can
+ * filter `{shell_timings_ok="true"}` to ignore scrapes where the page
+ * was destroyed before we could read window.__shellTimings.
+ */
+function shellTimingLabels(st?: import("./ahrefs-cdp.js").ShellTimings): Record<string, string> {
+  if (!st) {
+    return {
+      [ATTR_SHELL_TO_TOKEN_MS]: "0",
+      [ATTR_OVERVIEW_CALL_MS]: "0",
+      [ATTR_LIST_CALL_MS]: "0",
+      [ATTR_LIST_CALLED]: "false",
+      [ATTR_TOKEN_TO_RESULT_MS]: "0",
+      [ATTR_SHELL_TIMINGS_OK]: "false",
+    };
+  }
+  // Math: durations are computed only when both endpoints are present.
+  // Round to integer ms — Loki labels with float milliseconds blow
+  // cardinality without giving us anything actionable.
+  const shellToToken = st.token_received_at != null ? Math.round(st.token_received_at) : 0;
+  const overviewCall =
+    st.overview_call_start != null && st.overview_call_end != null
+      ? Math.round(st.overview_call_end - st.overview_call_start)
+      : 0;
+  const listCall =
+    st.list_call_start != null && st.list_call_end != null
+      ? Math.round(st.list_call_end - st.list_call_start)
+      : 0;
+  const tokenToResult =
+    st.token_received_at != null && st.result_set_at != null
+      ? Math.round(st.result_set_at - st.token_received_at)
+      : 0;
+  return {
+    [ATTR_SHELL_TO_TOKEN_MS]: String(shellToToken),
+    [ATTR_OVERVIEW_CALL_MS]: String(overviewCall),
+    [ATTR_LIST_CALL_MS]: String(listCall),
+    [ATTR_LIST_CALLED]: String(st.list_called),
+    [ATTR_TOKEN_TO_RESULT_MS]: String(tokenToResult),
+    [ATTR_SHELL_TIMINGS_OK]: "true",
+  };
 }
 
 export function buildWideEvent(input: WideEventInput): Record<string, string> {
@@ -272,6 +337,7 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_NAVIGATION_DURATION_MS]: String(result.timings.navMs),
     [ATTR_PHASE_DURATION_MS]: String(result.timings.resultMs),
     [ATTR_PHASE_SUCCESS]: String(result.success),
+    ...shellTimingLabels(input.shellTimings),
 
     // Backlinks data
     [ATTR_BACKLINKS_COUNT]: String(overview.backlinks ?? 0),

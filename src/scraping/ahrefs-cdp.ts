@@ -317,6 +317,61 @@ export const getApiCallStatus = (page: Page) =>
     catch: () => "page_destroyed",
   }).pipe(Effect.catch(() => Effect.succeed("page_destroyed")));
 
+// ── Shell-side timings ──────────────────────────────────────────────
+//
+// All values are MS-since-shell-start (performance.now() inside the
+// page). null = the corresponding step never ran (e.g. CF token never
+// arrived → token_received_at stays null; backlinks list call wasn't
+// triggered because backlinks count was 0 → list_call_* stays null).
+//
+// Populated by the synthetic shell HTML in ahrefs-html.ts:
+// `window.__shellTimings`. Read from the host via page.evaluate after
+// waitForResult resolves, so the values reflect a successful scrape's
+// terminal state. Failed scrapes may have partial values which is the
+// signal we want — "token received but overview never returned" is
+// exactly the diagnosis we couldn't make pre-instrumentation.
+export interface ShellTimings {
+  shell_loaded_at: number; // anchor; should always be 0
+  token_received_at: number | null;
+  overview_call_start: number | null;
+  overview_call_end: number | null;
+  list_call_start: number | null;
+  list_call_end: number | null;
+  result_set_at: number | null;
+  list_called: boolean;
+}
+
+/** Default returned when reading shell timings fails (page destroyed before read). */
+const NULL_SHELL_TIMINGS: ShellTimings = {
+  shell_loaded_at: 0,
+  token_received_at: null,
+  overview_call_start: null,
+  overview_call_end: null,
+  list_call_start: null,
+  list_call_end: null,
+  result_set_at: null,
+  list_called: false,
+};
+
+/**
+ * Read window.__shellTimings from the page after the result is available.
+ *
+ * Returns NULL_SHELL_TIMINGS on any failure — these are diagnostic
+ * timings, not a load-bearing contract. A failed read means we lose
+ * visibility for that one scrape, not that the scrape itself fails.
+ */
+export const getShellTimings = (page: Page) =>
+  Effect.tryPromise({
+    try: async () => {
+      const raw = await page.evaluate("JSON.stringify(window.__shellTimings || null)");
+      if (typeof raw !== "string" || raw === "null") return NULL_SHELL_TIMINGS;
+      const parsed = JSON.parse(raw) as Partial<ShellTimings> | null;
+      if (!parsed) return NULL_SHELL_TIMINGS;
+      return { ...NULL_SHELL_TIMINGS, ...parsed };
+    },
+    catch: () => NULL_SHELL_TIMINGS,
+  }).pipe(Effect.catch(() => Effect.succeed(NULL_SHELL_TIMINGS)));
+
 // ── Diagnostics ─────────────────────────────────────────────────────
 
 export interface DiagnosticInfo {

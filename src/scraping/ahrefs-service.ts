@@ -18,9 +18,10 @@ import {
   captureDiagnostics,
   cleanupCdp,
   enableFetchInterception,
+  getApiCallStatus,
+  getShellTimings,
   getTargetId,
   setupFetchInterception,
-  getApiCallStatus,
   waitForDocumentInterception,
   waitForResult,
 } from "./ahrefs-cdp.js";
@@ -52,6 +53,14 @@ export interface ScrapeOutput {
   scrapeType: ScrapeType;
   scrapeUrl: string;
   timings: { navMs: number; interceptMs: number; resultMs: number; totalMs: number };
+  /**
+   * Per-step timestamps captured INSIDE the synthetic shell HTML
+   * (window.__shellTimings). Lets us decompose `resultMs` into
+   * "waiting for CF token" vs "ahrefs API call duration" — the only
+   * way to attribute the 5-15s of "unaccounted time" we see in slow
+   * scrapes. Read via getShellTimings() after waitForResult resolves.
+   */
+  shellTimings?: import("./ahrefs-cdp.js").ShellTimings;
   cfClearancePresent?: boolean;
   apiCallStatus?: string;
   fetchDecisions?: import("./ahrefs-cdp.js").FetchDecision[];
@@ -292,8 +301,12 @@ export const executeAhrefsScrape = (
         return result;
       })();
 
-      // Phase 5: Read API status + parse result
+      // Phase 5: Read API status + shell timings + parse result.
+      // shell timings MUST be read here, before page-cleanup or fiber
+      // teardown — otherwise window.__shellTimings is gone and we lose
+      // the breakdown of the post-CF API call.
       const apiCallStatus = yield* getApiCallStatus(page);
+      const shellTimings = yield* getShellTimings(page);
 
       const result = yield* Effect.fn("ahrefs.phase.parseResult")(function* () {
         return yield* parseResult(apiResult, domain, scrapeType, timings, apiCallStatus).pipe(
@@ -365,6 +378,7 @@ export const executeAhrefsScrape = (
         scrapeType,
         scrapeUrl: url,
         timings,
+        shellTimings,
         cfClearancePresent,
         apiCallStatus,
         fetchDecisions: interception.fetchDecisions,

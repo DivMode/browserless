@@ -25,6 +25,25 @@ window.__turnstileToken = null;
 window.__apiCallStatus = 'not_called';
 window.__apiErrors = [];
 
+// ── Shell-side timing capture ────────────────────────────────────────
+// All timestamps are MS-since-shell-start (performance.now()), so the
+// host-side reader can subtract pairs to get phase durations even if
+// the page's wall clock differs from the host's. The host reads this
+// via page.evaluate AFTER waitForResult resolves, then emits as
+// wide-event labels. THIS is what gives us visibility into the 5-15s
+// of "unaccounted time" in slow scrapes (most of which is the ahrefs
+// API call latency post-CF-token).
+window.__shellTimings = {
+  shell_loaded_at: performance.now(),  // anchor; always 0 by construction
+  token_received_at: null,             // when CF Turnstile resolved → onToken
+  overview_call_start: null,           // before fetchJSON('/v4/stGetFreeBacklinksOverview')
+  overview_call_end: null,             // after the response parsed
+  list_call_start: null,               // only set if backlinks > 0 path runs
+  list_call_end: null,
+  result_set_at: null,                 // when window.__ahrefsResult is assigned
+  list_called: false,                  // distinguishes "no second call" from "second call timed out"
+};
+
 function mark(tag, payload) {
   var event = {type: 5, timestamp: Date.now(), data: {tag: tag, payload: payload || {}}};
   if (window.__rrwebPush) { try { window.__rrwebPush(JSON.stringify([event])); return; } catch(e) {} }
@@ -72,6 +91,7 @@ function recordApiError(e) {
 
 function completeSuccess(result) {
   if (window.__apiErrors.length) result.apiErrors = window.__apiErrors;
+  window.__shellTimings.result_set_at = performance.now();
   window.__ahrefsResult = JSON.stringify(result);
   window.__apiCallStatus = 'responded_ok';
   mark('ahrefs.complete', {success: true});
@@ -82,6 +102,7 @@ function completeSuccess(result) {
 
 function completeError(message, result) {
   var lastErr = window.__apiErrors.length ? window.__apiErrors[window.__apiErrors.length - 1] : null;
+  window.__shellTimings.result_set_at = performance.now();
   window.__apiCallStatus = lastErr ? 'responded_' + lastErr.status : 'responded_error';
   window.__ahrefsResult = JSON.stringify(Object.assign({
     apiErrors: window.__apiErrors.length ? window.__apiErrors : undefined
@@ -123,31 +144,38 @@ const backlinksOnToken = (p: HtmlParams): string => `
 async function onToken(token) {
   window.__turnstileToken = token;
   window.__turnstileSolved = true;
+  window.__shellTimings.token_received_at = performance.now();
   mark('turnstile.token_received', {});
   notifyServer();
 
   document.getElementById('status').textContent = 'Token received, calling API...';
   window.__apiCallStatus = 'pending';
   try {
+    window.__shellTimings.overview_call_start = performance.now();
     var ov = await fetchJSON('overview', '/v4/stGetFreeBacklinksOverview', {
       method: 'POST',
       headers: {'Content-Type': 'application/json; charset=utf-8'},
       body: JSON.stringify({captcha: token, url: '${p.domain}', mode: 'subdomains'})
     });
+    window.__shellTimings.overview_call_end = performance.now();
     mark('ahrefs.overview', {backlinks: ov[1] && ov[1].data ? ov[1].data.backlinks || 0 : 0});
     document.getElementById('status').textContent = 'Fetching backlinks...';
 
     var bl = null;
     if (Array.isArray(ov) && ov[0] === 'Ok' && ov[1] && ov[1].signedInput &&
         ov[1].data && ov[1].data.backlinks > 0) {
+      window.__shellTimings.list_called = true;
       try {
+        window.__shellTimings.list_call_start = performance.now();
         bl = await fetchJSON('backlinks_list', '/v4/stGetFreeBacklinksList', {
           method: 'POST',
           headers: {'Content-Type': 'application/json; charset=utf-8'},
           body: JSON.stringify({signedInput: ov[1].signedInput, reportType: ['TopBacklinks']})
         });
+        window.__shellTimings.list_call_end = performance.now();
         mark('ahrefs.backlinks', {});
       } catch(e) {
+        window.__shellTimings.list_call_end = performance.now();
         recordApiError(e);
         bl = {error: 'backlinks_fetch_failed', message: e.message};
         showError('backlinks_fetch_failed', e.message);
@@ -179,17 +207,20 @@ const trafficOnToken = (p: HtmlParams): string => `
 async function onToken(token) {
   window.__turnstileToken = token;
   window.__turnstileSolved = true;
+  window.__shellTimings.token_received_at = performance.now();
   mark('turnstile.token_received', {});
   notifyServer();
 
   document.getElementById('status').textContent = 'Token received, calling API...';
   window.__apiCallStatus = 'pending';
   try {
+    window.__shellTimings.overview_call_start = performance.now();
     var ov = await fetchJSON('traffic', '/v4/stGetFreeTrafficOverview', {
       method: 'POST',
       headers: {'Content-Type': 'application/json; charset=utf-8'},
       body: JSON.stringify({captcha: token, url: '${p.domain}', mode: 'subdomains', country: null, protocol: null})
     });
+    window.__shellTimings.overview_call_end = performance.now();
     mark('ahrefs.traffic', {});
     completeSuccess({success: true, overview: ov});
   } catch(e) {
