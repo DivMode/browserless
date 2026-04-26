@@ -410,6 +410,11 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
           this.userDataDir ? `--user-data-dir=${this.userDataDir}` : "",
         ].filter((_) => !!_),
         executablePath: this.executablePath,
+        // Puppeteer adds --disable-dev-shm-usage by default, which forces
+        // Chrome to fall back from /dev/shm (RAM, fast) to /tmp (slower).
+        // Our K8s pod mounts an 8 GiB tmpfs at /dev/shm specifically for
+        // Chrome IPC — let Chrome use it.
+        ignoreDefaultArgs: ["--disable-dev-shm-usage"],
       };
 
       if (extensions.length) {
