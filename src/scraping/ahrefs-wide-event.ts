@@ -161,6 +161,17 @@ const ATTR_SESSION_RECYCLE_REASON = "session_recycle_reason";
 const ATTR_API_RESPONSE_BODY = "api_response_body";
 const ATTR_SESSION_GENERATION_ID = "session_generation_id";
 
+// Proxy observability — schema matches packages/godaddy-fetcher/src/fetch_auctions.rs
+// (`proxy.ip_address = %ip` tracing field). Loki normalises the dot to an
+// underscore for label compatibility — the godaddy-fetcher dashboard already
+// queries `proxy_ip_address` and the same query will work for ahrefs once
+// this field is populated. `chrome.proxy_server` is the literal string passed
+// to Chrome's `--proxy-server` flag (origin only, no credentials), captured
+// at session creation so we can correlate IP-rotation bugs with the URL the
+// renderer was actually told to use.
+const ATTR_PROXY_IP_ADDRESS = "proxy.ip_address";
+const ATTR_CHROME_PROXY_SERVER = "chrome.proxy_server";
+
 // ── Builder ─────────────────────────────────────────────────────────
 
 export interface SessionContext {
@@ -172,6 +183,18 @@ export interface SessionContext {
   generation_id?: number;
   browser_acquire_ms?: number;
   page_create_ms?: number;
+  /**
+   * Egress IP observed at browser acquire time, captured by an IP-echo
+   * fetch through Chrome's `--proxy-server`. `undefined` when the IP echo
+   * services were unreachable. Schema matches godaddy-fetcher's
+   * `proxy.ip_address = %ip` tracing field.
+   */
+  proxy_ip_address?: string;
+  /**
+   * Literal value passed as Chrome's `--proxy-server` flag (origin only,
+   * no credentials). Empty string when LOCAL_MOBILE_PROXY is unset.
+   */
+  chrome_proxy_server?: string;
 }
 
 export interface WideEventInput {
@@ -479,6 +502,14 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_SESSION_RECYCLE_REASON]: input.sessionRecycleReason ?? "",
     [ATTR_API_RESPONSE_BODY]: result.apiErrors?.[0]?.body ?? "",
     [ATTR_SESSION_GENERATION_ID]: String(input.sessionContext?.generation_id ?? 0),
+
+    // Proxy observability — fixes the "Scrapes by IP" panel showing 100%
+    // "Geo Failed". Schema matches godaddy-fetcher's `proxy.ip_address = %ip`.
+    // Empty string (not "unknown" / not a fake IP) when the IP echo services
+    // were unreachable through the proxy — the dashboard already maps empty
+    // → "Geo Failed", which is the honest signal that we couldn't see the IP.
+    [ATTR_PROXY_IP_ADDRESS]: input.sessionContext?.proxy_ip_address ?? "",
+    [ATTR_CHROME_PROXY_SERVER]: input.sessionContext?.chrome_proxy_server ?? "",
 
     // Misc
     [ATTR_HARD_TIMEOUT_PHASE]: "",

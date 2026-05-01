@@ -49,18 +49,99 @@ const BROWSER_COUNT = Math.min(Math.ceil(MAX_CONCURRENT_TABS / TABS_PER_BROWSER)
 
 // ── Internal WS URL ─────────────────────────────────────────────────
 
+/**
+ * Returns the value passed as Chrome's `--proxy-server` flag (origin only,
+ * no credentials). Empty string when LOCAL_MOBILE_PROXY is unset. This is
+ * the exact string Chrome sees — useful for diagnosing rotation bugs where
+ * we want to know precisely which proxy URL the renderer was told to use.
+ */
+function getProxyServerFlag(): string {
+  if (!PROXY) return "";
+  return new URL(PROXY).origin;
+}
+
 function buildInternalWsUrl(): string {
   const params = new URLSearchParams();
   if (TOKEN) params.set("token", TOKEN);
-  if (PROXY) {
-    const proxyUrl = new URL(PROXY);
-    params.set("--proxy-server", proxyUrl.origin);
+  const proxyServer = getProxyServerFlag();
+  if (proxyServer) {
+    params.set("--proxy-server", proxyServer);
   }
   params.set("headless", "false");
   params.set("replay", "true");
   params.set("cfSolver", "true");
   params.set("launch", JSON.stringify({ args: ["--window-size=1280,900"] }));
   return `ws://127.0.0.1:${PORT}/chromium?${params.toString()}`;
+}
+
+// ── Proxy egress IP check ───────────────────────────────────────────
+//
+// Mirrors packages/godaddy-fetcher/src/proxy_check.rs — issue a GET through
+// the mobile proxy to an IP echo service and return the observed outbound
+// IP. The Grafana "Scrapes by IP" panel queries `proxy_ip_address` (Loki's
+// dot-to-underscore mapping of `proxy.ip_address`). Without this field, the
+// panel falls back to "Geo Failed" for 100% of ahrefs scrapes — even though
+// the proxy IS rotating correctly (godaddy-fetcher proves the same proxy
+// path produces a healthy distribution of T-Mobile cellular IPs).
+//
+// We ride on the puppeteer-controlled Chrome that already has `--proxy-server`
+// configured, so the fetch automatically egresses through the proxy. CORS-
+// friendly providers only (Access-Control-Allow-Origin: *) — checkip.amazonaws
+// is excluded because it doesn't set CORS headers, which would block reading
+// the body from the about:blank page context.
+const IP_SERVICES = [
+  { url: "https://api.ipify.org?format=json", json: true },
+  { url: "https://icanhazip.com", json: false },
+] as const;
+const PROXY_CHECK_TIMEOUT_MS = 10_000;
+
+async function fetchProxyEgressIp(browser: Browser): Promise<string | undefined> {
+  if (!PROXY) return undefined;
+  let page;
+  try {
+    const pages = await browser.pages();
+    page = pages[0];
+    if (!page) return undefined;
+  } catch {
+    return undefined;
+  }
+  for (const svc of IP_SERVICES) {
+    try {
+      const result = await page.evaluate(
+        async (url: string, isJson: boolean, timeoutMs: number) => {
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), timeoutMs);
+          try {
+            const res = await fetch(url, { signal: ctrl.signal });
+            if (!res.ok) return null;
+            if (isJson) {
+              const body: unknown = await res.json();
+              if (
+                typeof body === "object" &&
+                body !== null &&
+                "ip" in body &&
+                typeof body.ip === "string"
+              ) {
+                return body.ip;
+              }
+              return null;
+            }
+            const text = await res.text();
+            return text.trim() || null;
+          } finally {
+            clearTimeout(t);
+          }
+        },
+        svc.url,
+        svc.json,
+        PROXY_CHECK_TIMEOUT_MS,
+      );
+      if (typeof result === "string" && result.length > 0) return result;
+    } catch {
+      // try next service
+    }
+  }
+  return undefined;
 }
 
 // ── Managed Browser ─────────────────────────────────────────────────
@@ -75,6 +156,13 @@ interface ManagedBrowser {
   needsInvalidation: boolean;
   /** Active tab count on this browser (incremented on acquire, decremented on release). */
   activeTabs: number;
+  /**
+   * Egress IP observed from the mobile proxy at session create time. Mirrors
+   * godaddy-fetcher's `proxy.ip_address` field. `undefined` when the IP echo
+   * services are unreachable through the proxy — the wide event will record
+   * an empty string and the dashboard renders that as "Geo Failed".
+   */
+  readonly proxyIpAddress: string | undefined;
 }
 
 let nextBrowserId = 0;
@@ -111,6 +199,15 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
       }
     }
 
+    // Fetch egress IP through the mobile proxy. Best-effort: a failure here
+    // does NOT block session acquisition — we simply log undefined into the
+    // wide event so the dashboard reflects the reality that we couldn't see
+    // the IP, rather than inventing a fallback value.
+    const proxyIpAddress = yield* Effect.tryPromise({
+      try: () => fetchProxyEgressIp(browser),
+      catch: () => new Error("proxy_ip_check"),
+    }).pipe(Effect.catch(() => Effect.succeed<string | undefined>(undefined)));
+
     const managed: ManagedBrowser = {
       browser,
       createdAt: Date.now(),
@@ -119,6 +216,7 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
       cfSolveCount: 0,
       needsInvalidation: false,
       activeTabs: 0,
+      proxyIpAddress,
     };
 
     // Set up CF solve tracking on Connection
@@ -154,8 +252,17 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
       catch: () => new Error("cf_listener"),
     }).pipe(Effect.ignore);
 
+    // Wide-style annotation: `chrome.proxy_server` is the literal string
+    // passed to Chrome via `--proxy-server`; `proxy.ip_address` is the egress
+    // IP we observed through that proxy. Both are observability fields —
+    // when IP rotation goes wrong we want to see exactly which proxy URL
+    // Chrome was told to use AND which IP came back, side-by-side.
     yield* Effect.logInfo("session.browser.acquired").pipe(
-      Effect.annotateLogs({ browser_id: String(id) }),
+      Effect.annotateLogs({
+        browser_id: String(id),
+        "chrome.proxy_server": getProxyServerFlag(),
+        "proxy.ip_address": managed.proxyIpAddress ?? "",
+      }),
     );
 
     return managed;
@@ -353,6 +460,8 @@ export class AhrefsSessionManager {
               generation_id: managed.id,
               browser_acquire_ms: browserAcquireMs,
               page_create_ms: pageCreateMs,
+              proxy_ip_address: managed.proxyIpAddress,
+              chrome_proxy_server: getProxyServerFlag(),
             },
             cfClearancePresent: scrapeOutput.cfClearancePresent,
             apiCallStatus: scrapeOutput.apiCallStatus,
