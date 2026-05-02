@@ -161,16 +161,15 @@ const ATTR_SESSION_RECYCLE_REASON = "session_recycle_reason";
 const ATTR_API_RESPONSE_BODY = "api_response_body";
 const ATTR_SESSION_GENERATION_ID = "session_generation_id";
 
-// Proxy observability — schema matches packages/godaddy-fetcher/src/fetch_auctions.rs
-// (`proxy.ip_address = %ip` tracing field). Loki normalises the dot to an
-// underscore for label compatibility — the godaddy-fetcher dashboard already
-// queries `proxy_ip_address` and the same query will work for ahrefs once
-// this field is populated. `chrome.proxy_server` is the literal string passed
-// to Chrome's `--proxy-server` flag (origin only, no credentials), captured
-// at session creation so we can correlate IP-rotation bugs with the URL the
-// renderer was actually told to use.
-const ATTR_PROXY_IP_ADDRESS = "proxy.ip_address";
-const ATTR_CHROME_PROXY_SERVER = "chrome.proxy_server";
+// Proxy observability — flat underscore names. The Rust tracing pipeline that
+// godaddy-fetcher uses normalises dot-named fields to underscore on the way
+// through OTLP, but Effect.logInfo + annotateLogs (the path browserless uses)
+// drops them entirely — verified against Loki: dot-named fields never reach
+// structured metadata for service_name="browserless". So we name flat from
+// the start, matching what godaddy-fetcher's data looks like once it lands in
+// Loki and what the dashboard's "Scrapes by IP" panel actually queries.
+const ATTR_PROXY_IP_ADDRESS = "proxy_ip_address";
+const ATTR_CHROME_PROXY_SERVER = "chrome_proxy_server";
 
 // ── Builder ─────────────────────────────────────────────────────────
 
