@@ -21,6 +21,7 @@ export default defineConfig({
       {
         resolve: resolveConfig,
         test: {
+          name: "unit",
           bail: 1,
           include: ["src/**/*.test.ts"],
           exclude: ["src/**/*.integration.test.ts"],
@@ -34,6 +35,7 @@ export default defineConfig({
       {
         resolve: resolveConfig,
         test: {
+          name: "integration",
           bail: 1,
           include: ["src/**/*.integration.test.ts"],
           globals: false,
