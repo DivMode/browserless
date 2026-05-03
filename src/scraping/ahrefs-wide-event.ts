@@ -41,9 +41,6 @@ const ATTR_SCRAPE_ERROR_CATEGORY = "scrape_error_category";
 const ATTR_SESSION_ID = "session_id";
 const ATTR_CHROME_ENDPOINT = "chrome_endpoint";
 const ATTR_USE_PROXY = "use_proxy";
-const ATTR_HARD_TIMEOUT_PHASE = "hard_timeout_phase";
-const ATTR_CLOUDFLARE_DETECTION_ERROR = "cloudflare_detection_error";
-const ATTR_SCREENSHOT_URL = "screenshot_url";
 
 // Backlinks
 const ATTR_BACKLINKS_COUNT = "backlinks_count";
@@ -74,12 +71,6 @@ const ATTR_VIDEO_ENABLED = "video_enabled";
 const ATTR_RETRY_REASON = "retry_reason";
 const ATTR_RETRY_REPLAY_URL = "retry_replay_url";
 const ATTR_RETRY_REPLAY_DURATION_MS = "retry_replay_duration_ms";
-
-// Geo
-const ATTR_GEO_IP = "geo_ip";
-const ATTR_GEO_CITY = "geo_city";
-const ATTR_GEO_COUNTRY = "geo_country";
-const ATTR_GEO_ATTEMPTS = "geo_attempts";
 
 // Diagnostics
 const ATTR_DIAGNOSTIC_PAGE_TITLE = "diagnostic_page_title";
@@ -156,20 +147,15 @@ const ATTR_CF_CLEARANCE_PRESENT = "cf_clearance_present";
 // API call lifecycle — registered in registry/ahrefs.yaml (ahrefs.session group)
 const ATTR_API_CALL_STATUS = "api_call_status";
 
-// Observability: session recycle + API response body + generation tracking
-const ATTR_SESSION_RECYCLE_REASON = "session_recycle_reason";
-const ATTR_API_RESPONSE_BODY = "api_response_body";
-const ATTR_SESSION_GENERATION_ID = "session_generation_id";
-
-// Proxy observability — flat underscore names. The Rust tracing pipeline that
-// godaddy-fetcher uses normalises dot-named fields to underscore on the way
-// through OTLP, but Effect.logInfo + annotateLogs (the path browserless uses)
-// drops them entirely — verified against Loki: dot-named fields never reach
-// structured metadata for service_name="browserless". So we name flat from
-// the start, matching what godaddy-fetcher's data looks like once it lands in
-// Loki and what the dashboard's "Scrapes by IP" panel actually queries.
+// Proxy observability — flat underscore names. Grafana Cloud's OTLP gateway
+// promotes log-record attributes to Loki structured-metadata labels and rejects
+// records over 128 labels (HTTP 400). With ~15 framework attrs added by Effect
+// (trace_id/span_id/fiberId/severity_*/observed_timestamp/scope_name/service_name/
+// deployment_environment/detected_level), the wide event payload has to stay
+// under ~110 user attrs. `chrome_proxy_server` is emitted on the separate
+// `session.browser.acquired` log so it's joinable by trace_id without costing
+// a slot here.
 const ATTR_PROXY_IP_ADDRESS = "proxy_ip_address";
-const ATTR_CHROME_PROXY_SERVER = "chrome_proxy_server";
 
 // ── Builder ─────────────────────────────────────────────────────────
 
@@ -185,15 +171,9 @@ export interface SessionContext {
   /**
    * Egress IP observed at browser acquire time, captured by an IP-echo
    * fetch through Chrome's `--proxy-server`. `undefined` when the IP echo
-   * services were unreachable. Schema matches godaddy-fetcher's
-   * `proxy.ip_address = %ip` tracing field.
+   * services were unreachable.
    */
   proxy_ip_address?: string;
-  /**
-   * Literal value passed as Chrome's `--proxy-server` flag (origin only,
-   * no credentials). Empty string when LOCAL_MOBILE_PROXY is unset.
-   */
-  chrome_proxy_server?: string;
 }
 
 export interface WideEventInput {
@@ -311,7 +291,36 @@ function shellTimingLabels(st?: import("./ahrefs-cdp.js").ShellTimings): Record<
   };
 }
 
+/**
+ * Hard cap on the number of attributes in the wide event payload.
+ *
+ * Grafana Cloud's OTLP gateway promotes log-record attributes to Loki
+ * structured-metadata labels, and the Loki ingester returns HTTP 400 on any
+ * record with > 128 labels (`max_structured_metadata_entries_count`). Effect's
+ * OTLP exporter on a non-2xx response dumps its entire pending log buffer and
+ * disables itself for 60 seconds (`OtlpExporter.ts:96-100`), so a single
+ * oversized wide event can take out everything in flight.
+ *
+ * Effect's logger adds ~15 framework attrs of its own (trace_id, span_id,
+ * fiberId, severity_number, severity_text, observed_timestamp, scope_name,
+ * service_name, deployment_environment, detected_level), so user attrs must
+ * stay comfortably under (128 - 15) = 113. We pick 110 for headroom.
+ */
+const WIDE_EVENT_MAX_ATTRS = 110;
+
 export function buildWideEvent(input: WideEventInput): Record<string, string> {
+  const event = buildWideEventInner(input);
+  const count = Object.keys(event).length;
+  if (count > WIDE_EVENT_MAX_ATTRS) {
+    throw new Error(
+      `wide event has ${count} attributes (cap ${WIDE_EVENT_MAX_ATTRS}). ` +
+        `Loki rejects records over 128 labels — drop attributes or split the event.`,
+    );
+  }
+  return event;
+}
+
+function buildWideEventInner(input: WideEventInput): Record<string, string> {
   const { result, cfMetrics, replayMeta, diagnostics, domain, scrapeType, scrapeUrl } = input;
   const retry = input.retryContext;
 
@@ -441,12 +450,6 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_REPLAY_LABEL]: replayLabel,
     [ATTR_VIDEO_ENABLED]: "false",
 
-    // Geo (populated by Worker or proxy lookup later)
-    [ATTR_GEO_IP]: "",
-    [ATTR_GEO_CITY]: "",
-    [ATTR_GEO_COUNTRY]: "",
-    [ATTR_GEO_ATTEMPTS]: "",
-
     // API health — populated from result.apiErrors (extracted from browser-side JS)
     [ATTR_API_ERRORS]: result.apiErrors?.length
       ? JSON.stringify(
@@ -475,11 +478,6 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     [ATTR_DIAGNOSTIC_IFRAME_COUNT]: String(diagnostics?.iframe_count ?? 0),
     [ATTR_DIAGNOSTIC_CF_IFRAME_COUNT]: String(diagnostics?.cf_iframe_count ?? 0),
 
-    // Fetch decisions (accumulated per-scrape, zero hot-path overhead)
-    fetch_decisions: input.fetchDecisions?.length
-      ? JSON.stringify(input.fetchDecisions.map((d) => `${d.status}:${d.action}`))
-      : "",
-
     // Retry
     [ATTR_RETRY_REASON]: retry?.reason ?? "",
     [ATTR_RETRY_REPLAY_URL]: retry?.replayUrl ?? "",
@@ -492,28 +490,14 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
     session_cf_solves_at_start: String(input.sessionContext?.session_cf_solves_at_start ?? 0),
     [ATTR_SESSION_CONCURRENT_TABS]: String(input.sessionContext?.session_concurrent_tabs ?? 0),
     browser_acquire_ms: String(input.sessionContext?.browser_acquire_ms ?? 0),
-    page_create_ms: String(input.sessionContext?.page_create_ms ?? 0),
     [ATTR_SESSION_WARM]: String(input.sessionContext?.session_warm ?? false),
     [ATTR_CF_CLEARANCE_PRESENT]: String(input.cfClearancePresent ?? false),
     [ATTR_API_CALL_STATUS]: input.apiCallStatus ?? "unknown",
 
-    // Observability: session recycle + API response body + generation tracking
-    [ATTR_SESSION_RECYCLE_REASON]: input.sessionRecycleReason ?? "",
-    [ATTR_API_RESPONSE_BODY]: result.apiErrors?.[0]?.body ?? "",
-    [ATTR_SESSION_GENERATION_ID]: String(input.sessionContext?.generation_id ?? 0),
-
-    // Proxy observability — fixes the "Scrapes by IP" panel showing 100%
-    // "Geo Failed". Schema matches godaddy-fetcher's `proxy.ip_address = %ip`.
-    // Empty string (not "unknown" / not a fake IP) when the IP echo services
-    // were unreachable through the proxy — the dashboard already maps empty
-    // → "Geo Failed", which is the honest signal that we couldn't see the IP.
+    // Proxy observability — fixes the "Scrapes by IP" panel.
+    // `chrome_proxy_server` is emitted on `session.browser.acquired` instead;
+    // dropping here to stay under Loki's 128-label cap on log records.
     [ATTR_PROXY_IP_ADDRESS]: input.sessionContext?.proxy_ip_address ?? "",
-    [ATTR_CHROME_PROXY_SERVER]: input.sessionContext?.chrome_proxy_server ?? "",
-
-    // Misc
-    [ATTR_HARD_TIMEOUT_PHASE]: "",
-    [ATTR_CLOUDFLARE_DETECTION_ERROR]: "",
-    [ATTR_SCREENSHOT_URL]: "",
   };
 }
 

@@ -252,16 +252,14 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
       catch: () => new Error("cf_listener"),
     }).pipe(Effect.ignore);
 
-    // Wide-style annotation: `chrome.proxy_server` is the literal string
-    // passed to Chrome via `--proxy-server`; `proxy.ip_address` is the egress
-    // IP we observed through that proxy. Both are observability fields —
-    // when IP rotation goes wrong we want to see exactly which proxy URL
-    // Chrome was told to use AND which IP came back, side-by-side.
+    // Joinable proxy diagnostics: emitted here (not on the wide event) so the
+    // wide event's structured-metadata label count stays under Loki's 128 cap.
+    // Cross-reference by trace_id when investigating IP-rotation issues.
     yield* Effect.logInfo("session.browser.acquired").pipe(
       Effect.annotateLogs({
         browser_id: String(id),
-        "chrome.proxy_server": getProxyServerFlag(),
-        "proxy.ip_address": managed.proxyIpAddress ?? "",
+        chrome_proxy_server: getProxyServerFlag(),
+        proxy_ip_address: managed.proxyIpAddress ?? "",
       }),
     );
 
@@ -461,7 +459,6 @@ export class AhrefsSessionManager {
               browser_acquire_ms: browserAcquireMs,
               page_create_ms: pageCreateMs,
               proxy_ip_address: managed.proxyIpAddress,
-              chrome_proxy_server: getProxyServerFlag(),
             },
             cfClearancePresent: scrapeOutput.cfClearancePresent,
             apiCallStatus: scrapeOutput.apiCallStatus,
