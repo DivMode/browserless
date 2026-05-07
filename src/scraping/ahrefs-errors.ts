@@ -135,6 +135,30 @@ export type ScrapeError =
   | ResultTimeoutError
   | FulfillError;
 
+const SCRAPE_ERROR_TAGS = new Set<string>([
+  "TurnstileTimeoutError",
+  "ApiError",
+  "BacklinksFetchFailed",
+  "ScrapeInfraError",
+  "CdpSessionError",
+  "FetchEnableError",
+  "InterceptionTimeoutError",
+  "NavigationError",
+  "ResultTimeoutError",
+  "FulfillError",
+]);
+
+/**
+ * Type guard for the ScrapeError union. Used by the session catch handler
+ * to preserve typed errors (so the wide event can read their structured
+ * fields, e.g. InterceptionTimeoutError counts) instead of stringifying
+ * them into a ScrapeInfraError wrapper.
+ */
+export const isScrapeError = (e: unknown): e is ScrapeError => {
+  const tag = (e as { _tag?: unknown })?._tag;
+  return typeof tag === "string" && SCRAPE_ERROR_TAGS.has(tag);
+};
+
 // ── Error metadata (exhaustive by construction) ────────────────
 
 export type ErrorCategory = "transient" | "solver" | "upstream" | "infrastructure";

@@ -420,3 +420,108 @@ describe("wide event — API health fields", () => {
     expect(event.error_type).toBe("");
   });
 });
+
+describe("wide event — InterceptionTimeoutError diagnosis", () => {
+  const buildResult = (e: InterceptionTimeoutError): AhrefsScrapeResult => ({
+    success: false,
+    domain: "test.com",
+    error: "InterceptionTimeoutError",
+    scrapeError: e,
+    timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
+  });
+
+  const callBuild = (e: InterceptionTimeoutError) =>
+    buildWideEvent({
+      result: buildResult(e),
+      cfMetrics: emptyCfMetrics,
+      replayMeta: null,
+      diagnostics: null,
+      domain: "test.com",
+      scrapeType: "backlinks",
+      scrapeUrl: "https://ahrefs.com/backlink-checker?input=test.com",
+    });
+
+  it("requestCount=0 → api_diagnosis=proxy_egress_dead (no bytes left Chrome)", () => {
+    const event = callBuild(
+      new InterceptionTimeoutError({
+        domain: "test.com",
+        requestCount: 0,
+        responseCount: 0,
+        docResponseCount: 0,
+      }),
+    );
+    expect(event.api_diagnosis).toBe("proxy_egress_dead");
+    expect(event.intercept_request_count).toBe("0");
+    expect(event.intercept_response_count).toBe("0");
+    expect(event.intercept_doc_response_count).toBe("0");
+    expect(event.error_type).toBe("interception_timeout");
+    expect(event.failure_point).toBe("interception");
+  });
+
+  it("requestCount>0, responseCount=0 → proxy_no_response (request sent, no reply)", () => {
+    const event = callBuild(
+      new InterceptionTimeoutError({
+        domain: "test.com",
+        requestCount: 7,
+        responseCount: 0,
+        docResponseCount: 0,
+      }),
+    );
+    expect(event.api_diagnosis).toBe("proxy_no_response");
+    expect(event.intercept_request_count).toBe("7");
+    expect(event.intercept_response_count).toBe("0");
+  });
+
+  it("responseCount>0, docResponseCount=0 → no_document_response (redirect away)", () => {
+    const event = callBuild(
+      new InterceptionTimeoutError({
+        domain: "test.com",
+        requestCount: 12,
+        responseCount: 5,
+        docResponseCount: 0,
+      }),
+    );
+    expect(event.api_diagnosis).toBe("no_document_response");
+    expect(event.intercept_response_count).toBe("5");
+    expect(event.intercept_doc_response_count).toBe("0");
+  });
+
+  it("docResponseCount>0 → intercept_loop (Document arrived, fulfill failed)", () => {
+    const event = callBuild(
+      new InterceptionTimeoutError({
+        domain: "test.com",
+        requestCount: 20,
+        responseCount: 8,
+        docResponseCount: 2,
+      }),
+    );
+    expect(event.api_diagnosis).toBe("intercept_loop");
+    expect(event.intercept_doc_response_count).toBe("2");
+  });
+
+  it("intercept count labels are absent for non-InterceptionTimeoutError failures", () => {
+    const result: AhrefsScrapeResult = {
+      success: false,
+      domain: "test.com",
+      error: "turnstile",
+      scrapeError: new TurnstileTimeoutError({
+        domain: "test.com",
+        scrapeType: "backlinks",
+        apiCallStatus: "not_called",
+      }),
+      timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
+    };
+    const event = buildWideEvent({
+      result,
+      cfMetrics: emptyCfMetrics,
+      replayMeta: null,
+      diagnostics: null,
+      domain: "test.com",
+      scrapeType: "backlinks",
+      scrapeUrl: "https://ahrefs.com/backlink-checker?input=test.com",
+    });
+    expect(event.intercept_request_count).toBeUndefined();
+    expect(event.intercept_response_count).toBeUndefined();
+    expect(event.intercept_doc_response_count).toBeUndefined();
+  });
+});

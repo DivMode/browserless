@@ -8,6 +8,7 @@
 import type { CfSolveMetrics, ReplayMetadata } from "./ahrefs-cf-listener.js";
 import type { DiagnosticInfo } from "./ahrefs-cdp.js";
 import { errorCategory, failurePoint } from "./ahrefs-errors.js";
+import type { ScrapeError } from "./ahrefs-errors.js";
 import type { AhrefsScrapeResult, ScrapeType } from "./ahrefs-types.js";
 
 // ── ATTR_* constants (from ahrefs_gen.ts) ───────────────────────────
@@ -57,6 +58,23 @@ const ATTR_API_DIAGNOSIS = "api_diagnosis";
 const ATTR_API_ENDPOINT = "api_endpoint";
 const ATTR_API_ERRORS = "api_errors";
 const ATTR_API_STATUS_CODE = "api_status_code";
+
+// InterceptionTimeoutError counters — disambiguate "no document response"
+// failures by where in the request lifecycle Chrome stalled.
+//   request_count = 0  → Fetch.requestPaused never fired = no bytes left Chrome
+//                        (proxy/network upstream is dead).
+//   request_count > 0, response_count = 0  → request sent, nothing came back
+//                        (proxy accepted bytes but upstream dropped them).
+//   response_count > 0, doc_response_count = 0  → got non-document responses
+//                        but no Document for ahrefs.com (redirect away).
+//   doc_response_count > 0  → Document arrived but interception couldn't
+//                        fulfill (CF rechallenge loop, fulfill error).
+// Emitted only for InterceptionTimeoutError failures — Loki's 128-label cap
+// makes "always emit as 0" too expensive (would consume 3 of our headroom
+// slots permanently). Their absence means "not applicable".
+const ATTR_INTERCEPT_REQUEST_COUNT = "intercept_request_count";
+const ATTR_INTERCEPT_RESPONSE_COUNT = "intercept_response_count";
+const ATTR_INTERCEPT_DOC_RESPONSE_COUNT = "intercept_doc_response_count";
 
 // Replay
 const ATTR_REPLAY_ENABLED = "replay_enabled";
@@ -247,6 +265,52 @@ function deriveErrorType(result: AhrefsScrapeResult): string {
 }
 
 /**
+ * Lift InterceptionTimeoutError counts into wide-event labels.
+ *
+ * The error already carries these counts in its payload — we surface them
+ * as labels so the failure mode (proxy dead vs interception loop vs
+ * redirect-away) is queryable without parsing the error message.
+ */
+function interceptCountLabels(scrapeError: ScrapeError | undefined): Record<string, string> {
+  if (scrapeError?._tag !== "InterceptionTimeoutError") return {};
+  return {
+    [ATTR_INTERCEPT_REQUEST_COUNT]: String(scrapeError.requestCount),
+    [ATTR_INTERCEPT_RESPONSE_COUNT]: String(scrapeError.responseCount),
+    [ATTR_INTERCEPT_DOC_RESPONSE_COUNT]: String(scrapeError.docResponseCount),
+  };
+}
+
+/**
+ * Map the scrape outcome to a single `api_diagnosis` category. The taxonomy
+ * is intentionally flat (one label, one value) so dashboards and alerts can
+ * pivot on it without inspecting other fields.
+ *
+ * Order matters: CF-blocked > non-CF HTTP error > turnstile failed >
+ * interception failure modes (proxy_egress_dead | proxy_no_response |
+ * no_document_response | intercept_loop). When no rule matches we emit ""
+ * which renders as `?` in dashboards — that's the signal that a new failure
+ * mode has appeared without a category.
+ */
+function deriveApiDiagnosis(result: AhrefsScrapeResult, cfMetrics: CfSolveMetrics): string {
+  if (result.success) return "healthy";
+  if (result.apiErrors?.some((e) => e.isCf)) {
+    return cfMetrics.cf_solved ? "cf_rechallenge" : "cf_blocked";
+  }
+  if (result.apiErrors?.length) {
+    return `http_${result.apiErrors[0].status}`;
+  }
+  const e = result.scrapeError;
+  if (e?._tag === "TurnstileTimeoutError") return "turnstile_failed";
+  if (e?._tag === "InterceptionTimeoutError") {
+    if (e.requestCount === 0) return "proxy_egress_dead";
+    if (e.responseCount === 0) return "proxy_no_response";
+    if (e.docResponseCount === 0) return "no_document_response";
+    return "intercept_loop";
+  }
+  return "";
+}
+
+/**
  * Compute shell-timing-derived label values. Returns "0" / "false" for
  * any field whose source is null/missing — flat strings only because
  * Loki labels are stringly typed. We use `shell_timings_ok` as the
@@ -304,9 +368,12 @@ function shellTimingLabels(st?: import("./ahrefs-cdp.js").ShellTimings): Record<
  * Effect's logger adds ~15 framework attrs of its own (trace_id, span_id,
  * fiberId, severity_number, severity_text, observed_timestamp, scope_name,
  * service_name, deployment_environment, detected_level), so user attrs must
- * stay comfortably under (128 - 15) = 113. We pick 110 for headroom.
+ * stay under (128 - 15) = 113. We're now AT 113 on InterceptionTimeoutError
+ * failures (110 base + 3 intercept counts). No headroom left — any future
+ * framework attr addition or new always-on label will trip this and require
+ * dropping an existing label or splitting the event.
  */
-const WIDE_EVENT_MAX_ATTRS = 110;
+const WIDE_EVENT_MAX_ATTRS = 113;
 
 export function buildWideEvent(input: WideEventInput): Record<string, string> {
   const event = buildWideEventInner(input);
@@ -459,17 +526,8 @@ function buildWideEventInner(input: WideEventInput): Record<string, string> {
     [ATTR_API_STATUS_CODE]: result.apiErrors?.[0]?.status ? String(result.apiErrors[0].status) : "",
     [ATTR_API_BLOCKED_BY_CF]: result.apiErrors?.some((e) => e.isCf) ? "true" : "",
     [ATTR_API_ENDPOINT]: result.apiErrors?.[0]?.endpoint ?? "",
-    [ATTR_API_DIAGNOSIS]: result.success
-      ? "healthy"
-      : result.apiErrors?.some((e) => e.isCf)
-        ? cfMetrics.cf_solved
-          ? "cf_rechallenge"
-          : "cf_blocked"
-        : result.apiErrors?.length
-          ? `http_${result.apiErrors[0].status}`
-          : result.scrapeError?._tag === "TurnstileTimeoutError"
-            ? "turnstile_failed"
-            : "",
+    [ATTR_API_DIAGNOSIS]: deriveApiDiagnosis(result, cfMetrics),
+    ...interceptCountLabels(result.scrapeError),
 
     // Diagnostics (only populated on failure)
     [ATTR_DIAGNOSTIC_PAGE_TITLE]: diagnostics?.page_title ?? "",

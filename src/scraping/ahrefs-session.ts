@@ -19,7 +19,7 @@ import { executeAhrefsScrape, type ScrapeOutput } from "./ahrefs-service.js";
 import { buildWideEvent } from "./ahrefs-wide-event.js";
 import { MAX_CF_SOLVES_PER_SESSION } from "./ahrefs-types.js";
 import type { ScrapeType } from "./ahrefs-types.js";
-import { ScrapeInfraError } from "./ahrefs-errors.js";
+import { ScrapeInfraError, isScrapeError } from "./ahrefs-errors.js";
 import type { ScrapeError } from "./ahrefs-errors.js";
 import { emptyCfMetrics } from "./ahrefs-cf-listener.js";
 import type { ReplayMetadata } from "./ahrefs-cf-listener.js";
@@ -389,19 +389,28 @@ export class AhrefsSessionManager {
           // Run scrape
           const scrapeOutput = yield* executeAhrefsScrape(page, domain, scrapeType).pipe(
             Effect.catch((e) => {
-              const tag = (e as any)?._tag;
               const msg = e instanceof Error ? e.message : String(e);
-              const cause = tag ? `${tag}${msg ? `: ${msg}` : ""}` : msg || "unknown";
+              // Preserve typed ScrapeError variants so the wide event can
+              // surface their structured fields (e.g. InterceptionTimeoutError's
+              // requestCount/responseCount/docResponseCount, which disambiguate
+              // proxy-dead from interception-loop failures). Only wrap unknown
+              // errors in ScrapeInfraError.
+              const scrapeError: ScrapeError = isScrapeError(e)
+                ? e
+                : new ScrapeInfraError({
+                    domain,
+                    cause: msg || "unknown",
+                    phase: "execute",
+                  });
+              const errorMsg = isScrapeError(e)
+                ? `${e._tag}${msg ? `: ${msg}` : ""}`
+                : msg || "unknown";
               return Effect.succeed({
                 result: {
                   success: false as const,
                   domain,
-                  error: cause,
-                  scrapeError: new ScrapeInfraError({
-                    domain,
-                    cause,
-                    phase: "execute",
-                  }) as ScrapeError,
+                  error: errorMsg,
+                  scrapeError,
                   timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
                 },
                 cfMetrics: emptyCfMetrics(),
