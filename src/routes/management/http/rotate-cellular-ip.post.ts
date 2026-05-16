@@ -13,7 +13,7 @@
  *   - browserless runs on the Talos worker (`192.168.4.170`) which is on
  *     the same LAN as oeili — direct call is one hop, no tunnel needed
  *
- * The pattern mirrors `packages/godaddy-fetcher/src/proxy_rotate.rs` —
+ * The pattern mirrors `packages/scraper/src/proxy_rotate.rs` —
  * same oeili `/rotate` contract:
  *   - 200 → success
  *   - 409 → already rotating, treat as success (the in-flight rotation

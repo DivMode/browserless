@@ -76,7 +76,7 @@ function buildInternalWsUrl(): string {
 
 // ── Proxy egress IP check ───────────────────────────────────────────
 //
-// Mirrors packages/godaddy-fetcher/src/proxy_check.rs — issue a GET through
+// Mirrors packages/scraper/src/proxy_check.rs — issue a GET through
 // the mobile proxy to an IP echo service and return the observed outbound
 // IP. The Grafana "Scrapes by IP" panel queries `proxy_ip_address` (Loki's
 // dot-to-underscore mapping of `proxy.ip_address`). Without this field, the
