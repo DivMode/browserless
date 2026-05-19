@@ -31,8 +31,13 @@
  *   - 503: relay admin built without registry (test/dev config).
  *   - timeout: rotation loop gave up after MAX_ROTATE_ATTEMPTS=60.
  *
- * Auth: the relay admin port (8290) is opened by the Hetzner firewall
- * to scraper-class callers. No app-layer auth.
+ * Auth: relay admin is bound to loopback on Hetzner and only reachable
+ * through `api.oeili.com` (cloudflared tunnel on the relay host, gated
+ * by Cloudflare Access service-token policy reusing the shared
+ * `pydollServiceToken` — see `infra/identity.ts`). This route forwards
+ * the call with `CF-Access-Client-Id` / `CF-Access-Client-Secret`
+ * headers sourced from env, mirroring how Workers workflows talk to
+ * `browserless.catchseo.com` and `godaddy-fetcher.catchseo.com`.
  */
 import type { Request } from "@browserless.io/browserless";
 import {
@@ -46,8 +51,10 @@ import {
 } from "@browserless.io/browserless";
 import type { ServerResponse } from "http";
 
-const OEILI_API_URL = process.env.OEILI_API_URL ?? "http://relay.oeili.com:8290";
+const OEILI_API_URL = process.env.OEILI_API_URL ?? "https://api.oeili.com";
 const OEILI_PHONE_ID = process.env.OEILI_PHONE_ID ?? "pixel-10-1189";
+const CF_ACCESS_CLIENT_ID = process.env.CF_ACCESS_CLIENT_ID ?? "";
+const CF_ACCESS_CLIENT_SECRET = process.env.CF_ACCESS_CLIENT_SECRET ?? "";
 const ROTATE_TIMEOUT_MS = 75_000;
 
 export default class RotateCellularIpPostRoute extends HTTPRoute {
@@ -68,7 +75,14 @@ export default class RotateCellularIpPostRoute extends HTTPRoute {
     const timer = setTimeout(() => controller.abort(), ROTATE_TIMEOUT_MS);
 
     try {
-      const upstream = await fetch(url, { method: "POST", signal: controller.signal });
+      const upstream = await fetch(url, {
+        method: "POST",
+        headers: {
+          "CF-Access-Client-Id": CF_ACCESS_CLIENT_ID,
+          "CF-Access-Client-Secret": CF_ACCESS_CLIENT_SECRET,
+        },
+        signal: controller.signal,
+      });
       const body = await upstream.text();
 
       if (upstream.status === 200) {
