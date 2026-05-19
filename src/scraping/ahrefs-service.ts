@@ -20,6 +20,7 @@ import {
   enableFetchInterception,
   getApiCallStatus,
   getShellTimings,
+  getTurnstileErrorCode,
   getTargetId,
   setupFetchInterception,
   waitForDocumentInterception,
@@ -63,6 +64,14 @@ export interface ScrapeOutput {
   shellTimings?: import("./ahrefs-cdp.js").ShellTimings;
   cfClearancePresent?: boolean;
   apiCallStatus?: string;
+  /**
+   * CF Turnstile error code captured by the widget's data-error-callback,
+   * if the widget failed before producing a token. Empty string when the
+   * widget didn't fire its error callback (true timeout or solver success).
+   * See `getTurnstileErrorCode` in `ahrefs-cdp.ts` and the wide-event label
+   * `turnstile_error_code` in `ahrefs-wide-event.ts`.
+   */
+  turnstileErrorCode?: string;
   fetchDecisions?: import("./ahrefs-cdp.js").FetchDecision[];
 }
 
@@ -307,6 +316,7 @@ export const executeAhrefsScrape = (
       // the breakdown of the post-CF API call.
       const apiCallStatus = yield* getApiCallStatus(page);
       const shellTimings = yield* getShellTimings(page);
+      const turnstileErrorCode = yield* getTurnstileErrorCode(page);
 
       const result = yield* Effect.fn("ahrefs.phase.parseResult")(function* () {
         return yield* parseResult(apiResult, domain, scrapeType, timings, apiCallStatus).pipe(
@@ -381,6 +391,7 @@ export const executeAhrefsScrape = (
         shellTimings,
         cfClearancePresent,
         apiCallStatus,
+        turnstileErrorCode,
         fetchDecisions: interception.fetchDecisions,
       };
     })().pipe(

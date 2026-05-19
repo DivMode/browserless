@@ -207,6 +207,14 @@ export interface WideEventInput {
   sessionContext?: SessionContext;
   cfClearancePresent?: boolean;
   apiCallStatus?: string;
+  /**
+   * CF Turnstile error code, captured when the widget fires its
+   * data-error-callback. Empty / undefined when the widget didn't fail
+   * (typical for successful scrapes). Conditional label — only emitted
+   * when non-empty — keeps the wide event under Loki's 113-attr cap.
+   * See ADR-0037.
+   */
+  turnstileErrorCode?: string;
   sessionRecycleReason?: string;
   fetchDecisions?: import("./ahrefs-cdp.js").FetchDecision[];
   /**
@@ -377,6 +385,17 @@ const WIDE_EVENT_MAX_ATTRS = 113;
 
 export function buildWideEvent(input: WideEventInput): Record<string, string> {
   const event = buildWideEventInner(input);
+
+  // Conditional labels — only emitted when their value is non-empty so the
+  // common-case wide event stays under Loki's 113 always-on cap. The
+  // worst-case attribute count (InterceptionTimeoutError + a turnstile
+  // error_code present) is 113 + 1 = 114, still under the 128 ingest
+  // threshold; never both fire on the same scrape because turnstile
+  // failure precedes interception in the pipeline.
+  if (input.turnstileErrorCode && input.turnstileErrorCode.length > 0) {
+    event["turnstile_error_code"] = input.turnstileErrorCode;
+  }
+
   const count = Object.keys(event).length;
   if (count > WIDE_EVENT_MAX_ATTRS) {
     throw new Error(

@@ -721,7 +721,6 @@ export const BrowserlessManagementRoutes = {
   AhrefsScrapePostRoute: "AhrefsScrapePostRoute",
   AhrefsBacklinksDispatchRoute: "AhrefsBacklinksDispatchRoute",
   AhrefsTrafficDispatchRoute: "AhrefsTrafficDispatchRoute",
-  RotateCellularIpPostRoute: "RotateCellularIpPostRoute",
   SessionsGetRoute: "SessionsGetRoute",
   StaticGetRoute: "StaticGetRoute",
 };

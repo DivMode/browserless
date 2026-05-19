@@ -154,7 +154,6 @@ export enum HTTPManagementRoutes {
   ahrefsScrape = "/internal/ahrefs-scrape?(/)",
   ahrefsBacklinksDispatch = "/ahrefs/backlinks/dispatch?(/)",
   ahrefsTrafficDispatch = "/ahrefs/traffic/dispatch?(/)",
-  rotateCellularIp = "/internal/rotate-cellular-ip?(/)",
   sessions = "/sessions?(/)",
   static = "/",
 }

@@ -317,6 +317,19 @@ export const getApiCallStatus = (page: Page) =>
     catch: () => "page_destroyed",
   }).pipe(Effect.catch(() => Effect.succeed("page_destroyed")));
 
+/**
+ * Read the CF Turnstile error code captured by the widget's
+ * data-error-callback (see ahrefs-html.ts). Returns the string code
+ * (e.g. "600010") on widget failure, "" when the widget didn't fire its
+ * error callback or the page was destroyed before read. Disambiguates
+ * the `turnstile_unsolved` error_type class per ADR-0037.
+ */
+export const getTurnstileErrorCode = (page: Page) =>
+  Effect.tryPromise({
+    try: () => page.evaluate("window.__turnstileErrorCode || ''") as Promise<string>,
+    catch: () => "",
+  }).pipe(Effect.catch(() => Effect.succeed("")));
+
 // ── Shell-side timings ──────────────────────────────────────────────
 //
 // All values are MS-since-shell-start (performance.now() inside the

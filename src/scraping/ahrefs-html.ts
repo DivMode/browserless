@@ -25,6 +25,13 @@ window.__turnstileToken = null;
 window.__apiCallStatus = 'not_called';
 window.__apiErrors = [];
 
+// Captured by CF Turnstile data-error-callback. CF code semantics:
+// 600010 = abuse/IP-rep (rotate-worthy); 3xxxxx = network (skip);
+// 1xxxx-2xxxx = config/sitekey mismatch (alert ops); null = no error
+// callback fired. ADR-0037 uses this to triage the turnstile_unsolved
+// error_type class for inclusion in the block-trigger set.
+window.__turnstileErrorCode = null;
+
 // ── Shell-side timing capture ────────────────────────────────────────
 // All timestamps are MS-since-shell-start (performance.now()), so the
 // host-side reader can subtract pairs to get phase durations even if
@@ -133,7 +140,7 @@ const htmlShell = (p: HtmlParams, onTokenJs: string): string => `<!DOCTYPE html>
 <script>${sharedBrowserJs(p)}
 ${onTokenJs}</script>
 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
-  async onload="turnstile.render('#ts',{sitekey:'${p.sitekey}',action:'${p.action}',callback:onToken,theme:'light'})">
+  async onload="turnstile.render('#ts',{sitekey:'${p.sitekey}',action:'${p.action}',callback:onToken,'error-callback':function(code){window.__turnstileErrorCode=String(code);mark('turnstile.error',{code:code});return false;},theme:'light'})">
 </script>
 </body>
 </html>`;

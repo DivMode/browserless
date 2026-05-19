@@ -24,6 +24,8 @@ import type { ScrapeError } from "./ahrefs-errors.js";
 import { emptyCfMetrics } from "./ahrefs-cf-listener.js";
 import type { ReplayMetadata } from "./ahrefs-cf-listener.js";
 import { runForkInServer } from "../otel-runtime.js";
+import { freshSessionId } from "./session-id.js";
+import { isBlockTrigger } from "./block-detection.js";
 
 // ── Config ──────────────────────────────────────────────────────────
 
@@ -72,6 +74,36 @@ function buildInternalWsUrl(): string {
   params.set("cfSolver", "true");
   params.set("launch", JSON.stringify({ args: ["--window-size=1280,900"] }));
   return `ws://127.0.0.1:${PORT}/chromium?${params.toString()}`;
+}
+
+/**
+ * Compute the auth username for a given session_id. Chrome's `--proxy-server`
+ * flag takes the proxy origin only; credentials flow through
+ * `page.authenticate()` which sets HTTP Basic on the CONNECT. The relay's
+ * `RouteParams::session` parser reads the session_id from the username
+ * segment, so the rotation primitive is "inject session-{uuid} into the
+ * username before authenticate."
+ *
+ * Returns `null` when PROXY is unset (dev / local) or has no username.
+ */
+function authUsernameWithSession(sessionId: string): {
+  username: string;
+  password: string;
+} | null {
+  if (!PROXY) return null;
+  let proxyUrl: URL;
+  try {
+    proxyUrl = new URL(PROXY);
+  } catch {
+    return null;
+  }
+  if (!proxyUrl.username) return null;
+  const baseUser = decodeURIComponent(proxyUrl.username);
+  const password = decodeURIComponent(proxyUrl.password);
+  return {
+    username: `${baseUser}-session-${sessionId}`,
+    password,
+  };
 }
 
 // ── Proxy egress IP check ───────────────────────────────────────────
@@ -163,6 +195,15 @@ interface ManagedBrowser {
    * an empty string and the dashboard renders that as "Geo Failed".
    */
   readonly proxyIpAddress: string | undefined;
+  /**
+   * Fresh UUIDv4 generated at acquire time and injected into the proxy
+   * username (`<baseUser>-session-{uuid}`). The relay's SessionManager pins
+   * this session_id to a backend phone (post-cutover; today the legacy
+   * router round-robins and ignores it). On invalidate, the next acquired
+   * browser gets a fresh session_id — that's the rotation mechanism.
+   * See ADR-0037.
+   */
+  readonly sessionId: string;
 }
 
 let nextBrowserId = 0;
@@ -172,30 +213,27 @@ let nextBrowserId = 0;
 const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.acquireBrowser")(
   function* () {
     const id = nextBrowserId++;
+    const sessionId = freshSessionId();
 
     const browser = yield* Effect.tryPromise({
       try: () => puppeteer.connect({ browserWSEndpoint: buildInternalWsUrl() }),
       catch: (e: unknown) => new Error(`connect: ${e instanceof Error ? e.message : String(e)}`),
     });
 
-    // Proxy auth on initial pages
-    if (PROXY) {
-      const proxyUrl = new URL(PROXY);
-      if (proxyUrl.username) {
-        const pages = yield* Effect.tryPromise({
-          try: () => browser.pages(),
-          catch: () => new Error("pages"),
-        });
-        for (const p of pages) {
-          yield* Effect.tryPromise({
-            try: () =>
-              p.authenticate({
-                username: decodeURIComponent(proxyUrl.username),
-                password: decodeURIComponent(proxyUrl.password),
-              }),
-            catch: () => new Error("auth"),
-          }).pipe(Effect.ignore);
-        }
+    // Proxy auth on initial pages — inject session_id into the username so the
+    // relay's SessionManager can pin this browser's traffic to a backend phone.
+    // See ADR-0037.
+    const auth = authUsernameWithSession(sessionId);
+    if (auth) {
+      const pages = yield* Effect.tryPromise({
+        try: () => browser.pages(),
+        catch: () => new Error("pages"),
+      });
+      for (const p of pages) {
+        yield* Effect.tryPromise({
+          try: () => p.authenticate(auth),
+          catch: () => new Error("auth"),
+        }).pipe(Effect.ignore);
       }
     }
 
@@ -217,6 +255,7 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
       needsInvalidation: false,
       activeTabs: 0,
       proxyIpAddress,
+      sessionId,
     };
 
     // Set up CF solve tracking on Connection
@@ -260,6 +299,7 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
         browser_id: String(id),
         chrome_proxy_server: getProxyServerFlag(),
         proxy_ip_address: managed.proxyIpAddress ?? "",
+        session_id: sessionId,
       }),
     );
 
@@ -336,8 +376,71 @@ export class AhrefsSessionManager {
 
   // ── Scrape ────────────────────────────────────────────────────
 
+  /**
+   * Public scrape entry point. Runs one attempt; on block trigger (per
+   * `isBlockTrigger` — see `block-detection.ts`), runs ONE retry. The retry
+   * naturally lands on a different browser in the pool (or a freshly-created
+   * one if the failed browser was the only one) because the failed attempt
+   * invalidated its browser. Different browser → different session_id →
+   * different backend phone (post-SessionManager-cutover) → different IP.
+   *
+   * Budget: 1 rotation per scrape call. Post-rotation failures bubble up
+   * for the workflow's outer retry to handle.
+   */
   scrape(domain: string, scrapeType: ScrapeType): Effect.Effect<ScrapeOutput, Error> {
     return Effect.fn("session.scrape")(function* (this: AhrefsSessionManager) {
+      const firstOutput = yield* this.scrapeAttempt(domain, scrapeType, 1);
+
+      if (firstOutput.result.success || !isBlockTrigger(firstOutput.result.scrapeError)) {
+        return firstOutput;
+      }
+
+      const triggerTag = firstOutput.result.scrapeError?._tag ?? "unknown";
+      yield* Effect.logInfo("ahrefs.rotation.triggered").pipe(
+        Effect.annotateLogs({
+          domain,
+          scrape_type: scrapeType,
+          trigger_type: triggerTag,
+          first_attempt_error: firstOutput.result.error ?? "",
+        }),
+      );
+
+      const secondOutput = yield* this.scrapeAttempt(domain, scrapeType, 2);
+
+      const postOutcome = secondOutput.result.success
+        ? "success"
+        : isBlockTrigger(secondOutput.result.scrapeError)
+          ? "same_block"
+          : "different_error";
+
+      yield* Effect.logInfo("ahrefs.rotation.completed").pipe(
+        Effect.annotateLogs({
+          domain,
+          scrape_type: scrapeType,
+          trigger_type: triggerTag,
+          post_rotation_outcome: postOutcome,
+          second_attempt_error: secondOutput.result.error ?? "",
+        }),
+      );
+
+      return secondOutput;
+    }).bind(this)();
+  }
+
+  /**
+   * Run a single scrape attempt against a freshly-acquired browser from the
+   * pool. The attempt number is logged on the trace span; the wide event
+   * itself stays unchanged so the 113-attr Loki cap holds. On any failure,
+   * the browser is invalidated — guaranteeing the retry attempt lands on a
+   * different (or freshly-recreated) browser.
+   */
+  private scrapeAttempt(
+    domain: string,
+    scrapeType: ScrapeType,
+    attempt: number,
+  ): Effect.Effect<ScrapeOutput, Error> {
+    return Effect.fn("session.scrape.attempt")(function* (this: AhrefsSessionManager) {
+      yield* Effect.annotateCurrentSpan({ "scrape.attempt": attempt });
       const pool = yield* this.getPool();
 
       // Tab stagger (before scoped block — needs `this`)
@@ -364,19 +467,18 @@ export class AhrefsSessionManager {
             "session.browser_acquire_ms": browserAcquireMs,
           });
 
-          // Create page on the pooled browser
+          // Create page on the pooled browser. Each page gets the same
+          // session_id as its parent browser — every CONNECT through this
+          // browser carries the same session_id in the Basic Auth username,
+          // so the relay's SessionManager pins this browser's traffic to a
+          // single backend phone for the browser's lifetime.
           const pageCreateStart = Date.now();
           const page = yield* Effect.tryPromise({
             try: async () => {
               const p = await managed.browser.newPage();
-              if (PROXY) {
-                const proxyUrl = new URL(PROXY);
-                if (proxyUrl.username) {
-                  await p.authenticate({
-                    username: decodeURIComponent(proxyUrl.username),
-                    password: decodeURIComponent(proxyUrl.password),
-                  });
-                }
+              const auth = authUsernameWithSession(managed.sessionId);
+              if (auth) {
+                await p.authenticate(auth);
               }
               return p;
             },
@@ -471,6 +573,8 @@ export class AhrefsSessionManager {
             },
             cfClearancePresent: scrapeOutput.cfClearancePresent,
             apiCallStatus: scrapeOutput.apiCallStatus,
+            turnstileErrorCode:
+              "turnstileErrorCode" in scrapeOutput ? scrapeOutput.turnstileErrorCode : undefined,
             fetchDecisions:
               "fetchDecisions" in scrapeOutput ? scrapeOutput.fetchDecisions : undefined,
             shellTimings: "shellTimings" in scrapeOutput ? scrapeOutput.shellTimings : undefined,
