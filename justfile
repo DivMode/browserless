@@ -18,7 +18,7 @@ typecheck:
     npx tsc --noEmit
 
 dev port="3000":
-    PORT={{port}} npx env-cmd -f .env.dev node --watch build/index.js
+    PORT={{ port }} npx env-cmd -f .env.dev node --watch build/index.js
 
 watch:
     npx tsc --watch --preserveWatchOutput
