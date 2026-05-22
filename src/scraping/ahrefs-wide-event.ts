@@ -10,6 +10,7 @@ import type { DiagnosticInfo } from "./ahrefs-cdp.js";
 import { errorCategory, failurePoint } from "./ahrefs-errors.js";
 import type { ScrapeError } from "./ahrefs-errors.js";
 import type { AhrefsScrapeResult, ScrapeType } from "./ahrefs-types.js";
+import { currentRelayPath } from "./proxy-config.js";
 
 // ── ATTR_* constants (from ahrefs_gen.ts) ───────────────────────────
 
@@ -41,7 +42,13 @@ const ATTR_SCRAPER_TYPE = "scraper_type";
 const ATTR_SCRAPE_ERROR_CATEGORY = "scrape_error_category";
 const ATTR_SESSION_ID = "session_id";
 const ATTR_CHROME_ENDPOINT = "chrome_endpoint";
-const ATTR_USE_PROXY = "use_proxy";
+// ADR-0045 Q21 — which relay served this scrape. Values: "lan" (VM 200
+// LAN relay) or "hetzner" (legacy Hetzner relay). Lets dashboards split
+// p50/p95 by path so the +3.4s Talos recovery is observable as soon as
+// Talos flips `OEILI_PROXY_LOCAL`. Replaces the historical `use_proxy`
+// label (always "true" — proxy-config.ts throws if unset, so it carried
+// no information). Net label count is unchanged.
+const ATTR_RELAY_PATH = "relay_path";
 
 // Backlinks
 const ATTR_BACKLINKS_COUNT = "backlinks_count";
@@ -376,10 +383,10 @@ function shellTimingLabels(st?: import("./ahrefs-cdp.js").ShellTimings): Record<
  * Effect's logger adds ~15 framework attrs of its own (trace_id, span_id,
  * fiberId, severity_number, severity_text, observed_timestamp, scope_name,
  * service_name, deployment_environment, detected_level), so user attrs must
- * stay under (128 - 15) = 113. We're now AT 113 on InterceptionTimeoutError
- * failures (110 base + 3 intercept counts). No headroom left — any future
- * framework attr addition or new always-on label will trip this and require
- * dropping an existing label or splitting the event.
+ * stay under (128 - 15) = 113. We're AT 113 on InterceptionTimeoutError
+ * failures (110 base + 3 intercept counts). 2026-05-21 ADR-0045 swapped
+ * `use_proxy` (always "true", dead constant) for `relay_path` (varies between
+ * "lan" and "hetzner") — net label count unchanged.
  */
 const WIDE_EVENT_MAX_ATTRS = 113;
 
@@ -435,7 +442,7 @@ function buildWideEventInner(input: WideEventInput): Record<string, string> {
     [ATTR_SCRAPE_URL]: scrapeUrl,
     [ATTR_SESSION_ID]: input.sessionId ?? "",
     [ATTR_CHROME_ENDPOINT]: "browserless",
-    [ATTR_USE_PROXY]: "true",
+    [ATTR_RELAY_PATH]: currentRelayPath(),
 
     // Outcome — all derived from scrapeError (single source of truth)
     [ATTR_AHREFS_SUCCESS]: String(result.success),

@@ -188,11 +188,18 @@ export async function setup() {
   // Clear results file from previous run
   writeFileSync(RESULTS_FILE, "");
 
-  // Check proxy — fail fast before any build/spawn work
-  if (!process.env.OEILI_PROXY_URL) {
+  // Check proxy — fail fast before any build/spawn work.
+  // ADR-0045 introduced path-specific names (OEILI_PROXY_LOCAL for the
+  // VM 200 LAN relay, OEILI_PROXY_HETZNER for the legacy public relay).
+  // Local-dev .zshenv still uses the historical OEILI_PROXY_URL; accept
+  // any of the three so the test gate works on every developer setup.
+  const proxyUrl =
+    process.env.OEILI_PROXY_LOCAL || process.env.OEILI_PROXY_HETZNER || process.env.OEILI_PROXY_URL;
+  if (!proxyUrl) {
     throw new Error(
-      "OEILI_PROXY_URL env var required. Run with:\n" +
-        "  npx vitest run --config vitest.integration.config.ts",
+      "Proxy env var required (OEILI_PROXY_LOCAL, OEILI_PROXY_HETZNER, or legacy OEILI_PROXY_URL).\n" +
+        "Run with:\n" +
+        "  OEILI_PROXY_HETZNER=https://user:pass@proxy.oeili.com:8443 npx vitest run --config vitest.integration.config.ts",
     );
   }
 
@@ -200,7 +207,6 @@ export async function setup() {
   // Without this, tests run with a dead proxy and produce confusing
   // "0 CF markers" failures instead of a clear "proxy down" error.
   // Route a real request THROUGH the proxy via Node 24 native env proxy (NODE_USE_ENV_PROXY).
-  const proxyUrl = process.env.OEILI_PROXY_URL;
   const proxyHost = proxyUrl.replace(/^https?:\/\/(?:[^@]+@)?/, "").replace(/\/$/, "");
   console.log(`[globalSetup] Validating proxy connectivity: ${proxyHost}...`);
   process.env.NODE_USE_ENV_PROXY = "1";

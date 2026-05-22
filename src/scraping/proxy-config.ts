@@ -8,40 +8,67 @@
  * worker's datacenter IP for ~13h before detection. This module guards
  * against that recurring.
  *
+ * ADR-0045 introduces a second relay (VM 200 LAN relay) for Talos
+ * browserless. To avoid silent ambiguity between the two paths, env var
+ * names are path-specific:
+ *
+ *   - `OEILI_PROXY_LOCAL`   — VM 200 LAN relay (Talos path, primary)
+ *   - `OEILI_PROXY_HETZNER` — Hetzner relay (external customers, fallback)
+ *
+ * Resolution order: LOCAL wins if set, else HETZNER, else throw. We
+ * stamp `relay.path = 'lan' | 'hetzner'` on every scrape wide event so
+ * dashboards can split p50/p95 by path and prove the +3.4s recovery.
+ *
  * Why NOT throw at module load: the Docker build runs `npm run
  * build:openapi`, which imports route modules to extract their schemas.
  * That import path triggers any top-level work in the route module,
  * including a top-level `requireProxyUrl()` call. The build container
- * has no OEILI_PROXY_URL set (build env != runtime env), so a
+ * has no proxy env vars set (build env != runtime env), so a
  * module-load throw fails the entire image build. Instead we throw on
  * FIRST USE inside the scrape path — the route still hard-fails loudly
  * if the env var is missing at runtime, but the build can complete and
  * the pod can boot to surface a real error log instead of timing out.
  */
 
+/** Which relay the current pod is configured to use. */
+export type RelayPath = "lan" | "hetzner";
+
+interface ResolvedProxy {
+  url: string;
+  path: RelayPath;
+}
+
+function resolveProxy(): ResolvedProxy | undefined {
+  const local = process.env.OEILI_PROXY_LOCAL?.trim();
+  if (local) return { url: local, path: "lan" };
+  const hetzner = process.env.OEILI_PROXY_HETZNER?.trim();
+  if (hetzner) return { url: hetzner, path: "hetzner" };
+  return undefined;
+}
+
 /**
- * Returns the validated proxy URL. Throws on first call if the env var
- * is missing or not a valid URL. Safe to call at module load AT TOP OF
- * a function body — NOT safe to call at module top level (breaks build).
+ * Returns the validated proxy URL. Throws on first call if neither env
+ * var is set or the resolved URL is malformed. Safe to call inside any
+ * function body — NOT safe to call at module top level (breaks build).
  */
 export function requireProxyUrl(): string {
-  const raw = process.env.OEILI_PROXY_URL?.trim();
-  if (!raw) {
+  const resolved = resolveProxy();
+  if (!resolved) {
     throw new Error(
-      "OEILI_PROXY_URL is required — browserless will NOT scrape unproxied. " +
-        "Check infra/kubernetes-browserless.ts (env var name) and the Pulumi " +
-        "phoneProxy 1Password secret.",
+      "OEILI_PROXY_LOCAL or OEILI_PROXY_HETZNER is required — browserless will NOT scrape unproxied. " +
+        "Check infra/kubernetes-browserless.ts (env var name) and the 1Password " +
+        "Oeili Proxy Auth credentials (LAN) or oeili_proxy_credentials (Hetzner).",
     );
   }
   try {
-    new URL(raw);
+    new URL(resolved.url);
   } catch {
     throw new Error(
-      `OEILI_PROXY_URL is not a valid URL: ${JSON.stringify(raw)}. ` +
+      `Resolved proxy URL is malformed: ${JSON.stringify(resolved.url)}. ` +
         "Browserless will NOT scrape with a malformed proxy.",
     );
   }
-  return raw;
+  return resolved.url;
 }
 
 /**
@@ -51,5 +78,16 @@ export function requireProxyUrl(): string {
  * actually needs the proxy.
  */
 export function proxyUrlOrEmpty(): string {
-  return process.env.OEILI_PROXY_URL?.trim() ?? "";
+  return resolveProxy()?.url ?? "";
+}
+
+/**
+ * Which relay this pod is using right now. Wide event consumers stamp
+ * this on `ahrefs.scrape.wide_event` so dashboards can split by path.
+ * Returns `"hetzner"` as a conservative default when no env var is set;
+ * that path is the historical SoT and any unset-env-var scrape is
+ * already broken (requireProxyUrl will throw).
+ */
+export function currentRelayPath(): RelayPath {
+  return resolveProxy()?.path ?? "hetzner";
 }
