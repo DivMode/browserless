@@ -16,9 +16,9 @@ import { Schema } from "effect";
 
 export const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN || "";
 export const PROXY_URL =
-  process.env.LOCAL_MOBILE_PROXY ??
+  process.env.OEILI_PROXY_URL ??
   (() => {
-    throw new Error("LOCAL_MOBILE_PROXY required — add it to .env");
+    throw new Error("OEILI_PROXY_URL required — add it to .env");
   })();
 export const BROWSERLESS_HTTP = process.env.BROWSERLESS_ENDPOINT || "http://localhost:3000";
 /** Replay server HTTP endpoint — separate from browserless in the new architecture. */
@@ -362,12 +362,12 @@ const execFileAsync = promisify(execFile);
  * execFileSync blocks for ~12s, causing undici's connection pool to hold
  * stale TCP connections that get ECONNRESET on reuse by fetchSignals.
  *
- * LOCAL_MOBILE_PROXY is inherited from process.env (set in .zshenv) —
+ * OEILI_PROXY_URL is inherited from process.env (set in .zshenv) —
  * no env spreading needed.
  */
 export async function runPydoll(args: string[], timeoutMs: number): Promise<PydollResult> {
-  const proxy = process.env.LOCAL_MOBILE_PROXY;
-  if (!proxy) throw new Error("LOCAL_MOBILE_PROXY not in environment — check .zshenv");
+  const proxy = process.env.OEILI_PROXY_URL;
+  if (!proxy) throw new Error("OEILI_PROXY_URL not in environment — check .zshenv");
 
   let stdout: string;
   try {

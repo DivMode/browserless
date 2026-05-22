@@ -7,7 +7,7 @@
  * tests read from the cache. bail: 1 in vitest config stops on first failure.
  *
  * Prerequisites (handled by vitest globalSetup — vitest.integration.setup.ts):
- *   - LOCAL_MOBILE_PROXY env var set (proxy required for CF to accept solves)
+ *   - OEILI_PROXY_URL env var set (proxy required for CF to accept solves)
  *   - Browserless auto-started if not already running
  *
  * Run:

@@ -6,7 +6,7 @@
  * and the /debug/spans endpoint to retrieve them after the session completes.
  *
  * Prerequisites (handled by vitest globalSetup — vitest.integration.setup.ts):
- *   - LOCAL_MOBILE_PROXY env var set
+ *   - OEILI_PROXY_URL env var set
  *   - Browserless auto-started with TEST_TRACE_COLLECT=1
  *
  * Run: npx vitest run (included in the integration project)

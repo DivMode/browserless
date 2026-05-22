@@ -189,9 +189,9 @@ export async function setup() {
   writeFileSync(RESULTS_FILE, "");
 
   // Check proxy — fail fast before any build/spawn work
-  if (!process.env.LOCAL_MOBILE_PROXY) {
+  if (!process.env.OEILI_PROXY_URL) {
     throw new Error(
-      "LOCAL_MOBILE_PROXY env var required. Run with:\n" +
+      "OEILI_PROXY_URL env var required. Run with:\n" +
         "  npx vitest run --config vitest.integration.config.ts",
     );
   }
@@ -200,7 +200,7 @@ export async function setup() {
   // Without this, tests run with a dead proxy and produce confusing
   // "0 CF markers" failures instead of a clear "proxy down" error.
   // Route a real request THROUGH the proxy via Node 24 native env proxy (NODE_USE_ENV_PROXY).
-  const proxyUrl = process.env.LOCAL_MOBILE_PROXY;
+  const proxyUrl = process.env.OEILI_PROXY_URL;
   const proxyHost = proxyUrl.replace(/^https?:\/\/(?:[^@]+@)?/, "").replace(/\/$/, "");
   console.log(`[globalSetup] Validating proxy connectivity: ${proxyHost}...`);
   process.env.NODE_USE_ENV_PROXY = "1";

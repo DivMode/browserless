@@ -29,18 +29,23 @@ import { AHREFS_DEFAULT_SITEKEY, type ScrapeType } from "../../../scraping/ahref
 import { ScrapeInfraError } from "../../../scraping/ahrefs-errors.js";
 import type { ScrapeError } from "../../../scraping/ahrefs-errors.js";
 import { executeAhrefsScrape } from "../../../scraping/ahrefs-service.js";
+import { requireProxyUrl } from "../../../scraping/proxy-config.js";
 
 const PORT = process.env.PORT ?? "3000";
 const TOKEN = process.env.TOKEN ?? "";
-const PROXY = process.env.LOCAL_MOBILE_PROXY ?? "";
+// No top-level proxy read — the openapi build imports this module and a
+// top-level requireProxyUrl() would crash the Docker build. The proxy is
+// read inside each function via requireProxyUrl() which throws loudly at
+// runtime if OEILI_PROXY_URL is missing.
 
 function buildInternalWsUrl(): string {
+  // Throws loudly if env var missing — guarantees we never launch
+  // Chromium without --proxy-server (datacenter IP leak prevention).
+  const proxy = requireProxyUrl();
   const params = new URLSearchParams();
   if (TOKEN) params.set("token", TOKEN);
-  if (PROXY) {
-    const proxyUrl = new URL(PROXY);
-    params.set("--proxy-server", proxyUrl.origin);
-  }
+  const proxyUrl = new URL(proxy);
+  params.set("--proxy-server", proxyUrl.origin);
   params.set("headless", "false");
   params.set("replay", "true");
   params.set("cfSolver", "true");
@@ -89,14 +94,12 @@ export default class AhrefsScrapePostRoute extends HTTPRoute {
           const page = yield* Effect.promise(async () => {
             const pages = await browser.pages();
             const p = pages[0] ?? (await browser.newPage());
-            if (PROXY) {
-              const proxyUrl = new URL(PROXY);
-              if (proxyUrl.username) {
-                await p.authenticate({
-                  username: decodeURIComponent(proxyUrl.username),
-                  password: decodeURIComponent(proxyUrl.password),
-                });
-              }
+            const proxyUrl = new URL(requireProxyUrl());
+            if (proxyUrl.username) {
+              await p.authenticate({
+                username: decodeURIComponent(proxyUrl.username),
+                password: decodeURIComponent(proxyUrl.password),
+              });
             }
             return p;
           });

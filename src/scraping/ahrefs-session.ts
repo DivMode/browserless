@@ -26,12 +26,16 @@ import type { ReplayMetadata } from "./ahrefs-cf-listener.js";
 import { runForkInServer } from "../otel-runtime.js";
 import { freshSessionId } from "./session-id.js";
 import { isBlockTrigger } from "./block-detection.js";
+import { requireProxyUrl } from "./proxy-config.js";
 
 // ── Config ──────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT ?? "3000";
 const TOKEN = process.env.TOKEN ?? "";
-const PROXY = process.env.LOCAL_MOBILE_PROXY ?? "";
+// No top-level proxy read — the openapi build imports this module and a
+// top-level requireProxyUrl() would crash the Docker build. The proxy is
+// read inside each function via requireProxyUrl() which throws loudly at
+// runtime if OEILI_PROXY_URL is missing.
 const MAX_CONCURRENT_TABS = 15;
 const TAB_STAGGER_MS = 1500;
 const BROWSER_TTL = "120 seconds";
@@ -53,22 +57,18 @@ const BROWSER_COUNT = Math.min(Math.ceil(MAX_CONCURRENT_TABS / TABS_PER_BROWSER)
 
 /**
  * Returns the value passed as Chrome's `--proxy-server` flag (origin only,
- * no credentials). Empty string when LOCAL_MOBILE_PROXY is unset. This is
- * the exact string Chrome sees — useful for diagnosing rotation bugs where
+ * no credentials). Throws loudly if OEILI_PROXY_URL is missing — this is
+ * the exact string Chrome sees, useful for diagnosing rotation bugs where
  * we want to know precisely which proxy URL the renderer was told to use.
  */
 function getProxyServerFlag(): string {
-  if (!PROXY) return "";
-  return new URL(PROXY).origin;
+  return new URL(requireProxyUrl()).origin;
 }
 
 function buildInternalWsUrl(): string {
   const params = new URLSearchParams();
   if (TOKEN) params.set("token", TOKEN);
-  const proxyServer = getProxyServerFlag();
-  if (proxyServer) {
-    params.set("--proxy-server", proxyServer);
-  }
+  params.set("--proxy-server", getProxyServerFlag());
   params.set("headless", "false");
   params.set("replay", "true");
   params.set("cfSolver", "true");
@@ -84,19 +84,14 @@ function buildInternalWsUrl(): string {
  * segment, so the rotation primitive is "inject session-{uuid} into the
  * username before authenticate."
  *
- * Returns `null` when PROXY is unset (dev / local) or has no username.
+ * Returns `null` only when the proxy URL has no username segment (no auth).
+ * requireProxyUrl() throws loudly if OEILI_PROXY_URL is missing.
  */
 function authUsernameWithSession(sessionId: string): {
   username: string;
   password: string;
 } | null {
-  if (!PROXY) return null;
-  let proxyUrl: URL;
-  try {
-    proxyUrl = new URL(PROXY);
-  } catch {
-    return null;
-  }
+  const proxyUrl = new URL(requireProxyUrl());
   if (!proxyUrl.username) return null;
   const baseUser = decodeURIComponent(proxyUrl.username);
   const password = decodeURIComponent(proxyUrl.password);
@@ -128,7 +123,8 @@ const IP_SERVICES = [
 const PROXY_CHECK_TIMEOUT_MS = 10_000;
 
 async function fetchProxyEgressIp(browser: Browser): Promise<string | undefined> {
-  if (!PROXY) return undefined;
+  // OEILI_PROXY_URL guaranteed valid because the surrounding session
+  // acquisition already called requireProxyUrl() via buildInternalWsUrl.
   let page;
   try {
     const pages = await browser.pages();

@@ -69,7 +69,7 @@ The full test gate:
 
 1. `npx tsc --noEmit` (typecheck)
 2. `npx vitest run` (unit tests)
-3. `LOCAL_MOBILE_PROXY=... npx vitest run --config vitest.integration.config.ts` (integration + pydoll)
+3. `OEILI_PROXY_URL=... npx vitest run --config vitest.integration.config.ts` (integration)
 
 ## Architecture
 

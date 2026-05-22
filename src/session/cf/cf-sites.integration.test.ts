@@ -14,7 +14,7 @@
  * ## Prerequisites
  *
  * Handled by vitest globalSetup (vitest.integration.setup.ts):
- *   - LOCAL_MOBILE_PROXY env var set
+ *   - OEILI_PROXY_URL env var set
  *   - Browserless auto-started if not already running (auto-build + spawn)
  *   - If `just dev` is already running, globalSetup detects it and uses the existing instance
  *
@@ -35,7 +35,7 @@
  * ## Ad-hoc Debugging Commands (manual, not part of vitest)
  *
  * All from /Users/peter/Developer/catchseo/packages/pydoll-scraper.
- * LOCAL_MOBILE_PROXY is already set via .zshenv — no `op read` prefix needed.
+ * OEILI_PROXY_URL is already set via .zshenv — no `op read` prefix needed.
  *
  *   # Nopecha serverside (browserless solver only)
  *   uv run pydoll nopecha --serverside --chrome-endpoint=local-browserless
