@@ -193,6 +193,7 @@ describe("error type system — exhaustive mappers", () => {
       requestCount: 5,
       responseCount: 3,
       docResponseCount: 0,
+      fetchDecisionsJson: "",
     }),
     new NavigationError({ url: "https://ahrefs.com", cause: "timeout" }),
     new ResultTimeoutError({ domain: "test.com" }),

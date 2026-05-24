@@ -15,6 +15,8 @@ import { Effect, Exit, Pool, Scope } from "effect";
 import puppeteer from "puppeteer-core";
 import type { Browser } from "puppeteer-core";
 
+import type { FetchDecision } from "./ahrefs-cdp.js";
+import { getFetchDecisionsForError } from "./ahrefs-cdp.js";
 import { executeAhrefsScrape, type ScrapeOutput } from "./ahrefs-service.js";
 import { buildWideEvent } from "./ahrefs-wide-event.js";
 import { MAX_CF_SOLVES_PER_SESSION } from "./ahrefs-types.js";
@@ -503,6 +505,16 @@ export class AhrefsSessionManager {
               const errorMsg = isScrapeError(e)
                 ? `${e._tag}${msg ? `: ${msg}` : ""}`
                 : msg || "unknown";
+              // Extract fetchDecisions from InterceptionTimeoutError when
+              // available — the only way to surface what HTTP status codes
+              // the intercept handler actually saw before timing out, which
+              // is the data needed to root-cause the 2026-05-22 LAN
+              // cold-session regression (intercept_doc_response_count=1
+              // tells us the response arrived, but not which status).
+              const fetchDecisionsFromError: FetchDecision[] | undefined =
+                scrapeError._tag === "InterceptionTimeoutError"
+                  ? getFetchDecisionsForError(scrapeError)
+                  : undefined;
               return Effect.succeed({
                 result: {
                   success: false as const,
@@ -520,6 +532,7 @@ export class AhrefsSessionManager {
                 timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
                 cfClearancePresent: false,
                 apiCallStatus: "scrape_error",
+                fetchDecisions: fetchDecisionsFromError,
               });
             }),
           );

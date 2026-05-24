@@ -105,6 +105,7 @@ describe("isBlockTrigger", () => {
         requestCount: 0,
         responseCount: 0,
         docResponseCount: 0,
+        fetchDecisionsJson: "",
       });
       expect(isBlockTrigger(e)).toBe(false);
     });
