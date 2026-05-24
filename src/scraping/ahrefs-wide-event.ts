@@ -296,6 +296,31 @@ function interceptCountLabels(scrapeError: ScrapeError | undefined): Record<stri
 }
 
 /**
+ * Compact summary of every Fetch.requestPaused decision the intercept
+ * handler made on the navigation. Format: arrow-joined entries of
+ * `<status>:<action>[:cf]`, e.g. `502:continue_other` or
+ * `503:continue_rechallenge:cf→200:fulfill`. Truncated to 256 chars
+ * to stay under Loki structured-metadata size limits.
+ *
+ * Only emitted on FAILURES (success path is `200:fulfill` and not worth
+ * the label budget). The 2026-05-24 LAN-cutover regression collapsed
+ * cold-session success from 99%→0%; the existing intercept_*_count
+ * labels prove the failure is in interception but don't reveal WHICH
+ * status code the cold path is seeing. This label closes that gap.
+ */
+function fetchDecisionChain(
+  fetchDecisions: import("./ahrefs-cdp.js").FetchDecision[] | undefined,
+  scrapeSuccess: boolean,
+): Record<string, string> {
+  if (scrapeSuccess) return {};
+  if (!fetchDecisions || fetchDecisions.length === 0) return {};
+  const chain = fetchDecisions
+    .map((d) => `${d.status}:${d.action}${d.cf_mitigated ? ":cf" : ""}`)
+    .join("→");
+  return { fetch_decision_chain: chain.slice(0, 256) };
+}
+
+/**
  * Map the scrape outcome to a single `api_diagnosis` category. The taxonomy
  * is intentionally flat (one label, one value) so dashboards and alerts can
  * pivot on it without inspecting other fields.
@@ -554,6 +579,7 @@ function buildWideEventInner(input: WideEventInput): Record<string, string> {
     [ATTR_API_ENDPOINT]: result.apiErrors?.[0]?.endpoint ?? "",
     [ATTR_API_DIAGNOSIS]: deriveApiDiagnosis(result, cfMetrics),
     ...interceptCountLabels(result.scrapeError),
+    ...fetchDecisionChain(input.fetchDecisions, result.success),
 
     // Diagnostics (only populated on failure)
     [ATTR_DIAGNOSTIC_PAGE_TITLE]: diagnostics?.page_title ?? "",
