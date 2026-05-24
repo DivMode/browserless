@@ -257,143 +257,208 @@ export const executeAhrefsScrape = (
 
       yield* Effect.logInfo(`Scraping ${domain} (${scrapeType}) → ${url}`);
 
-      // Phase 3: Fetch.enable + navigate + intercept document
-      yield* Effect.fn("ahrefs.phase.navigate")(function* () {
-        yield* enableFetchInterception(interception);
+      // Phases 3-7 + return run inside an inner Effect.fn so the
+      // outer catchTag below can rewrite InterceptionTimeoutError into
+      // the same ScrapeOutput shape (with `interception.fetchDecisions`
+      // populated). Same in-band-failure pattern parseResult uses for
+      // TurnstileTimeoutError / ApiError / BacklinksFetchFailed —
+      // typed failures become success-typed Effects carrying a result
+      // with `success: false`, so the consumer doesn't need a separate
+      // error-handling branch. Nothing leaves this scope as a typed
+      // error any more.
+      return yield* Effect.fn("ahrefs.scrape.phases.body")(function* () {
+        // Phase 3: Fetch.enable + navigate + intercept document.
+        // InterceptionTimeoutError flows out of waitForDocumentInterception
+        // here; the outer catchTag wraps the whole body to capture it.
+        yield* Effect.fn("ahrefs.phase.navigate")(function* () {
+          yield* enableFetchInterception(interception);
 
-        const navStart = Date.now();
-        const navPromise = page
-          .goto(url, { timeout: 60_000, waitUntil: "domcontentloaded" })
-          .catch(() => null);
+          const navStart = Date.now();
+          const navPromise = page
+            .goto(url, { timeout: 60_000, waitUntil: "domcontentloaded" })
+            .catch(() => null);
 
-        yield* waitForDocumentInterception(interception).pipe(
-          Effect.catchTag("InterceptionTimeoutError", (e) =>
-            Effect.logWarning(
-              `Interception timeout: ${domain} requests=${e.requestCount} responses=${e.responseCount} docs=${e.docResponseCount}`,
-            ).pipe(Effect.flatMap(() => Effect.fail(e))),
+          yield* waitForDocumentInterception(interception);
+          timings.navMs = Date.now() - navStart;
+
+          yield* Effect.tryPromise({
+            try: () => navPromise,
+            catch: () => new Error("navigation_settle"),
+          }).pipe(Effect.ignore);
+          timings.interceptMs = Date.now() - navStart - timings.navMs;
+
+          yield* Effect.annotateCurrentSpan({
+            nav_ms: timings.navMs,
+            intercept_ms: timings.interceptMs,
+          });
+        })();
+
+        yield* Effect.logInfo(`Interception complete for ${domain} (${timings.navMs}ms)`);
+
+        // Activate navigation guard
+        cdp.on("Page.frameStartedLoading" as any, navGuardHandler);
+        connection?.on("Browserless.cloudflareSolved" as any, onSolvedGuard);
+
+        // Phase 4: Wait for Turnstile solve + API result — THE CRITICAL SPAN
+        // This is where CF solve time + API response time live. Without this span,
+        // slow scrapes are a black box.
+        const apiResult = yield* Effect.fn("ahrefs.phase.waitForResult")(function* () {
+          const resStart = Date.now();
+          const result = yield* waitForResult(page, domain).pipe(
+            Effect.catchTag("ResultTimeoutError", () => Effect.succeed(undefined)),
+          );
+          timings.resultMs = Date.now() - resStart;
+          timings.totalMs = Date.now() - t0;
+          yield* Effect.annotateCurrentSpan({
+            result_ms: timings.resultMs,
+            has_result: String(result !== undefined),
+          });
+          return result;
+        })();
+
+        // Phase 5: Read API status + shell timings + parse result.
+        // shell timings MUST be read here, before page-cleanup or fiber
+        // teardown — otherwise window.__shellTimings is gone and we lose
+        // the breakdown of the post-CF API call.
+        const apiCallStatus = yield* getApiCallStatus(page);
+        const shellTimings = yield* getShellTimings(page);
+        const turnstileErrorCode = yield* getTurnstileErrorCode(page);
+
+        const result = yield* Effect.fn("ahrefs.phase.parseResult")(function* () {
+          return yield* parseResult(apiResult, domain, scrapeType, timings, apiCallStatus).pipe(
+            Effect.catchTag("TurnstileTimeoutError", (e) =>
+              Effect.succeed<AhrefsScrapeResult>({
+                success: false,
+                domain,
+                scrapedAt: Math.floor(Date.now() / 1000),
+                error: "No API result (turnstile timeout or solver failure)",
+                scrapeError: e,
+                timings,
+              }),
+            ),
+            Effect.catchTag("ApiError", (e) =>
+              Effect.succeed<AhrefsScrapeResult>({
+                success: false,
+                domain,
+                scrapedAt: Math.floor(Date.now() / 1000),
+                error: e.message,
+                apiErrors: e.typedApiErrors,
+                scrapeError: e,
+                data: apiResult,
+                timings,
+              }),
+            ),
+            Effect.catchTag("BacklinksFetchFailed", (e) =>
+              Effect.succeed<AhrefsScrapeResult>({
+                success: false,
+                domain,
+                scrapedAt: Math.floor(Date.now() / 1000),
+                error: `backlinks_fetch_failed: ${e.message}`,
+                apiErrors: e.typedApiErrors,
+                scrapeError: e,
+                data: {
+                  websiteData: e.overviewData,
+                  backlinksData: { error: "backlinks_fetch_failed" },
+                },
+                timings,
+              }),
+            ),
+          );
+        })();
+
+        // Phase 6: On failure, capture page diagnostics
+        const diagnostics = result.success
+          ? null
+          : yield* Effect.fn("ahrefs.phase.diagnostics")(function* () {
+              return yield* captureDiagnostics(page);
+            })();
+
+        // Phase 7: Collect CF solver telemetry + per-tab replay metadata
+        const cfMetrics = cfListener.collect();
+        const replayMeta = cfListener.getReplayMetadata();
+
+        // Cleanup listeners + navigation guard
+        navigationGuardActive = false;
+        cdp.off("Page.frameStartedLoading" as any, navGuardHandler);
+        connection?.off("Browserless.cloudflareSolved" as any, onSolvedGuard);
+        cfListener.cleanup();
+        interception.cleanup();
+
+        // Return everything the dispatch route needs to build the wide event.
+        return {
+          result,
+          cfMetrics,
+          replayMeta,
+          diagnostics,
+          domain,
+          scrapeType,
+          scrapeUrl: url,
+          timings,
+          shellTimings,
+          cfClearancePresent,
+          apiCallStatus,
+          turnstileErrorCode,
+          fetchDecisions: interception.fetchDecisions,
+        };
+      })().pipe(
+        // In-band catch for InterceptionTimeoutError. The catchTag
+        // handler runs inside the outer "ahrefs.scrape.phases" scope so
+        // it has closure access to `interception`, `cfListener`,
+        // `timings`, `cdp`, `connection`, etc — including
+        // `interception.fetchDecisions`, the array we need to surface
+        // the actual HTTP status codes Chrome saw before timeout (the
+        // 2026-05-22 LAN cold-session regression made this essential).
+        // Builds the same ScrapeOutput shape as the success-path return
+        // above, with `result.success: false` + `scrapeError: e` +
+        // `fetchDecisions` populated.
+        Effect.catchTag("InterceptionTimeoutError", (e) =>
+          Effect.logWarning(
+            `Interception timeout: ${domain} requests=${e.requestCount} responses=${e.responseCount} docs=${e.docResponseCount}`,
+          ).pipe(
+            Effect.andThen(
+              Effect.fn("ahrefs.scrape.phases.body.interceptFailure")(function* () {
+                navigationGuardActive = false;
+                cdp.off("Page.frameStartedLoading" as any, navGuardHandler);
+                connection?.off("Browserless.cloudflareSolved" as any, onSolvedGuard);
+                const cfMetrics = cfListener.collect();
+                const replayMeta = cfListener.getReplayMetadata();
+                cfListener.cleanup();
+                const capturedDecisions = [...interception.fetchDecisions];
+                interception.cleanup();
+                timings.totalMs = Date.now() - t0;
+                yield* Effect.annotateCurrentSpan({
+                  intercept_request_count: e.requestCount,
+                  intercept_response_count: e.responseCount,
+                  intercept_doc_response_count: e.docResponseCount,
+                  fetch_decisions_captured: capturedDecisions.length,
+                });
+                return {
+                  result: {
+                    success: false as const,
+                    domain,
+                    scrapedAt: Math.floor(Date.now() / 1000),
+                    error: `InterceptionTimeoutError: requests=${e.requestCount} responses=${e.responseCount} docs=${e.docResponseCount}`,
+                    scrapeError: e,
+                    timings,
+                  } satisfies AhrefsScrapeResult,
+                  cfMetrics,
+                  replayMeta,
+                  diagnostics: null,
+                  domain,
+                  scrapeType,
+                  scrapeUrl: url,
+                  timings,
+                  shellTimings: undefined,
+                  cfClearancePresent,
+                  apiCallStatus: "intercept_timeout",
+                  turnstileErrorCode: undefined,
+                  fetchDecisions: capturedDecisions,
+                };
+              })(),
+            ),
           ),
-        );
-        timings.navMs = Date.now() - navStart;
-
-        yield* Effect.tryPromise({
-          try: () => navPromise,
-          catch: () => new Error("navigation_settle"),
-        }).pipe(Effect.ignore);
-        timings.interceptMs = Date.now() - navStart - timings.navMs;
-
-        yield* Effect.annotateCurrentSpan({
-          nav_ms: timings.navMs,
-          intercept_ms: timings.interceptMs,
-        });
-      })();
-
-      yield* Effect.logInfo(`Interception complete for ${domain} (${timings.navMs}ms)`);
-
-      // Activate navigation guard
-      cdp.on("Page.frameStartedLoading" as any, navGuardHandler);
-      connection?.on("Browserless.cloudflareSolved" as any, onSolvedGuard);
-
-      // Phase 4: Wait for Turnstile solve + API result — THE CRITICAL SPAN
-      // This is where CF solve time + API response time live. Without this span,
-      // slow scrapes are a black box.
-      const apiResult = yield* Effect.fn("ahrefs.phase.waitForResult")(function* () {
-        const resStart = Date.now();
-        const result = yield* waitForResult(page, domain).pipe(
-          Effect.catchTag("ResultTimeoutError", () => Effect.succeed(undefined)),
-        );
-        timings.resultMs = Date.now() - resStart;
-        timings.totalMs = Date.now() - t0;
-        yield* Effect.annotateCurrentSpan({
-          result_ms: timings.resultMs,
-          has_result: String(result !== undefined),
-        });
-        return result;
-      })();
-
-      // Phase 5: Read API status + shell timings + parse result.
-      // shell timings MUST be read here, before page-cleanup or fiber
-      // teardown — otherwise window.__shellTimings is gone and we lose
-      // the breakdown of the post-CF API call.
-      const apiCallStatus = yield* getApiCallStatus(page);
-      const shellTimings = yield* getShellTimings(page);
-      const turnstileErrorCode = yield* getTurnstileErrorCode(page);
-
-      const result = yield* Effect.fn("ahrefs.phase.parseResult")(function* () {
-        return yield* parseResult(apiResult, domain, scrapeType, timings, apiCallStatus).pipe(
-          Effect.catchTag("TurnstileTimeoutError", (e) =>
-            Effect.succeed<AhrefsScrapeResult>({
-              success: false,
-              domain,
-              scrapedAt: Math.floor(Date.now() / 1000),
-              error: "No API result (turnstile timeout or solver failure)",
-              scrapeError: e,
-              timings,
-            }),
-          ),
-          Effect.catchTag("ApiError", (e) =>
-            Effect.succeed<AhrefsScrapeResult>({
-              success: false,
-              domain,
-              scrapedAt: Math.floor(Date.now() / 1000),
-              error: e.message,
-              apiErrors: e.typedApiErrors,
-              scrapeError: e,
-              data: apiResult,
-              timings,
-            }),
-          ),
-          Effect.catchTag("BacklinksFetchFailed", (e) =>
-            Effect.succeed<AhrefsScrapeResult>({
-              success: false,
-              domain,
-              scrapedAt: Math.floor(Date.now() / 1000),
-              error: `backlinks_fetch_failed: ${e.message}`,
-              apiErrors: e.typedApiErrors,
-              scrapeError: e,
-              data: {
-                websiteData: e.overviewData,
-                backlinksData: { error: "backlinks_fetch_failed" },
-              },
-              timings,
-            }),
-          ),
-        );
-      })();
-
-      // Phase 6: On failure, capture page diagnostics
-      const diagnostics = result.success
-        ? null
-        : yield* Effect.fn("ahrefs.phase.diagnostics")(function* () {
-            return yield* captureDiagnostics(page);
-          })();
-
-      // Phase 7: Collect CF solver telemetry + per-tab replay metadata
-      const cfMetrics = cfListener.collect();
-      const replayMeta = cfListener.getReplayMetadata();
-
-      // Cleanup listeners + navigation guard
-      navigationGuardActive = false;
-      cdp.off("Page.frameStartedLoading" as any, navGuardHandler);
-      connection?.off("Browserless.cloudflareSolved" as any, onSolvedGuard);
-      cfListener.cleanup();
-      interception.cleanup();
-
-      // Return everything the dispatch route needs to build the wide event.
-      return {
-        result,
-        cfMetrics,
-        replayMeta,
-        diagnostics,
-        domain,
-        scrapeType,
-        scrapeUrl: url,
-        timings,
-        shellTimings,
-        cfClearancePresent,
-        apiCallStatus,
-        turnstileErrorCode,
-        fetchDecisions: interception.fetchDecisions,
-      };
+        ),
+      );
     })().pipe(
       Effect.ensuring(
         Effect.sync(() => {

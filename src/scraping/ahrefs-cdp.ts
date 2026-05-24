@@ -57,30 +57,6 @@ export interface FetchDecision {
   doc_index: number;
 }
 
-/**
- * Out-of-band carrier for FetchDecision[] when an InterceptionTimeoutError
- * is thrown. The Effect Schema for InterceptionTimeoutError doesn't
- * include the decisions array (would require updating 6+ test
- * constructors), so we ferry them through a module-level WeakMap keyed
- * by the error instance itself. GC drops the entries automatically when
- * the error is no longer referenced.
- *
- * Set at the throw site in `setupFetchInterception`'s timer callbacks;
- * read at the catch site in `ahrefs-session.ts` via [`getFetchDecisionsForError`].
- *
- * The session-level catch needs this to surface the actual HTTP status
- * codes browserless saw before timeout (the 2026-05-22 LAN cold-session
- * regression made this data essential).
- */
-const errorFetchDecisions = new WeakMap<InterceptionTimeoutError, FetchDecision[]>();
-
-/** Look up FetchDecision[] for an InterceptionTimeoutError if any were captured. */
-export function getFetchDecisionsForError(
-  err: InterceptionTimeoutError,
-): FetchDecision[] | undefined {
-  return errorFetchDecisions.get(err);
-}
-
 interface FetchInterceptionResult {
   /** Resolves when Fetch.enable completes — caller MUST await before navigating */
   ready: Promise<void>;
@@ -175,14 +151,14 @@ export function setupFetchInterception(
           timer = setTimeout(() => {
             if (!settled) {
               settled = true;
-              const err = new InterceptionTimeoutError({
-                domain,
-                requestCount,
-                responseCount,
-                docResponseCount,
-              });
-              errorFetchDecisions.set(err, [...fetchDecisions]);
-              rejectIntercepted(err);
+              rejectIntercepted(
+                new InterceptionTimeoutError({
+                  domain,
+                  requestCount,
+                  responseCount,
+                  docResponseCount,
+                }),
+              );
             }
           }, MAX_INTERCEPT_WAIT_MS);
         }
@@ -258,14 +234,9 @@ export function setupFetchInterception(
   let timer = setTimeout(() => {
     if (!settled) {
       settled = true;
-      const err = new InterceptionTimeoutError({
-        domain,
-        requestCount,
-        responseCount,
-        docResponseCount,
-      });
-      errorFetchDecisions.set(err, [...fetchDecisions]);
-      rejectIntercepted(err);
+      rejectIntercepted(
+        new InterceptionTimeoutError({ domain, requestCount, responseCount, docResponseCount }),
+      );
     }
   }, MAX_INTERCEPT_WAIT_MS);
 
