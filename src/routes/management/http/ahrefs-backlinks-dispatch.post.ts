@@ -57,38 +57,79 @@ export default class AhrefsBacklinksDispatchRoute extends HTTPRoute {
     res.writeHead(202, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "accepted", instance_id: instanceId, domain }));
 
-    // Background scrape via session manager (shared browser, tab concurrency)
+    // Background scrape via session manager (shared browser, tab concurrency).
+    //
+    // CRITICAL: `session.scrape` can FAIL (Effect error channel populated with
+    // Error) when the underlying CDP session dies, the browser pool kills the
+    // session, or any other infra-level failure short-circuits the typed-result
+    // path. Before this catch was wired, those failures propagated up to
+    // `runForkInServer` which logged and dropped them — leaving R2 empty and
+    // forcing the upstream workflow to wait its full 3min timeout, then emit
+    // `Scrape timed out for ${domain} — no result in R2 or event`.
+    // `Effect.matchEffect` now branches both outcomes:
+    //   - onFailure: log the actual error + writeFailure to R2 immediately so
+    //     the workflow's R2 fallback surfaces the real reason instead of "no
+    //     result in R2 or event".
+    //   - onSuccess: existing per-result behavior (writeResult / writeFailure).
     runForkInServer(
       Effect.fn("dispatch.backlinks")(function* () {
         const session = getAhrefsSession();
-        const { result } = yield* session.scrape(domain, "backlinks");
 
-        yield* Effect.logInfo(`Dispatch done: ${domain} success=${result.success}`).pipe(
-          Effect.annotateLogs({
-            dispatch_domain: domain,
-            dispatch_instance_id: instanceId,
-            dispatch_success: String(result.success),
-            dispatch_error: result.error ?? "",
+        yield* session.scrape(domain, "backlinks").pipe(
+          Effect.matchEffect({
+            onFailure: (error) => {
+              const message = error instanceof Error ? error.message : String(error);
+              return Effect.logError("Dispatch failed: scrape threw").pipe(
+                Effect.annotateLogs({
+                  dispatch_domain: domain,
+                  dispatch_instance_id: instanceId,
+                  dispatch_error: message,
+                  dispatch_error_name: error instanceof Error ? error.name : "unknown",
+                }),
+                Effect.andThen(
+                  writeFailure(instanceId, domain, "backlinks", message).pipe(
+                    Effect.tap(() =>
+                      Effect.logInfo(`R2 failure write OK (from catch): ${instanceId}`),
+                    ),
+                    Effect.catch((e: unknown) =>
+                      Effect.logError(
+                        `R2 failure write FAILED (from catch): ${e instanceof Error ? e.message : String(e)}`,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+            onSuccess: ({ result }) =>
+              Effect.logInfo(`Dispatch done: ${domain} success=${result.success}`).pipe(
+                Effect.annotateLogs({
+                  dispatch_domain: domain,
+                  dispatch_instance_id: instanceId,
+                  dispatch_success: String(result.success),
+                  dispatch_error: result.error ?? "",
+                }),
+                Effect.andThen(
+                  result.success
+                    ? writeResult(instanceId, domain, "backlinks", result as any).pipe(
+                        Effect.tap(() => Effect.logInfo(`R2 write OK: ${instanceId}`)),
+                        Effect.catch((e: unknown) =>
+                          Effect.logError(
+                            `R2 write FAILED: ${e instanceof Error ? e.message : String(e)}`,
+                          ),
+                        ),
+                      )
+                    : writeFailure(instanceId, domain, "backlinks", result.error ?? "unknown").pipe(
+                        Effect.tap(() => Effect.logInfo(`R2 failure write OK: ${instanceId}`)),
+                        Effect.catch((e: unknown) =>
+                          Effect.logError(
+                            `R2 failure write FAILED: ${e instanceof Error ? e.message : String(e)}`,
+                          ),
+                        ),
+                      ),
+                ),
+              ),
           }),
         );
-
-        if (result.success) {
-          yield* writeResult(instanceId, domain, "backlinks", result as any).pipe(
-            Effect.tap(() => Effect.logInfo(`R2 write OK: ${instanceId}`)),
-            Effect.catch((e: unknown) =>
-              Effect.logError(`R2 write FAILED: ${e instanceof Error ? e.message : String(e)}`),
-            ),
-          );
-        } else {
-          yield* writeFailure(instanceId, domain, "backlinks", result.error ?? "unknown").pipe(
-            Effect.tap(() => Effect.logInfo(`R2 failure write OK: ${instanceId}`)),
-            Effect.catch((e: unknown) =>
-              Effect.logError(
-                `R2 failure write FAILED: ${e instanceof Error ? e.message : String(e)}`,
-              ),
-            ),
-          );
-        }
       })(),
     );
   }
