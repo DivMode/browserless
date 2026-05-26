@@ -489,27 +489,21 @@ export class CloudflareDetector {
   ): Effect.Effect<void, never, BaseDetectorR> {
     const self = this;
     return Effect.fn("cf.detector.onPageNavigated")(function* () {
-      yield* Effect.annotateCurrentSpan({
-        "cf.target_id": targetId,
-        "cf.url": url?.substring(0, 200) ?? "",
-      });
       self.state.registerPage(targetId, cdpSessionId);
 
-      // ── Diagnostic: trace retry-tab detection pipeline ──
+      // Retry-tab detection diagnostics → span attributes (queryable in Tempo).
       const hasActive = !!self.state.registry.getActive(targetId);
       const cfUrlMatch = self.detectCFFromUrl(url);
       const isSolvedPage = self.state.solvedPages.has(targetId);
-      yield* Effect.logInfo("cf.detector.onPageNavigated").pipe(
-        Effect.annotateLogs({
-          target_id: targetId.slice(0, 8),
-          session_id: self.sid,
-          url: url?.substring(0, 200) ?? "",
-          has_active: hasActive,
-          cf_url_match: cfUrlMatch ?? "none",
-          is_solved_page: isSolvedPage,
-          enabled: self.enabled,
-        }),
-      );
+      yield* Effect.annotateCurrentSpan({
+        "cf.target_id": targetId,
+        "cf.url": url?.substring(0, 200) ?? "",
+        "cf.session_id": self.sid,
+        "cf.has_active": hasActive,
+        "cf.url_match": cfUrlMatch ?? "none",
+        "cf.is_solved_page": isSolvedPage,
+        "cf.enabled": self.enabled,
+      });
 
       // ── Phase A: Classification ──────────────────────────────────────
       const active = self.state.registry.getActive(targetId);
@@ -735,7 +729,7 @@ export class CloudflareDetector {
       // PHANTOM GUARD: After navigation on a solved page, don't restart Turnstile detection.
       // CF spawns new OOPIFs post-solve that look like fresh challenges. See solvedPages JSDoc.
       if (self.state.solvedPages.has(targetId)) {
-        yield* Effect.logInfo("cf.detector.phaseC.solvedPage.skip").pipe(
+        yield* Effect.logDebug("cf.detector.phaseC.solvedPage.skip").pipe(
           Effect.annotateLogs({
             target_id: targetId.slice(0, 8),
             session_id: self.sid,
@@ -744,7 +738,7 @@ export class CloudflareDetector {
         );
         return;
       }
-      yield* Effect.logInfo("cf.detector.phaseC.startDetectionLoop").pipe(
+      yield* Effect.logDebug("cf.detector.phaseC.startDetectionLoop").pipe(
         Effect.annotateLogs({
           target_id: targetId.slice(0, 8),
           session_id: self.sid,
@@ -1408,7 +1402,7 @@ export class CloudflareDetector {
 
         // ── Diagnostic: log first poll + every 10th poll ──
         if (pollCount === 1 || pollCount % 10 === 0) {
-          yield* Effect.logInfo("cf.detector.oopifPoll").pipe(
+          yield* Effect.logDebug("cf.detector.oopifPoll").pipe(
             Effect.annotateLogs({
               target_id: targetId.slice(0, 8),
               session_id: self.sessionId,
@@ -1431,7 +1425,7 @@ export class CloudflareDetector {
           // by isCFInterstitialTitle check in classifyOOPIFDetection.
           const classified = classifyOOPIFDetection(detection, pageInfo);
 
-          yield* Effect.logInfo("cf.detector.oopifClassification").pipe(
+          yield* Effect.logDebug("cf.detector.oopifClassification").pipe(
             Effect.annotateLogs({
               target_id: targetId.slice(0, 8),
               session_id: self.sessionId,

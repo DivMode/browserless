@@ -515,7 +515,7 @@ export class CloudflareSolver {
     // ── Diagnostic: log fiber stop ──
     const hasActiveDetection = this.stateTracker.registry.has(targetId);
     this.runtime.runFork(
-      Effect.logInfo("cf.solver.stopTargetDetection").pipe(
+      Effect.logDebug("cf.solver.stopTargetDetection").pipe(
         Effect.annotateLogs({
           target_id: targetId.slice(0, 8),
           session_id: this.sessionId,
@@ -621,7 +621,7 @@ export class CloudflareSolver {
     const hasRegistry = this.stateTracker.registry.has(targetId);
     const hasTabSpan = this.tabContexts.has(targetId);
     this.runtime.runFork(
-      Effect.logInfo("cf.solver.startDetectionFiber").pipe(
+      Effect.logDebug("cf.solver.startDetectionFiber").pipe(
         Effect.annotateLogs({
           target_id: targetId.slice(0, 8),
           session_id: this.sessionId,

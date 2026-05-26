@@ -11,13 +11,26 @@
  * Spans push to the server exporter (never disposed during sessions).
  * The exporter's scope finalizer only runs on disposeOtelRuntime().
  */
-import { Effect, type Fiber, Layer, ManagedRuntime, References, Tracer } from "effect";
+import { Effect, type Fiber, Layer, Logger, ManagedRuntime, References, Tracer } from "effect";
 import { OtelLayer } from "./otel-layer.js";
 
 const serverRuntime = ManagedRuntime.make(OtelLayer);
 let _cachedTracer: Tracer.Tracer | null = null;
 
 const logLevelLayer = Layer.succeed(References.MinimumLogLevel, "Info");
+
+// Replace the default Pretty console logger with a structured JSON logger so each
+// Effect.logInfo / annotateLogs call becomes exactly ONE line on stdout. Without
+// this, the default util.inspect-style logger splits annotation objects across
+// many newlines — Docker logs split on newlines — alloy-logs ships each line —
+// Loki bills each as a separate row. One CF-detector poll log fanned out into
+// ~10 Loki rows, driving ~75% of browserless's billable log volume.
+//
+// `mergeWithExisting: false` ensures we REPLACE the default logger, not stack on
+// top of it. OtelLayer already does this for the server runtime via Otlp.layer's
+// loggerMergeWithExisting option, but session runtimes use SharedTracerLayer
+// (below) which previously inherited the default Pretty logger.
+const consoleJsonLoggerLayer = Logger.layer([Logger.consoleJson], { mergeWithExisting: false });
 
 /**
  * Initialize the server-level OTLP runtime.
@@ -50,7 +63,7 @@ export const SharedTracerLayer: Layer.Layer<never> = Layer.effect(Tracer.Tracer)
     }
     return _cachedTracer;
   }),
-).pipe(Layer.merge(logLevelLayer));
+).pipe(Layer.merge(logLevelLayer), Layer.merge(consoleJsonLoggerLayer));
 
 /**
  * Run an effect in the server runtime (for gaugeCollector, etc.).
