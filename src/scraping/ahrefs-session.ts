@@ -254,6 +254,25 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
       sessionId,
     };
 
+    // Puppeteer "disconnected" — fires when the underlying CDP WebSocket
+    // closes for any reason (Chrome crash, lifecycle force-kill via
+    // setOnBeforeClose, proxy WS drop). Without this listener, Pool keeps
+    // handing out tab permits on the dead browser — newPage() then waits
+    // forever on the closed socket, parks the Effect fiber, and leaks the
+    // permit. Flipping needsInvalidation makes the next scrapeAttempt
+    // call Pool.invalidate BEFORE touching newPage.
+    browser.on("disconnected", () => {
+      managed.needsInvalidation = true;
+      runForkInServer(
+        Effect.logWarning("session.browser.disconnected").pipe(
+          Effect.annotateLogs({
+            browser_id: String(managed.id),
+            session_age_ms: String(Date.now() - managed.createdAt),
+          }),
+        ),
+      );
+    });
+
     // Set up CF solve tracking on Connection
     yield* Effect.tryPromise({
       try: async () => {
@@ -463,11 +482,41 @@ export class AhrefsSessionManager {
             "session.browser_acquire_ms": browserAcquireMs,
           });
 
+          // Dead-browser guard. The "disconnected" listener wired in
+          // acquireBrowser (and the CF-solve handler at the solve-TTL limit)
+          // flips needsInvalidation when the underlying Chrome is gone. If
+          // Pool handed us a dead one, evict it now so the replacement is
+          // created before the next acquire — otherwise newPage() below
+          // would hang on the closed CDP WS forever.
+          if (managed.needsInvalidation) {
+            yield* Effect.logWarning("session.pool.invalidate").pipe(
+              Effect.annotateLogs({
+                reason: "stale_at_acquire",
+                browser_id: String(managed.id),
+                session_age_ms: String(Date.now() - managed.createdAt),
+              }),
+            );
+            yield* Pool.invalidate(pool, managed);
+            return yield* Effect.fail(
+              new ScrapeInfraError({
+                domain,
+                cause: "browser_disconnected_at_acquire",
+                phase: "acquire",
+              }),
+            );
+          }
+
           // Create page on the pooled browser. Each page gets the same
           // session_id as its parent browser — every CONNECT through this
           // browser carries the same session_id in the Basic Auth username,
           // so the relay's SessionManager pins this browser's traffic to a
           // single backend phone for the browser's lifetime.
+          //
+          // Effect.timeout is the safety net for the disconnected-but-not-yet-
+          // flagged case: if Chrome dies AFTER Pool.get and BEFORE the
+          // "disconnected" event fires, newPage's Promise waits forever on
+          // the closed CDP socket. The timeout converts that hang into a
+          // typed failure so Pool.invalidate runs and the permit releases.
           const pageCreateStart = Date.now();
           const page = yield* Effect.tryPromise({
             try: async () => {
@@ -480,7 +529,30 @@ export class AhrefsSessionManager {
             },
             catch: (e: unknown) =>
               new Error(`new_page: ${e instanceof Error ? e.message : String(e)}`),
-          });
+          }).pipe(
+            Effect.timeout("15 seconds"),
+            Effect.catch((e: unknown) => {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              return Effect.logWarning("session.pool.invalidate").pipe(
+                Effect.annotateLogs({
+                  reason: "new_page_failed",
+                  browser_id: String(managed.id),
+                  session_age_ms: String(Date.now() - managed.createdAt),
+                  error: errMsg,
+                }),
+                Effect.andThen(Pool.invalidate(pool, managed)),
+                Effect.andThen(
+                  Effect.fail(
+                    new ScrapeInfraError({
+                      domain,
+                      cause: `new_page: ${errMsg}`,
+                      phase: "new_page",
+                    }),
+                  ),
+                ),
+              );
+            }),
+          );
           const pageCreateMs = Date.now() - pageCreateStart;
           yield* Effect.annotateCurrentSpan({ "session.page_create_ms": pageCreateMs });
 

@@ -40,7 +40,7 @@
     "build:schemas": "bun scripts/build-schemas.js",
     "build:openapi": "bun scripts/build-open-api.js",
     "build:ts": "tsc",
-    "typecheck": "npm run bundle:rrweb && npm run bundle:cf && npm run bundle:antibot && tsc --noEmit",
+    "typecheck": "tsc --noEmit",
     "build:tests": "npm run build:ts && npm run build:function && npm run install:debugger",
     "clean": "bun scripts/clean.js",
     "dev": "npm run build:dev && env-cmd -f .env bun build",
