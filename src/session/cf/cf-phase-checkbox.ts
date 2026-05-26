@@ -47,7 +47,7 @@ const cdpCall = <T>(effect: Effect.Effect<T>) =>
 // ── Checkbox finding strategies ──────────────────────────────────────
 
 /**
- * Find checkbox using an isolated JS world — matches pydoll's exact approach.
+ * Find checkbox using an isolated JS world — matches the scraper's exact approach.
  *
  * CF's WASM in the main world cannot observe execution in isolated worlds.
  */
@@ -297,7 +297,7 @@ function queryCheckboxInShadow(
  * Phase 3: Find the Turnstile checkbox in the OOPIF.
  *
  * Polls with CHECKBOX_POLL_INTERVAL_MS gaps until PHASE3_TIMEOUT_MS (30s),
- * matching pydoll's querySelector polling behavior. CF's WASM needs time to
+ * matching the scraper's querySelector polling behavior. CF's WASM needs time to
  * render the widget after the OOPIF loads.
  */
 export function phase3CheckboxFind(

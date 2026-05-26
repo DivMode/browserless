@@ -94,7 +94,7 @@ export const CF_MARKERS = {
 // ── Turnstile Summary ────────────────────────────────────────────────
 
 export interface TurnstileSummary {
-  /** Summary label matching pydoll format: Int→, Int✓, Emb→, Emb✓, etc. */
+  /** Summary label matching the scraper format: Int→, Int✓, Emb→, Emb✓, etc. */
   label: string;
   /** CF challenge type: 'interstitial' | 'turnstile' */
   type: string;

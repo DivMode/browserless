@@ -8,14 +8,14 @@ Browserless container memory grew at ~870 MB/hr due to orphaned Chrome user-data
 
 ## Symptoms
 
-| Signal             | Where to Check                                                                  | What You See                                   |
-| ------------------ | ------------------------------------------------------------------------------- | ---------------------------------------------- |
-| Memory climbing    | Prometheus: `container_memory_working_set_bytes{name="browserless"}`            | Monotonic increase ~670-870 MB/hr              |
-| Watchdog firing    | Loki: `{service_name="flatcar-browserless"} \|= "Watchdog"`                     | "force-closing stale session" every 7 min      |
-| Orphaned dirs      | SSH: `ls /tmp/browserless-data-dirs/ \| wc -l`                                  | Count >> active session count                  |
-| CF solver timeouts | Loki: `{service_name="flatcar-pydoll-scraper"} \|~ "timeout\|widget_not_found"` | Cluster of turnstile failures                  |
-| Batch failures     | Loki: `{service_name="workers-prod"} \|~ "workflow failed"`                     | "Turnstile + API not completed within timeout" |
-| Queue retries      | Loki: `{service_name="workers-prod"} \|= "queue_attempt_distribution"`          | Attempts > 1 (retries at 3, 6, etc.)           |
+| Signal             | Where to Check                                                           | What You See                                   |
+| ------------------ | ------------------------------------------------------------------------ | ---------------------------------------------- |
+| Memory climbing    | Prometheus: `container_memory_working_set_bytes{name="browserless"}`     | Monotonic increase ~670-870 MB/hr              |
+| Watchdog firing    | Loki: `{service_name="flatcar-browserless"} \|= "Watchdog"`              | "force-closing stale session" every 7 min      |
+| Orphaned dirs      | SSH: `ls /tmp/browserless-data-dirs/ \| wc -l`                           | Count >> active session count                  |
+| CF solver timeouts | Loki: `{service_name="flatcar-scraper"} \|~ "timeout\|widget_not_found"` | Cluster of turnstile failures                  |
+| Batch failures     | Loki: `{service_name="workers-prod"} \|~ "workflow failed"`              | "Turnstile + API not completed within timeout" |
+| Queue retries      | Loki: `{service_name="workers-prod"} \|= "queue_attempt_distribution"`   | Attempts > 1 (retries at 3, 6, etc.)           |
 
 ## Root Cause
 
@@ -133,7 +133,7 @@ After deploying the `destroySession` fix (Part 1), the watchdog correctly cleane
 
 The watchdog used global `TIMEOUT` env var (300s = 5 min) instead of per-session `ttl`.
 
-Pydoll's AhrefsSessionManager creates persistent Chrome sessions with `timeout=3600000` (1 hour) via the WebSocket query param. The limiter (queue library) correctly used this as the job timeout. But the watchdog ignored it entirely and used `TIMEOUT + 60s` = 360s as the kill threshold.
+The scraper's AhrefsSessionManager creates persistent Chrome sessions with `timeout=3600000` (1 hour) via the WebSocket query param. The limiter (queue library) correctly used this as the job timeout. But the watchdog ignored it entirely and used `TIMEOUT + 60s` = 360s as the kill threshold.
 
 **The math:**
 
@@ -145,12 +145,12 @@ Pydoll's AhrefsSessionManager creates persistent Chrome sessions with `timeout=3
 ### The Cascade
 
 ```
-t=0:     Pydoll connects with timeout=3600000 (1 hour)
+t=0:     The scraper connects with timeout=3600000 (1 hour)
 t=0-5m:  Session alive, scrapes running normally
 t=6m:    Watchdog kills session (360s threshold + poll variance)
-t=6m:    Pydoll's WebSocket closes → "browser_session_closed"
+t=6m:    The scraper's WebSocket closes → "browser_session_closed"
 t=6m:    Any in-flight scrape fails → "Turnstile timeout" / "workflow failed"
-t=6m+:   Pydoll recreates session (AhrefsSessionManager._ensure_session)
+t=6m+:   The scraper recreates session (AhrefsSessionManager._ensure_session)
 t=12m:   Watchdog kills again...
 ```
 

@@ -1,7 +1,7 @@
 /**
  * POST /ahrefs/traffic/dispatch — Ahrefs traffic scrape dispatch.
  *
- * Drop-in replacement for pydoll's /ahrefs/traffic/dispatch endpoint.
+ * Drop-in replacement for the scraper's /ahrefs/traffic/dispatch endpoint.
  * Same pattern as backlinks — 202, background scrape via session manager, R2 write.
  */
 import type { Request } from "@browserless.io/browserless";
@@ -27,7 +27,7 @@ export default class AhrefsTrafficDispatchRoute extends HTTPRoute {
   browser = null;
   concurrency = false;
   contentTypes = [contentTypes.json];
-  description = "Dispatch ahrefs traffic scrape (pydoll-compatible).";
+  description = "Dispatch ahrefs traffic scrape (the scraper-compatible).";
   method = Methods.post;
   path = HTTPManagementRoutes.ahrefsTrafficDispatch;
   tags = [APITags.management];

@@ -3,7 +3,7 @@
 ## 1. Connection Topology
 
 ```
-pydoll-scraper (Python)
+scraper (Python)
   |
   |  WebSocket #1: CDPProxy (browser-level)
   |  ws://browserless:3000 -> ws://127.0.0.1:{port}/devtools/browser/{id}
@@ -27,11 +27,11 @@ pydoll-scraper (Python)
 
 ### Connection Ownership
 
-| Connection            | Owner          | Endpoint                    | Lifetime     |
-| --------------------- | -------------- | --------------------------- | ------------ |
-| CDPProxy WS           | pydoll-scraper | `/devtools/browser/{id}`    | Full session |
-| Replay Coordinator WS | browserless    | `/devtools/browser/{id}`    | Full session |
-| Per-Page WS (x5)      | browserless    | `/devtools/page/{targetId}` | Per tab      |
+| Connection            | Owner       | Endpoint                    | Lifetime     |
+| --------------------- | ----------- | --------------------------- | ------------ |
+| CDPProxy WS           | scraper     | `/devtools/browser/{id}`    | Full session |
+| Replay Coordinator WS | browserless | `/devtools/browser/{id}`    | Full session |
+| Per-Page WS (x5)      | browserless | `/devtools/page/{targetId}` | Per tab      |
 
 ## 2. Why Per-Page WebSockets Exist
 
@@ -39,11 +39,11 @@ With `MAX_CONCURRENT_TABS = 5`:
 
 - 5 tabs x 500ms polling = **10 `Runtime.evaluate` calls/sec** for rrweb event collection alone
 - Cloudflare solver adds its own polling per tab
-- pydoll sends its own CDP commands (navigation, DOM queries, form fills)
+- the scraper sends its own CDP commands (navigation, DOM queries, form fills)
 
-**Without per-page WS:** All 10+ evaluates/sec compete with pydoll's commands on a single browser-level WebSocket. Chrome CDP processes messages sequentially per connection — a slow `Runtime.evaluate` blocks pydoll's `Page.navigate` behind it.
+**Without per-page WS:** All 10+ evaluates/sec compete with the scraper's commands on a single browser-level WebSocket. Chrome CDP processes messages sequentially per connection — a slow `Runtime.evaluate` blocks the scraper's `Page.navigate` behind it.
 
-**With per-page WS:** Each tab has a dedicated WebSocket routed directly to that page's V8 isolate. Zero contention between tabs, zero contention with pydoll.
+**With per-page WS:** Each tab has a dedicated WebSocket routed directly to that page's V8 isolate. Zero contention between tabs, zero contention with the scraper.
 
 ### Scaling Impact
 
@@ -119,7 +119,7 @@ Per-page WebSocket connections had **no keepalive mechanism** (no ping/pong). Wh
 1. **Per-page WS keepalive (non-destructive):** Ping every 30s. If no pong within 30s, the WS is terminated. Logged at debug level. A dead per-page WS is NOT fatal — `sendCommand` transparently falls back to browser-level WS. No cascade.
 2. **No main WS ping/pong:** The main browser-level WS has NO keepalive. Chrome process death fires WS `close` event naturally via TCP. SessionLifecycleManager handles zombie sessions via TTL. The previous 5s main WS ping/pong was the root cause of the replay URL disappearance bug (Chrome missed one pong under load → WS terminated → permanent replay death).
 3. **TargetRegistry atomic cleanup:** When per-page WS dies, `target.pageWebSocket = null` is set atomically. `sendCommand` checks this and falls back to browser WS. No stale references.
-4. **Session-level safeguards (pydoll):** 5-minute overall scrape timeout ensures stuck scrapes always release their semaphore slot. Consecutive CDP health failures trigger session destruction.
+4. **Session-level safeguards (the scraper):** 5-minute overall scrape timeout ensures stuck scrapes always release their semaphore slot. Consecutive CDP health failures trigger session destruction.
 
 ## 6. The 0-Event Replay Bug (collectEvents via Per-Page WS)
 

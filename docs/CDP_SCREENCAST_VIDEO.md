@@ -12,7 +12,7 @@ Per session (parallel):
 
 Both recordings start when a session begins and stop when it ends. rrweb results are available immediately. Video encoding is **deferred** — frames stay on disk until someone visits the video player, then encoding triggers on-demand. Most sessions are never watched, so this avoids wasting CPU on encoding unwatched videos.
 
-Previously, the Pydoll scraper ran its own video recording pipeline: `Page.captureScreenshot` at 5fps → Canvas → MediaRecorder → WebM → R2 upload. This was ~430 lines of Python (`screencast_recorder.py`) working around browser limitations. Moving recording to Browserless eliminated that code entirely — Pydoll just receives a `videoPlayerUrl` in the CDP event.
+Previously, the The scraper scraper ran its own video recording pipeline: `Page.captureScreenshot` at 5fps → Canvas → MediaRecorder → WebM → R2 upload. This was ~430 lines of Python (`screencast_recorder.py`) working around browser limitations. Moving recording to Browserless eliminated that code entirely — The scraper just receives a `videoPlayerUrl` in the CDP event.
 
 ## How It Works
 
@@ -239,7 +239,7 @@ When a session ends, Browserless injects a custom CDP event into the client's We
 }
 ```
 
-The Pydoll scraper receives this via `_get_recording_metadata_via_kill()` in `browser.py` and stores it on the `ScrapeContext` for the wide event. The `videoPlayerUrl` appears in Grafana dashboards as a clickable link.
+The The scraper scraper receives this via `_get_recording_metadata_via_kill()` in `browser.py` and stores it on the `ScrapeContext` for the wide event. The `videoPlayerUrl` appears in Grafana dashboards as a clickable link.
 
 Note: `encodingStatus` will be `'deferred'` at event emission time (encoding hasn't started yet — it triggers when someone visits the video player). The video player page handles the transition from `deferred` → `pending` → `encoding` → `completed` with auto-refresh.
 

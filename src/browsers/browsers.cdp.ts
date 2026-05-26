@@ -46,7 +46,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   protected port?: number;
   protected proxy = httpProxy.createProxyServer();
   protected executablePath = playwright.chromium.executablePath();
-  // Flag to track when WE are creating a page (vs external clients like pydoll)
+  // Flag to track when WE are creating a page (vs external clients like the scraper)
   // When true, the next targetcreated event is from our newPage() call
   // When false, it's from an external client and we should NOT attach puppeteer
   protected pendingInternalPage = false;
@@ -137,7 +137,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
   protected async onTargetCreated(target: Target) {
     if (target.type() === "page") {
       // CRITICAL: Only attach puppeteer to targets WE created via newPage()
-      // External clients (pydoll, playwright, etc.) create targets via /json/new
+      // External clients (the scraper, playwright, etc.) create targets via /json/new
       // and don't want puppeteer-stealth or our event handlers interfering.
       // Attaching to external targets causes CDP command conflicts and timeouts.
       if (!this.pendingInternalPage) {
@@ -373,7 +373,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
           // canvas/audio fingerprinting). Without it, Chrome has NO WebGL and
           // fingerprint data is incomplete (fewer fields = instant bot detection).
           // Akamai detects the "Google SwiftShader" renderer STRING, but the
-          // pydoll fingerprint injection overrides getParameter(UNMASKED_RENDERER)
+          // the scraper fingerprint injection overrides getParameter(UNMASKED_RENDERER)
           // to return a real GPU name, so the string is never exposed to scripts.
           `--use-gl=angle`,
           `--use-angle=swiftshader-webgl`,
@@ -562,7 +562,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
         if (this.onBeforeClosePromise) {
           await this.onBeforeClosePromise;
         }
-        // Close CDPProxy (sends WS close frame to pydoll) but do NOT null —
+        // Close CDPProxy (sends WS close frame to the scraper) but do NOT null —
         // destroySession needs it alive for sendTabReplayComplete during
         // tab scope cleanup. handleClose() is idempotent (isClosing guard).
         this.cdpProxy?.close();
@@ -636,7 +636,7 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
    * Send replay metadata to client via CDP event.
    *
    * Called by SessionLifecycleManager before closing the session.
-   * The client (Pydoll) can listen for "Browserless.replayComplete" event
+   * The client (the scraper) can listen for "Browserless.replayComplete" event
    * to receive replay URL without making an additional HTTP call.
    */
   public async sendReplayComplete(metadata: ReplayCompleteParams): Promise<boolean> {

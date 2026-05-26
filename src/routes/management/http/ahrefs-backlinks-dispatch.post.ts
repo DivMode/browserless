@@ -1,11 +1,11 @@
 /**
  * POST /ahrefs/backlinks/dispatch — Ahrefs backlinks scrape dispatch.
  *
- * Drop-in replacement for pydoll's /ahrefs/backlinks/dispatch endpoint.
+ * Drop-in replacement for the scraper's /ahrefs/backlinks/dispatch endpoint.
  * Accepts domain + instance_id, returns 202 immediately, runs scrape
  * in background, writes result to R2.
  *
- * Query params: domain, instance_id (matching pydoll's FastAPI signature)
+ * Query params: domain, instance_id (matching the scraper's FastAPI signature)
  */
 import type { Request } from "@browserless.io/browserless";
 import {
@@ -30,7 +30,7 @@ export default class AhrefsBacklinksDispatchRoute extends HTTPRoute {
   browser = null;
   concurrency = false;
   contentTypes = [contentTypes.json];
-  description = "Dispatch ahrefs backlinks scrape (pydoll-compatible).";
+  description = "Dispatch ahrefs backlinks scrape (the scraper-compatible).";
   method = Methods.post;
   path = HTTPManagementRoutes.ahrefsBacklinksDispatch;
   tags = [APITags.management];

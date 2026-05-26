@@ -8,11 +8,11 @@ The root cause analysis and proposed fixes below have not been successfully depl
 
 ## The Bug
 
-`Runtime.evaluate` hangs forever on pages that contain sandboxed cross-origin iframes (e.g., `webscraper.io/bot-check` which embeds `d1exrvfwzmo830.cloudfront.net/checkbox-iframe.html` via `sandbox="allow-scripts"`). The CDP command never returns, causing pydoll's `_wait_page_load` to time out after 60 seconds.
+`Runtime.evaluate` hangs forever on pages that contain sandboxed cross-origin iframes (e.g., `webscraper.io/bot-check` which embeds `d1exrvfwzmo830.cloudfront.net/checkbox-iframe.html` via `sandbox="allow-scripts"`). The CDP command never returns, causing the scraper's `_wait_page_load` to time out after 60 seconds.
 
 ## Root Cause
 
-`Target.setAutoAttach({waitForDebuggerOnStart: true})` pauses iframe targets that nobody resumes. Multiple CDP sessions call this — the replay-coordinator (browser-level and page-level) and puppeteer's TargetManager (on every discovered page session). When an iframe target is paused, the page's `load` event never fires because it waits for all frames to finish loading. This blocks `document.readyState` from reaching `"complete"`, causing pydoll's `_wait_page_load` to time out at 60s.
+`Target.setAutoAttach({waitForDebuggerOnStart: true})` pauses iframe targets that nobody resumes. Multiple CDP sessions call this — the replay-coordinator (browser-level and page-level) and puppeteer's TargetManager (on every discovered page session). When an iframe target is paused, the page's `load` event never fires because it waits for all frames to finish loading. This blocks `document.readyState` from reaching `"complete"`, causing the scraper's `_wait_page_load` to time out at 60s.
 
 The replay-coordinator connects a separate WebSocket to Chrome's browser-level CDP endpoint and calls:
 
@@ -42,9 +42,9 @@ Chrome's behavior: when ANY CDP session's auto-attach has `waitForDebuggerOnStar
 
 ## Why Ahrefs Works But Botcheck Didn't
 
-**Timing.** Ahrefs's Turnstile iframe (`challenges.cloudflare.com`) loads dynamically AFTER page load completes — by the time the iframe creates an in-process target, pydoll's `Runtime.evaluate` has already returned. The V8 freeze only blocks _in-flight_ evaluations.
+**Timing.** Ahrefs's Turnstile iframe (`challenges.cloudflare.com`) loads dynamically AFTER page load completes — by the time the iframe creates an in-process target, the scraper's `Runtime.evaluate` has already returned. The V8 freeze only blocks _in-flight_ evaluations.
 
-Botcheck's iframe is created by JavaScript in the initial page HTML (`document.createElement("iframe")` with `sandbox="allow-scripts"`). It loads DURING the page's initial JavaScript execution, before `document.readyState` reaches "complete". Pydoll's `_wait_page_load` polls `Runtime.evaluate('document.readyState')` in a loop — the in-flight evaluate gets frozen when the iframe target is paused.
+Botcheck's iframe is created by JavaScript in the initial page HTML (`document.createElement("iframe")` with `sandbox="allow-scripts"`). It loads DURING the page's initial JavaScript execution, before `document.readyState` reaches "complete". The scraper's `_wait_page_load` polls `Runtime.evaluate('document.readyState')` in a loop — the in-flight evaluate gets frozen when the iframe target is paused.
 
 **Note:** With site isolation disabled, the iframe doesn't generate a separate CDP target that's visible to the replay-coordinator's auto-attach handler. The target exists internally in Chrome but is only reported to sessions with appropriate scope. This made the bug invisible in logs — no `Iframe target attached` events appeared for the botcheck session.
 
@@ -98,7 +98,7 @@ All three are necessary:
 
 The `--disable-features=IsolateOrigins,site-per-process` flag was removed from `browser.py` (it's detectable and unnecessary for CDP). But this **did not fix the deadlock**.
 
-With site isolation enabled, cross-origin iframes get their own V8 isolate, so pausing them no longer freezes the parent's V8. However, the page's `load` event still waits for **all frames** (including cross-origin ones in separate processes) to finish loading. A paused iframe target can't proceed with loading → the `load` event never fires → `document.readyState` never reaches `"complete"` → pydoll's `_wait_page_load` times out at 60s.
+With site isolation enabled, cross-origin iframes get their own V8 isolate, so pausing them no longer freezes the parent's V8. However, the page's `load` event still waits for **all frames** (including cross-origin ones in separate processes) to finish loading. A paused iframe target can't proceed with loading → the `load` event never fires → `document.readyState` never reaches `"complete"` → the scraper's `_wait_page_load` times out at 60s.
 
 The V8 freeze was a symptom, not the root cause. The root cause is **any CDP session calling `setAutoAttach({waitForDebuggerOnStart: true})` that covers iframe targets and never resumes them**.
 
@@ -128,13 +128,13 @@ await sendCommand("Target.setAutoAttach", {
 
 **Page-level** `setAutoAttach` (~line 442 and ~line 684): Changed from `waitForDebuggerOnStart: true` to `false`. Belt-and-suspenders — even if the browser-level filter somehow fails, iframes detected on the page level won't be paused.
 
-**Why pausing iframes is dangerous:** Puppeteer's default Chrome flags include `--disable-features=IsolateSandboxedIframes`, which means sandboxed cross-origin iframes share the parent page's V8 isolate and renderer process. When `waitForDebuggerOnStart: true` pauses an in-process iframe target, the entire V8 isolate freezes — blocking all `Runtime.evaluate` calls on the parent page. Even without shared V8 (site isolation enabled), the page's `load` event still waits for all frames to finish loading. A paused iframe can't load → `document.readyState` never reaches `"complete"` → pydoll's `_wait_page_load` times out at 60s.
+**Why pausing iframes is dangerous:** Puppeteer's default Chrome flags include `--disable-features=IsolateSandboxedIframes`, which means sandboxed cross-origin iframes share the parent page's V8 isolate and renderer process. When `waitForDebuggerOnStart: true` pauses an in-process iframe target, the entire V8 isolate freezes — blocking all `Runtime.evaluate` calls on the parent page. Even without shared V8 (site isolation enabled), the page's `load` event still waits for all frames to finish loading. A paused iframe can't load → `document.readyState` never reaches `"complete"` → the scraper's `_wait_page_load` times out at 60s.
 
 **Tradeoff:** Iframes get rrweb injected via `addScriptToEvaluateOnNewDocument({runImmediately: true})` after attachment (~100ms delay) instead of pre-injection while paused. This is negligible because iframe content loads over network (100-500ms), and `addScriptToEvaluateOnNewDocument` persists across iframe navigations.
 
 ### 2. puppeteer's core TargetManager
 
-Both `puppeteer.launch()` and `puppeteerStealth.launch()` create a `TargetManager` — it's core puppeteer, not stealth-specific. The TargetManager calls `Target.setAutoAttach({waitForDebuggerOnStart: true})` on **every discovered page session**, including pydoll's pages. This pauses iframe targets on those pages that puppeteer never resumes (browserless's `onTargetCreated` returns early for external clients because `pendingInternalPage` is false).
+Both `puppeteer.launch()` and `puppeteerStealth.launch()` create a `TargetManager` — it's core puppeteer, not stealth-specific. The TargetManager calls `Target.setAutoAttach({waitForDebuggerOnStart: true})` on **every discovered page session**, including the scraper's pages. This pauses iframe targets on those pages that puppeteer never resumes (browserless's `onTargetCreated` returns early for external clients because `pendingInternalPage` is false).
 
 **Fix — `targetFilter` on launch** (`browsers.cdp.ts`):
 
@@ -150,7 +150,7 @@ this.browser = await launch({
 
 Only accepts page targets when `pendingInternalPage` is true (set during `newPage()` calls). External clients' pages are rejected → `silentDetach()` → TargetManager never calls `setAutoAttach` on their sessions.
 
-**Requires `waitForInitialPage: false`**: The filter rejects all pages when `pendingInternalPage` is false. Puppeteer's `waitForPageTarget` would timeout after 30s unless the client sends `waitForInitialPage: false` in launch options. Pydoll already does this.
+**Requires `waitForInitialPage: false`**: The filter rejects all pages when `pendingInternalPage` is false. Puppeteer's `waitForPageTarget` would timeout after 30s unless the client sends `waitForInitialPage: false` in launch options. The scraper already does this.
 
 ### How the TargetManager creates the deadlock
 
@@ -162,7 +162,7 @@ Tracing through puppeteer's `TargetManager.js`:
 
 3. **Lines 279-287**: For every target that **passes** the filter, the TargetManager sends `session.send('Target.setAutoAttach', {waitForDebuggerOnStart: true, flatten: true, autoAttach: true})` on **that target's CDP session**. This propagates hierarchically: browser → tab → page → iframe. When a page session gets `setAutoAttach({waitForDebuggerOnStart: true})`, any iframe child targets are paused before execution.
 
-4. **The deadlock**: The TargetManager resumes targets it manages via `Runtime.runIfWaitingForDebugger` (line 286). But for external clients' pages (pydoll's pages), browserless's `onTargetCreated` returns early because `pendingInternalPage` is `false` — nobody resumes the iframe children. They stay paused forever.
+4. **The deadlock**: The TargetManager resumes targets it manages via `Runtime.runIfWaitingForDebugger` (line 286). But for external clients' pages (the scraper's pages), browserless's `onTargetCreated` returns early because `pendingInternalPage` is `false` — nobody resumes the iframe children. They stay paused forever.
 
 ### How targetFilter prevents it
 
@@ -190,11 +190,11 @@ Puppeteer assumes it owns every target in the browser. When `puppeteer.launch()`
 
 Connect via puppeteer or playwright client libraries. When they request a page, browserless calls `newPage()` internally (setting `pendingInternalPage = true`). Puppeteer creates the page, manages its lifecycle, and the TargetManager correctly handles all child targets — pausing, injecting, resuming. The `onTargetCreated` handler in browserless sees `pendingInternalPage = true` and hands the page to the client. Everything works.
 
-### Our setup (pydoll as external CDP client)
+### Our setup (the scraper as external CDP client)
 
-Pydoll connects via raw CDP WebSocket directly to Chrome, bypassing puppeteer entirely. It creates pages through Chrome's `Target.createTarget` CDP command — puppeteer's `newPage()` is never called, so `pendingInternalPage` stays `false`.
+The scraper connects via raw CDP WebSocket directly to Chrome, bypassing puppeteer entirely. It creates pages through Chrome's `Target.createTarget` CDP command — puppeteer's `newPage()` is never called, so `pendingInternalPage` stays `false`.
 
-But puppeteer's TargetManager still **discovers** these pages. It monitors all targets in the browser and doesn't distinguish between pages it created and pages an external client created. So it calls `setAutoAttach({waitForDebuggerOnStart: true})` on pydoll's page sessions, pausing iframe targets. Browserless's `onTargetCreated` fires but returns early because `pendingInternalPage` is `false` — it knows it didn't create that page. The normal code path that would resume paused targets never executes. The iframe stays paused forever.
+But puppeteer's TargetManager still **discovers** these pages. It monitors all targets in the browser and doesn't distinguish between pages it created and pages an external client created. So it calls `setAutoAttach({waitForDebuggerOnStart: true})` on the scraper's page sessions, pausing iframe targets. Browserless's `onTargetCreated` fires but returns early because `pendingInternalPage` is `false` — it knows it didn't create that page. The normal code path that would resume paused targets never executes. The iframe stays paused forever.
 
 ### Not a puppeteer bug
 

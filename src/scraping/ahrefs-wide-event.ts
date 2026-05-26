@@ -151,7 +151,7 @@ const ATTR_TURNSTILE_EMBEDDED_PASSED = "turnstile_embedded_passed";
 const ATTR_TURNSTILE_EMBEDDED_AUTO_RESOLVED = "turnstile_embedded_auto_resolved";
 const ATTR_TURNSTILE_EMBEDDED_CLICK_COUNT = "turnstile_embedded_click_count";
 
-// Short-form CF attrs (pydoll emits both prefixed and short)
+// Short-form CF attrs (the scraper emits both prefixed and short)
 const ATTR_CF_METHOD = "cf_method";
 const ATTR_CF_DURATION_MS = "cf_duration_ms";
 const ATTR_CF_SOLVED = "cf_solved";

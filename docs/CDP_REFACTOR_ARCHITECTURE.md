@@ -42,7 +42,7 @@ When 15+ tabs share a single browser-level WebSocket, events queue behind each o
 ```
 ┌──────────────┐       ┌───────────────┐       ┌──────────────────┐
 │  Client      │◄─────►│  CDPProxy     │◄─────►│  Chrome Browser  │
-│  (Pydoll)    │  WS   │  (intercept)  │  WS   │  /devtools/      │
+│  (The scraper)    │  WS   │  (intercept)  │  WS   │  /devtools/      │
 └──────────────┘       └───────────────┘       │  browser/{id}    │
                                                 └──────────────────┘
                        ┌───────────────┐              ▲
@@ -199,7 +199,7 @@ Searched every CDP library, wrapper, and automation framework. The result:
 | simple-cdp              | JS/TS    | No              | Partial              | No           | No             |
 | **mafredri/cdp**        | **Go**   | **Yes**         | Yes                  | No           | No             |
 | **chromedp**            | **Go**   | **Yes**         | Yes                  | No           | No             |
-| Pydoll                  | Python   | No              | Per-tab WS           | No           | Yes            |
+| The scraper             | Python   | No              | Per-tab WS           | No           | Yes            |
 | Nodriver/Zendriver      | Python   | No              | Unknown              | No           | Yes            |
 | cdp-use                 | Python   | No              | Partial              | No           | No             |
 | WebDriver BiDi          | Standard | Context-scoped  | N/A                  | N/A          | N/A            |
@@ -212,7 +212,7 @@ Searched every CDP library, wrapper, and automation framework. The result:
 
 - **browser-use's "stateless" pattern is the most robust.** Their architecture re-derives state from the browser on every interaction rather than maintaining in-memory state from events. Watchdog services periodically health-check targets. This eliminates the entire class of "missed event" bugs.
 
-- **Pydoll's per-tab WebSocket architecture is sound** — separate WS connections per tab eliminates head-of-line blocking. The uncommitted changes in `replay-coordinator.ts` are moving in this direction.
+- **The scraper's per-tab WebSocket architecture is sound** — separate WS connections per tab eliminates head-of-line blocking. The uncommitted changes in `replay-coordinator.ts` are moving in this direction.
 
 ### Relevant Patterns from Other Libraries
 
@@ -739,14 +739,14 @@ The key insight: `ActiveDetection` objects are cleaned up after emitting CDP eve
 
 This endpoint is callable at any time during or after the scrape. Since it reads from the persisted `completedDetections` array, it returns the full history of CF interactions for that session — not just the current in-flight state.
 
-#### 3. Pydoll: Always-fetch after scrape
+#### 3. The scraper: Always-fetch after scrape
 
 **File:** `src/cloudflare_listener.py`
 
 - Add `fetch_cf_summary()` — HTTP GET to `http://browserless:3000/sessions/{id}/cf-summary`
 - Add `merge_http_summary()` — synthesize missing events into the waiter (skip if CDP already delivered the same detection)
 - `get_metrics()` remains the single code path for all metric emission
-- Uses `aiohttp` (already a pydoll-scraper dependency)
+- Uses `aiohttp` (already a scraper dependency)
 
 **Integration points** — insert between `await_resolution()` and `get_metrics()`:
 
@@ -760,7 +760,7 @@ This endpoint is callable at any time during or after the scrape. Since it reads
 
 **Merge into existing waiter.** Reuses `get_metrics()` as the single metrics builder. The merge step only adds detections the waiter hasn't seen (matching on cRay or detection fingerprint). No duplicate metrics paths.
 
-**Uses `aiohttp`.** Already a pydoll-scraper dependency. Simple `GET` with `async with session.get(url) as resp:` pattern.
+**Uses `aiohttp`.** Already a scraper dependency. Simple `GET` with `async with session.get(url) as resp:` pattern.
 
 ### Relationship to Other Phases
 
@@ -783,9 +783,9 @@ Phase 3: Poll-based solver ──► Phase 0 becomes verification layer
 
 Independent of all other phases. Can be implemented immediately.
 
-| Fix                                                                  | Effort       | Impact                                                       | Files                                                                                       |
-| -------------------------------------------------------------------- | ------------ | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| HTTP fallback — `GET /sessions/:id/cf-summary` + pydoll always-fetch | Small-Medium | Defense-in-depth: CF data never lost regardless of CDP state | `cloudflare-solver.ts`, new `cf-summary.get.ts`, `http.ts`, pydoll `cloudflare_listener.py` |
+| Fix                                                                       | Effort       | Impact                                                       | Files                                                                                            |
+| ------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| HTTP fallback — `GET /sessions/:id/cf-summary` + the scraper always-fetch | Small-Medium | Defense-in-depth: CF data never lost regardless of CDP state | `cloudflare-solver.ts`, new `cf-summary.get.ts`, `http.ts`, the scraper `cloudflare_listener.py` |
 
 ### Phase 1: Immediate Fixes (stops events from dropping)
 
@@ -882,7 +882,7 @@ Replaced 70-line `handleCDPMessage` if-chain with `Map<string, handler>` routing
 
 #### 11. `onTabReplayComplete` Cleanup Fix (deployed)
 
-The cleanup path (`source === 'cleanup'`) now fires `onTabReplayComplete` callback for each finalized tab. Previously, tabs finalized during orderly shutdown never sent metadata to pydoll.
+The cleanup path (`source === 'cleanup'`) now fires `onTabReplayComplete` callback for each finalized tab. Previously, tabs finalized during orderly shutdown never sent metadata to the scraper.
 
 ### Key Discovery
 

@@ -1,18 +1,18 @@
+import type { Request } from "@browserless.io/browserless";
 import {
   APITags,
   BrowserlessRoutes,
   HTTPManagementRoutes,
   HTTPRoute,
   Methods,
-  Request,
   contentTypes,
 } from "@browserless.io/browserless";
-import { ServerResponse } from "http";
+import type { ServerResponse } from "http";
 import { Effect } from "effect";
 
 /**
  * Receives navigator.sendBeacon from the browser when a Turnstile token
- * is received. Bypasses CDP entirely — fires well before pydoll disconnects.
+ * is received. Bypasses CDP entirely — fires well before the scraper disconnects.
  *
  * Body: { s: sessionId, t: targetId, l: tokenLength }
  *

@@ -91,7 +91,7 @@ export function isReplayCapable(browser: unknown): browser is ReplayCapableBrows
  * 2. Can inject custom CDP events to the client before closing
  * 3. Handles the WebSocket upgrade from the HTTP socket
  *
- * This enables sending replay metadata to clients (like Pydoll)
+ * This enables sending replay metadata to clients (like the scraper)
  * without requiring an additional HTTP call after session close.
  *
  * Flow:
@@ -429,9 +429,9 @@ export class CDPProxy {
             }
           }
 
-          // Instrument: log ALL Input.dispatchMouseEvent from client (pydoll)
+          // Instrument: log ALL Input.dispatchMouseEvent from client (the scraper)
           // Browserless solver clicks bypass the proxy (direct WS to Chrome),
-          // so any mouse event here is from pydoll's CDP connection.
+          // so any mouse event here is from the scraper's CDP connection.
           if (msg.method === "Input.dispatchMouseEvent") {
             const p = msg.params as Record<string, unknown> | undefined;
             const type = p?.type ?? "";
@@ -442,7 +442,7 @@ export class CDPProxy {
             // Full CDP sessionId — maps to a specific target (tab/OOPIF)
             const cdpSessionId = msg.sessionId ?? "page";
             runForkInServer(
-              Effect.logWarning("[PYDOLL-MOUSE] dispatch").pipe(
+              Effect.logWarning("[SCRAPER-MOUSE] dispatch").pipe(
                 Effect.annotateLogs({
                   type: String(type),
                   x: String(x),
@@ -531,12 +531,12 @@ export class CDPProxy {
 
     // Heartbeat: ping Chrome WS every 10s, close if no pong within 5s.
     // Detects stalled Chrome connections (tab renderer crash, WS backpressure)
-    // that don't emit close events. Without this, pydoll waits the full
+    // that don't emit close events. Without this, the scraper waits the full
     // 60s+ timeout and gets cf_events=0 → "No Data".
     this.startHeartbeat();
 
-    // Client heartbeat: ping pydoll's WS every 10s, close after 2 missed pongs (~25-30s).
-    // Detects dead pydoll connections (crash, network death, half-open TCP).
+    // Client heartbeat: ping the scraper's WS every 10s, close after 2 missed pongs (~25-30s).
+    // Detects dead the scraper connections (crash, network death, half-open TCP).
     // Without this, zombie sessions survive until the limiter timeout (minutes).
     this.startClientHeartbeat();
   }
@@ -659,7 +659,7 @@ export class CDPProxy {
    *
    * CDP events are JSON messages with "method" and "params" fields.
    * We use a custom method name "Browserless.replayComplete" that
-   * clients (Pydoll) can listen for.
+   * clients (the scraper) can listen for.
    */
   async emitClientEvent(method: string, params: object): Promise<void> {
     if (!this.clientOutbound) {
@@ -736,9 +736,9 @@ export class CDPProxy {
   }
 
   /**
-   * Create a fresh, isolated WS connection to Chrome — matching pydoll's approach.
+   * Create a fresh, isolated WS connection to Chrome — matching the scraper's approach.
    *
-   * Pydoll's IFrameContextResolver creates a brand new ConnectionHandler for
+   * The scraper's IFrameContextResolver creates a brand new ConnectionHandler for
    * OOPIF resolution. This fresh WS has ZERO CDP domain enables, no auto-attach,
    * no subscriptions — a completely clean slate. All commands (Target.attachToTarget,
    * DOM queries, Input.dispatchMouseEvent) go through this isolated connection.
@@ -849,7 +849,7 @@ export class CDPProxy {
    *
    * When Chrome's renderer crashes or the WS stalls, no 'close' event fires.
    * The heartbeat detects this within PONG_TIMEOUT_MS and tears down the session,
-   * causing pydoll to get a WS close and retry on a fresh session.
+   * causing the scraper to get a WS close and retry on a fresh session.
    */
   private startHeartbeat(): void {
     if (!this.browserWs) return;
@@ -917,9 +917,9 @@ export class CDPProxy {
   }
 
   /**
-   * Start WS-level ping/pong heartbeat to the client (pydoll).
+   * Start WS-level ping/pong heartbeat to the client (the scraper).
    *
-   * Detects dead pydoll connections (crash, network death, half-open TCP)
+   * Detects dead the scraper connections (crash, network death, half-open TCP)
    * within ~25-30s. Without this, zombie sessions survive until the limiter
    * timeout fires (minutes), consuming a Chrome process and RAM the entire time.
    */
@@ -968,7 +968,7 @@ export class CDPProxy {
         if (missedPongs >= CLIENT_WS_MAX_MISSED_PONGS) {
           runForkInServer(
             Effect.logWarning(
-              "Client WS heartbeat timeout — pydoll not responding, closing session",
+              "Client WS heartbeat timeout — the scraper not responding, closing session",
             ).pipe(Effect.annotateLogs({ missed_pongs: String(missedPongs) })),
           );
           this.handleClose();

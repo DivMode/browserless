@@ -237,7 +237,7 @@ export async function simulateHumanPresence(
 }
 
 /**
- * Bezier mouse movement to a click target — matches pydoll's Mouse.click(humanize=True).
+ * Bezier mouse movement to a click target — matches the scraper's Mouse.click(humanize=True).
  *
  * Generates a smooth Bezier curve from a random offset position to the target
  * coordinates, sending Input.dispatchMouseEvent(mouseMoved) at each step.

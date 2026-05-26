@@ -1,7 +1,7 @@
 /**
  * Ahrefs scrape service types and constants.
  *
- * Ported from packages/pydoll-scraper/src/ahrefs_fast.py.
+ * Ported from packages/the scraper/src/ahrefs_fast.py.
  * All constants match the Python originals exactly.
  */
 import type { ApiErrorInfo, ScrapeError } from "./ahrefs-errors.js";

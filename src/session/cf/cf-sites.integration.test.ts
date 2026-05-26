@@ -5,11 +5,11 @@
  *   1. Connect → navigate → wait → close
  *   2. Verify replays exist for every tab (recording pipeline works)
  *   3. Extract CF markers from replays
- *   4. Build Turnstile summary (same labels as pydoll: Int→, Emb✓, etc.)
+ *   4. Build Turnstile summary (same labels as the scraper: Int→, Emb✓, etc.)
  *   5. Compare summary against expected results
  *   6. Assert summary-to-replay consistency (method/signal match label)
  *
- * This replaces the `cf-test` CLI command from pydoll for browserless-side solver validation.
+ * This replaces the `cf-test` CLI command from the scraper for browserless-side solver validation.
  *
  * ## Prerequisites
  *
@@ -18,7 +18,7 @@
  *   - Browserless auto-started if not already running (auto-build + spawn)
  *   - If `just dev` is already running, globalSetup detects it and uses the existing instance
  *
- * For manual pydoll CLI debugging (not needed for vitest):
+ * For manual the scraper CLI debugging (not needed for vitest):
  *   Terminal 1: cd /Users/peter/Developer/browserless && just watch
  *   Terminal 2: cd /Users/peter/Developer/browserless && just dev
  *   Verify: curl http://localhost:3000/json/version
@@ -34,23 +34,23 @@
  *
  * ## Ad-hoc Debugging Commands (manual, not part of vitest)
  *
- * All from /Users/peter/Developer/catchseo/packages/pydoll-scraper.
+ * All from /Users/peter/Developer/catchseo/packages/the scraper.
  * OEILI_PROXY_URL is already set via .zshenv — no `op read` prefix needed.
  *
  *   # Nopecha serverside (browserless solver only)
- *   uv run pydoll nopecha --serverside --chrome-endpoint=local-browserless
+ *   uv run the scraper nopecha --serverside --chrome-endpoint=local-browserless
  *
  *   # Ahrefs fast (production path)
- *   uv run pydoll ahrefs-fast etsy.com --chrome-endpoint=local-browserless
+ *   uv run the scraper ahrefs-fast etsy.com --chrome-endpoint=local-browserless
  *
  *   # Any URL with solver
- *   uv run pydoll navigate https://nopecha.com/demo/cloudflare --serverside --chrome-endpoint=local-browserless
+ *   uv run the scraper navigate https://nopecha.com/demo/cloudflare --serverside --chrome-endpoint=local-browserless
  *
  *   # Multi-run reliability (5x)
- *   for i in $(seq 1 5); do uv run pydoll nopecha --serverside --chrome-endpoint=local-browserless; done
+ *   for i in $(seq 1 5); do uv run the scraper nopecha --serverside --chrome-endpoint=local-browserless; done
  *
  *   # Stress test
- *   uv run pydoll cf-stress --concurrent 10 --chrome-endpoint=local-browserless
+ *   uv run the scraper cf-stress --concurrent 10 --chrome-endpoint=local-browserless
  *
  * Run:
  *   npx vitest run --config vitest.integration.config.ts
@@ -174,7 +174,7 @@ interface CfTestSite {
   waitStrategy: "interstitial" | "turnstile";
   /**
    * Acceptable Turnstile summary labels.
-   * Matches pydoll's [Turnstile] output format:
+   * Matches the scraper's [Turnstile] output format:
    *   Int→ = interstitial auto-solved    Int✓ = interstitial click-solved
    *   Emb→ = embedded auto-solved        Emb✓ = embedded click-solved
    */

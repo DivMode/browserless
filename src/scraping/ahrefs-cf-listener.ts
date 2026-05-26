@@ -5,11 +5,11 @@
  * The CDPProxy already forwards these from the CF solver to the client WS.
  * Accumulates events and exposes collect() for the wide event builder.
  *
- * This replaces pydoll's CloudflareListener — same data, different transport.
+ * This replaces the scraper's CloudflareListener — same data, different transport.
  */
 import type { CDPSession } from "puppeteer-core";
 
-// ── CF Solve Metrics (matches pydoll's turnstile_* wide event fields) ──
+// ── CF Solve Metrics (matches the scraper's turnstile_* wide event fields) ──
 
 export interface CfSolveMetrics {
   // Detection

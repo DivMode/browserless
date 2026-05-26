@@ -37,7 +37,7 @@
  * Int→ Emb✗ timeout│ Interstitial passed, embedded failed  │ detected(int) → solved(→) → detected(ts) → failed(✗ timeout)
  * Int✓Int→ Emb→    │ Rechallenge + embedded auto           │ detected(int) → failed(✓) → rechallenge → detected(int) → solved(→) → detected(ts) → solved(→)
  *
- * DIAGNOSTIC LABELS (pydoll-side only)
+ * DIAGNOSTIC LABELS (the scraper-side only)
  * ──────────────────────────────────────────────────────────────────────
  * ⚠ No Data        │ Zero CF events in scrape
  * cf({n})          │ CF events but unrecognized phases

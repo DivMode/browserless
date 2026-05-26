@@ -61,7 +61,7 @@ npm run install:browsers
 Vitest has TWO configs:
 
 1. `npx vitest run` — unit tests (`*.test.ts`, excludes integration). Fast, no browser.
-2. `npx vitest run --config vitest.integration.config.ts` — integration tests (`*.integration.test.ts`). Launches real server, hits real CF sites, runs pydoll subprocess tests (ahrefs-fast, cf-stress, pytest). 60s timeout.
+2. `npx vitest run --config vitest.integration.config.ts` — integration tests (`*.integration.test.ts`). Launches real server, hits real CF sites, runs the scraper subprocess tests (ahrefs-fast, cf-stress, pytest). 60s timeout.
 
 `npx vitest run` alone only runs unit tests — ALWAYS run both.
 
@@ -244,7 +244,7 @@ Import from `@browserless.io/browserless`:
 - `availableBrowsers` - Promise of installed browser classes
 - `sleep(ms)`, `exists(path)`, `safeParse(json)`, `dedent()` - General utilities
 
-## External CDP Client Support (Pydoll, Playwright, etc.)
+## External CDP Client Support (The scraper, Playwright, etc.)
 
 ### Problem Solved
 
@@ -280,7 +280,7 @@ protected async onTargetCreated(target: Target) {
 }
 ```
 
-**Why this matters:** External clients (pydoll, raw CDP) create targets via `/json/new`. Puppeteer-stealth hooks (`onPageCreated`) were sending CDP commands that raced with the external client's commands, causing timeouts.
+**Why this matters:** External clients (the scraper, raw CDP) create targets via `/json/new`. Puppeteer-stealth hooks (`onPageCreated`) were sending CDP commands that raced with the external client's commands, causing timeouts.
 
 ### Key Fixes in `src/browsers/index.ts`
 

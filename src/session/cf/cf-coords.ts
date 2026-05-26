@@ -4,10 +4,11 @@
  * Extracted from cloudflare-solve-strategies.ts for maintainability.
  * Handles iframe-to-page coordinate transformation and box model center calculation.
  */
-import { Effect, Scope } from "effect";
+import type { Scope } from "effect";
+import { Effect } from "effect";
 import type { TargetId } from "../../shared/cloudflare-detection.js";
 import { CdpSessionId } from "../../shared/cloudflare-detection.js";
-import { CdpConnection } from "../../shared/cdp-rpc.js";
+import type { CdpConnection } from "../../shared/cdp-rpc.js";
 import { CdpSessionGone } from "./cf-errors.js";
 import { CLEAN_WS_OPEN_TIMEOUT_MS, CLEAN_WS_CMD_TIMEOUT_MS } from "./cf-schedules.js";
 import { openScopedWs } from "./cf-ws-resource.js";
@@ -48,7 +49,7 @@ export function getIframePageCoords(
  *
  * CdpSession's WS is tainted by rrweb's addScriptToEvaluateOnNewDocument
  * and Runtime.addBinding calls. A fresh page WS has zero state — matching
- * how pydoll connects via /devtools/page/{targetId}.
+ * how the scraper connects via /devtools/page/{targetId}.
  *
  * Returns a scoped CdpConnection — callers use Effect.scoped to guarantee
  * WS cleanup even on fiber interruption.

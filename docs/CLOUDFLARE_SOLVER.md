@@ -1,11 +1,11 @@
 # Cloudflare Solver — Browserless Server-Side Reference
 
-The browserless server-side CF solver detects and solves Cloudflare challenges without any client (pydoll) involvement. This doc covers the **server-side solver only** — for client-side Turnstile bypass via pydoll, see the pydoll source code in `pydoll/browser/tab.py`.
+The browserless server-side CF solver detects and solves Cloudflare challenges without any client (the scraper) involvement. This doc covers the **server-side solver only** — for client-side Turnstile bypass via the scraper, see the the scraper source code in `the scraper/browser/tab.py`.
 
 ## Architecture
 
 ```
-Browserless (producer)              Pydoll (consumer)
+Browserless (producer)              The scraper (consumer)
 ─────────────────────               ─────────────────
 CloudflareSolver (delegator)        cloudflare_listener.py
   ├─ CloudflareDetector               ├─ CloudflareListener
@@ -20,9 +20,9 @@ CloudflareSolver (delegator)        cloudflare_listener.py
            + recording markers
 ```
 
-**Boundary:** Browserless produces structured CDP events and recording markers. Pydoll consumes them into wide events, metrics, and diagnostics. Observability logic lives in pydoll, not browserless.
+**Boundary:** Browserless produces structured CDP events and recording markers. The scraper consumes them into wide events, metrics, and diagnostics. Observability logic lives in the scraper, not browserless.
 
-The solver intercepts CDP traffic flowing through browserless. When a page navigates to a CF challenge, the solver detects it, waits, discovers the Turnstile OOPIF, and clicks the checkbox — all transparently. Pydoll sees a normal page load.
+The solver intercepts CDP traffic flowing through browserless. When a page navigates to a CF challenge, the solver detects it, waits, discovers the Turnstile OOPIF, and clicks the checkbox — all transparently. The scraper sees a normal page load.
 
 ---
 
@@ -61,56 +61,56 @@ CF's WASM monitors V8 evaluation events in the page context. Even a single `Runt
 
 ReplaySession's WS connection has accumulated V8 state from recording setup — `Page.addScriptToEvaluateOnNewDocument` for rrweb, `Runtime.addBinding` for `__csrfp` and `__perf`. When `Runtime.callFunctionOn` executes in this tainted context, CF's WASM detects the modifications.
 
-Pydoll does its Phase 1 commands through a fresh `/devtools/page/{targetId}` WS. That connection has zero accumulated state — clean V8.
+The scraper does its Phase 1 commands through a fresh `/devtools/page/{targetId}` WS. That connection has zero accumulated state — clean V8.
 
-**Phase 1 is now re-enabled via a clean page WS.** The solver opens a fresh `/devtools/page/{targetId}` WS (matching pydoll's approach) for Phase 1's `DOM.getDocument(depth:-1, pierce:true)` traversal. This WS is created per-detection attempt, used only for the DOM walk, and immediately closed. Zero V8 state accumulation.
+**Phase 1 is now re-enabled via a clean page WS.** The solver opens a fresh `/devtools/page/{targetId}` WS (matching the scraper's approach) for Phase 1's `DOM.getDocument(depth:-1, pierce:true)` traversal. This WS is created per-detection attempt, used only for the DOM walk, and immediately closed. Zero V8 state accumulation.
 
 If `chromePort` is unavailable, Phase 1 gracefully skips and Phase 2's `parentFrameId` fallback handles OOPIF discovery.
 
 #### WS Routing and V8 State
 
-| Path                    | Endpoint                                        | V8 State                  | CF Safe?                |
-| ----------------------- | ----------------------------------------------- | ------------------------- | ----------------------- |
-| Phase 1 (page DOM walk) | Fresh `/devtools/page/{targetId}` WS            | Clean (new per-detection) | Yes                     |
-| Pydoll page commands    | `/devtools/page/{targetId}` (http-proxy tunnel) | Clean                     | Yes                     |
-| ReplaySession commands  | Internal direct WS                              | Tainted (rrweb, bindings) | **NO** for JS execution |
-| `sendViaProxy` (solver) | `/devtools/browser/{id}` (CDPProxy)             | N/A (browser-level)       | Yes                     |
-| OOPIF commands (both)   | OOPIF sessionId on any WS                       | Separate V8 isolate       | Yes                     |
+| Path                      | Endpoint                                        | V8 State                  | CF Safe?                |
+| ------------------------- | ----------------------------------------------- | ------------------------- | ----------------------- |
+| Phase 1 (page DOM walk)   | Fresh `/devtools/page/{targetId}` WS            | Clean (new per-detection) | Yes                     |
+| The scraper page commands | `/devtools/page/{targetId}` (http-proxy tunnel) | Clean                     | Yes                     |
+| ReplaySession commands    | Internal direct WS                              | Tainted (rrweb, bindings) | **NO** for JS execution |
+| `sendViaProxy` (solver)   | `/devtools/browser/{id}` (CDPProxy)             | N/A (browser-level)       | Yes                     |
+| OOPIF commands (both)     | OOPIF sessionId on any WS                       | Separate V8 isolate       | Yes                     |
 
 ---
 
-## Pydoll vs Browserless — Complete Comparison
+## The scraper vs Browserless — Complete Comparison
 
-Pydoll's `_bypass_cloudflare` (tab.py:1945-1966) was the working reference. We copied it to TypeScript in browserless. Below is every step compared, with every difference explicitly called out.
+The scraper's `_bypass_cloudflare` (tab.py:1945-1966) was the working reference. We copied it to TypeScript in browserless. Below is every step compared, with every difference explicitly called out.
 
 ### Side-by-Side Comparison Table
 
-| Step                        | Pydoll (Python)                                                                                                                     | Browserless (TypeScript)                                                                                                        | Same?                                                                                     |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| **Phase 1 (page DOM walk)** | `DOM.getDocument(depth=-1, pierce=True)` → shadow root `inner_html` check for CF iframe. Uses fresh `/devtools/page/` WS (clean V8) | `DOM.getDocument(depth=-1, pierce=true)` → tree walk for CF iframe. Uses fresh `/devtools/page/` WS (clean V8, matching pydoll) | **SAME** — both use clean page WS for Phase 1                                             |
-| **Detection**               | Shadow root inner_html matching from Phase 1                                                                                        | URL pattern matching (`detectCFFromUrl`) OR `Target.getTargets` (browser-level, zero page V8)                                   | **DIFFERENT** — browserless uses URL matching + `Target.getTargets`; pydoll uses DOM walk |
-| **Pre-click isSolved()**    | No                                                                                                                                  | No (explicitly removed)                                                                                                         | Same                                                                                      |
-| **OOPIF connection**        | `ConnectionHandler(connection_port=port)` — brand new WS to Chrome                                                                  | `sendViaProxy` — routes through CDPProxy's browser WS (opaque byte tunnel)                                                      | **DIFFERENT** — pydoll creates fresh WS; browserless reuses CDPProxy's browser WS         |
-| **OOPIF discovery filter**  | `Target.getTargets` → filter by `parentFrameId` match                                                                               | `Target.getTargets` → filter by frameId match, fallback to `parentFrameId`                                                      | Same (browserless now matches pydoll's `parentFrameId` approach)                          |
-| **Frame validation**        | `Page.getFrameTree(sessionId)` → validate frame identity via `owner_backend_id`                                                     | `Page.getFrameTree(sessionId)` → validate frame identity                                                                        | Same                                                                                      |
-| **Isolated world**          | `Page.createIsolatedWorld(frameId, 'pydoll::iframe::...', grantUniversalAccess=True)` → get `executionContextId`                    | `Page.createIsolatedWorld(frameId, worldName, grantUniversalAccess=true)` → get `executionContextId`                            | Same                                                                                      |
-| **Get document**            | `Runtime.evaluate('document.documentElement', contextId=isolatedWorld)` **in isolated world**                                       | `Runtime.evaluate('document.documentElement', contextId=isolatedWorld)` **in isolated world** (primary method)                  | Same                                                                                      |
-| **Find checkbox**           | `Runtime.callFunctionOn(querySelector('span.cb-i'))` on shadow objectId in isolated world                                           | Three methods tried in order: isolated world → runtime query → DOM tree walk. Polls 8× at 500ms                                 | **DIFFERENT** — browserless has polling + multiple fallback strategies                    |
-| **Coordinates**             | `DOM.getBoxModel` → center, **fallback to `getBoundingClientRect()` JS**                                                            | `DOM.getBoxModel` → center, **fallback to `getBoundingClientRect()` JS**                                                        | Same                                                                                      |
-| **Pre-click wait**          | None                                                                                                                                | 2000ms minimum elapsed since solve start (WASM arming delay)                                                                    | **DIFFERENT** — browserless waits for CF WASM to arm                                      |
-| **Mouse movement**          | Bezier curve via `Mouse.click()` (`humanize=True`) — moves from tracked position to target                                          | None — teleports directly to coordinates                                                                                        | **DIFFERENT** — pydoll humanizes mouse; browserless teleports                             |
-| **Click dispatch**          | `Input.dispatchMouseEvent` press + 100ms sleep + release via OOPIF sessionId                                                        | `Input.dispatchMouseEvent` press + 50-150ms sleep + release via oopifSessionId                                                  | Same pattern                                                                              |
-| **Click attribution**       | Not tracked                                                                                                                         | `clickDelivered` flag → `click_navigation` vs `auto_navigation` method in `cf.solved`                                           | **DIFFERENT** — browserless tracks click → navigation causality                           |
+| Step                        | The scraper (Python)                                                                                                                | Browserless (TypeScript)                                                                                                             | Same?                                                                                          |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| **Phase 1 (page DOM walk)** | `DOM.getDocument(depth=-1, pierce=True)` → shadow root `inner_html` check for CF iframe. Uses fresh `/devtools/page/` WS (clean V8) | `DOM.getDocument(depth=-1, pierce=true)` → tree walk for CF iframe. Uses fresh `/devtools/page/` WS (clean V8, matching the scraper) | **SAME** — both use clean page WS for Phase 1                                                  |
+| **Detection**               | Shadow root inner_html matching from Phase 1                                                                                        | URL pattern matching (`detectCFFromUrl`) OR `Target.getTargets` (browser-level, zero page V8)                                        | **DIFFERENT** — browserless uses URL matching + `Target.getTargets`; the scraper uses DOM walk |
+| **Pre-click isSolved()**    | No                                                                                                                                  | No (explicitly removed)                                                                                                              | Same                                                                                           |
+| **OOPIF connection**        | `ConnectionHandler(connection_port=port)` — brand new WS to Chrome                                                                  | `sendViaProxy` — routes through CDPProxy's browser WS (opaque byte tunnel)                                                           | **DIFFERENT** — the scraper creates fresh WS; browserless reuses CDPProxy's browser WS         |
+| **OOPIF discovery filter**  | `Target.getTargets` → filter by `parentFrameId` match                                                                               | `Target.getTargets` → filter by frameId match, fallback to `parentFrameId`                                                           | Same (browserless now matches the scraper's `parentFrameId` approach)                          |
+| **Frame validation**        | `Page.getFrameTree(sessionId)` → validate frame identity via `owner_backend_id`                                                     | `Page.getFrameTree(sessionId)` → validate frame identity                                                                             | Same                                                                                           |
+| **Isolated world**          | `Page.createIsolatedWorld(frameId, 'the scraper::iframe::...', grantUniversalAccess=True)` → get `executionContextId`               | `Page.createIsolatedWorld(frameId, worldName, grantUniversalAccess=true)` → get `executionContextId`                                 | Same                                                                                           |
+| **Get document**            | `Runtime.evaluate('document.documentElement', contextId=isolatedWorld)` **in isolated world**                                       | `Runtime.evaluate('document.documentElement', contextId=isolatedWorld)` **in isolated world** (primary method)                       | Same                                                                                           |
+| **Find checkbox**           | `Runtime.callFunctionOn(querySelector('span.cb-i'))` on shadow objectId in isolated world                                           | Three methods tried in order: isolated world → runtime query → DOM tree walk. Polls 8× at 500ms                                      | **DIFFERENT** — browserless has polling + multiple fallback strategies                         |
+| **Coordinates**             | `DOM.getBoxModel` → center, **fallback to `getBoundingClientRect()` JS**                                                            | `DOM.getBoxModel` → center, **fallback to `getBoundingClientRect()` JS**                                                             | Same                                                                                           |
+| **Pre-click wait**          | None                                                                                                                                | 2000ms minimum elapsed since solve start (WASM arming delay)                                                                         | **DIFFERENT** — browserless waits for CF WASM to arm                                           |
+| **Mouse movement**          | Bezier curve via `Mouse.click()` (`humanize=True`) — moves from tracked position to target                                          | None — teleports directly to coordinates                                                                                             | **DIFFERENT** — the scraper humanizes mouse; browserless teleports                             |
+| **Click dispatch**          | `Input.dispatchMouseEvent` press + 100ms sleep + release via OOPIF sessionId                                                        | `Input.dispatchMouseEvent` press + 50-150ms sleep + release via oopifSessionId                                                       | Same pattern                                                                                   |
+| **Click attribution**       | Not tracked                                                                                                                         | `clickDelivered` flag → `click_navigation` vs `auto_navigation` method in `cf.solved`                                                | **DIFFERENT** — browserless tracks click → navigation causality                                |
 
 ### Why `Page.createIsolatedWorld` Matters
 
-Pydoll's `IFrameContextResolver` calls `Page.createIsolatedWorld(frameId)` to create an **isolated execution context** in the OOPIF frame. Isolated worlds share the DOM but have **completely separate JavaScript globals** — like Chrome extension content scripts. Any detection code running in the main world (including CF's own code within the Turnstile iframe) **CANNOT observe JS execution in an isolated world**.
+The scraper's `IFrameContextResolver` calls `Page.createIsolatedWorld(frameId)` to create an **isolated execution context** in the OOPIF frame. Isolated worlds share the DOM but have **completely separate JavaScript globals** — like Chrome extension content scripts. Any detection code running in the main world (including CF's own code within the Turnstile iframe) **CANNOT observe JS execution in an isolated world**.
 
 ```python
-# pydoll/interactions/iframe.py:319-337
+# the scraper/interactions/iframe.py:319-337
 create_command = PageCommands.create_isolated_world(
     frame_id=frame_id,
-    world_name=f'pydoll::iframe::{frame_id}',
+    world_name=f'the scraper::iframe::{frame_id}',
     grant_universal_access=True,
 )
 create_command['sessionId'] = session_id
@@ -120,9 +120,9 @@ execution_context_id = create_response['result']['executionContextId']
 
 Then ALL subsequent `Runtime.evaluate` and `Runtime.callFunctionOn` calls use this `executionContextId`. They are invisible to any code in the main world.
 
-Browserless now does the same — `Page.createIsolatedWorld` on the OOPIF frame, then all `Runtime.evaluate` and `Runtime.callFunctionOn` calls use the isolated `executionContextId`. This matches pydoll's defensive approach: even though CF's WASM runs in the **page's** V8 (not the OOPIF's), the isolated world provides an extra layer of protection against any future OOPIF-level detection.
+Browserless now does the same — `Page.createIsolatedWorld` on the OOPIF frame, then all `Runtime.evaluate` and `Runtime.callFunctionOn` calls use the isolated `executionContextId`. This matches the scraper's defensive approach: even though CF's WASM runs in the **page's** V8 (not the OOPIF's), the isolated world provides an extra layer of protection against any future OOPIF-level detection.
 
-### Pydoll's Full Call Chain
+### The scraper's Full Call Chain
 
 ```
 Tab._bypass_cloudflare()
@@ -172,10 +172,10 @@ cloudflare-solve-strategies.ts:
        ├─ Phase 2: OOPIF discovery via sendViaProxy   ← CDPProxy browser WS (not isolated WS)
        │    ├─ Target.getTargets → filter frameId match, fallback parentFrameId
        │    ├─ Target.attachToTarget(flatten=true)     ← get oopifSessionId
-       │    ├─ Page.getFrameTree(sessionId)            ← validate frame (matches pydoll)
+       │    ├─ Page.getFrameTree(sessionId)            ← validate frame (matches the scraper)
        │    └─ marker: cf.oopif_discovered {method, via: 'proxy_ws'}
        ├─ Phase 3: Isolated world + checkbox
-       │    ├─ Page.createIsolatedWorld(frameId)       ← isolated JS context (matches pydoll)
+       │    ├─ Page.createIsolatedWorld(frameId)       ← isolated JS context (matches the scraper)
        │    ├─ marker: cf.cdp_dom_session {executionContextId}
        │    └─ Checkbox polling (8 × 500ms, 3 find methods):
        │         ├─ isolated_world: Runtime.evaluate in isolated context
@@ -197,9 +197,9 @@ cloudflare-solve-strategies.ts:
             └─ cf.solved {method: 'click_navigation' | 'auto_navigation'}
 ```
 
-### Pydoll OOPIF Patch (Browserless Adapter)
+### The scraper OOPIF Patch (Browserless Adapter)
 
-`pydoll-scraper/src/evasion/pydoll_oopif_patch.py` patches pydoll to work through the Browserless WebSocket proxy:
+`scraper/src/evasion/oopif_patch.py` patches the scraper to work through the Browserless WebSocket proxy:
 
 | Patch                         | What It Does                                                                                                                                                                   |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -239,14 +239,14 @@ cloudflare-solve-strategies.ts:
 | `cloudflare-detection.ts`          | `CF_DETECTION_JS` (post-click only), re-exports `CloudflareSnapshot` type |
 | `mouse-humanizer.ts`               | Mouse presence simulation, Bezier movement                                |
 
-### Client-side — `pydoll-scraper/src/`
+### Client-side — `scraper/src/`
 
-| File                            | Role                                                                                       |
-| ------------------------------- | ------------------------------------------------------------------------------------------ |
-| `cf_snapshot.py`                | Generated Pydantic v2 model from JSON Schema                                               |
-| `cf_phase.py`                   | `CFPhaseSnapshot` — frozen per-phase wrapper                                               |
-| `cloudflare_listener.py`        | `_Waiter` with per-phase snapshots, coordination/accumulation state split                  |
-| `evasion/pydoll_oopif_patch.py` | Patches pydoll for Browserless proxy (OOPIF resolver, replay markers, new_tab propagation) |
+| File                     | Role                                                                                            |
+| ------------------------ | ----------------------------------------------------------------------------------------------- |
+| `cf_snapshot.py`         | Generated Pydantic v2 model from JSON Schema                                                    |
+| `cf_phase.py`            | `CFPhaseSnapshot` — frozen per-phase wrapper                                                    |
+| `cloudflare_listener.py` | `_Waiter` with per-phase snapshots, coordination/accumulation state split                       |
+| `evasion/oopif_patch.py` | Patches the scraper for Browserless proxy (OOPIF resolver, replay markers, new_tab propagation) |
 
 ### Key external references
 
@@ -287,7 +287,7 @@ The detection polling loop runs repeatedly while waiting for the Turnstile ifram
 
 `Target.getTargets` is the only safe detection method. It operates at the browser level with zero page interaction.
 
-**Pydoll's approach:** `_find_cloudflare_shadow_root` uses `DOM.getDocument(depth=-1, pierce=True)` → walks shadow roots → checks `inner_html` for `challenges.cloudflare.com`. This works for pydoll because it runs once per solve attempt, not in a polling loop.
+**The scraper's approach:** `_find_cloudflare_shadow_root` uses `DOM.getDocument(depth=-1, pierce=True)` → walks shadow roots → checks `inner_html` for `challenges.cloudflare.com`. This works for the scraper because it runs once per solve attempt, not in a polling loop.
 
 ### Path 3: OOPIF Target Events
 
@@ -320,7 +320,7 @@ URL match / Target.getTargets / OOPIF event
         │
         ▼
   Phase 3: Isolated world + checkbox
-  Page.createIsolatedWorld(frameId) ← Isolated JS context (matches pydoll)
+  Page.createIsolatedWorld(frameId) ← Isolated JS context (matches the scraper)
   Poll checkbox (8 × 500ms)         ← isolated_world → runtime_query → dom_tree_walk
         │
         ▼
@@ -375,10 +375,10 @@ const { sessionId: oopifSessionId } = await rawSend("Target.attachToTarget", {
   flatten: true,
 });
 
-// 4. Validate frame via getFrameTree (matches pydoll)
+// 4. Validate frame via getFrameTree (matches the scraper)
 const { frameTree } = await rawSend("Page.getFrameTree", {}, oopifSessionId);
 
-// 5. Create isolated world (matches pydoll)
+// 5. Create isolated world (matches the scraper)
 const { executionContextId } = await rawSend(
   "Page.createIsolatedWorld",
   {
@@ -422,13 +422,13 @@ Active discovery via `Target.getTargets` + `Target.attachToTarget` avoids this �
 
 ### Detected — NEVER use on CF challenge page before clicking
 
-| Command                                 | Scope                           | Why Dangerous                                                                                                                                                                                                                                                                |
-| --------------------------------------- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Runtime.evaluate`                      | Page session                    | Executes in the PAGE's V8 context. CF's WASM monitors V8 evaluation events. Even `document.title` triggers detection. In a detection polling loop, causes rechallenge.                                                                                                       |
-| `DOM.getDocument` (polling)             | Page session (repeated)         | Safe as a single call, but repeated calls in a detection polling loop (20×200ms) cause CF timeout — the widget never solves. Proven 2026-02-24.                                                                                                                              |
-| `Runtime.callFunctionOn`                | Page session through tainted WS | When the WS has accumulated V8 state from recording setup (rrweb scripts, `Runtime.addBinding`), callFunctionOn inherits that tainted context. This is why Phase 1 (page-side shadow root walk) was detected through ReplaySession's WS but works through pydoll's clean WS. |
-| `Runtime.addBinding`                    | Page session                    | Creates a callable function in the page's V8 context. May be enumerable.                                                                                                                                                                                                     |
-| `Page.addScriptToEvaluateOnNewDocument` | Page session                    | Injects JS that runs on page load. CF may detect injection traces. Also taints the WS connection's V8 state for all subsequent commands.                                                                                                                                     |
+| Command                                 | Scope                           | Why Dangerous                                                                                                                                                                                                                                                                     |
+| --------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Runtime.evaluate`                      | Page session                    | Executes in the PAGE's V8 context. CF's WASM monitors V8 evaluation events. Even `document.title` triggers detection. In a detection polling loop, causes rechallenge.                                                                                                            |
+| `DOM.getDocument` (polling)             | Page session (repeated)         | Safe as a single call, but repeated calls in a detection polling loop (20×200ms) cause CF timeout — the widget never solves. Proven 2026-02-24.                                                                                                                                   |
+| `Runtime.callFunctionOn`                | Page session through tainted WS | When the WS has accumulated V8 state from recording setup (rrweb scripts, `Runtime.addBinding`), callFunctionOn inherits that tainted context. This is why Phase 1 (page-side shadow root walk) was detected through ReplaySession's WS but works through the scraper's clean WS. |
+| `Runtime.addBinding`                    | Page session                    | Creates a callable function in the page's V8 context. May be enumerable.                                                                                                                                                                                                          |
+| `Page.addScriptToEvaluateOnNewDocument` | Page session                    | Injects JS that runs on page load. CF may detect injection traces. Also taints the WS connection's V8 state for all subsequent commands.                                                                                                                                          |
 
 **The V8 context boundary:** CF's WASM runs in the main page's V8 context. Anything that touches the page's V8 is visible to it. The OOPIF (Turnstile iframe) runs in a **separate V8 isolate** — JS execution there is invisible to the page. `DOM.*` commands use Chrome's C++ DOM implementation, never entering V8 at all. Isolated worlds (via `Page.createIsolatedWorld`) share the DOM but have **separate JS globals** — code in the main world cannot observe execution in an isolated world.
 
@@ -455,7 +455,7 @@ Note: `_cf_chl_opt` is only read post-click via `CF_DETECTION_JS` in background 
 
 ## CDP Events Emitted
 
-The solver emits custom CDP events consumed by pydoll's `CloudflareListener`:
+The solver emits custom CDP events consumed by the scraper's `CloudflareListener`:
 
 | Event                           | Payload                                                                          | When                             |
 | ------------------------------- | -------------------------------------------------------------------------------- | -------------------------------- |
@@ -464,7 +464,7 @@ The solver emits custom CDP events consumed by pydoll's `CloudflareListener`:
 | `Browserless.challengeSolved`   | `{solved, type, method, token?, duration_ms, attempts, auto_resolved?, signal?}` | Challenge solved                 |
 | `Browserless.challengeFailed`   | `{reason, duration_ms, attempts}`                                                | All attempts exhausted           |
 
-These are injected into the CDP stream between browserless and pydoll. Pydoll's `_Waiter` collects them into per-phase `CFPhaseSnapshot` objects (frozen Pydantic models).
+These are injected into the CDP stream between browserless and the scraper. The scraper's `_Waiter` collects them into per-phase `CFPhaseSnapshot` objects (frozen Pydantic models).
 
 **`state` values in `challengeProgress`:**
 
@@ -605,11 +605,11 @@ Implemented `disconnectForChallenge()` / `reconnectAfterChallenge()` — close a
 
 Improved solve rate but wasn't 100% — the detection JS had already run before disconnect.
 
-#### Phase 5: Zero-injection copying pydoll's approach (THE FIX, 2026-02-23)
+#### Phase 5: Zero-injection copying the scraper's approach (THE FIX, 2026-02-23)
 
 Root cause identified: `Runtime.evaluate(CF_DETECTION_JS)` on the page before clicking. CF's WASM observes V8 evaluation in the page context and flags the session.
 
-**Fix:** Replace all pre-click `Runtime.evaluate` with pydoll's approach:
+**Fix:** Replace all pre-click `Runtime.evaluate` with the scraper's approach:
 
 - **Detection:** URL pattern matching (zero CDP) + `DOM.getDocument` walk (C++ layer, bypasses V8)
 - **Click target:** Isolated WS → active OOPIF discovery via `Target.getTargets` → `Target.attachToTarget` → `Runtime.callFunctionOn` on OOPIF (separate V8 isolate) → shadow root walk → `span.cb-i` checkbox
@@ -631,11 +631,11 @@ Result: 3/3 on nopecha, 3-5s solve time, 100% Ahrefs production solve rate.
 
 #### Phase 6: V8 Context Tainting Discovery (2026-02-23)
 
-After Phase 5's zero-injection fix gave 100% solve rate, investigated **why** Phase 1 (page-side DOM traversal) was detected while pydoll's identical commands were not.
+After Phase 5's zero-injection fix gave 100% solve rate, investigated **why** Phase 1 (page-side DOM traversal) was detected while the scraper's identical commands were not.
 
 **Root cause:** Not `DOM.getDocument(pierce:true)` itself — that's C++ layer, always safe. Phase 1 also called `Runtime.callFunctionOn` on shadow root objects to walk the DOM tree. When sent through ReplaySession's internal WS, this command executed in a V8 context tainted by recording setup (`Page.addScriptToEvaluateOnNewDocument` for rrweb, `Runtime.addBinding` for `__csrfp`/`__perf`). CF's WASM detected the accumulated state.
 
-Pydoll does the **exact same Phase 1 commands** but through a fresh `/devtools/page/{targetId}` WS — CDPProxy's opaque byte tunnel with zero accumulated V8 state. Clean context, no detection.
+The scraper does the **exact same Phase 1 commands** but through a fresh `/devtools/page/{targetId}` WS — CDPProxy's opaque byte tunnel with zero accumulated V8 state. Clean context, no detection.
 
 **Changes made:**
 
@@ -644,9 +644,9 @@ Pydoll does the **exact same Phase 1 commands** but through a fresh `/devtools/p
 | OOPIF command routing   | `createIsolatedConnection()` (fresh raw WS per attempt) | `sendViaProxy` (CDPProxy browser WS — clean, reusable)                                              |
 | Phase 1 (page DOM walk) | Attempted through ReplaySession's tainted WS            | **RE-ENABLED** via fresh `/devtools/page/` WS (marker: `cf.page_traversal {skipped_phase1: false}`) |
 | Turnstile detection     | `DOM.getDocument(pierce:true)` on page → tree walk      | `Target.getTargets` (browser-level, zero page V8)                                                   |
-| OOPIF discovery filter  | URL-only filter                                         | frameId match + `parentFrameId` fallback (matches pydoll)                                           |
-| Frame validation        | Skipped                                                 | `Page.getFrameTree(sessionId)` (matches pydoll)                                                     |
-| Isolated world          | Not done                                                | `Page.createIsolatedWorld(frameId)` (matches pydoll)                                                |
+| OOPIF discovery filter  | URL-only filter                                         | frameId match + `parentFrameId` fallback (matches the scraper)                                      |
+| Frame validation        | Skipped                                                 | `Page.getFrameTree(sessionId)` (matches the scraper)                                                |
+| Isolated world          | Not done                                                | `Page.createIsolatedWorld(frameId)` (matches the scraper)                                           |
 | Checkbox finding        | Single attempt                                          | 8 polls × 500ms, 3 methods: `isolated_world` → `runtime_query` → `dom_tree_walk`                    |
 | Pre-click wait          | None                                                    | 2000ms minimum elapsed (WASM arming delay)                                                          |
 | Click attribution       | Not tracked                                             | `clickDelivered` flag → `click_navigation` vs `auto_navigation` in `cf.solved`                      |

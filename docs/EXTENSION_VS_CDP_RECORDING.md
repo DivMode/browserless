@@ -54,14 +54,14 @@ Every 500ms per tab:
   → Parse JSON response → sessionReplay.addTabEvents()
 ```
 
-With 5 concurrent tabs, this was 10 `Runtime.evaluate` commands per second just for event collection — separate from pydoll's own CDP commands (navigation, DOM queries, form fills) and the CF solver's polling.
+With 5 concurrent tabs, this was 10 `Runtime.evaluate` commands per second just for event collection — separate from the scraper's own CDP commands (navigation, DOM queries, form fills) and the CF solver's polling.
 
 ### Per-page WebSockets
 
 To reduce contention on the single browser-level WebSocket, the server opened dedicated per-page WebSocket connections (`ws://127.0.0.1:{port}/devtools/page/{targetId}`) and routed `Runtime.evaluate` calls through them. This eliminated contention between tabs but added complexity: keepalive management, reconnection logic, and a new class of bugs when these connections died.
 
 ```
-pydoll → CDPProxy WS (browser-level)  → Chrome
+the scraper → CDPProxy WS (browser-level)  → Chrome
 browserless → Replay WS (browser-level) → Chrome
 browserless → Per-page WS ×5 (per tab)  → Chrome page isolates
 ```
@@ -130,12 +130,12 @@ The 0-event replay bug ([WEBSOCKET_ARCHITECTURE.md §6](WEBSOCKET_ARCHITECTURE.m
 
 At 500ms intervals across 5 tabs:
 
-| Component         | CDP Commands/sec | Purpose                                    |
-| ----------------- | ---------------- | ------------------------------------------ |
-| Event collection  | 10               | `Runtime.evaluate` (5 tabs × 2/sec)        |
-| CF solver polling | 2–10             | `Runtime.evaluate` for Turnstile detection |
-| pydoll commands   | Variable         | Navigation, DOM queries, form fills        |
-| **Total**         | **12–20+**       | All competing on shared WebSocket          |
+| Component            | CDP Commands/sec | Purpose                                    |
+| -------------------- | ---------------- | ------------------------------------------ |
+| Event collection     | 10               | `Runtime.evaluate` (5 tabs × 2/sec)        |
+| CF solver polling    | 2–10             | `Runtime.evaluate` for Turnstile detection |
+| the scraper commands | Variable         | Navigation, DOM queries, form fills        |
+| **Total**            | **12–20+**       | All competing on shared WebSocket          |
 
 Under concurrency (15 tabs), this scaled to 30+ `Runtime.evaluate` commands per second for event collection alone. Each command took ~8s under contention (see [CLOUDFLARE_SOLVER.md](CLOUDFLARE_SOLVER.md)), making the polling model fundamentally unscalable.
 

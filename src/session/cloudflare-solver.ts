@@ -649,7 +649,7 @@ export class CloudflareSolver {
     // FiberMap.run auto-interrupts existing fiber for same key.
     // The detection effect is wrapped in catchCause to prevent silent fiber
     // death — without this, defects (NPE in emitClientEvent, etc.) kill the fiber
-    // and pydoll never receives cf.solved/cf.failed (the "events=1" failure mode).
+    // and the scraper never receives cf.solved/cf.failed (the "events=1" failure mode).
     const tab = this.tabRuntimes.get(targetId)!;
     const stateTracker = this.stateTracker;
     const strategies = this.strategies;
@@ -711,7 +711,7 @@ export class CloudflareSolver {
           yield* Effect.logError("Detection fiber crashed — emitting fallback failure").pipe(
             Effect.annotateLogs({ targetId, error: pretty }),
           );
-          // Emit cf.failed so pydoll doesn't hang waiting for event #2
+          // Emit cf.failed so the scraper doesn't hang waiting for event #2
           const crashCtx = this.stateTracker.registry.getContext(targetId);
           if (crashCtx && !crashCtx.aborted) {
             const duration = Date.now() - crashCtx.active.startTime;

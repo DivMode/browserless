@@ -1,17 +1,17 @@
-# Browserless rrweb Session Recording Fix for CDP Clients (Pydoll)
+# Browserless rrweb Session Recording Fix for CDP Clients (The scraper)
 
 ## TL;DR - What Was Fixed
 
-Multiple issues were fixed to make rrweb session recordings work with CDP clients like Pydoll:
+Multiple issues were fixed to make rrweb session recordings work with CDP clients like The scraper:
 
-| Issue                               | Root Cause                                                                              | Fix                                                                                    | File                                    |
-| ----------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | --------------------------------------- |
-| **Recording not starting**          | Pydoll uses existing tabs, not `newPage()`                                              | Connect internal Puppeteer to browser, set up recording for all tabs                   | `src/browsers/index.ts`                 |
-| **Events lost on navigation**       | 1-second polling + page unload destroys in-memory events                                | Collect events on `Page.frameStartedLoading` BEFORE navigation                         | `src/browsers/index.ts`                 |
-| **CDP session isolation**           | `addScriptToEvaluateOnNewDocument` may not fire for navigations from other CDP sessions | Re-inject on `Page.frameNavigated`, `Page.loadEventFired`, `Page.domContentEventFired` | `src/browsers/index.ts`                 |
-| **Self-healing too slow**           | 1-second check interval                                                                 | Reduced to 200ms polling                                                               | `src/browsers/index.ts`                 |
-| **Concurrent scraper cleanup race** | `get_browser_id()` returned newest session, not calling scraper's session               | Use `trackingId` param to identify own session                                         | `pydoll-scraper/src/evasion/browser.py` |
-| **Session state desync**            | Recording setup blocked session registration for 180s                                   | Add `protocolTimeout: 10000` to internal Puppeteer connection                          | `src/browsers/index.ts`                 |
+| Issue                               | Root Cause                                                                              | Fix                                                                                    | File                             |
+| ----------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------- |
+| **Recording not starting**          | The scraper uses existing tabs, not `newPage()`                                         | Connect internal Puppeteer to browser, set up recording for all tabs                   | `src/browsers/index.ts`          |
+| **Events lost on navigation**       | 1-second polling + page unload destroys in-memory events                                | Collect events on `Page.frameStartedLoading` BEFORE navigation                         | `src/browsers/index.ts`          |
+| **CDP session isolation**           | `addScriptToEvaluateOnNewDocument` may not fire for navigations from other CDP sessions | Re-inject on `Page.frameNavigated`, `Page.loadEventFired`, `Page.domContentEventFired` | `src/browsers/index.ts`          |
+| **Self-healing too slow**           | 1-second check interval                                                                 | Reduced to 200ms polling                                                               | `src/browsers/index.ts`          |
+| **Concurrent scraper cleanup race** | `get_browser_id()` returned newest session, not calling scraper's session               | Use `trackingId` param to identify own session                                         | `scraper/src/evasion/browser.py` |
+| **Session state desync**            | Recording setup blocked session registration for 180s                                   | Add `protocolTimeout: 10000` to internal Puppeteer connection                          | `src/browsers/index.ts`          |
 
 ---
 
@@ -19,14 +19,14 @@ Multiple issues were fixed to make rrweb session recordings work with CDP client
 
 ### The Problem
 
-**Symptom:** `eventCount: 0` in recordings for Pydoll, but works for Puppeteer.
+**Symptom:** `eventCount: 0` in recordings for The scraper, but works for Puppeteer.
 
 **Why it happens:**
 
-| Client       | How it works                                                                    | Recording setup                                                             |
-| ------------ | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| Puppeteer    | Calls `browser.newPage()` through Browserless wrapper                           | Browserless intercepts, emits `newPage` event, calls `setupPageRecording()` |
-| Pydoll (CDP) | Connects directly to Chrome via CDP, uses `get_opened_tabs()[0]` (existing tab) | `newPage` event never fires, recording never set up                         |
+| Client            | How it works                                                                    | Recording setup                                                             |
+| ----------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Puppeteer         | Calls `browser.newPage()` through Browserless wrapper                           | Browserless intercepts, emits `newPage` event, calls `setupPageRecording()` |
+| The scraper (CDP) | Connects directly to Chrome via CDP, uses `get_opened_tabs()[0]` (existing tab) | `newPage` event never fires, recording never set up                         |
 
 ### The Fix
 
@@ -49,14 +49,14 @@ pptr.on("targetcreated", async (target) => {
   if (page) await setupRecordingForPage(page, "new");
 });
 
-// Set up recording for EXISTING tabs (including the one Pydoll will use)
+// Set up recording for EXISTING tabs (including the one The scraper will use)
 const pages = await pptr.pages();
 for (const page of pages) {
   await setupRecordingForPage(page, "existing");
 }
 ```
 
-**Why internal Puppeteer?** We need a reliable way to get Page objects with CDP access. Puppeteer gives us this. The internal connection is separate from Pydoll's - they don't interfere.
+**Why internal Puppeteer?** We need a reliable way to get Page objects with CDP access. Puppeteer gives us this. The internal connection is separate from The scraper's - they don't interfere.
 
 ---
 
@@ -108,14 +108,14 @@ Timeline (NEW - event-driven + 200ms polling):
 
 ### The Problem
 
-**Symptom:** rrweb script doesn't run after Pydoll navigates to a new page.
+**Symptom:** rrweb script doesn't run after The scraper navigates to a new page.
 
 **Why it happens:**
 
-Chrome DevTools Protocol has **session isolation**. When Browserless registers `Page.addScriptToEvaluateOnNewDocument` on its internal Puppeteer CDP session, it might not execute for navigations triggered by a different CDP session (Pydoll's session).
+Chrome DevTools Protocol has **session isolation**. When Browserless registers `Page.addScriptToEvaluateOnNewDocument` on its internal Puppeteer CDP session, it might not execute for navigations triggered by a different CDP session (The scraper's session).
 
 ```
-Browserless Internal Session          Pydoll's Session
+Browserless Internal Session          The scraper's Session
          │                                   │
          │ addScriptToEvaluateOnNewDocument  │
          │ (registered here)                 │
@@ -159,7 +159,7 @@ emitter.on("Page.domContentEventFired", () => injectAfterNavigation("domContentE
 
 ### The Problem
 
-**Symptom:** When running multiple Pydoll scrapers concurrently:
+**Symptom:** When running multiple The Python scrapers concurrently:
 
 - Sessions accumulate and never get cleaned up
 - Hit Browserless concurrent session limit (e.g., 20)
@@ -168,7 +168,7 @@ emitter.on("Page.domContentEventFired", () => injectAfterNavigation("domContentE
 
 **Why it happens:**
 
-Pydoll's `get_browser_id()` function found the session to kill by selecting the **newest** session:
+The scraper's `get_browser_id()` function found the session to kill by selecting the **newest** session:
 
 ```python
 # WRONG - browser.py (old code)
@@ -192,7 +192,7 @@ Session A: NEVER CLEANED UP
 
 **Solution:** Use Browserless's `trackingId` parameter to uniquely identify each scraper's session.
 
-**File:** `packages/pydoll-scraper/src/evasion/browser.py`
+**File:** `packages/scraper/src/evasion/browser.py`
 
 ```python
 import uuid
@@ -378,7 +378,7 @@ Result:
 │                                    ▲                                     │
 │                                    │                                     │
 │  ┌────────────────────────────────────────────────────────────────────┐ │
-│  │                    PYDOLL (CDP CLIENT)                             │ │
+│  │                    SCRAPER (CDP CLIENT)                             │ │
 │  │                                                                    │ │
 │  │  1. Connect: ws://browserless:3000?replay=true&trackingId=abc123   │ │
 │  │  2. get_opened_tabs() → uses tabs[0]                               │ │
@@ -391,7 +391,7 @@ Result:
 │  ┌────────────────────────────────────────────────────────────────────┐ │
 │  │                    SESSION CLOSE FLOW                              │ │
 │  │                                                                    │ │
-│  │  1. Pydoll disconnects WebSocket                                   │ │
+│  │  1. The scraper disconnects WebSocket                                   │ │
 │  │  2. Browserless detects disconnect                                 │ │
 │  │  3. stopRecording(sessionId) called                                │ │
 │  │     ├── Run finalCollectors (last collectEvents())                 │ │
@@ -414,7 +414,7 @@ Result:
 | `src/browsers/index.ts` | Added `setupRecordingForAllTabs()` with `protocolTimeout: 10000`, CDP event listeners (`Page.frameStartedLoading`, `Page.frameNavigated`, `Page.loadEventFired`, `Page.domContentEventFired`), reduced polling to 200ms |
 | `src/session-replay.ts` | Added `finalCollectors`, `cleanupFns` to `SessionRecordingState`, `registerFinalCollector()`, `registerCleanupFn()` methods                                                                                             |
 
-### Pydoll Scraper (`/Users/peter/Developer/catchseo/packages/pydoll-scraper`)
+### the Python scraper (`/Users/peter/Developer/catchseo/packages/scraper`)
 
 | File                     | Changes                                                                                                                          |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
@@ -440,9 +440,9 @@ bunx sst deploy
 ### Test Single Scraper
 
 ```bash
-cd /Users/peter/Developer/catchseo/packages/pydoll-scraper
+cd /Users/peter/Developer/catchseo/packages/scraper
 \
-  uv run pydoll ahrefs example.com --chrome-endpoint=browserless
+  uv run the scraper ahrefs example.com --chrome-endpoint=browserless
 
 # Check recording created with events
 curl -s http://192.168.4.200:3000/recordings | jq '.[0] | {id, eventCount, duration}'
@@ -455,7 +455,7 @@ curl -s http://192.168.4.200:3000/recordings | jq '.[0] | {id, eventCount, durat
 # Run 5 scrapers in parallel
 for i in {1..5}; do
   \
-    uv run pydoll ahrefs domain$i.com --chrome-endpoint=browserless &
+    uv run the scraper ahrefs domain$i.com --chrome-endpoint=browserless &
 done
 wait
 
@@ -498,7 +498,7 @@ curl -s http://192.168.4.200:3000/sessions | jq '.[0]'
 
 ## Key Insights
 
-1. **CDP clients (Pydoll) bypass Browserless's page lifecycle hooks** - They connect directly to Chrome and use existing tabs, so `newPage` events never fire.
+1. **CDP clients (The scraper) bypass Browserless's page lifecycle hooks** - They connect directly to Chrome and use existing tabs, so `newPage` events never fire.
 
 2. **`Page.addScriptToEvaluateOnNewDocument` has session isolation** - Scripts registered by one CDP session may not run for navigations triggered by another session. Must re-inject on navigation events.
 
@@ -506,6 +506,6 @@ curl -s http://192.168.4.200:3000/sessions | jq '.[0]'
 
 4. **Concurrent scrapers need unique identifiers** - Using "newest session" to find your session fails with multiple scrapers. Use `trackingId` parameter.
 
-5. **Multiple CDP connections to same browser work fine** - Browserless's internal Puppeteer and Pydoll's CDP connection don't interfere with each other.
+5. **Multiple CDP connections to same browser work fine** - Browserless's internal Puppeteer and The scraper's CDP connection don't interfere with each other.
 
 6. **Recording setup must not block session registration** - If `setupRecordingForAllTabs()` takes too long, the session is never added to `this.browsers` Map, causing state desync where limiter shows running jobs but `/sessions` returns empty. Use short `protocolTimeout` (10s) to fail fast.

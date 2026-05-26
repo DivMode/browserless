@@ -369,7 +369,7 @@ export const classifyNavigationOutcome = (
  * Detection lifecycle for Cloudflare challenges.
  *
  * ZERO-INJECTION on CF pages: No Runtime.evaluate, no addScriptToEvaluateOnNewDocument,
- * no Runtime.addBinding on CF challenge pages. This matches what happens when pydoll's
+ * no Runtime.addBinding on CF challenge pages. This matches what happens when the scraper's
  * native solver runs (which succeeds) — zero server-side JS execution on CF pages.
  *
  * For EMBEDDED types (turnstile on third-party pages), the bridge is pre-injected via
@@ -568,7 +568,7 @@ export class CloudflareDetector {
               // Emit CFEvent.Solved BEFORE abortAndResolve — same pattern as InterstitialSolved.
               // abortAndResolve() tears down ctx.scope which interrupts the handleEmbeddedDetection
               // fiber hosting awaitResolutionRace. If we don't emit here, the CDP event
-              // (Browserless.cloudflareSolved) is never delivered to pydoll.
+              // (Browserless.cloudflareSolved) is never delivered to the scraper.
               const attr = deriveSolveAttribution("page_navigated", o.clickDelivered);
               const result = {
                 solved: true as const,
@@ -1961,7 +1961,7 @@ export class CloudflareDetector {
               // Settle current detection — phase label ↻ (reload) instead of ✗
               yield* active.resolution.fail("widget_reload", duration, "↻");
 
-              // Emit CFEvent.Failed so pydoll receives the CDP event.
+              // Emit CFEvent.Failed so the scraper receives the CDP event.
               // awaitResolutionRace (below) won't run because we return early.
               const label = self.state.buildCompoundLabel(targetId);
               self.cfPublish(

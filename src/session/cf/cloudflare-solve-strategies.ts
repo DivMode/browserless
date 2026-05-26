@@ -169,7 +169,7 @@ interface CDPNode {
  *
  * All methods return Effect — callers use yield* from Effect.gen contexts.
  *
- * Pydoll's exact flow replicated:
+ * The scraper's exact flow replicated:
  *   Phase 1: Page-side DOM traversal (PAGE session via this.sendCommand)
  *   Phase 2: OOPIF resolution (CDPProxy browser WS via send)
  *   Phase 3: Isolated world + checkbox (OOPIF session via send)
@@ -199,7 +199,7 @@ export class CloudflareSolveStrategies {
 
   /**
    * Find Turnstile checkbox and click it using active OOPIF discovery
-   * and Runtime.callFunctionOn — matching pydoll's exact approach.
+   * and Runtime.callFunctionOn — matching the scraper's exact approach.
    *
    * Flow:
    * 1. Active OOPIF discovery via Target.getTargets + attachToTarget
@@ -233,14 +233,14 @@ export class CloudflareSolveStrategies {
       const events = yield* SolverEvents;
       const { pageCdpSessionId, pageTargetId } = active;
 
-      // Route OOPIF commands through CDPProxy's browser WS — matching pydoll's
-      // actual routing through Browserless. Pydoll's OOPIF patch stores
+      // Route OOPIF commands through CDPProxy's browser WS — matching the scraper's
+      // actual routing through Browserless. The scraper's OOPIF patch stores
       // chrome._connection_handler (= CDPProxy browser WS) as _browser_handler,
       // and all OOPIF commands (Target.getTargets, attachToTarget, DOM queries,
       // Input.dispatchMouseEvent) route through it via _execute_command → _resolve_routing.
       //
       // We previously used a fresh isolated WS (createIsolatedConnection), thinking
-      // zero CDP state would be cleaner. But pydoll succeeds through CDPProxy and
+      // zero CDP state would be cleaner. But the scraper succeeds through CDPProxy and
       // we failed through isolated WS — the isolated WS is not the advantage.
 
       // Materialize CdpSender into EffectSend closures for inner methods.
@@ -307,7 +307,7 @@ export class CloudflareSolveStrategies {
       };
 
       // ──────────────────────────────────────────────────────────────────
-      // Pydoll's exact flow replicated:
+      // The scraper's exact flow replicated:
       //   Phase 1: Page-side DOM traversal (PAGE session via this.sendCommand)
       //   Phase 2: OOPIF resolution (CDPProxy browser WS via send)
       //   Phase 3: Isolated world + checkbox (OOPIF session via send)
@@ -429,8 +429,8 @@ export class CloudflareSolveStrategies {
       });
 
       // ── Phase 4: Visibility check, scroll, bounds, click ─────────────
-      // No delay — pydoll clicks immediately after finding the checkbox.
-      // Bare press + random hold + release, no mouseMoved (matches pydoll).
+      // No delay — the scraper clicks immediately after finding the checkbox.
+      // Bare press + random hold + release, no mouseMoved (matches the scraper).
       // All Input events on isolated WS (same as DOM/Runtime).
       const clickResult = yield* strategies.phase4Click(
         send,
@@ -684,7 +684,7 @@ export class CloudflareSolveStrategies {
       });
 
       // ── Sub-span: Click dispatch (listener + mouse events) ──
-      // Bare press + hold + release — NO mouseMoved (matches pydoll exactly).
+      // Bare press + hold + release — NO mouseMoved (matches the scraper exactly).
       // mouseMoved causes 283-5600ms compositor init stall on isolated WS.
       return yield* Effect.fn("cf.phase4_dispatch")(function* () {
         yield* Effect.annotateCurrentSpan({

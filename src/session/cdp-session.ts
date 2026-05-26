@@ -1234,7 +1234,7 @@ export class CdpSession {
                 },
               ]);
             }
-            // Emit as custom CDP event for pydoll to consume
+            // Emit as custom CDP event for the scraper to consume
             try {
               this.onAntibotReport?.(result);
             } catch (_) {}
