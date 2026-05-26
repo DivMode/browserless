@@ -407,10 +407,17 @@ export function phase3CheckboxFind(
         heartbeats: heartbeatCount,
       });
 
-      // Checkbox not found yet — wait and retry
-      yield* Effect.sleep(`${pollInterval} millis`).pipe(
-        Effect.withSpan("cf.phase3.pollSleep", { attributes: { "cf.poll": poll } }),
-      );
+      // Checkbox not found yet — wait and retry.
+      // No Effect.withSpan wrapper: this sleep used to emit `cf.phase3.pollSleep`
+      // per iteration, which fired ~1.7 spans/sec (the single largest trace
+      // producer in browserless ≈ 4.5 GB/mo). The parent `cf.phase3CheckboxFind`
+      // Effect.fn span already annotates `cf.poll_count` (final value), and the
+      // `cf.phase3_strategy` event marker emitted above captures each poll's
+      // outcome with `poll` + `elapsed_ms`. The per-sleep child span carried
+      // zero unique diagnostic signal and was referenced by zero dashboards,
+      // alerts, or skills (trace-debug skill diagnoses cold-start polls via
+      // the parent's `poll_count` attribute, not the per-iteration child).
+      yield* Effect.sleep(`${pollInterval} millis`);
     }
 
     // Stop heartbeat — checkbox loop is done (found or exhausted)
