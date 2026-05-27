@@ -125,7 +125,7 @@ COPY external external
 COPY scripts scripts
 COPY static static
 
-COPY CHANGELOG.md LICENSE NOTICE.txt README.md tsconfig.json ./
+COPY CHANGELOG.md LICENSE NOTICE.txt README.md tsconfig.json tsconfig.build.json ./
 
 # ---------------------------------------------------------------------------
 # chromium layer

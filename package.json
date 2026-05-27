@@ -39,7 +39,7 @@
     "build:function": "bun scripts/build-function.js",
     "build:schemas": "bun scripts/build-schemas.js",
     "build:openapi": "bun scripts/build-open-api.js",
-    "build:ts": "tsc",
+    "build:ts": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "build:tests": "npm run build:ts && npm run build:function && npm run install:debugger",
     "clean": "bun scripts/clean.js",

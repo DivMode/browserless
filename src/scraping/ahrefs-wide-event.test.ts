@@ -72,6 +72,9 @@ const emptyCfMetrics: CfSolveMetrics = {
   embedded_clicked: false,
   error_detected: false,
   failure_reason: "",
+  cf_phase3_duration_ms: 0,
+  cf_phase4_duration_ms: 0,
+  cf_oopif_discovery_ms: 0,
 };
 
 const successResult: AhrefsScrapeResult = {
@@ -193,7 +196,6 @@ describe("error type system — exhaustive mappers", () => {
       requestCount: 5,
       responseCount: 3,
       docResponseCount: 0,
-      fetchDecisionsJson: "",
     }),
     new NavigationError({ url: "https://ahrefs.com", cause: "timeout" }),
     new ResultTimeoutError({ domain: "test.com" }),

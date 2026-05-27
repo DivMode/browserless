@@ -14,9 +14,7 @@ import {
   filterOwnedTargets,
   classifyOOPIFDetection,
   classifyNavigationOutcome,
-  NavigationOutcome,
   classifyBridgeDetected,
-  BridgeDetectedOutcome,
 } from "./cloudflare-detector.js";
 import type { CFTargetMatch, CFDetected } from "./cloudflare-solve-strategies.js";
 import { CloudflareTracker } from "./cloudflare-event-emitter.js";
@@ -32,7 +30,7 @@ const makeTarget = (id: string): CFTargetMatch => ({
   targetId: id,
   url: `https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2/av0/rcv0/${id}`,
   type: "iframe",
-  meta: { sitekey: null, action: null, mode: null, retry_count: 0 },
+  meta: { sitekey: null, mode: null, theme: null, appearance: null },
 });
 
 const pageA = TargetId.make("AAAA-page-target");
@@ -630,6 +628,7 @@ describe("classifyOOPIFDetection — interstitial DOM probe", () => {
       {
         targetId: "OOPIF1" as TargetId,
         url: "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/ov2",
+        type: "iframe",
         parentFrameId: "PAGE1",
         meta: { sitekey: "0xTestKey", mode: "normal", theme: null, appearance: null },
       },

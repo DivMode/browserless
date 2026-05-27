@@ -19,7 +19,7 @@ RUN rm -rf $APP_DIR && mkdir -p $APP_DIR
 WORKDIR $APP_DIR
 
 COPY src src
-COPY package.json package-lock.json tsconfig.json README.md ./
+COPY package.json package-lock.json tsconfig.json tsconfig.build.json README.md ./
 
 # Delete unsupported routes based on base image and platform
 RUN npm clean-install && npm run build && \

@@ -12,7 +12,7 @@
  * This test validates the pattern directly — no mocking of solver internals.
  */
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, FiberMap, Layer, ManagedRuntime, Scope } from "effect";
+import { Effect, Exit, FiberMap, Layer, ManagedRuntime, Scope } from "effect";
 
 describe("cross-runtime fiber interrupt", () => {
   it.effect("runInSolver pattern properly awaits fiber cleanup", () =>
@@ -49,7 +49,7 @@ describe("cross-runtime fiber interrupt", () => {
 
       expect(cleanupRan.value).toBe(true);
 
-      yield* Effect.promise(() => runtime.runPromise(Scope.close(scope, Effect.void)));
+      yield* Effect.promise(() => runtime.runPromise(Scope.close(scope, Exit.void)));
       yield* runtime.disposeEffect;
     }),
   );

@@ -29,7 +29,7 @@ const OOPIF_TARGET_ID = "oopif-target-1";
 const ATTACHED_SESSION = "attached-session-1";
 
 const makeMockEvents = () => {
-  const markers: Array<{ tag: string; payload?: Record<string, unknown> }> = [];
+  const markers: Array<{ tag: string; payload?: object }> = [];
   const layer = Layer.succeed(
     SolverEvents,
     SolverEvents.of({

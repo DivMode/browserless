@@ -28,7 +28,6 @@ import {
   buildWsUrl,
   dumpConsoleErrors,
   dumpMarkerTimeline,
-  dumpRechallengeDiag,
   dumpReplayHint,
   failWithEvidence,
   fetchDebugData,
@@ -106,8 +105,8 @@ const setupProxyAuth = (page: Page) =>
  * Full solve session: connect → proxy auth → navigate → wait → close → get markers + debug data.
  * Runs ONCE, populates module-level sessionResult.
  */
-const runSession: Effect.Effect<SessionResult, never, typeof ReplayAPI | Scope.Scope> = Effect.gen(
-  function* () {
+const runSession: Effect.Effect<SessionResult, never, typeof ReplayAPI.Identifier | Scope.Scope> =
+  Effect.gen(function* () {
     const testStartTs = Date.now();
 
     const browser = yield* acquireBrowser;
@@ -176,11 +175,10 @@ const runSession: Effect.Effect<SessionResult, never, typeof ReplayAPI | Scope.S
     }
 
     return { markers, replay, replayId: replay.id, consoleErrors, allEvents };
-  },
-);
+  });
 
 /** Provide ReplayAPI to an effect that needs it. */
-const withReplayAPI = <A, E, R>(effect: Effect.Effect<A, E, R | typeof ReplayAPI>) =>
+const withReplayAPI = <A, E, R>(effect: Effect.Effect<A, E, R | typeof ReplayAPI.Identifier>) =>
   Effect.provideService(effect, ReplayAPI, replayAPIImpl);
 
 /**
@@ -453,7 +451,7 @@ describe("CF Solver Integration (real nopecha.com)", () => {
 
         if (strategies.length >= 2) {
           const gap = strategies[1].timestamp - strategies[0].timestamp;
-          const cdpMs = strategies[1].payload?.elapsed_ms ?? 0;
+          const cdpMs = Number(strategies[1].payload?.elapsed_ms ?? 0);
           const sleepGap = gap - cdpMs;
           console.log(`  poll_gap: ${gap}ms (cdp=${cdpMs}ms, sleep≈${sleepGap}ms)`);
           // Isolate sleep interval from CDP call time.

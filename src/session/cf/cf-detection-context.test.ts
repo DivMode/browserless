@@ -1,10 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Fiber, Latch, Scope } from "effect";
+import { Effect, Exit, Fiber, Latch, Scope } from "effect";
 import { CdpSessionId, TargetId } from "../../shared/cloudflare-detection.js";
 import type { CloudflareInfo } from "../../shared/cloudflare-detection.js";
 import { CloudflareTracker } from "./cloudflare-event-emitter.js";
 import type { ActiveDetection } from "./cloudflare-event-emitter.js";
-import { DetectionContext, OOPIFState } from "./cf-detection-context.js";
+import { DetectionContext } from "./cf-detection-context.js";
 import { DetectionRegistry } from "./cf-detection-registry.js";
 import { Resolution } from "./cf-resolution.js";
 import type { SolveSignal } from "./cloudflare-state-tracker.js";
@@ -134,7 +134,7 @@ describe("DetectionContext", () => {
       expect(active.iframeCdpSessionId).toBe(iframeCdpSessionId);
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(scope, Exit.succeed(undefined));
     }),
   );
 
@@ -151,14 +151,14 @@ describe("DetectionContext", () => {
       expect(ctx.aborted).toBe(false);
 
       // Simulate pre-click OOPIF destruction — clickDelivered is falsy
-      yield* Scope.close(ctx.oopif!.scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(ctx.oopif!.scope, Exit.succeed(undefined));
 
       // Detection should NOT be aborted — pre-click OOPIF death is normal
       expect(ctx.aborted).toBe(false);
       expect(active.aborted).toBe(false);
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(scope, Exit.succeed(undefined));
     }),
   );
 
@@ -176,7 +176,7 @@ describe("DetectionContext", () => {
       active.clickDelivered = true;
 
       // Simulate post-click OOPIF destruction
-      yield* Scope.close(ctx.oopif!.scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(ctx.oopif!.scope, Exit.succeed(undefined));
 
       // Parent detection SHOULD be aborted — CF rejected our click
       expect(ctx.aborted).toBe(true);
@@ -217,7 +217,7 @@ describe("DetectionContext", () => {
       expect(active.iframeCdpSessionId).toBe(iframe2Session);
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(scope, Exit.succeed(undefined));
     }),
   );
 
@@ -248,7 +248,7 @@ describe("DetectionContext", () => {
       expect(ctx.oopif!.iframeTargetId).toBe(TargetId.make("i2"));
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(scope, Exit.succeed(undefined));
     }),
   );
 
@@ -263,7 +263,7 @@ describe("DetectionContext", () => {
       expect(ctx.aborted).toBe(false);
 
       // Detection times out normally — no crash
-      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(scope, Exit.succeed(undefined));
     }),
   );
 
@@ -281,7 +281,7 @@ describe("DetectionContext", () => {
       yield* ctx.abort();
 
       // OOPIF scope should also be closed — closing it again is idempotent
-      yield* Scope.close(ctx.oopif!.scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(ctx.oopif!.scope, Exit.succeed(undefined));
       // No throw = success
     }),
   );
@@ -298,7 +298,7 @@ describe("DetectionContext", () => {
       expect(ctx.active.aborted).toBe(false);
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(scope, Exit.succeed(undefined));
     }),
   );
 
@@ -318,7 +318,7 @@ describe("DetectionContext", () => {
       expect(active.clickDeliveredAt).toBeLessThanOrEqual(Date.now());
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(scope, Exit.succeed(undefined));
     }),
   );
 
@@ -339,7 +339,7 @@ describe("DetectionContext", () => {
       expect(active.activityLoopStarted).toBe(true);
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(scope, Exit.succeed(undefined));
     }),
   );
 
@@ -362,7 +362,7 @@ describe("DetectionContext", () => {
       expect(active.aborted).toBe(false);
 
       // Cleanup
-      yield* Scope.close(scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(scope, Exit.succeed(undefined));
     }),
   );
 });
@@ -433,7 +433,7 @@ describe("DetectionRegistry with DetectionContext", () => {
       yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.make("iframe-session-1"));
 
       // Simulate pre-click OOPIF destruction
-      yield* Scope.close(ctx.oopif!.scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(ctx.oopif!.scope, Exit.succeed(undefined));
 
       // Detection should NOT be aborted — pre-click OOPIF death is normal
       expect(ctx.aborted).toBe(false);
@@ -464,7 +464,7 @@ describe("DetectionRegistry with DetectionContext", () => {
         active.clickDelivered = true;
 
         // Simulate post-click OOPIF destruction
-        yield* Scope.close(ctx.oopif!.scope, { _tag: "Success", value: void 0 });
+        yield* Scope.close(ctx.oopif!.scope, Exit.succeed(undefined));
 
         // Detection SHOULD be aborted — CF rejected our click
         expect(ctx.aborted).toBe(true);
@@ -492,7 +492,7 @@ describe("DetectionRegistry with DetectionContext", () => {
       yield* ctx.resolve();
 
       // Then OOPIF destroyed — no fallback emission
-      yield* Scope.close(ctx.oopif!.scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(ctx.oopif!.scope, Exit.succeed(undefined));
 
       expect(emissions).toHaveLength(0);
     }),
@@ -535,10 +535,12 @@ describe("DetectionRegistry with DetectionContext", () => {
 
       // Settle resolution — simulates bridge push
       yield* active.resolution.solve({
+        solved: true,
         type: "turnstile",
         method: "auto_solve",
         signal: "bridge_solved",
         duration_ms: 5000,
+        attempts: 1,
         phase_label: "→",
       });
 
@@ -565,10 +567,12 @@ describe("DetectionRegistry with DetectionContext", () => {
 
       // Late push — should be a no-op (returns false)
       const lateSolve = yield* active.resolution.solve({
+        solved: true,
         type: "turnstile",
         method: "auto_solve",
         signal: "bridge_solved",
         duration_ms: 5000,
+        attempts: 1,
         phase_label: "→",
       });
 
@@ -603,7 +607,7 @@ describe("DetectionRegistry with DetectionContext", () => {
       // Simulate OOPIF post-click destruction — sets aborted + opens latch
       ctx.setClickDelivered();
       DetectionContext.setAborted(active);
-      yield* Scope.close(ctx.scope, { _tag: "Success", value: void 0 });
+      yield* Scope.close(ctx.scope, Exit.succeed(undefined));
 
       // Resolution NOT settled by finalizer — handler waits for bridge push
       expect(active.resolution.isDone).toBe(false);
@@ -611,10 +615,12 @@ describe("DetectionRegistry with DetectionContext", () => {
       // Bridge push arrives after OOPIF destruction (typical ~200ms later) —
       // this is the happy path, resolution.solve() succeeds
       const solved = yield* active.resolution.solve({
+        solved: true,
         type: "turnstile",
         method: "auto_solve",
         signal: "bridge_solved",
         duration_ms: 5000,
+        attempts: 1,
         phase_label: "→",
       });
 

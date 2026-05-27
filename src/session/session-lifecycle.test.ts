@@ -1,6 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { describe as effectDescribe, it as effectIt } from "@effect/vitest";
-import { Effect, Scope } from "effect";
+import { Effect } from "effect";
 import type { BrowserInstance, BrowserlessSession } from "@browserless.io/browserless";
 import { SessionRegistry } from "./session-registry.js";
 import { SessionLifecycleManager } from "./session-lifecycle-manager.js";

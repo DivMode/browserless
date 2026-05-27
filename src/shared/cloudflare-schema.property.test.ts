@@ -5,7 +5,7 @@
  * and verifies round-trip encode/decode, required field presence,
  * and constraint satisfaction (finite, integer, etc.).
  */
-import { describe, it } from "@effect/vitest";
+import { describe, expect, it } from "@effect/vitest";
 import { Effect, Schema } from "effect";
 import * as fc from "fast-check";
 import { CloudflareInfo, CloudflareResult, CloudflareSnapshot } from "./cloudflare-detection.js";

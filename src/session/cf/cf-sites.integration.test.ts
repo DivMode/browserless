@@ -70,7 +70,6 @@ import {
   type ServerCfSummary,
   assertSummaryConsistency,
   buildWsUrl,
-  extractReplayId,
   failWithEvidence,
   fetchSignals,
   findAllReplays,
@@ -299,7 +298,7 @@ describe.concurrent("CF Solver Multi-Site", () => {
           let summary: ServerCfSummary | null = null;
 
           try {
-            const page = yield* Effect.scoped(
+            yield* Effect.scoped(
               Effect.gen(function* () {
                 const p = yield* acquirePage(browser);
 
@@ -712,7 +711,7 @@ describe("Session Manager Dispatch", () => {
       // consume Chrome resources during cf-stress (which creates its own 10-tab browser).
       // The dispatch endpoint creates a singleton AhrefsSessionManager that stays alive.
       try {
-        const { getAhrefsSession } = await import("../../../scraping/ahrefs-session.js");
+        const { getAhrefsSession } = await import("../../scraping/ahrefs-session.js");
         await getAhrefsSession().shutdown();
       } catch {
         // Non-fatal — session manager may not have been initialized
