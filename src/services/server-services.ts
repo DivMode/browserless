@@ -7,7 +7,7 @@
  * Pattern: {@link ../session/cf/cf-services.ts}
  */
 import type { Effect } from "effect";
-import { ServiceMap } from "effect";
+import { Context } from "effect";
 
 import type {
   AfterResponse,
@@ -33,7 +33,7 @@ import type { LimitFn, ErrorFn } from "../limiter.js";
 // ConfigService — server configuration (reads from process.env)
 // ═══════════════════════════════════════════════════════════════════════
 
-export const ConfigService = ServiceMap.Service<{
+export const ConfigService = Context.Service<{
   // Sync getters — pure reads, no side effects
   readonly getPort: () => number;
   readonly getHost: () => string;
@@ -87,7 +87,7 @@ export const ConfigService = ServiceMap.Service<{
 // MonitoringService — machine resource load (CPU/memory)
 // ═══════════════════════════════════════════════════════════════════════
 
-export const MonitoringService = ServiceMap.Service<{
+export const MonitoringService = Context.Service<{
   readonly getMachineStats: () => Effect.Effect<IResourceLoad>;
   readonly overloaded: () => Effect.Effect<{
     cpuInt: number | null;
@@ -101,7 +101,7 @@ export const MonitoringService = ServiceMap.Service<{
 // TokenService — request authorization
 // ═══════════════════════════════════════════════════════════════════════
 
-export const TokenService = ServiceMap.Service<{
+export const TokenService = Context.Service<{
   readonly isAuthorized: (
     req: Request,
     route: BrowserHTTPRoute | BrowserWebsocketRoute | HTTPRoute | WebSocketRoute,
@@ -112,7 +112,7 @@ export const TokenService = ServiceMap.Service<{
 // HooksService — lifecycle event hooks (before/after/page/browser)
 // ═══════════════════════════════════════════════════════════════════════
 
-export const HooksService = ServiceMap.Service<{
+export const HooksService = Context.Service<{
   readonly before: (args: BeforeRequest) => Effect.Effect<boolean>;
   readonly after: (args: AfterResponse) => Effect.Effect<unknown>;
   readonly page: (args: PageHook) => Effect.Effect<unknown>;
@@ -123,7 +123,7 @@ export const HooksService = ServiceMap.Service<{
 // WebHooksService — external webhook calls (alert URLs)
 // ═══════════════════════════════════════════════════════════════════════
 
-export const WebHooksService = ServiceMap.Service<{
+export const WebHooksService = Context.Service<{
   readonly callFailedHealthURL: () => Effect.Effect<Response | void>;
   readonly callQueueAlertURL: () => Effect.Effect<Response | void>;
   readonly callRejectAlertURL: () => Effect.Effect<Response | void>;
@@ -135,7 +135,7 @@ export const WebHooksService = ServiceMap.Service<{
 // FileSystemService — encrypted file read/append
 // ═══════════════════════════════════════════════════════════════════════
 
-export const FileSystemService = ServiceMap.Service<{
+export const FileSystemService = Context.Service<{
   readonly append: (path: string, newContent: string, shouldEncode: boolean) => Effect.Effect<void>;
   readonly read: (path: string, encoded: boolean) => Effect.Effect<string[]>;
 }>("FileSystemService");
@@ -144,7 +144,7 @@ export const FileSystemService = ServiceMap.Service<{
 // SessionRegistryService — in-memory browser↔session map
 // ═══════════════════════════════════════════════════════════════════════
 
-export const SessionRegistryService = ServiceMap.Service<{
+export const SessionRegistryService = Context.Service<{
   readonly register: (browser: BrowserInstance, session: BrowserlessSession) => void;
   readonly remove: (browser: BrowserInstance) => void;
   readonly get: (browser: BrowserInstance) => BrowserlessSession | undefined;
@@ -170,7 +170,7 @@ export const SessionRegistryService = ServiceMap.Service<{
 // BrowserManagerService — browser lifecycle facade
 // ═══════════════════════════════════════════════════════════════════════
 
-export const BrowserManagerService = ServiceMap.Service<{
+export const BrowserManagerService = Context.Service<{
   readonly getBrowserForRequest: (
     req: Request,
     router: BrowserHTTPRoute | BrowserWebsocketRoute,
@@ -191,7 +191,7 @@ export const BrowserManagerService = ServiceMap.Service<{
 // LimiterService — concurrency + queue limiter
 // ═══════════════════════════════════════════════════════════════════════
 
-export const LimiterService = ServiceMap.Service<{
+export const LimiterService = Context.Service<{
   readonly limit: <TArgs extends unknown[], TResult>(
     limitFn: LimitFn<TArgs, TResult>,
     overCapacityFn: ErrorFn<TArgs>,
@@ -209,7 +209,7 @@ export const LimiterService = ServiceMap.Service<{
 // RouterService — HTTP + WebSocket route registration and lookup
 // ═══════════════════════════════════════════════════════════════════════
 
-export const RouterService = ServiceMap.Service<{
+export const RouterService = Context.Service<{
   readonly registerHTTPRoute: (route: HTTPRoute | BrowserHTTPRoute) => HTTPRoute | BrowserHTTPRoute;
   readonly registerWebSocketRoute: (
     route: WebSocketRoute | BrowserWebsocketRoute,

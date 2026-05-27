@@ -207,7 +207,7 @@ export function makeCFEventPipeline(deps: CFEventPipelineDeps): CFEventPipeline 
           abortLatch.openUnsafe();
           const active: ActiveDetection = {
             info,
-            pageCdpSessionId: cdpSessionId || CdpSessionId.makeUnsafe(""),
+            pageCdpSessionId: cdpSessionId || CdpSessionId.make(""),
             pageTargetId: targetId,
             startTime: Date.now(),
             attempt: 0,

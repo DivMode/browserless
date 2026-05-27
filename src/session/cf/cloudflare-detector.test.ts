@@ -35,8 +35,8 @@ const makeTarget = (id: string): CFTargetMatch => ({
   meta: { sitekey: null, action: null, mode: null, retry_count: 0 },
 });
 
-const pageA = TargetId.makeUnsafe("AAAA-page-target");
-const pageB = TargetId.makeUnsafe("BBBB-page-target");
+const pageA = TargetId.make("AAAA-page-target");
+const pageB = TargetId.make("BBBB-page-target");
 
 // ═══════════════════════════════════════════════════════════════════════
 // Tests
@@ -45,7 +45,7 @@ const pageB = TargetId.makeUnsafe("BBBB-page-target");
 describe("filterOwnedTargets", () => {
   it("keeps targets owned by the current page", () => {
     const oopif = makeTarget("oopif-1");
-    const map = new Map<TargetId, TargetId>([[TargetId.makeUnsafe("oopif-1"), pageA]]);
+    const map = new Map<TargetId, TargetId>([[TargetId.make("oopif-1"), pageA]]);
 
     const result = filterOwnedTargets([oopif], pageA, map);
     expect(result).toEqual([oopif]);
@@ -53,7 +53,7 @@ describe("filterOwnedTargets", () => {
 
   it("filters targets owned by a different page", () => {
     const oopif = makeTarget("oopif-1");
-    const map = new Map<TargetId, TargetId>([[TargetId.makeUnsafe("oopif-1"), pageB]]);
+    const map = new Map<TargetId, TargetId>([[TargetId.make("oopif-1"), pageB]]);
 
     const result = filterOwnedTargets([oopif], pageA, map);
     expect(result).toEqual([]);
@@ -73,8 +73,8 @@ describe("filterOwnedTargets", () => {
     const unregistered = makeTarget("new-oopif");
 
     const map = new Map<TargetId, TargetId>([
-      [TargetId.makeUnsafe("own-oopif"), pageA],
-      [TargetId.makeUnsafe("other-oopif"), pageB],
+      [TargetId.make("own-oopif"), pageA],
+      [TargetId.make("other-oopif"), pageB],
       // 'new-oopif' deliberately absent — simulates race where iframe attached but not yet tracked
     ]);
 
@@ -87,8 +87,8 @@ describe("filterOwnedTargets", () => {
     const t2 = makeTarget("oopif-2");
 
     const map = new Map<TargetId, TargetId>([
-      [TargetId.makeUnsafe("oopif-1"), pageB],
-      [TargetId.makeUnsafe("oopif-2"), pageB],
+      [TargetId.make("oopif-1"), pageB],
+      [TargetId.make("oopif-2"), pageB],
     ]);
 
     const result = filterOwnedTargets([t1, t2], pageA, map);
@@ -232,8 +232,8 @@ function makeActive(overrides: {
   };
   return {
     info,
-    pageCdpSessionId: CdpSessionId.makeUnsafe("sess-1"),
-    pageTargetId: TargetId.makeUnsafe("target-1"),
+    pageCdpSessionId: CdpSessionId.make("sess-1"),
+    pageTargetId: TargetId.make("target-1"),
     startTime: overrides.startTime ?? Date.now() - 5000,
     attempt: 1,
     aborted: false,

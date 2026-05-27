@@ -9,7 +9,7 @@
  * eliminating all Runtime.evaluate polling.
  */
 import type { Effect } from "effect";
-import { ServiceMap } from "effect";
+import { Context } from "effect";
 import type {
   CdpSessionId,
   TargetId,
@@ -30,7 +30,7 @@ import type { SolveDetectionResult } from "./cloudflare-solver.effect.js";
 // CdpSender — send CDP commands to browser/page/OOPIF sessions
 // ═══════════════════════════════════════════════════════════════════════
 
-export const CdpSender = ServiceMap.Service<{
+export const CdpSender = Context.Service<{
   /** Send a CDP command via the direct (page-level) WS. */
   readonly send: (
     method: string,
@@ -60,7 +60,7 @@ export const CdpSender = ServiceMap.Service<{
 // SolverEvents — emit detection/solve/fail events + recording markers
 // ═══════════════════════════════════════════════════════════════════════
 
-export const SolverEvents = ServiceMap.Service<{
+export const SolverEvents = Context.Service<{
   readonly emitDetected: (active: ReadonlyActiveDetection) => Effect.Effect<void>;
   readonly emitProgress: (
     active: ReadonlyActiveDetection,
@@ -87,7 +87,7 @@ export const SolverEvents = ServiceMap.Service<{
 // to every solve function. Now provided via Layer — yield* in generators.
 // ═══════════════════════════════════════════════════════════════════════
 
-export const SolveDeps = ServiceMap.Service<{
+export const SolveDeps = Context.Service<{
   readonly findAndClickViaCDP: (
     active: ReadonlyActiveDetection,
     attempt: number,
@@ -111,7 +111,7 @@ export const SolveDeps = ServiceMap.Service<{
 // injected into CloudflareDetector via constructor.
 // ═══════════════════════════════════════════════════════════════════════
 
-export const SolveDispatcher = ServiceMap.Service<{
+export const SolveDispatcher = Context.Service<{
   readonly dispatch: (active: ActiveDetection) => Effect.Effect<SolveDetectionResult>;
 }>("SolveDispatcher");
 
@@ -122,7 +122,7 @@ export const SolveDispatcher = ServiceMap.Service<{
 // injected into CloudflareDetector via constructor.
 // ═══════════════════════════════════════════════════════════════════════
 
-export const DetectionLoopStarter = ServiceMap.Service<{
+export const DetectionLoopStarter = Context.Service<{
   readonly start: (targetId: TargetId, cdpSessionId: CdpSessionId) => Effect.Effect<void>;
 }>("DetectionLoopStarter");
 
@@ -134,7 +134,7 @@ export const DetectionLoopStarter = ServiceMap.Service<{
 // strategies.checkOOPIFStateViaCDP at the bridge layer.
 // ═══════════════════════════════════════════════════════════════════════
 
-export const OOPIFChecker = ServiceMap.Service<{
+export const OOPIFChecker = Context.Service<{
   readonly check: (
     iframeCdpSessionId: CdpSessionId,
   ) => Effect.Effect<"success" | "fail" | "expired" | "timeout" | "pending" | null>;
@@ -147,7 +147,7 @@ export const OOPIFChecker = ServiceMap.Service<{
 // instead of reading a mutable field on the state tracker.
 // ═══════════════════════════════════════════════════════════════════════
 
-export const SolverConfig = ServiceMap.Service<Required<CloudflareConfig>>("SolverConfig");
+export const SolverConfig = Context.Service<Required<CloudflareConfig>>("SolverConfig");
 
 // ═══════════════════════════════════════════════════════════════════════
 // SessionSolverContext — session-level shared state (provided once)
@@ -156,7 +156,7 @@ export const SolverConfig = ServiceMap.Service<Required<CloudflareConfig>>("Solv
 // guards, OOPIF ownership tracking, and compound label accumulation.
 // ═══════════════════════════════════════════════════════════════════════
 
-export const SessionSolverContext = ServiceMap.Service<{
+export const SessionSolverContext = Context.Service<{
   readonly iframeToPage: ReadonlyMap<TargetId, TargetId>;
   readonly solvedCFTargetIds: ReadonlySet<string>;
   readonly solvedPages: ReadonlySet<TargetId>;
@@ -179,7 +179,7 @@ export const SessionSolverContext = ServiceMap.Service<{
 
 import type { TabSolverState } from "./cf-tab-state.js";
 
-export const TabSolverContext = ServiceMap.Service<{
+export const TabSolverContext = Context.Service<{
   readonly targetId: TargetId;
   readonly cdpSessionId: CdpSessionId;
   readonly state: TabSolverState;
@@ -200,7 +200,7 @@ export const TabSolverContext = ServiceMap.Service<{
 
 import type { CFDetected } from "./cloudflare-solve-strategies.js";
 
-export const TabDetector = ServiceMap.Service<{
+export const TabDetector = Context.Service<{
   /** Returns ONLY OOPIFs belonging to this tab. Cross-tab OOPIFs are filtered by construction. */
   readonly detect: (
     excludeTargetIds?: ReadonlySet<string>,

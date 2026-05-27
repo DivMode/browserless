@@ -18,7 +18,7 @@
  * Excluded from default `npx vitest run` via vitest.config.ts exclude pattern.
  */
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, ServiceMap } from "effect";
+import { Context, Effect } from "effect";
 import type { Scope } from "effect";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 
@@ -59,7 +59,7 @@ let sessionError: Error | null = null;
 
 // ── ReplayAPI Service ───────────────────────────────────────────────
 
-const ReplayAPI = ServiceMap.Service<{
+const ReplayAPI = Context.Service<{
   readonly findAllReplays: (afterTs: number) => Effect.Effect<ReplayMeta[]>;
   readonly fetchMarkers: (replayId: string) => Effect.Effect<ReplayMarker[]>;
   readonly fetchDebugData: (replayId: string) => Effect.Effect<{

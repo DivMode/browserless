@@ -10,7 +10,7 @@
  * Together, all four services form the R channel of CdpSession's
  * single ManagedRuntime — same pattern as CloudflareSolver.
  */
-import { ServiceMap } from "effect";
+import { Context } from "effect";
 import type { Effect, FiberMap } from "effect";
 import type { CdpSessionId, TargetId } from "../shared/cloudflare-detection.js";
 import type { CdpSessionGone, CdpTimeout } from "../shared/cdp-rpc.js";
@@ -18,7 +18,7 @@ import type { TargetRegistry } from "./target-state.js";
 import type { TargetState } from "./target-state.js";
 
 /** Send CDP commands via browser or per-page WebSocket. */
-export const CdpSender = ServiceMap.Service<{
+export const CdpSender = Context.Service<{
   readonly send: (
     method: string,
     params?: object,
@@ -28,7 +28,7 @@ export const CdpSender = ServiceMap.Service<{
 }>("session/CdpSender");
 
 /** Session lifecycle resources — FiberMap + TargetRegistry. */
-export const SessionLifecycle = ServiceMap.Service<{
+export const SessionLifecycle = Context.Service<{
   readonly fiberMap: FiberMap.FiberMap<string>;
   readonly targets: TargetRegistry;
 }>("session/SessionLifecycle");
@@ -40,7 +40,7 @@ export const SessionLifecycle = ServiceMap.Service<{
 // Sync operations return raw values (not Effect-wrapped).
 // ═══════════════════════════════════════════════════════════════════════
 
-export const TargetRegistryService = ServiceMap.Service<{
+export const TargetRegistryService = Context.Service<{
   readonly add: (targetId: TargetId, cdpSessionId: CdpSessionId) => TargetState;
   readonly remove: (targetId: TargetId) => void;
   readonly getByTarget: (targetId: TargetId) => TargetState | undefined;

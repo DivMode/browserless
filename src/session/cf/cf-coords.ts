@@ -70,7 +70,7 @@ export function openCleanPageWsScoped(
     Effect.mapError(
       () =>
         new CdpSessionGone({
-          sessionId: CdpSessionId.makeUnsafe(""),
+          sessionId: CdpSessionId.make(""),
           method: "openCleanPageWs",
         }),
     ),

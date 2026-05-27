@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { Cause, Effect, Fiber, Layer, Queue } from "effect";
+import type { Cause } from "effect";
+import { Effect, Fiber, Layer, Queue } from "effect";
 import type { ReplayEvent } from "../shared/replay-schemas.js";
 import { SessionId } from "../shared/replay-schemas.js";
 import type { TabEvent } from "../shared/replay-schemas.js";
@@ -13,8 +14,8 @@ const makeTabEvent = (
   type: number,
   timestamp: number,
 ): TabEvent => ({
-  sessionId: SessionId.makeUnsafe(sessionId),
-  targetId: TargetId.makeUnsafe(targetId),
+  sessionId: SessionId.make(sessionId),
+  targetId: TargetId.make(targetId),
   event: { type, timestamp, data: {} } as ReplayEvent,
 });
 
@@ -65,13 +66,13 @@ describe("Replay Pipeline (per-tab Queue)", () => {
         // Fork consumers for each tab
         const fiberA = yield* tabConsumer(
           queueA,
-          SessionId.makeUnsafe("sess-1"),
-          TargetId.makeUnsafe("tgt-A"),
+          SessionId.make("sess-1"),
+          TargetId.make("tgt-A"),
         ).pipe(Effect.provide(layer), Effect.forkChild);
         const fiberB = yield* tabConsumer(
           queueB,
-          SessionId.makeUnsafe("sess-1"),
-          TargetId.makeUnsafe("tgt-B"),
+          SessionId.make("sess-1"),
+          TargetId.make("tgt-B"),
         ).pipe(Effect.provide(layer), Effect.forkChild);
 
         // Push events to each tab's queue
@@ -110,8 +111,8 @@ describe("Replay Pipeline (per-tab Queue)", () => {
         const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
         const fiber = yield* tabConsumer(
           queue,
-          SessionId.makeUnsafe("sess-empty"),
-          TargetId.makeUnsafe("tgt-X"),
+          SessionId.make("sess-empty"),
+          TargetId.make("tgt-X"),
         ).pipe(Effect.provide(layer), Effect.forkChild);
         yield* Queue.end(queue);
         yield* Fiber.await(fiber);
@@ -129,8 +130,8 @@ describe("Replay Pipeline (per-tab Queue)", () => {
         const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
         const fiber = yield* tabConsumer(
           queue,
-          SessionId.makeUnsafe("sess-42"),
-          TargetId.makeUnsafe("tgt-X"),
+          SessionId.make("sess-42"),
+          TargetId.make("tgt-X"),
         ).pipe(Effect.provide(layer), Effect.forkChild);
 
         yield* Queue.offer(queue, makeTabEvent("sess-42", "tgt-X", 2, 1000));
@@ -178,8 +179,8 @@ describe("Replay Pipeline (per-tab Queue)", () => {
         const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
         const fiber = yield* tabConsumer(
           queue,
-          SessionId.makeUnsafe("sess-m"),
-          TargetId.makeUnsafe("tgt-1"),
+          SessionId.make("sess-m"),
+          TargetId.make("tgt-1"),
         ).pipe(Effect.provide(layer), Effect.forkChild);
 
         for (let i = 0; i < 10; i++) {
@@ -228,8 +229,8 @@ describe("Replay Pipeline (per-tab Queue)", () => {
         const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
         const fiber = yield* tabConsumer(
           queue,
-          SessionId.makeUnsafe("sess-order"),
-          TargetId.makeUnsafe("tgt-1"),
+          SessionId.make("sess-order"),
+          TargetId.make("tgt-1"),
         ).pipe(Effect.provide(layer), Effect.forkChild);
 
         // Push events
@@ -264,13 +265,13 @@ describe("Replay Pipeline (per-tab Queue)", () => {
 
         const fiberA = yield* tabConsumer(
           queueA,
-          SessionId.makeUnsafe("sess-tc"),
-          TargetId.makeUnsafe("tgt-A"),
+          SessionId.make("sess-tc"),
+          TargetId.make("tgt-A"),
         ).pipe(Effect.provide(layer), Effect.forkChild);
         const fiberB = yield* tabConsumer(
           queueB,
-          SessionId.makeUnsafe("sess-tc"),
-          TargetId.makeUnsafe("tgt-B"),
+          SessionId.make("sess-tc"),
+          TargetId.make("tgt-B"),
         ).pipe(Effect.provide(layer), Effect.forkChild);
 
         // Push events for two tabs
@@ -336,8 +337,8 @@ describe("Replay Pipeline (per-tab Queue)", () => {
         const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
         const fiber = yield* tabConsumer(
           queue,
-          SessionId.makeUnsafe("sess-batch"),
-          TargetId.makeUnsafe("tgt-1"),
+          SessionId.make("sess-batch"),
+          TargetId.make("tgt-1"),
         ).pipe(Effect.provide(layer), Effect.forkChild);
 
         // Push 500 events — should trigger 2 batch flushes (200 each) + final flush (100)

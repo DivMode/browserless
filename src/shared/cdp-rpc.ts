@@ -85,7 +85,7 @@ export class CdpConnection {
         resume(
           Effect.fail(
             new CdpSessionGone({
-              sessionId: sessionId ?? CdpSessionId.makeUnsafe(""),
+              sessionId: sessionId ?? CdpSessionId.make(""),
               method,
             }),
           ),
@@ -117,7 +117,7 @@ export class CdpConnection {
         resume(
           Effect.fail(
             new CdpSessionGone({
-              sessionId: sessionId ?? CdpSessionId.makeUnsafe(""),
+              sessionId: sessionId ?? CdpSessionId.make(""),
               method,
             }),
           ),
@@ -178,7 +178,7 @@ export class CdpConnection {
       entry.resume(
         Effect.fail(
           new CdpSessionGone({
-            sessionId: CdpSessionId.makeUnsafe(""),
+            sessionId: CdpSessionId.make(""),
             method: `response:${msg.id}`,
           }),
         ),
@@ -199,7 +199,7 @@ export class CdpConnection {
       entry.resume(
         Effect.fail(
           new CdpSessionGone({
-            sessionId: CdpSessionId.makeUnsafe(""),
+            sessionId: CdpSessionId.make(""),
             method: `drain:${reason}`,
           }),
         ),

@@ -368,7 +368,7 @@ export class CDPProxy {
                 return;
               }
               const { targetId, tag, payload } = markerExit.value;
-              this.onAddReplayMarker(TargetId.makeUnsafe(targetId || ""), tag, payload);
+              this.onAddReplayMarker(TargetId.make(targetId || ""), tag, payload);
               void this.sendClientResponse(msg.id, { success: true });
             } else {
               void this.sendClientResponse(msg.id, { error: "Replay not enabled" });

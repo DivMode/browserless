@@ -12,8 +12,8 @@ const makeActive = (targetId: string): ActiveDetection => {
   const info: CloudflareInfo = { type: "turnstile", url: "", detectionMethod: "cdp_dom_walk" };
   return {
     info,
-    pageCdpSessionId: CdpSessionId.makeUnsafe("session-1"),
-    pageTargetId: TargetId.makeUnsafe(targetId),
+    pageCdpSessionId: CdpSessionId.make("session-1"),
+    pageTargetId: TargetId.make(targetId),
     startTime: Date.now(),
     attempt: 1,
     aborted: false,
@@ -30,7 +30,7 @@ describe("DetectionRegistry", () => {
       emissions.push(active.pageTargetId);
     });
 
-    const targetId = TargetId.makeUnsafe("T1");
+    const targetId = TargetId.make("T1");
     const active = makeActive("T1");
 
     await Effect.runPromise(
@@ -53,7 +53,7 @@ describe("DetectionRegistry", () => {
       emissions.push({ targetId: active.pageTargetId, signal });
     });
 
-    const targetId = TargetId.makeUnsafe("T2");
+    const targetId = TargetId.make("T2");
     const active = makeActive("T2");
 
     await Effect.runPromise(
@@ -76,9 +76,9 @@ describe("DetectionRegistry", () => {
       emissions.push(active.pageTargetId);
     });
 
-    const t1 = TargetId.makeUnsafe("T1");
-    const t2 = TargetId.makeUnsafe("T2");
-    const t3 = TargetId.makeUnsafe("T3");
+    const t1 = TargetId.make("T1");
+    const t2 = TargetId.make("T2");
+    const t3 = TargetId.make("T3");
 
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -106,7 +106,7 @@ describe("DetectionRegistry", () => {
       emissions.push(active.pageTargetId);
     });
 
-    const targetId = TargetId.makeUnsafe("T1");
+    const targetId = TargetId.make("T1");
 
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -122,7 +122,7 @@ describe("DetectionRegistry", () => {
   it("unregister unknown targetId → no error", async () => {
     const registry = new DetectionRegistry(() => {});
 
-    await Effect.runPromise(registry.unregister(TargetId.makeUnsafe("unknown")));
+    await Effect.runPromise(registry.unregister(TargetId.make("unknown")));
     // No throw
   });
 
@@ -132,11 +132,11 @@ describe("DetectionRegistry", () => {
       emissions.push(`${active.pageTargetId}-${active.info.detectionMethod}`);
     });
 
-    const targetId = TargetId.makeUnsafe("T1");
+    const targetId = TargetId.make("T1");
     const info1: CloudflareInfo = { type: "turnstile", url: "", detectionMethod: "first" };
     const active1: ActiveDetection = {
       info: info1,
-      pageCdpSessionId: CdpSessionId.makeUnsafe("s1"),
+      pageCdpSessionId: CdpSessionId.make("s1"),
       pageTargetId: targetId,
       startTime: Date.now(),
       attempt: 1,
@@ -148,7 +148,7 @@ describe("DetectionRegistry", () => {
     const info2: CloudflareInfo = { type: "turnstile", url: "", detectionMethod: "second" };
     const active2: ActiveDetection = {
       info: info2,
-      pageCdpSessionId: CdpSessionId.makeUnsafe("s1"),
+      pageCdpSessionId: CdpSessionId.make("s1"),
       pageTargetId: targetId,
       startTime: Date.now(),
       attempt: 1,
@@ -179,7 +179,7 @@ describe("DetectionRegistry", () => {
       emissions.push(active.pageTargetId);
     });
 
-    const targetId = TargetId.makeUnsafe("T1");
+    const targetId = TargetId.make("T1");
     const active = makeActive("T1");
     active.aborted = true; // pre-aborted
 
@@ -196,9 +196,9 @@ describe("DetectionRegistry", () => {
 
   it("findByIframeSession returns correct page target", async () => {
     const registry = new DetectionRegistry(() => {});
-    const targetId = TargetId.makeUnsafe("T1");
+    const targetId = TargetId.make("T1");
     const active = makeActive("T1");
-    active.iframeCdpSessionId = CdpSessionId.makeUnsafe("iframe-session-1");
+    active.iframeCdpSessionId = CdpSessionId.make("iframe-session-1");
 
     const ctx = await Effect.runPromise(registry.register(targetId, active));
 
@@ -214,8 +214,8 @@ describe("DetectionRegistry", () => {
 
     await Effect.runPromise(
       Effect.gen(function* () {
-        yield* registry.register(TargetId.makeUnsafe("T1"), makeActive("T1"));
-        yield* registry.register(TargetId.makeUnsafe("T2"), makeActive("T2"));
+        yield* registry.register(TargetId.make("T1"), makeActive("T1"));
+        yield* registry.register(TargetId.make("T2"), makeActive("T2"));
       }),
     );
 

@@ -11,13 +11,13 @@
  * Tests use Layer.succeed with mocks (same pattern as cf-services.ts).
  */
 import type { Effect } from "effect";
-import { ServiceMap } from "effect";
+import { Context } from "effect";
 import type { ReplayEvent, ReplayMetadata, ReplayStoreError } from "../shared/replay-schemas.js";
 
 // ─── ReplayWriter ───────────────────────────────────────────────────
 // Writes per-tab replay JSON files + SQLite metadata.
 
-export const ReplayWriter = ServiceMap.Service<{
+export const ReplayWriter = Context.Service<{
   /** Write a per-tab replay file (events + metadata as JSON). Returns filepath. */
   readonly writeTabReplay: (
     tabReplayId: string,
@@ -46,7 +46,7 @@ export interface SessionGaugeState {
   getEstimatedBytes: () => number;
 }
 
-export const ReplayMetrics = ServiceMap.Service<{
+export const ReplayMetrics = Context.Service<{
   readonly incEvents: (count: number) => Effect.Effect<void>;
   readonly observeTabDuration: (seconds: number) => Effect.Effect<void>;
   readonly registerSession: (state: SessionGaugeState) => Effect.Effect<() => void>;

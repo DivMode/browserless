@@ -41,8 +41,8 @@ const makeActive = (overrides?: Partial<ActiveDetection>): ActiveDetection => {
   };
   return {
     info,
-    pageCdpSessionId: CdpSessionId.makeUnsafe("test-session"),
-    pageTargetId: TargetId.makeUnsafe("test-target"),
+    pageCdpSessionId: CdpSessionId.make("test-session"),
+    pageTargetId: TargetId.make("test-target"),
     startTime: Date.now(),
     attempt: 1,
     aborted: false,

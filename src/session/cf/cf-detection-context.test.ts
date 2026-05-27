@@ -13,8 +13,8 @@ const makeActive = (targetId: string): ActiveDetection => {
   const info: CloudflareInfo = { type: "turnstile", url: "", detectionMethod: "cdp_dom_walk" };
   return {
     info,
-    pageCdpSessionId: CdpSessionId.makeUnsafe("session-1"),
-    pageTargetId: TargetId.makeUnsafe(targetId),
+    pageCdpSessionId: CdpSessionId.make("session-1"),
+    pageTargetId: TargetId.make(targetId),
     startTime: Date.now(),
     attempt: 1,
     aborted: false,
@@ -122,8 +122,8 @@ describe("DetectionContext", () => {
 
       expect(ctx.oopif).toBeNull();
 
-      const iframeTargetId = TargetId.makeUnsafe("iframe-1");
-      const iframeCdpSessionId = CdpSessionId.makeUnsafe("iframe-session-1");
+      const iframeTargetId = TargetId.make("iframe-1");
+      const iframeCdpSessionId = CdpSessionId.make("iframe-session-1");
       yield* ctx.bindOOPIF(iframeTargetId, iframeCdpSessionId);
 
       expect(ctx.oopif).not.toBeNull();
@@ -144,8 +144,8 @@ describe("DetectionContext", () => {
       const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
-      const iframeTargetId = TargetId.makeUnsafe("iframe-1");
-      const iframeCdpSessionId = CdpSessionId.makeUnsafe("iframe-session-1");
+      const iframeTargetId = TargetId.make("iframe-1");
+      const iframeCdpSessionId = CdpSessionId.make("iframe-session-1");
       yield* ctx.bindOOPIF(iframeTargetId, iframeCdpSessionId);
 
       expect(ctx.aborted).toBe(false);
@@ -168,8 +168,8 @@ describe("DetectionContext", () => {
       const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
-      const iframeTargetId = TargetId.makeUnsafe("iframe-1");
-      const iframeCdpSessionId = CdpSessionId.makeUnsafe("iframe-session-1");
+      const iframeTargetId = TargetId.make("iframe-1");
+      const iframeCdpSessionId = CdpSessionId.make("iframe-session-1");
       yield* ctx.bindOOPIF(iframeTargetId, iframeCdpSessionId);
 
       // Mark click as delivered — post-click OOPIF death should abort
@@ -191,8 +191,8 @@ describe("DetectionContext", () => {
       const ctx = new DetectionContext(active, scope);
 
       // Bind first OOPIF
-      const iframe1Target = TargetId.makeUnsafe("iframe-1");
-      const iframe1Session = CdpSessionId.makeUnsafe("iframe-session-1");
+      const iframe1Target = TargetId.make("iframe-1");
+      const iframe1Session = CdpSessionId.make("iframe-session-1");
       yield* ctx.bindOOPIF(iframe1Target, iframe1Session);
 
       expect(ctx.oopif).not.toBeNull();
@@ -207,8 +207,8 @@ describe("DetectionContext", () => {
       expect(ctx.aborted).toBe(false);
 
       // Bind replacement OOPIF
-      const iframe2Target = TargetId.makeUnsafe("iframe-2");
-      const iframe2Session = CdpSessionId.makeUnsafe("iframe-session-2");
+      const iframe2Target = TargetId.make("iframe-2");
+      const iframe2Session = CdpSessionId.make("iframe-session-2");
       yield* ctx.bindOOPIF(iframe2Target, iframe2Session);
 
       expect(ctx.oopif).not.toBeNull();
@@ -232,7 +232,7 @@ describe("DetectionContext", () => {
       expect(ctx.canBindOOPIF).toBe(true);
 
       // Bind → Bound
-      yield* ctx.bindOOPIF(TargetId.makeUnsafe("i1"), CdpSessionId.makeUnsafe("s1"));
+      yield* ctx.bindOOPIF(TargetId.make("i1"), CdpSessionId.make("s1"));
       expect(ctx.oopifState._tag).toBe("Bound");
       expect(ctx.canBindOOPIF).toBe(false);
 
@@ -243,9 +243,9 @@ describe("DetectionContext", () => {
       expect(ctx.oopif).toBeNull();
 
       // Rebind → Bound
-      yield* ctx.bindOOPIF(TargetId.makeUnsafe("i2"), CdpSessionId.makeUnsafe("s2"));
+      yield* ctx.bindOOPIF(TargetId.make("i2"), CdpSessionId.make("s2"));
       expect(ctx.oopifState._tag).toBe("Bound");
-      expect(ctx.oopif!.iframeTargetId).toBe(TargetId.makeUnsafe("i2"));
+      expect(ctx.oopif!.iframeTargetId).toBe(TargetId.make("i2"));
 
       // Cleanup
       yield* Scope.close(scope, { _tag: "Success", value: void 0 });
@@ -273,8 +273,8 @@ describe("DetectionContext", () => {
       const active = makeActive("T1");
       const ctx = new DetectionContext(active, scope);
 
-      const iframeTargetId = TargetId.makeUnsafe("iframe-1");
-      const iframeCdpSessionId = CdpSessionId.makeUnsafe("iframe-session-1");
+      const iframeTargetId = TargetId.make("iframe-1");
+      const iframeCdpSessionId = CdpSessionId.make("iframe-session-1");
       yield* ctx.bindOOPIF(iframeTargetId, iframeCdpSessionId);
 
       // Close detection scope
@@ -371,7 +371,7 @@ describe("DetectionRegistry with DetectionContext", () => {
   it.effect("register returns DetectionContext", () =>
     Effect.gen(function* () {
       const registry = new DetectionRegistry(() => {});
-      const targetId = TargetId.makeUnsafe("T1");
+      const targetId = TargetId.make("T1");
       const active = makeActive("T1");
 
       const ctx = yield* registry.register(targetId, active);
@@ -389,17 +389,17 @@ describe("DetectionRegistry with DetectionContext", () => {
   it.effect("findByIframeTarget finds context with bound OOPIF", () =>
     Effect.gen(function* () {
       const registry = new DetectionRegistry(() => {});
-      const targetId = TargetId.makeUnsafe("T1");
+      const targetId = TargetId.make("T1");
       const active = makeActive("T1");
 
       const ctx = yield* registry.register(targetId, active);
-      const iframeTargetId = TargetId.makeUnsafe("iframe-1");
-      yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe("iframe-session-1"));
+      const iframeTargetId = TargetId.make("iframe-1");
+      yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.make("iframe-session-1"));
 
       const found = registry.findByIframeTarget(iframeTargetId);
       expect(found).toBe(ctx);
 
-      const notFound = registry.findByIframeTarget(TargetId.makeUnsafe("unknown"));
+      const notFound = registry.findByIframeTarget(TargetId.make("unknown"));
       expect(notFound).toBeUndefined();
 
       yield* ctx.resolve();
@@ -409,10 +409,10 @@ describe("DetectionRegistry with DetectionContext", () => {
   it.effect("findByIframeTarget returns undefined when no OOPIF bound", () =>
     Effect.gen(function* () {
       const registry = new DetectionRegistry(() => {});
-      const targetId = TargetId.makeUnsafe("T1");
+      const targetId = TargetId.make("T1");
       const ctx = yield* registry.register(targetId, makeActive("T1"));
 
-      const found = registry.findByIframeTarget(TargetId.makeUnsafe("iframe-1"));
+      const found = registry.findByIframeTarget(TargetId.make("iframe-1"));
       expect(found).toBeUndefined();
 
       yield* ctx.resolve();
@@ -426,11 +426,11 @@ describe("DetectionRegistry with DetectionContext", () => {
         emissions.push({ targetId: active.pageTargetId, signal });
       });
 
-      const targetId = TargetId.makeUnsafe("T1");
+      const targetId = TargetId.make("T1");
       const active = makeActive("T1");
       const ctx = yield* registry.register(targetId, active);
-      const iframeTargetId = TargetId.makeUnsafe("iframe-1");
-      yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe("iframe-session-1"));
+      const iframeTargetId = TargetId.make("iframe-1");
+      yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.make("iframe-session-1"));
 
       // Simulate pre-click OOPIF destruction
       yield* Scope.close(ctx.oopif!.scope, { _tag: "Success", value: void 0 });
@@ -454,11 +454,11 @@ describe("DetectionRegistry with DetectionContext", () => {
           emissions.push({ targetId: active.pageTargetId, signal });
         });
 
-        const targetId = TargetId.makeUnsafe("T1");
+        const targetId = TargetId.make("T1");
         const active = makeActive("T1");
         const ctx = yield* registry.register(targetId, active);
-        const iframeTargetId = TargetId.makeUnsafe("iframe-1");
-        yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe("iframe-session-1"));
+        const iframeTargetId = TargetId.make("iframe-1");
+        yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.make("iframe-session-1"));
 
         // Mark click as delivered
         active.clickDelivered = true;
@@ -483,10 +483,10 @@ describe("DetectionRegistry with DetectionContext", () => {
         emissions.push(active.pageTargetId);
       });
 
-      const targetId = TargetId.makeUnsafe("T1");
+      const targetId = TargetId.make("T1");
       const ctx = yield* registry.register(targetId, makeActive("T1"));
-      const iframeTargetId = TargetId.makeUnsafe("iframe-1");
-      yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.makeUnsafe("iframe-session-1"));
+      const iframeTargetId = TargetId.make("iframe-1");
+      yield* ctx.bindOOPIF(iframeTargetId, CdpSessionId.make("iframe-session-1"));
 
       // Resolve first
       yield* ctx.resolve();
@@ -501,7 +501,7 @@ describe("DetectionRegistry with DetectionContext", () => {
   it.effect("context.abort() opens latch — raceFirst pattern works", () =>
     Effect.gen(function* () {
       const registry = new DetectionRegistry(() => {});
-      const targetId = TargetId.makeUnsafe("T1");
+      const targetId = TargetId.make("T1");
       const active = makeActive("T1");
       const ctx = yield* registry.register(targetId, active);
 
@@ -579,7 +579,7 @@ describe("DetectionRegistry with DetectionContext", () => {
   it.effect("scope finalizer settles resolution when aborted", () =>
     Effect.gen(function* () {
       const registry = new DetectionRegistry(() => {});
-      const targetId = TargetId.makeUnsafe("T1");
+      const targetId = TargetId.make("T1");
       const active = makeActive("T1");
       yield* registry.register(targetId, active);
 
@@ -596,7 +596,7 @@ describe("DetectionRegistry with DetectionContext", () => {
   it.effect("aborted detection: bridge push still settles resolution after OOPIF destruction", () =>
     Effect.gen(function* () {
       const registry = new DetectionRegistry(() => {});
-      const targetId = TargetId.makeUnsafe("T1");
+      const targetId = TargetId.make("T1");
       const active = makeActive("T1");
       const ctx = yield* registry.register(targetId, active);
 

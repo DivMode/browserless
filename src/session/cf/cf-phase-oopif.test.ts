@@ -21,8 +21,8 @@ import { MAX_OOPIF_POLLS } from "./cf-schedules.js";
 // Test helpers
 // ═══════════════════════════════════════════════════════════════════════
 
-const PAGE_SESSION = CdpSessionId.makeUnsafe("test-page-session");
-const PAGE_TARGET = TargetId.makeUnsafe("test-target");
+const PAGE_SESSION = CdpSessionId.make("test-page-session");
+const PAGE_TARGET = TargetId.make("test-target");
 const PAGE_FRAME_ID = "page-frame-1";
 const IFRAME_FRAME_ID = "iframe-frame-1";
 const OOPIF_TARGET_ID = "oopif-target-1";

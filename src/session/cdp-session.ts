@@ -587,7 +587,7 @@ export class CdpSession {
     if (this.state === "DESTROYED") {
       return Effect.fail(
         new CdpSessionGoneError({
-          sessionId: cdpSessionId ?? CdpSessionId.makeUnsafe(""),
+          sessionId: cdpSessionId ?? CdpSessionId.make(""),
           method,
         }),
       );
@@ -632,7 +632,7 @@ export class CdpSession {
     if (!this.browserConn) {
       return Effect.fail(
         new CdpSessionGoneError({
-          sessionId: cdpSessionId ?? CdpSessionId.makeUnsafe(""),
+          sessionId: cdpSessionId ?? CdpSessionId.make(""),
           method,
         }),
       );
@@ -640,7 +640,7 @@ export class CdpSession {
     return this.browserConn.send(
       method,
       params,
-      cdpSessionId ? CdpSessionId.makeUnsafe(cdpSessionId) : undefined,
+      cdpSessionId ? CdpSessionId.make(cdpSessionId) : undefined,
       timeout,
     );
   }
@@ -683,7 +683,7 @@ export class CdpSession {
       // silently dropping them is correct and expected.
       return;
     }
-    const sid = SessionId.makeUnsafe(this.sessionId);
+    const sid = SessionId.make(this.sessionId);
     for (const event of events) {
       Queue.offerUnsafe(queue, {
         sessionId: sid,
@@ -1123,8 +1123,8 @@ export class CdpSession {
       }
 
       // Iframe CDP events → server-side rrweb events (direct, no hooks boundary)
-      if (msg.sessionId && this.targets.isIframe(CdpSessionId.makeUnsafe(msg.sessionId))) {
-        const iframeCdpSid = CdpSessionId.makeUnsafe(msg.sessionId);
+      if (msg.sessionId && this.targets.isIframe(CdpSessionId.make(msg.sessionId))) {
+        const iframeCdpSid = CdpSessionId.make(msg.sessionId);
         const pageSessionId = this.targets.getParentCdpSession(iframeCdpSid);
         if (pageSessionId) {
           const parentTargetId = this.targets.findTargetIdByCdpSession(pageSessionId);
@@ -1146,12 +1146,8 @@ export class CdpSession {
 
       // Page-level CDP events → server-side rrweb events
       // (Same pattern as handleIframeCDPEvent but for page sessions)
-      if (
-        msg.method &&
-        msg.sessionId &&
-        !this.targets.isIframe(CdpSessionId.makeUnsafe(msg.sessionId))
-      ) {
-        const pageCdpSid = CdpSessionId.makeUnsafe(msg.sessionId);
+      if (msg.method && msg.sessionId && !this.targets.isIframe(CdpSessionId.make(msg.sessionId))) {
+        const pageCdpSid = CdpSessionId.make(msg.sessionId);
         const pageTargetId = this.targets.findTargetIdByCdpSession(pageCdpSid);
         if (pageTargetId) {
           this.handlePageCDPEvent(pageTargetId, msg.method, msg.params);
@@ -1207,7 +1203,7 @@ export class CdpSession {
 
   private handleBindingCalled(msg: any): void {
     const name = msg.params?.name;
-    const cdpSessionId = CdpSessionId.makeUnsafe(msg.sessionId);
+    const cdpSessionId = CdpSessionId.make(msg.sessionId);
     if (name === "__rrwebPush") {
       // Multiplexed: rrweb batches (array) and bridge events (object with type).
       // Bridge events routed through __rrwebPush to avoid adding a detectable
@@ -1549,8 +1545,8 @@ export class CdpSession {
   private handleAttachedToTargetEffect(msg: any): Effect.Effect<void> {
     const session = this;
     const { sessionId, targetInfo, waitingForDebugger } = msg.params;
-    const cdpSessionId = CdpSessionId.makeUnsafe(sessionId);
-    const targetId = TargetId.makeUnsafe(targetInfo.targetId);
+    const cdpSessionId = CdpSessionId.make(sessionId);
+    const targetId = TargetId.make(targetInfo.targetId);
 
     return Effect.fn("cdp.onTargetAttached")(function* () {
       yield* Effect.annotateCurrentSpan({
@@ -1823,7 +1819,7 @@ export class CdpSession {
         }
 
         const parentCdpSid =
-          (msg.sessionId ? CdpSessionId.makeUnsafe(msg.sessionId) : undefined) ||
+          (msg.sessionId ? CdpSessionId.make(msg.sessionId) : undefined) ||
           session.getLastPageCdpSession();
         if (parentCdpSid) {
           session.targets.addIframe(cdpSessionId, parentCdpSid);
@@ -1868,7 +1864,7 @@ export class CdpSession {
         const queue = yield* Queue.unbounded<TabEvent, Cause.Done>();
         session.tabQueues.set(targetId, queue);
 
-        const sessionIdBranded = SessionId.makeUnsafe(session.sessionId);
+        const sessionIdBranded = SessionId.make(session.sessionId);
         // Deferred signals when consumer's final POST completes — FINALIZER 3 awaits it.
         const consumerDone = yield* Deferred.make<void>();
         session.tabDeferreds.set(targetId, consumerDone);
@@ -2001,10 +1997,7 @@ export class CdpSession {
         "cdp.target_type": targetInfo.type,
         "cdp.url": targetInfo.url?.substring(0, 200) ?? "",
       });
-      if (
-        targetInfo.type === "page" &&
-        !session.targets.has(TargetId.makeUnsafe(targetInfo.targetId))
-      ) {
+      if (targetInfo.type === "page" && !session.targets.has(TargetId.make(targetInfo.targetId))) {
         yield* Effect.logInfo("Discovered external target, attaching...").pipe(
           Effect.annotateLogs({
             target_id: targetInfo.targetId,
@@ -2024,7 +2017,7 @@ export class CdpSession {
 
   private handleTargetDestroyedEffect(msg: any): Effect.Effect<void> {
     const session = this;
-    const targetId = TargetId.makeUnsafe(msg.params.targetId);
+    const targetId = TargetId.make(msg.params.targetId);
 
     return Effect.fn("cdp.onTargetDestroyed")(function* () {
       yield* Effect.annotateCurrentSpan({ "cdp.target_id": targetId });
@@ -2063,7 +2056,7 @@ export class CdpSession {
   private handleTargetInfoChangedEffect(msg: any): Effect.Effect<void> {
     const session = this;
     const { targetInfo } = msg.params;
-    const changedTargetId = TargetId.makeUnsafe(targetInfo.targetId);
+    const changedTargetId = TargetId.make(targetInfo.targetId);
 
     return Effect.fn("cdp.onTargetInfoChanged")(function* () {
       yield* Effect.annotateCurrentSpan({
@@ -2171,7 +2164,7 @@ export class CdpSession {
     const url = frame.url;
     if (!url || url.startsWith("about:") || url.startsWith("chrome:")) return Effect.void;
 
-    const frameCdpSessionId = CdpSessionId.makeUnsafe(msg.sessionId);
+    const frameCdpSessionId = CdpSessionId.make(msg.sessionId);
     const target = this.targets.getByCdpSession(frameCdpSessionId);
     if (!target) return Effect.void;
 

@@ -15,7 +15,7 @@
  * Usage: Set TEST_TRACE_COLLECT=1 env var → otel-layer.ts provides this tracer
  * instead of Layer.empty → /debug/spans endpoint exposes the buffer.
  */
-import { Layer, Option, ServiceMap, Tracer } from "effect";
+import { Context, Layer, Option, Tracer } from "effect";
 
 export interface CollectedSpan {
   traceId: string;
@@ -117,5 +117,5 @@ export function collectingTracerLayer(): Layer.Layer<never> {
     },
   });
 
-  return Layer.succeedServices(ServiceMap.make(Tracer.Tracer, tracer));
+  return Layer.succeedContext(Context.make(Tracer.Tracer, tracer));
 }

@@ -200,7 +200,7 @@ export class CloudflareSolver {
         try: () => fn(method, params, sessionId, timeoutMs),
         catch: () =>
           new CdpSessionGone({
-            sessionId: sessionId ?? CdpSessionId.makeUnsafe(""),
+            sessionId: sessionId ?? CdpSessionId.make(""),
             method,
           }),
       });

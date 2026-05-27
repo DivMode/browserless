@@ -14,7 +14,7 @@
  * - FrameParams: CDP Page.screencastFrame parameters.
  */
 import type { Effect } from "effect";
-import { Schema, ServiceMap } from "effect";
+import { Context, Schema } from "effect";
 import type { CdpSessionId, TargetId } from "../shared/cloudflare-detection.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ export class ScreencastError extends Schema.TaggedErrorClass<ScreencastError>()(
 
 // ─── Service ─────────────────────────────────────────────────────────
 
-export const ScreencastService = ServiceMap.Service<{
+export const ScreencastService = Context.Service<{
   readonly addTarget: (
     sessionId: string,
     cdpSessionId: CdpSessionId,

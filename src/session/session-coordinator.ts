@@ -56,7 +56,7 @@ export class SessionCoordinator {
 
   /** Route an HTTP beacon to the correct CloudflareSolver. */
   handleCfBeacon(sessionId: string, targetId: string, tokenLength: number): boolean {
-    const brandedTargetId = TargetId.makeUnsafe(targetId);
+    const brandedTargetId = TargetId.make(targetId);
     if (sessionId) {
       const solver = this.cloudflareSolvers.get(sessionId);
       if (solver) {

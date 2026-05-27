@@ -65,7 +65,7 @@
     "better-sqlite3": "^11.10.0",
     "debug": "^4.4.1",
     "del": "^8.0.1",
-    "effect": "^4.0.0-beta.42",
+    "effect": "4.0.0-beta.70",
     "file-type": "^21.3.0",
     "get-port": "^7.1.0",
     "gradient-string": "^3.0.0",
@@ -86,12 +86,13 @@
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "queue": "^7.0.0",
     "systeminformation": "^5.30.7",
-    "tar-fs": "^3.1.1"
+    "tar-fs": "^3.1.1",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@commitlint/cli": "^20.4.4",
     "@commitlint/config-conventional": "^20.4.4",
-    "@effect/vitest": "^4.0.0-beta.42",
+    "@effect/vitest": "4.0.0-beta.70",
     "env-cmd": "^11.0.0",
     "fast-check": "^4.6.0",
     "vite": "^8.0.0",
