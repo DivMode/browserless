@@ -1,6 +1,4 @@
-import WebSocket from "ws";
-// ws is CJS — Server lives on default export at runtime but TS types don't expose it
-const WebSocketServer = (WebSocket as any).Server as typeof import("ws").WebSocketServer;
+import WebSocket, { WebSocketServer } from "ws";
 import type { Duplex } from "stream";
 import type { IncomingMessage } from "http";
 import type { Config } from "@browserless.io/browserless";
