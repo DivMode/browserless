@@ -18,6 +18,7 @@ import type { ServerResponse } from "http";
 import { Effect } from "effect";
 import { getAhrefsSession } from "../../../scraping/ahrefs-session.js";
 import { readResult, writeResult, writeFailure } from "../../../scraping/r2-writer.js";
+import { buildDispatchFailureWideEvent } from "../../../scraping/ahrefs-wide-event.js";
 import { runForkInServer } from "../../../otel-runtime.js";
 
 export default class AhrefsTrafficDispatchRoute extends HTTPRoute {
@@ -62,6 +63,12 @@ export default class AhrefsTrafficDispatchRoute extends HTTPRoute {
           Effect.matchEffect({
             onFailure: (error) => {
               const message = error instanceof Error ? error.message : String(error);
+              const wideEvent = buildDispatchFailureWideEvent({
+                domain,
+                scrapeType: "traffic",
+                errorMessage: message,
+                instanceId,
+              });
               return Effect.logError("Dispatch failed: scrape threw").pipe(
                 Effect.annotateLogs({
                   dispatch_domain: domain,
@@ -69,6 +76,9 @@ export default class AhrefsTrafficDispatchRoute extends HTTPRoute {
                   dispatch_error: message,
                   dispatch_error_name: error instanceof Error ? error.name : "unknown",
                 }),
+                Effect.andThen(
+                  Effect.logInfo("ahrefs.scrape.wide_event").pipe(Effect.annotateLogs(wideEvent)),
+                ),
                 Effect.andThen(
                   writeFailure(instanceId, domain, "traffic", message).pipe(
                     Effect.tap(() =>

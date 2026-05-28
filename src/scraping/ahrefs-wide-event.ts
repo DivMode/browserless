@@ -614,3 +614,37 @@ function buildWideEventInner(input: WideEventInput): Record<string, string> {
 // categorizeError() removed — replaced by exhaustive errorCategory() from ahrefs-errors.ts.
 // The old implementation had a bug: turnstile_timeout_* matched "timeout" before "turnstile",
 // returning "transient" instead of the correct "solver" category.
+
+/**
+ * Minimal `ahrefs.scrape.wide_event` for failures that happen BEFORE
+ * `session.scrape` can construct a full one — e.g. `puppeteer.connect`
+ * failing because the pool is zombied. Without it the dashboards go
+ * dark during pool failures: the real wide event lives inside
+ * `session.scrape` after browser acquisition, so a zombied pool emits
+ * only "Dispatch failed: scrape threw" with no `ahrefs_success="false"`
+ * label and the failure-rate panels show silence instead of a spike.
+ *
+ * Label set is intentionally minimal — just enough for the standard
+ * pivots (`ahrefs_success`, `ahrefs_domain`, `api_diagnosis`,
+ * `scraper_type`, `error_message`). Real scrape failures continue to
+ * get the full payload from `buildWideEvent`.
+ */
+export function buildDispatchFailureWideEvent(input: {
+  domain: string;
+  scrapeType: ScrapeType;
+  errorMessage: string;
+  instanceId: string;
+}): Record<string, string> {
+  return {
+    event_type: "ahrefs.scrape.wide_event",
+    [ATTR_AHREFS_DOMAIN]: input.domain,
+    [ATTR_AHREFS_SUCCESS]: "false",
+    [ATTR_SCRAPER_TYPE]: input.scrapeType,
+    [ATTR_API_DIAGNOSIS]: "dispatch_threw",
+    [ATTR_ERROR_TYPE]: "dispatch_threw",
+    [ATTR_ERROR_MESSAGE]: input.errorMessage.slice(0, 256),
+    [ATTR_FAILURE_POINT]: "dispatch_route",
+    [ATTR_FAILURE_CHAIN]: "dispatch_threw",
+    [ATTR_SESSION_ID]: input.instanceId,
+  };
+}

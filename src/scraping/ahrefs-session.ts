@@ -204,6 +204,40 @@ interface ManagedBrowser {
 
 let nextBrowserId = 0;
 
+/**
+ * Extract a useful message string from anything that landed in a catch
+ * handler. `e instanceof Error` is not reliable here: puppeteer-core's
+ * `ProtocolError`, undici's `SocketError`, and various CDP-layer rejections
+ * fail the cross-realm instanceof check (different module instances after
+ * bundling) and fall through to `String(e)` → `[object Object]`, which is
+ * exactly what wiped out the upstream signal in the 2026-05-28 zombie-pool
+ * incident.
+ */
+function stringifyUnknownError(e: unknown): string {
+  if (e == null) return String(e);
+  if (typeof e === "string") return e;
+  if (typeof e !== "object") return String(e);
+  if (e instanceof Error) {
+    if ("errors" in e && Array.isArray((e as { errors: unknown[] }).errors)) {
+      const inner = (e as { errors: unknown[] }).errors
+        .map(stringifyUnknownError)
+        .filter(Boolean)
+        .join("; ");
+      return inner ? `${e.message} [${inner}]` : e.message;
+    }
+    return e.message || e.name || "Error";
+  }
+  const obj = e as Record<string, unknown>;
+  if (typeof obj.message === "string" && obj.message) {
+    return typeof obj.name === "string" ? `${obj.name}: ${obj.message}` : obj.message;
+  }
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
+}
+
 // ── Browser acquire/release ─────────────────────────────────────────
 
 const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.acquireBrowser")(
@@ -213,7 +247,7 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
 
     const browser = yield* Effect.tryPromise({
       try: () => puppeteer.connect({ browserWSEndpoint: buildInternalWsUrl() }),
-      catch: (e: unknown) => new Error(`connect: ${e instanceof Error ? e.message : String(e)}`),
+      catch: (e: unknown) => new Error(`connect: ${stringifyUnknownError(e)}`),
     });
 
     // Proxy auth on initial pages — inject session_id into the username so the
