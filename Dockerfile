@@ -21,7 +21,10 @@
 # infra/lib/build-identity.ts).
 # ---------------------------------------------------------------------------
 
-FROM ubuntu:24.04
+# Pinned @sha256 (digest of ubuntu:24.04 as of 2026-05-30) so a future rebuild
+# can't silently pull a re-pushed base — matches the @sha256 discipline the
+# scraper/obscura-akamai/replay-server Dockerfiles already follow.
+FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
 
 LABEL org.opencontainers.image.source=https://github.com/DivMode/catchseo
 
@@ -105,11 +108,14 @@ RUN curl -sL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | b
   npm install -g npm@$NPM_VERSION
 
 # FFmpeg static binaries via multi-stage copy (pinned, no external wget)
-COPY --from=mwader/static-ffmpeg:8.0.1 /ffmpeg /usr/bin/ffmpeg
-COPY --from=mwader/static-ffmpeg:8.0.1 /ffprobe /usr/bin/ffprobe
+COPY --from=mwader/static-ffmpeg:8.0.1@sha256:252705ff88532fa338e7065c21792756552f8fe7c212f84bc503d3c340689594 /ffmpeg /usr/bin/ffmpeg
+COPY --from=mwader/static-ffmpeg:8.0.1@sha256:252705ff88532fa338e7065c21792756552f8fe7c212f84bc503d3c340689594 /ffprobe /usr/bin/ffprobe
 
 # Bun for build scripts (NOT runtime — see BUN_WEBSOCKET_BUG.md)
-RUN curl -fsSL https://bun.com/install | bash && \
+# Pin bun to v1.3.14 (the version already shipping) instead of fetching latest,
+# so a build months from now is reproducible. bun is build-only (not runtime)
+# and only the binary is kept below, so the installer's other side-effects don't matter.
+RUN curl -fsSL https://bun.com/install | bash -s "bun-v1.3.14" && \
   cp /root/.bun/bin/bun /usr/local/bin/bun && \
   chmod +x /usr/local/bin/bun && \
   rm -rf /root/.bun
