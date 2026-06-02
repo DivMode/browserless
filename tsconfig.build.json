@@ -1,4 +1,9 @@
 {
   "extends": "./tsconfig.json",
+  // TS6 no longer infers rootDir for emit from baseUrl; set it explicitly so the
+  // build output keeps its src-relative layout under build/.
+  "compilerOptions": {
+    "rootDir": "./src"
+  },
   "exclude": ["./src/**/*.test.ts", "./src/browser/**/*"]
 }

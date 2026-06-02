@@ -1,13 +1,6 @@
-import {
-  APITags,
-  BadRequest,
-  BrowserHTTPRoute,
+import type {
   BrowserInstance,
-  BrowserlessRoutes,
   CDPLaunchOptions,
-  ChromiumCDP,
-  HTTPRoutes,
-  Methods,
   Request,
   SystemQueryParameters,
   UnwrapPromise,
@@ -15,21 +8,30 @@ import {
   WaitForFunctionOptions,
   WaitForSelectorOptions,
   bestAttempt,
+  rejectRequestPattern,
+  rejectResourceTypes,
+  requestInterceptors,
+} from "@browserless.io/browserless";
+import {
+  APITags,
+  BadRequest,
+  BrowserHTTPRoute,
+  BrowserlessRoutes,
+  ChromiumCDP,
+  HTTPRoutes,
+  Methods,
   bestAttemptCatch,
   contentTypes,
   dedent,
   isBase64Encoded,
   noop,
-  rejectRequestPattern,
-  rejectResourceTypes,
-  requestInterceptors,
   sleep,
   waitForEvent as waitForEvt,
   waitForFunction as waitForFn,
 } from "@browserless.io/browserless";
-import { Page } from "puppeteer-core";
+import type { Page } from "puppeteer-core";
 import { Effect } from "effect";
-import { ServerResponse } from "http";
+import type { ServerResponse } from "http";
 import { runForkInServer } from "../otel-runtime.js";
 
 export interface BodySchema {
@@ -39,7 +41,7 @@ export interface BodySchema {
   bestAttempt?: bestAttempt;
   cookies?: Array<Parameters<Page["setCookie"]>[0]>;
   emulateMediaType?: Parameters<Page["emulateMediaType"]>[0];
-  gotoOptions?: Parameters<Page["goto"]>[1];
+  gotoOptions?: Parameters<Page["goto"]>[1] & Parameters<Page["setContent"]>[1];
   html?: Parameters<Page["setContent"]>[0];
   options?: Parameters<Page["pdf"]>[0] & {
     fullPage?: boolean;

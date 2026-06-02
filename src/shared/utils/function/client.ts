@@ -1,6 +1,6 @@
-import { Browser, Page } from "puppeteer-core";
-import { BrowserWebSocketTransport } from "puppeteer-core/lib/esm/puppeteer/common/BrowserWebSocketTransport.js";
-import { _connectToCdpBrowser as connect } from "puppeteer-core/lib/esm/puppeteer/cdp/BrowserConnector.js";
+import type { Browser, Page } from "puppeteer-core";
+import { BrowserWebSocketTransport } from "puppeteer-core/lib/puppeteer/common/BrowserWebSocketTransport.js";
+import { _connectToCdpBrowser as connect } from "puppeteer-core/lib/puppeteer/cdp/BrowserConnector.js";
 
 type codeHandler = (params: { context: unknown; page: Page }) => Promise<unknown>;
 

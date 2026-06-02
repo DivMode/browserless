@@ -1,13 +1,6 @@
-import {
-  APITags,
-  BadRequest,
-  BrowserHTTPRoute,
+import type {
   BrowserInstance,
-  BrowserlessRoutes,
   CDPLaunchOptions,
-  ChromiumCDP,
-  HTTPRoutes,
-  Methods,
   Request,
   SystemQueryParameters,
   UnwrapPromise,
@@ -15,22 +8,31 @@ import {
   WaitForFunctionOptions,
   WaitForSelectorOptions,
   bestAttempt,
-  bestAttemptCatch,
-  contentTypes,
-  isBase64Encoded,
-  noop,
   rejectRequestPattern,
   rejectResourceTypes,
   requestInterceptors,
   setJavaScriptEnabled,
+} from "@browserless.io/browserless";
+import {
+  APITags,
+  BadRequest,
+  BrowserHTTPRoute,
+  BrowserlessRoutes,
+  ChromiumCDP,
+  HTTPRoutes,
+  Methods,
+  bestAttemptCatch,
+  contentTypes,
+  isBase64Encoded,
+  noop,
   sleep,
   waitForEvent as waitForEvt,
   waitForFunction as waitForFn,
   writeResponse,
 } from "@browserless.io/browserless";
-import { Page } from "puppeteer-core";
+import type { Page } from "puppeteer-core";
 import { Effect } from "effect";
-import { ServerResponse } from "http";
+import type { ServerResponse } from "http";
 import { runForkInServer } from "../otel-runtime.js";
 
 export interface BodySchema {
@@ -40,7 +42,7 @@ export interface BodySchema {
   bestAttempt?: bestAttempt;
   cookies?: Array<Parameters<Page["setCookie"]>[0]>;
   emulateMediaType?: Parameters<Page["emulateMediaType"]>[0];
-  gotoOptions?: Parameters<Page["goto"]>[1];
+  gotoOptions?: Parameters<Page["goto"]>[1] & Parameters<Page["setContent"]>[1];
   html?: Parameters<Page["setContent"]>[0];
   rejectRequestPattern?: rejectRequestPattern[];
   rejectResourceTypes?: rejectResourceTypes[];
