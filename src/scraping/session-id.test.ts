@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import { freshSessionId, injectSessionId } from "./session-id.js";
 
 describe("freshSessionId", () => {
-  it("returns a UUIDv4 string", () => {
+  it("returns a 32-char hyphen-free lowercase-hex token", () => {
+    // Hyphen-free is the contract: the relay's RouteParams parser splits the
+    // username on `-` and would truncate a UUIDv4 at its first hyphen. The
+    // token must contain only [0-9a-f] so the full 128 bits survive.
     const id = freshSessionId();
-    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(id).toMatch(/^[0-9a-f]{32}$/);
+    expect(id).not.toContain("-");
   });
 
   it("returns a different value on each call", () => {

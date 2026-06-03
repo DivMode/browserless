@@ -24,7 +24,7 @@ import type { ScrapeError } from "./ahrefs-errors.js";
 import { emptyCfMetrics } from "./ahrefs-cf-listener.js";
 import type { ReplayMetadata } from "./ahrefs-cf-listener.js";
 import { runForkInServer } from "../otel-runtime.js";
-import { freshSessionId } from "./session-id.js";
+import { SessionTokenHolder } from "./session-token-holder.js";
 import { isBlockTrigger } from "./block-detection.js";
 import { requireProxyUrl } from "./proxy-config.js";
 
@@ -191,18 +191,19 @@ interface ManagedBrowser {
    * an empty string and the dashboard renders that as "Geo Failed".
    */
   readonly proxyIpAddress: string | undefined;
-  /**
-   * Fresh UUIDv4 generated at acquire time and injected into the proxy
-   * username (`<baseUser>-session-{uuid}`). The relay's SessionManager pins
-   * this session_id to a backend phone (post-cutover; today the legacy
-   * router round-robins and ignores it). On invalidate, the next acquired
-   * browser gets a fresh session_id — that's the rotation mechanism.
-   * See ADR-0037.
-   */
-  readonly sessionId: string;
 }
 
 let nextBrowserId = 0;
+
+/**
+ * Process-wide stable-until-block session token (ADR-0065 §3). Every browser
+ * and tab reads the SAME token from here, so all browserless egress is sticky
+ * to one relay-chosen phone/IP until a block forces a rotation — instead of
+ * the old behaviour where each browser minted its own token and burned a relay
+ * rotation per scrape. `scrape()` calls `observe(error)` to rotate it on a
+ * detected block; the next page's `authenticate()` reads the fresh token.
+ */
+const sessionTokenHolder = new SessionTokenHolder();
 
 /**
  * Extract a useful message string from anything that landed in a catch
@@ -243,7 +244,11 @@ function stringifyUnknownError(e: unknown): string {
 const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.acquireBrowser")(
   function* () {
     const id = nextBrowserId++;
-    const sessionId = freshSessionId();
+    // Snapshot the holder's current token for this browser's acquire-time
+    // logging and initial-page auth. The per-page auth in `scrapeAttempt`
+    // re-reads `sessionTokenHolder.current()` so a mid-life block rotation
+    // propagates to the retry without re-acquiring the browser.
+    const sessionId = sessionTokenHolder.current();
 
     const browser = yield* Effect.tryPromise({
       try: () => puppeteer.connect({ browserWSEndpoint: buildInternalWsUrl() }),
@@ -285,7 +290,6 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
       needsInvalidation: false,
       activeTabs: 0,
       proxyIpAddress,
-      sessionId,
     };
 
     // Puppeteer "disconnected" — fires when the underlying CDP WebSocket
@@ -427,20 +431,32 @@ export class AhrefsSessionManager {
 
   /**
    * Public scrape entry point. Runs one attempt; on block trigger (per
-   * `isBlockTrigger` — see `block-detection.ts`), runs ONE retry. The retry
-   * naturally lands on a different browser in the pool (or a freshly-created
-   * one if the failed browser was the only one) because the failed attempt
-   * invalidated its browser. Different browser → different session_id →
-   * different backend phone (post-SessionManager-cutover) → different IP.
+   * `isBlockTrigger` — see `block-detection.ts`), rotates the session token
+   * and runs ONE retry. The token rotation is the recovery primitive (ADR-0065
+   * §3): the customer changing the token IS the "the last IP failed" signal,
+   * and the relay services it by pool-walk → modem-rotate to a fresh egress
+   * IP. The retry's `page.authenticate()` reads the rotated token, so it
+   * lands on a fresh IP regardless of which pooled browser serves it.
    *
-   * Budget: 1 rotation per scrape call. Post-rotation failures bubble up
-   * for the workflow's outer retry to handle.
+   * A trailing block (attempt 2 also blocked) rotates the token once more so
+   * the NEXT scrape() call does not start on the burned IP. Healthy outcomes
+   * leave the token stable — that is the stable-until-block guarantee that
+   * keeps browserless from spending the relay's rotation budget on working IPs.
+   *
+   * Budget: 1 rotation per scrape call (+1 trailing). Post-rotation failures
+   * bubble up for the workflow's outer retry to handle.
    */
   scrape(domain: string, scrapeType: ScrapeType): Effect.Effect<ScrapeOutput, Error> {
     return Effect.fn("session.scrape")(function* (this: AhrefsSessionManager) {
       const firstOutput = yield* this.scrapeAttempt(domain, scrapeType, 1);
 
-      if (firstOutput.result.success || !isBlockTrigger(firstOutput.result.scrapeError)) {
+      // Stable-until-block: a success keeps the IP pinned (sticky); a block
+      // rotates the token (fresh IP on the retry); a non-block error neither
+      // retries nor rotates. `observe` both decides and performs the rotation.
+      if (firstOutput.result.success) {
+        return firstOutput;
+      }
+      if (!sessionTokenHolder.observe(firstOutput.result.scrapeError)) {
         return firstOutput;
       }
 
@@ -451,6 +467,7 @@ export class AhrefsSessionManager {
           scrape_type: scrapeType,
           trigger_type: triggerTag,
           first_attempt_error: firstOutput.result.error ?? "",
+          new_session_id: sessionTokenHolder.current(),
         }),
       );
 
@@ -462,6 +479,9 @@ export class AhrefsSessionManager {
           ? "same_block"
           : "different_error";
 
+      // Trailing block → rotate so the next request starts on a fresh IP.
+      const trailingRotated = sessionTokenHolder.observe(secondOutput.result.scrapeError);
+
       yield* Effect.logInfo("ahrefs.rotation.completed").pipe(
         Effect.annotateLogs({
           domain,
@@ -469,6 +489,7 @@ export class AhrefsSessionManager {
           trigger_type: triggerTag,
           post_rotation_outcome: postOutcome,
           second_attempt_error: secondOutput.result.error ?? "",
+          trailing_rotation: String(trailingRotated),
         }),
       );
 
@@ -511,6 +532,7 @@ export class AhrefsSessionManager {
           const sessionAgeAtStart = Date.now() - managed.createdAt;
           yield* Effect.annotateCurrentSpan({
             "session.browser_id": managed.id,
+            "session.session_id": sessionTokenHolder.current(),
             "session.solve_count_at_start": solveCountAtStart,
             "session.age_ms_at_start": sessionAgeAtStart,
             "session.browser_acquire_ms": browserAcquireMs,
@@ -540,11 +562,13 @@ export class AhrefsSessionManager {
             );
           }
 
-          // Create page on the pooled browser. Each page gets the same
-          // session_id as its parent browser — every CONNECT through this
-          // browser carries the same session_id in the Basic Auth username,
-          // so the relay's SessionManager pins this browser's traffic to a
-          // single backend phone for the browser's lifetime.
+          // Create page on the pooled browser. Auth reads the CURRENT token
+          // from the process-wide holder (not a per-browser snapshot), so a
+          // block rotation in `scrape()` between attempt 1 and 2 propagates
+          // here: the retry's CONNECT carries the fresh token and the relay
+          // pool-walks / modem-rotates to a fresh egress IP. While the token
+          // is stable, every CONNECT carries the same session_id, so the relay
+          // keeps browserless sticky to one phone (no wasted rotation).
           //
           // Effect.timeout is the safety net for the disconnected-but-not-yet-
           // flagged case: if Chrome dies AFTER Pool.get and BEFORE the
@@ -555,7 +579,7 @@ export class AhrefsSessionManager {
           const page = yield* Effect.tryPromise({
             try: async () => {
               const p = await managed.browser.newPage();
-              const auth = authUsernameWithSession(managed.sessionId);
+              const auth = authUsernameWithSession(sessionTokenHolder.current());
               if (auth) {
                 await p.authenticate(auth);
               }
@@ -670,6 +694,10 @@ export class AhrefsSessionManager {
             domain,
             scrapeType,
             scrapeUrl: scrapeOutput.scrapeUrl,
+            // The session token in use for this attempt — it determines the
+            // relay-pinned egress IP, so recording it lets ops correlate a
+            // scrape outcome with the IP that served it (ADR-0065).
+            sessionId: sessionTokenHolder.current(),
             sessionContext: {
               session_age_ms: Date.now() - managed.createdAt,
               session_cf_solves: managed.cfSolveCount,
