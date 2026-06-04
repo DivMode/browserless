@@ -412,6 +412,13 @@ function shellTimingLabels(st?: import("./ahrefs-cdp.js").ShellTimings): Record<
  * failures (110 base + 3 intercept counts). 2026-05-21 ADR-0045 swapped
  * `use_proxy` (always "true", dead constant) for `relay_path` (varies between
  * "lan" and "hetzner") — net label count unchanged.
+ *
+ * ADR-0068 deliberately does NOT add reconciliation labels (`instance_id`) to
+ * this record — the wide event is already at its 113 ceiling, and one more
+ * always-on label would risk the 128 ingest cap on the ITE-failure case. The
+ * `instance_id` reconciliation rides on SEPARATE, cheap `scrape.dispatched` /
+ * `scrape.terminal` marker log lines instead (see ahrefs-session.ts). The wide
+ * event's `event_type` already uniquely identifies it as a terminal record.
  */
 const WIDE_EVENT_MAX_ATTRS = 113;
 
@@ -615,36 +622,9 @@ function buildWideEventInner(input: WideEventInput): Record<string, string> {
 // The old implementation had a bug: turnstile_timeout_* matched "timeout" before "turnstile",
 // returning "transient" instead of the correct "solver" category.
 
-/**
- * Minimal `ahrefs.scrape.wide_event` for failures that happen BEFORE
- * `session.scrape` can construct a full one — e.g. `puppeteer.connect`
- * failing because the pool is zombied. Without it the dashboards go
- * dark during pool failures: the real wide event lives inside
- * `session.scrape` after browser acquisition, so a zombied pool emits
- * only "Dispatch failed: scrape threw" with no `ahrefs_success="false"`
- * label and the failure-rate panels show silence instead of a spike.
- *
- * Label set is intentionally minimal — just enough for the standard
- * pivots (`ahrefs_success`, `ahrefs_domain`, `api_diagnosis`,
- * `scraper_type`, `error_message`). Real scrape failures continue to
- * get the full payload from `buildWideEvent`.
- */
-export function buildDispatchFailureWideEvent(input: {
-  domain: string;
-  scrapeType: ScrapeType;
-  errorMessage: string;
-  instanceId: string;
-}): Record<string, string> {
-  return {
-    event_type: "ahrefs.scrape.wide_event",
-    [ATTR_AHREFS_DOMAIN]: input.domain,
-    [ATTR_AHREFS_SUCCESS]: "false",
-    [ATTR_SCRAPER_TYPE]: input.scrapeType,
-    [ATTR_API_DIAGNOSIS]: "dispatch_threw",
-    [ATTR_ERROR_TYPE]: "dispatch_threw",
-    [ATTR_ERROR_MESSAGE]: input.errorMessage.slice(0, 256),
-    [ATTR_FAILURE_POINT]: "dispatch_route",
-    [ATTR_FAILURE_CHAIN]: "dispatch_threw",
-    [ATTR_SESSION_ID]: input.instanceId,
-  };
-}
+// buildDispatchFailureWideEvent() removed (ADR-0068). It existed as a minimal
+// fallback for the "scrape threw before a full wide event could be built" case.
+// The guaranteed terminal path (`runDispatch` → `emitTerminalRecord` in
+// ahrefs-session.ts) now ALWAYS produces a FULL `buildWideEvent` — even on a
+// hard-deadline trip, defect, or interrupt, via `buildTerminalFailureOutput` —
+// so the minimal builder no longer has a caller.

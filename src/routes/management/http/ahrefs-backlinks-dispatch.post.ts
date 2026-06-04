@@ -19,9 +19,8 @@ import {
 } from "@browserless.io/browserless";
 import type { ServerResponse } from "http";
 import { Effect } from "effect";
-import { getAhrefsSession } from "../../../scraping/ahrefs-session.js";
-import { readResult, writeResult, writeFailure } from "../../../scraping/r2-writer.js";
-import { buildDispatchFailureWideEvent } from "../../../scraping/ahrefs-wide-event.js";
+import { runDispatch } from "../../../scraping/ahrefs-session.js";
+import { readResult } from "../../../scraping/r2-writer.js";
 import { runForkInServer } from "../../../otel-runtime.js";
 
 export default class AhrefsBacklinksDispatchRoute extends HTTPRoute {
@@ -49,7 +48,7 @@ export default class AhrefsBacklinksDispatchRoute extends HTTPRoute {
     const existing = await Effect.runPromise(
       readResult(instanceId).pipe(Effect.catch(() => Effect.succeed(null))),
     );
-    if (existing && (existing as any).success) {
+    if (existing?.success === true) {
       jsonResponse(res, 200, { status: "cached", instance_id: instanceId, domain });
       return;
     }
@@ -58,88 +57,31 @@ export default class AhrefsBacklinksDispatchRoute extends HTTPRoute {
     res.writeHead(202, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "accepted", instance_id: instanceId, domain }));
 
-    // Background scrape via session manager (shared browser, tab concurrency).
+    // Background scrape via the guaranteed terminal-outcome runner (ADR-0068).
     //
-    // CRITICAL: `session.scrape` can FAIL (Effect error channel populated with
-    // Error) when the underlying CDP session dies, the browser pool kills the
-    // session, or any other infra-level failure short-circuits the typed-result
-    // path. Before this catch was wired, those failures propagated up to
-    // `runForkInServer` which logged and dropped them — leaving R2 empty and
-    // forcing the upstream workflow to wait its full 3min timeout, then emit
-    // `Scrape timed out for ${domain} — no result in R2 or event`.
-    // `Effect.matchEffect` now branches both outcomes:
-    //   - onFailure: log the actual error + writeFailure to R2 immediately so
-    //     the workflow's R2 fallback surfaces the real reason instead of "no
-    //     result in R2 or event".
-    //   - onSuccess: existing per-result behavior (writeResult / writeFailure).
+    // `runDispatch` is the structural guarantee that this scrape produces a
+    // terminal outcome — an R2 result AND exactly one `ahrefs.scrape.wide_event`
+    // (carrying `instance_id` + the `scrape.terminal` marker) — within a hard
+    // deadline, before any best-effort teardown, even if the scrape work /
+    // replay resolution / CDP cleanup hangs, throws, times out, or is
+    // interrupted. The scrape can no longer end silently and leave R2 empty
+    // (the failure mode that produced "no result in R2 or event" and burned the
+    // workflow's full 3min blind wait). `runDispatch` never throws past itself,
+    // so `runForkInServer` always sees a clean exit.
     runForkInServer(
       Effect.fn("dispatch.backlinks")(function* () {
-        const session = getAhrefsSession();
-
-        yield* session.scrape(domain, "backlinks").pipe(
-          Effect.matchEffect({
-            onFailure: (error) => {
-              const message = error instanceof Error ? error.message : String(error);
-              const wideEvent = buildDispatchFailureWideEvent({
-                domain,
-                scrapeType: "backlinks",
-                errorMessage: message,
-                instanceId,
-              });
-              return Effect.logError("Dispatch failed: scrape threw").pipe(
-                Effect.annotateLogs({
-                  dispatch_domain: domain,
-                  dispatch_instance_id: instanceId,
-                  dispatch_error: message,
-                  dispatch_error_name: error instanceof Error ? error.name : "unknown",
-                }),
-                Effect.andThen(
-                  Effect.logInfo("ahrefs.scrape.wide_event").pipe(Effect.annotateLogs(wideEvent)),
-                ),
-                Effect.andThen(
-                  writeFailure(instanceId, domain, "backlinks", message).pipe(
-                    Effect.tap(() =>
-                      Effect.logInfo(`R2 failure write OK (from catch): ${instanceId}`),
-                    ),
-                    Effect.catch((e: unknown) =>
-                      Effect.logError(
-                        `R2 failure write FAILED (from catch): ${e instanceof Error ? e.message : String(e)}`,
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            },
-            onSuccess: ({ result }) =>
-              Effect.logInfo(`Dispatch done: ${domain} success=${result.success}`).pipe(
-                Effect.annotateLogs({
-                  dispatch_domain: domain,
-                  dispatch_instance_id: instanceId,
-                  dispatch_success: String(result.success),
-                  dispatch_error: result.error ?? "",
-                }),
-                Effect.andThen(
-                  result.success
-                    ? writeResult(instanceId, domain, "backlinks", result as any).pipe(
-                        Effect.tap(() => Effect.logInfo(`R2 write OK: ${instanceId}`)),
-                        Effect.catch((e: unknown) =>
-                          Effect.logError(
-                            `R2 write FAILED: ${e instanceof Error ? e.message : String(e)}`,
-                          ),
-                        ),
-                      )
-                    : writeFailure(instanceId, domain, "backlinks", result.error ?? "unknown").pipe(
-                        Effect.tap(() => Effect.logInfo(`R2 failure write OK: ${instanceId}`)),
-                        Effect.catch((e: unknown) =>
-                          Effect.logError(
-                            `R2 failure write FAILED: ${e instanceof Error ? e.message : String(e)}`,
-                          ),
-                        ),
-                      ),
-                ),
-              ),
+        // `scrape.dispatched` marker (ADR-0068 §4) — logged on receipt with
+        // instance_id + domain so a Loki query can reconcile dispatched vs
+        // terminal per instance_id and alert when `dispatched − terminal > 0`.
+        yield* Effect.logInfo("scrape.dispatched").pipe(
+          Effect.annotateLogs({
+            scrape_dispatched: "true",
+            dispatch_domain: domain,
+            dispatch_instance_id: instanceId,
+            dispatch_scrape_type: "backlinks",
           }),
         );
+        yield* runDispatch(domain, "backlinks", instanceId);
       })(),
     );
   }

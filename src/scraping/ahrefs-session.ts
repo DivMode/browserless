@@ -11,14 +11,14 @@
  * - TTL: 120s max browser age, invalidation on failure or CF solve TTL
  */
 import { cpus } from "os";
-import { Effect, Exit, Pool, Scope } from "effect";
+import { Cause, Effect, Exit, Pool, Scope } from "effect";
 import puppeteer from "puppeteer-core";
 import type { Browser } from "puppeteer-core";
 
 import { executeAhrefsScrape, type ScrapeOutput } from "./ahrefs-service.js";
 import { buildWideEvent } from "./ahrefs-wide-event.js";
 import { MAX_CF_SOLVES_PER_SESSION } from "./ahrefs-types.js";
-import type { ScrapeType } from "./ahrefs-types.js";
+import type { AhrefsScrapeResult, ScrapeTimings, ScrapeType } from "./ahrefs-types.js";
 import { ScrapeInfraError, isScrapeError } from "./ahrefs-errors.js";
 import type { ScrapeError } from "./ahrefs-errors.js";
 import { emptyCfMetrics } from "./ahrefs-cf-listener.js";
@@ -27,6 +27,7 @@ import { runForkInServer } from "../otel-runtime.js";
 import { SessionTokenHolder } from "./session-token-holder.js";
 import { isBlockTrigger } from "./block-detection.js";
 import { requireProxyUrl } from "./proxy-config.js";
+import { writeFailure, writeResult } from "./r2-writer.js";
 
 // ── Config ──────────────────────────────────────────────────────────
 
@@ -39,6 +40,31 @@ const TOKEN = process.env.TOKEN ?? "";
 const MAX_CONCURRENT_TABS = 15;
 const TAB_STAGGER_MS = 1500;
 const BROWSER_TTL = "120 seconds";
+
+// ── ADR-0068: guaranteed terminal outcome deadlines ─────────────────
+//
+// The dispatching workflow waits `step.waitForEvent({ timeout: "3 minutes" })`
+// (= 180s) for the R2 result, then falls back to a direct R2 read. The hard
+// scrape-work deadline MUST land comfortably under that so a hung scrape is
+// interrupted and its failure is recorded (R2 + wide event) with seconds to
+// spare — the workflow then sees a real failure in <1s instead of burning the
+// full 180s blind wait. 120s leaves a ~60s margin for the terminal record +
+// queue/event propagation. (packages/workers/src/workflows/*-workflow.ts)
+const WORKFLOW_WAIT_MS = 180_000;
+// 2/3 of the workflow wait — leaves a ~60s margin for the terminal record plus
+// R2-event → queue → consumer → sendEvent propagation, all of which must land
+// before the workflow gives up.
+const MAX_SCRAPE_WORK_MS = Math.floor((WORKFLOW_WAIT_MS * 2) / 3);
+// The terminal record (R2 write + wide event) is itself time-bounded so the
+// step that RECORDS the outcome can never be the thing that hangs.
+const R2_WRITE_TIMEOUT = "15 seconds";
+const WIDE_EVENT_TIMEOUT = "5 seconds";
+// Best-effort teardown bounds — kept short; a slow teardown must not eat the
+// scrape-work budget.
+const PAGE_CLOSE_TIMEOUT = "10 seconds";
+const REPLAY_FLUSH_WAIT = "2 seconds";
+const REPLAY_RESOLVE_TIMEOUT = "10 seconds";
+const REPLAY_PATCH_TIMEOUT = "5 seconds";
 
 // !! CRITICAL — READ docs/CF_SOLVE_SPEED_POSTMORTEM.md BEFORE CHANGING !!
 //
@@ -671,55 +697,54 @@ export class AhrefsSessionManager {
             catch: (): Error => new Error("targetId"),
           }).pipe(Effect.catch(() => Effect.succeed("")));
 
-          // Close page (triggers replay flush)
+          // ── Best-effort, BOUNDED teardown (ADR-0068) ──────────────
+          //
+          // None of the steps below may block the terminal record. The wide
+          // event + R2 write are emitted LATER, unconditionally, in the
+          // guaranteed terminal path (`runDispatch` → `emitTerminalRecord`),
+          // keyed off the `ScrapeOutput` this attempt returns. So page close
+          // and replay resolution — historically the silent-death points
+          // (ADR-0068 §root cause: a no-timeout replay fetch + CDP cleanup on
+          // a wedged connection ran BEFORE the wide event) — are now both
+          // time-bounded AND no longer gate the outcome record. The worst case
+          // is a scrape with `replay_url=""`, never a vanished scrape.
+
+          // Close page (triggers replay flush) — bounded best-effort.
           yield* Effect.fn("ahrefs.page.close")(function* () {
             const closeStart = Date.now();
             yield* Effect.tryPromise({
               try: () => page.close(),
               catch: () => undefined,
-            }).pipe(Effect.ignore);
+            }).pipe(Effect.timeout(PAGE_CLOSE_TIMEOUT), Effect.ignore);
             yield* Effect.annotateCurrentSpan({ "page.close_ms": Date.now() - closeStart });
           })();
 
-          // Resolve replay URL
-          yield* Effect.sleep("2 seconds");
+          // Resolve replay URL — bounded. The replay-ingest fetch had NO
+          // timeout (ADR-0068, ahrefs-session.ts:799); a dead/slow replay
+          // server could hang here forever, BEFORE the outcome was recorded.
+          // `resolveReplayUrl` is now internally timed out; on timeout/error
+          // it yields null and we proceed with no replay metadata.
+          yield* Effect.sleep(REPLAY_FLUSH_WAIT);
           const replayMeta = yield* resolveReplayUrl(scrapeOutput, pageTargetId);
 
-          // Emit wide event
-          const wideEvent = buildWideEvent({
-            result: scrapeOutput.result,
-            cfMetrics: scrapeOutput.cfMetrics ?? emptyCfMetrics(),
-            replayMeta,
-            diagnostics: scrapeOutput.diagnostics,
-            domain,
-            scrapeType,
-            scrapeUrl: scrapeOutput.scrapeUrl,
-            // The session token in use for this attempt — it determines the
-            // relay-pinned egress IP, so recording it lets ops correlate a
-            // scrape outcome with the IP that served it (ADR-0065).
-            sessionId: sessionTokenHolder.current(),
-            sessionContext: {
-              session_age_ms: Date.now() - managed.createdAt,
-              session_cf_solves: managed.cfSolveCount,
-              session_cf_solves_at_start: solveCountAtStart,
-              session_concurrent_tabs: managed.activeTabs,
-              session_warm: managed.cfSolveCount > 0,
-              generation_id: managed.id,
-              browser_acquire_ms: browserAcquireMs,
-              page_create_ms: pageCreateMs,
-              proxy_ip_address: managed.proxyIpAddress,
-            },
-            cfClearancePresent: scrapeOutput.cfClearancePresent,
-            apiCallStatus: scrapeOutput.apiCallStatus,
-            turnstileErrorCode:
-              "turnstileErrorCode" in scrapeOutput ? scrapeOutput.turnstileErrorCode : undefined,
-            fetchDecisions:
-              "fetchDecisions" in scrapeOutput ? scrapeOutput.fetchDecisions : undefined,
-            shellTimings: "shellTimings" in scrapeOutput ? scrapeOutput.shellTimings : undefined,
-          });
-          yield* Effect.logInfo("ahrefs.scrape.wide_event").pipe(Effect.annotateLogs(wideEvent));
+          // Build the session context the terminal wide event needs. We do NOT
+          // emit the wide event here — the guaranteed terminal path owns the
+          // single emit so it fires even if this attempt is interrupted before
+          // returning (e.g. the scrape-work hard deadline trips).
+          const sessionContext = {
+            session_age_ms: Date.now() - managed.createdAt,
+            session_cf_solves: managed.cfSolveCount,
+            session_cf_solves_at_start: solveCountAtStart,
+            session_concurrent_tabs: managed.activeTabs,
+            session_warm: managed.cfSolveCount > 0,
+            generation_id: managed.id,
+            browser_acquire_ms: browserAcquireMs,
+            page_create_ms: pageCreateMs,
+            proxy_ip_address: managed.proxyIpAddress,
+          };
 
-          // Patch replay with scrape context (domain, error_type, success) for debugging queries
+          // Patch replay with scrape context (domain, error_type, success) for
+          // debugging queries — bounded best-effort.
           const replayIngestUrl = process.env.REPLAY_INGEST_URL;
           if (replayIngestUrl && replayMeta?.replay_id) {
             yield* Effect.tryPromise(() =>
@@ -728,11 +753,13 @@ export class AhrefsSessionManager {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                   domain,
-                  error_type: wideEvent.error_type ?? null,
+                  error_type: scrapeOutput.result.scrapeError
+                    ? scrapeOutput.result.scrapeError._tag
+                    : null,
                   success: scrapeOutput.result.success,
                 }),
               }),
-            ).pipe(Effect.ignore);
+            ).pipe(Effect.timeout(REPLAY_PATCH_TIMEOUT), Effect.ignore);
           }
 
           // Track concurrent tabs and invalidation
@@ -768,7 +795,15 @@ export class AhrefsSessionManager {
             yield* Pool.invalidate(pool, managed);
           }
 
-          return scrapeOutput;
+          // Attach the wide-event context to the output so the GUARANTEED
+          // terminal path (`emitTerminalRecord`) emits exactly one rich wide
+          // event — even if a later step in `scrape()` is interrupted.
+          return {
+            ...scrapeOutput,
+            replayMeta,
+            sessionContext,
+            sessionId: sessionTokenHolder.current(),
+          } satisfies ScrapeOutput;
         })(), // close Effect.fn("session.scrape.scoped")
       ); // close Effect.scoped
     }).bind(this)();
@@ -831,7 +866,14 @@ const resolveReplayUrl = (
       };
     },
     catch: () => null,
-  }).pipe(Effect.catch(() => Effect.succeed(null)));
+    // ADR-0068: the replay-ingest fetch had NO timeout — a dead/slow replay
+    // server hung here forever, and the wide-event emit lived AFTER it, so a
+    // finished scrape vanished. Bound it; on timeout/error default to null and
+    // proceed. Replay metadata is best-effort; the terminal record is not.
+  }).pipe(
+    Effect.timeout(REPLAY_RESOLVE_TIMEOUT),
+    Effect.catch(() => Effect.succeed<ReplayMetadata | null>(null)),
+  );
 
 // ── Singleton ───────────────────────────────────────────────────────
 
@@ -841,3 +883,238 @@ export function getAhrefsSession(): AhrefsSessionManager {
   if (!_instance) _instance = new AhrefsSessionManager();
   return _instance;
 }
+
+// ── Guaranteed terminal outcome (ADR-0068) ──────────────────────────
+//
+// The single entry point both dispatch handlers call. It makes the invariant
+// hold structurally: every dispatched scrape produces a terminal outcome — an
+// R2 result AND exactly one `ahrefs.scrape.wide_event` (carrying the
+// `scrape.terminal` marker + instance_id) — within a hard deadline, before any
+// best-effort work, even if the scrape work / replay resolution / CDP cleanup
+// hangs, throws, times out, or is interrupted.
+//
+// Control flow:
+//   scrapeWork (hard 120s timeout → catchCause → result VALUE, never throws)
+//     → writeR2(result)        — guaranteed FIRST (workflow-critical artifact)
+//     → emit wide event        — guaranteed, exactly once
+//   Both terminal steps are individually time-bounded and catch-logged, so the
+//   step that RECORDS the outcome can never itself be the hang.
+
+const ZERO_TIMINGS: ScrapeTimings = { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 };
+
+/**
+ * Build a failure `ScrapeOutput` for the case where scrape work did NOT yield
+ * its own result value — i.e. it timed out, died with a defect, or was
+ * interrupted past `scrape()`'s own in-band handling. Categorizes the cause as
+ * `scrape_timeout` (the hard-deadline trip) or `scrape_defect`, so the failure
+ * is visible and queryable rather than silent.
+ */
+export function buildTerminalFailureOutput(
+  domain: string,
+  scrapeType: ScrapeType,
+  cause: Cause.Cause<Error>,
+): ScrapeOutput {
+  // Classify the cause so the failure is categorized, not a vague blob:
+  //  - the hard-deadline trip surfaces `Effect.timeout`'s `TimeoutError` in the
+  //    FAILURE channel (not an interrupt) → `scrape_timeout`.
+  //  - an interrupt from an outer scope cancelling the fiber → `scrape_timeout`
+  //    too (same operator intent: the scrape was cut short, not buggy).
+  //  - anything else (a defect thrown deep in scrape work) → `scrape_defect`.
+  const squashed: unknown = Cause.squash(cause);
+  const isTimeout =
+    (squashed as { _tag?: unknown } | null)?._tag === "TimeoutError" || Cause.hasInterrupts(cause);
+  const causeText = Cause.pretty(cause).slice(0, 200);
+  const phase = isTimeout ? "scrape_timeout" : "scrape_defect";
+  const scrapeError: ScrapeError = new ScrapeInfraError({ domain, cause: causeText, phase });
+  const result: AhrefsScrapeResult = {
+    success: false,
+    domain,
+    scrapedAt: Math.floor(Date.now() / 1000),
+    error: `${phase}: ${causeText}`,
+    scrapeError,
+    timings: ZERO_TIMINGS,
+  };
+  return {
+    result,
+    cfMetrics: emptyCfMetrics(),
+    replayMeta: null,
+    diagnostics: null,
+    domain,
+    scrapeType,
+    scrapeUrl: "",
+    timings: ZERO_TIMINGS,
+    cfClearancePresent: false,
+    apiCallStatus: phase,
+  };
+}
+
+/**
+ * Write the scrape outcome to R2 — the workflow-critical artifact. Bounded by
+ * its own short timeout and loudly logged on failure (a failing R2 write is
+ * never silent). Does NOT depend on replay resolution or CDP cleanup.
+ */
+const writeR2Outcome = (
+  instanceId: string,
+  domain: string,
+  scrapeType: ScrapeType,
+  output: ScrapeOutput,
+): Effect.Effect<void> =>
+  Effect.fn("dispatch.writeR2")(function* () {
+    const write = output.result.success
+      ? writeResult(instanceId, domain, scrapeType, output.result)
+      : writeFailure(instanceId, domain, scrapeType, output.result.error ?? "unknown");
+    yield* write.pipe(
+      Effect.timeout(R2_WRITE_TIMEOUT),
+      Effect.matchCauseEffect({
+        onSuccess: () =>
+          Effect.logInfo("dispatch.r2.write_ok").pipe(
+            Effect.annotateLogs({
+              dispatch_instance_id: instanceId,
+              dispatch_domain: domain,
+              dispatch_success: String(output.result.success),
+            }),
+          ),
+        onFailure: (cause) =>
+          Effect.logError("dispatch.r2.write_failed").pipe(
+            Effect.annotateLogs({
+              dispatch_instance_id: instanceId,
+              dispatch_domain: domain,
+              dispatch_error: Cause.pretty(cause).slice(0, 256),
+            }),
+          ),
+      }),
+    );
+  })();
+
+/**
+ * Emit the terminal record for this scrape — exactly one rich
+ * `ahrefs.scrape.wide_event` PLUS one `scrape.terminal` reconciliation marker.
+ *
+ * The wide event carries the rich session context the attempt collected (when
+ * available) and is already at its 113-attribute Loki ceiling, so the
+ * reconciliation key rides on a SEPARATE, cheap `scrape.terminal` marker line
+ * (symmetric with the dispatch handler's `scrape.dispatched`). The marker
+ * carries `instance_id` + the outcome (`ahrefs_success`/`ahrefs_domain`/
+ * `api_diagnosis`) so a Loki query can count `scrape.terminal` per
+ * `instance_id` and alert when `dispatched − terminal > 0` (ADR-0068 §4) — and
+ * pivot the residual on the outcome. Both emits are bounded + cause-logged: the
+ * step that RECORDS the outcome can never be the thing that hangs, and even an
+ * attribute-cap throw on the wide event cannot sink the dispatch fiber (R2 is
+ * already written by the time we get here).
+ */
+const emitTerminalRecord = (
+  instanceId: string,
+  domain: string,
+  scrapeType: ScrapeType,
+  output: ScrapeOutput,
+): Effect.Effect<void> =>
+  Effect.fn("dispatch.emitTerminal")(function* () {
+    // 1. The rich wide event (≤113 attrs; build can throw on the cap → caught).
+    yield* Effect.sync(() =>
+      buildWideEvent({
+        result: output.result,
+        cfMetrics: output.cfMetrics ?? emptyCfMetrics(),
+        replayMeta: output.replayMeta ?? null,
+        diagnostics: output.diagnostics,
+        domain,
+        scrapeType,
+        scrapeUrl: output.scrapeUrl,
+        sessionId: output.sessionId,
+        sessionContext: output.sessionContext,
+        cfClearancePresent: output.cfClearancePresent,
+        apiCallStatus: output.apiCallStatus,
+        turnstileErrorCode: output.turnstileErrorCode,
+        fetchDecisions: output.fetchDecisions,
+        shellTimings: output.shellTimings,
+      }),
+    ).pipe(
+      Effect.andThen((wideEvent) =>
+        Effect.logInfo("ahrefs.scrape.wide_event").pipe(Effect.annotateLogs(wideEvent)),
+      ),
+      Effect.timeout(WIDE_EVENT_TIMEOUT),
+      Effect.matchCauseEffect({
+        onSuccess: () => Effect.void,
+        onFailure: (cause) =>
+          // A wide-event failure (e.g. attribute-cap throw) must be LOUD — but
+          // it must never sink the dispatch fiber, because R2 is already
+          // written and the reconciliation marker below must still fire.
+          Effect.logError("dispatch.wide_event_failed").pipe(
+            Effect.annotateLogs({
+              dispatch_instance_id: instanceId,
+              dispatch_domain: domain,
+              dispatch_error: Cause.pretty(cause).slice(0, 256),
+            }),
+          ),
+      }),
+    );
+
+    // 2. The reconciliation marker (ADR-0068 §4) — ALWAYS emitted, even if the
+    //    wide event threw above. Cheap (a handful of labels), so it never risks
+    //    the Loki cap and never depends on the rich event succeeding.
+    yield* Effect.logInfo("scrape.terminal").pipe(
+      Effect.annotateLogs({
+        scrape_terminal: "true",
+        dispatch_instance_id: instanceId,
+        ahrefs_domain: domain,
+        dispatch_scrape_type: scrapeType,
+        ahrefs_success: String(output.result.success),
+        api_diagnosis: output.apiCallStatus ?? "unknown",
+        dispatch_error: output.result.error ?? "",
+      }),
+      Effect.timeout(WIDE_EVENT_TIMEOUT),
+      Effect.ignore,
+    );
+  })();
+
+/**
+ * GUARANTEED terminal-outcome runner. Both dispatch handlers call this. It is
+ * the structural guarantee for ADR-0068: a dispatched scrape is incapable of
+ * ending silently.
+ */
+export const runDispatch = (
+  domain: string,
+  scrapeType: ScrapeType,
+  instanceId: string,
+): Effect.Effect<void> =>
+  Effect.fn("dispatch.run")(function* () {
+    yield* Effect.annotateCurrentSpan({
+      "dispatch.instance_id": instanceId,
+      "dispatch.domain": domain,
+      "dispatch.scrape_type": scrapeType,
+    });
+
+    const session = getAhrefsSession();
+
+    // 1. Hard scrape-work deadline. On timeout OR any error OR defect OR
+    //    interrupt, convert to a categorized failure ScrapeOutput VALUE.
+    //    `catchCause` (not `catch`) is required: `Effect.timeout` surfaces a
+    //    TimeoutError in the E channel, but a hung teardown interrupted by the
+    //    deadline, or a defect thrown deep in scrape work, lands in the cause
+    //    channel — `catch` would let those escape and the fiber would die
+    //    WITHOUT writing R2. After this pipe, scrape work always yields a
+    //    result value and never throws.
+    const output: ScrapeOutput = yield* session.scrape(domain, scrapeType).pipe(
+      Effect.timeout(`${MAX_SCRAPE_WORK_MS} millis`),
+      Effect.catchCause((cause) => {
+        const failureOutput = buildTerminalFailureOutput(domain, scrapeType, cause);
+        return Effect.logWarning("dispatch.scrape_no_result").pipe(
+          Effect.annotateLogs({
+            dispatch_instance_id: instanceId,
+            dispatch_domain: domain,
+            // The categorized phase: scrape_timeout (hard deadline / interrupt)
+            // vs scrape_defect (a real defect deep in scrape work).
+            dispatch_phase: failureOutput.apiCallStatus ?? "unknown",
+            dispatch_interrupted: String(Cause.hasInterrupts(cause)),
+            dispatch_error: Cause.pretty(cause).slice(0, 256),
+          }),
+          Effect.as(failureOutput),
+        );
+      }),
+    );
+
+    // 2. R2 write FIRST — the workflow-critical artifact, independent of replay.
+    yield* writeR2Outcome(instanceId, domain, scrapeType, output);
+
+    // 3. Wide event — guaranteed, exactly one, with the reconciliation marker.
+    yield* emitTerminalRecord(instanceId, domain, scrapeType, output);
+  })();

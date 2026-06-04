@@ -7,6 +7,7 @@
  */
 import { Effect } from "effect";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import type { AhrefsScrapeResult } from "./ahrefs-types.js";
 
 const BUCKET = process.env.R2_SCRAPE_RESULTS_BUCKET ?? "scrape-results";
 const ACCOUNT_ID = process.env.R2_ACCOUNT_ID ?? "";
@@ -39,7 +40,7 @@ export const writeResult = (
   instanceId: string,
   domain: string,
   scrapeType: string,
-  result: Record<string, unknown>,
+  result: AhrefsScrapeResult,
 ) =>
   Effect.fn("r2.writeResult")(function* () {
     if (!s3) {

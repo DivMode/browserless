@@ -73,6 +73,16 @@ export interface ScrapeOutput {
    */
   turnstileErrorCode?: string;
   fetchDecisions?: import("./ahrefs-cdp.js").FetchDecision[];
+  /**
+   * Per-attempt session telemetry (browser id, age, solve count, concurrent
+   * tabs, proxy egress IP). Populated by `scrapeAttempt` so the GUARANTEED
+   * terminal wide event — emitted once at the `scrape()` boundary, never
+   * inside the fragile teardown — can carry the rich session context. See
+   * ADR-0068: the wide-event emit must not live behind unbounded teardown.
+   */
+  sessionContext?: import("./ahrefs-wide-event.js").SessionContext;
+  /** Session token (relay-pinned egress IP) in use for this attempt. */
+  sessionId?: string;
 }
 
 // ── Build URL ────────────────────────────────────────────────────────
