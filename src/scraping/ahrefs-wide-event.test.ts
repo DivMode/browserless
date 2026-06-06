@@ -444,7 +444,10 @@ describe("wide event — InterceptionTimeoutError diagnosis", () => {
       scrapeUrl: "https://ahrefs.com/backlink-checker?input=test.com",
     });
 
-  it("requestCount=0 → api_diagnosis=proxy_egress_dead (no bytes left Chrome)", () => {
+  // Label renamed proxy_egress_dead → interception_no_request: requestCount===0 is a
+  // browser-internal Fetch-interception/auth fault (proxy auth not re-applied under
+  // active Fetch.enable → 407), NOT a dead proxy. Old label mis-blamed the proxy.
+  it("requestCount=0 → api_diagnosis=interception_no_request (no bytes left Chrome)", () => {
     const event = callBuild(
       new InterceptionTimeoutError({
         domain: "test.com",
@@ -453,7 +456,7 @@ describe("wide event — InterceptionTimeoutError diagnosis", () => {
         docResponseCount: 0,
       }),
     );
-    expect(event.api_diagnosis).toBe("proxy_egress_dead");
+    expect(event.api_diagnosis).toBe("interception_no_request");
     expect(event.intercept_request_count).toBe("0");
     expect(event.intercept_response_count).toBe("0");
     expect(event.intercept_doc_response_count).toBe("0");
@@ -461,7 +464,9 @@ describe("wide event — InterceptionTimeoutError diagnosis", () => {
     expect(event.failure_point).toBe("interception");
   });
 
-  it("requestCount>0, responseCount=0 → proxy_no_response (request sent, no reply)", () => {
+  // Label renamed proxy_no_response → interception_no_response: request was paused but
+  // no response stage arrived — an interception-layer fault, not a silent proxy.
+  it("requestCount>0, responseCount=0 → interception_no_response (request sent, no reply)", () => {
     const event = callBuild(
       new InterceptionTimeoutError({
         domain: "test.com",
@@ -470,7 +475,7 @@ describe("wide event — InterceptionTimeoutError diagnosis", () => {
         docResponseCount: 0,
       }),
     );
-    expect(event.api_diagnosis).toBe("proxy_no_response");
+    expect(event.api_diagnosis).toBe("interception_no_response");
     expect(event.intercept_request_count).toBe("7");
     expect(event.intercept_response_count).toBe("0");
   });

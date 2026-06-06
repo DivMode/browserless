@@ -326,10 +326,18 @@ function fetchDecisionChain(
  * pivot on it without inspecting other fields.
  *
  * Order matters: CF-blocked > non-CF HTTP error > turnstile failed >
- * interception failure modes (proxy_egress_dead | proxy_no_response |
+ * interception failure modes (interception_no_request | interception_no_response |
  * no_document_response | intercept_loop). When no rule matches we emit ""
  * which renders as `?` in dashboards — that's the signal that a new failure
  * mode has appeared without a category.
+ *
+ * NOTE: the requestCount===0 / responseCount===0 branches were FORMERLY named
+ * `proxy_egress_dead` / `proxy_no_response`. Those labels lied: an
+ * InterceptionTimeoutError with zero requests/responses is a BROWSER-INTERNAL
+ * Fetch-interception/auth failure (e.g. proxy auth not re-applied under active
+ * Fetch.enable → 407 → ERR_INVALID_AUTH_CREDENTIALS), NOT a dead/silent proxy.
+ * They cost hours of mis-directed proxy debugging while the proxy was healthy
+ * the whole time, so they now point at the interception layer.
  */
 function deriveApiDiagnosis(result: AhrefsScrapeResult, cfMetrics: CfSolveMetrics): string {
   if (result.success) return "healthy";
@@ -342,8 +350,8 @@ function deriveApiDiagnosis(result: AhrefsScrapeResult, cfMetrics: CfSolveMetric
   const e = result.scrapeError;
   if (e?._tag === "TurnstileTimeoutError") return "turnstile_failed";
   if (e?._tag === "InterceptionTimeoutError") {
-    if (e.requestCount === 0) return "proxy_egress_dead";
-    if (e.responseCount === 0) return "proxy_no_response";
+    if (e.requestCount === 0) return "interception_no_request";
+    if (e.responseCount === 0) return "interception_no_response";
     if (e.docResponseCount === 0) return "no_document_response";
     return "intercept_loop";
   }

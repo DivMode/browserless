@@ -33,6 +33,44 @@
 /** Which relay the current pod is configured to use. */
 export type RelayPath = "lan" | "hetzner";
 
+/**
+ * Proxy credentials threaded through the scrape path. The `username` is the
+ * session-injected form `${baseUser}-session-${sessionId}` (see
+ * `authUsernameWithSession`) — the relay's `RouteParams::session` parser reads
+ * the session_id from the username segment to pin egress to a backend phone.
+ *
+ * These are the SAME credentials `page.authenticate(auth)` applies. They must
+ * ALSO be re-applied inside an active `Fetch.enable` interception via
+ * `Fetch.continueWithAuth`, because enabling Fetch with `handleAuthRequests`
+ * makes Chrome stop auto-applying the `page.authenticate` credentials on
+ * proxy 407 challenges — without the in-interception handler every proxied
+ * request 407s (`ERR_INVALID_AUTH_CREDENTIALS`) and the scrape times out with
+ * `requests=N responses=0`.
+ */
+export interface ProxyAuth {
+  username: string;
+  password: string;
+}
+
+/**
+ * Compute the session-injected proxy credentials for a given session_id, or
+ * `null` when the resolved proxy URL has no username segment (no-auth proxy —
+ * the interception must NOT enable auth handling in that case). Single source
+ * of truth shared by `page.authenticate()` (ahrefs-session.ts) and the
+ * `Fetch.authRequired` handler (ahrefs-cdp.ts), so both apply byte-identical
+ * credentials. Throws (via `requireProxyUrl`) if no proxy env var is set.
+ */
+export function authUsernameWithSession(sessionId: string): ProxyAuth | null {
+  const proxyUrl = new URL(requireProxyUrl());
+  if (!proxyUrl.username) return null;
+  const baseUser = decodeURIComponent(proxyUrl.username);
+  const password = decodeURIComponent(proxyUrl.password);
+  return {
+    username: `${baseUser}-session-${sessionId}`,
+    password,
+  };
+}
+
 interface ResolvedProxy {
   url: string;
   path: RelayPath;

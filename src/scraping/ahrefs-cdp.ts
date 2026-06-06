@@ -13,6 +13,8 @@ import {
   InterceptionTimeoutError,
   ResultTimeoutError,
 } from "./ahrefs-errors.js";
+import { runForkInServer } from "../otel-runtime.js";
+import type { ProxyAuth } from "./proxy-config.js";
 import { MAX_INTERCEPT_WAIT_MS } from "./ahrefs-types.js";
 
 // ── Typed CDP send — eliminates `as never` casts ───────────────────
@@ -20,6 +22,26 @@ import { MAX_INTERCEPT_WAIT_MS } from "./ahrefs-types.js";
 /** Typed CDP send for puppeteer CDPSession (which only types known methods). */
 const cdpSend = (cdp: CDPSession, method: string, params?: Record<string, unknown>) =>
   (cdp.send as (m: string, p?: Record<string, unknown>) => Promise<unknown>)(method, params);
+
+/**
+ * Fire-and-forget an Effect log from a SYNC CDP event handler. The Fetch
+ * handlers run as plain `cdp.on(...)` callbacks outside any Effect, so a
+ * failed `Fetch.continueRequest`/`continueResponse`/`continueWithAuth` cannot
+ * `yield* Effect.logWarning` directly. `runForkInServer` (otel-runtime.ts) runs
+ * the log on the shared server runtime so it reaches Loki/Tempo — replacing the
+ * silent `.catch(() => {})` that hid the proxy-407 root cause for hours.
+ */
+const logCdpSendFailure = (method: string, requestId: string, e: unknown): void => {
+  runForkInServer(
+    Effect.logWarning("ahrefs.cdp.send_failed").pipe(
+      Effect.annotateLogs({
+        cdp_method: method,
+        cdp_request_id: requestId,
+        cdp_error: e instanceof Error ? e.message : String(e),
+      }),
+    ),
+  );
+};
 
 // ── CDP session ─────────────────────────────────────────────────────
 
@@ -77,11 +99,22 @@ interface FetchInterceptionResult {
  * - cleanup: call to disable Fetch and remove listeners
  *
  * The interception has a built-in timeout of MAX_INTERCEPT_WAIT_MS.
+ *
+ * `proxyAuth` (session-injected `${baseUser}-session-${sessionId}` + password)
+ * MUST be supplied whenever the upstream proxy requires auth. Enabling
+ * `Fetch.enable` makes Chrome STOP auto-applying the `page.authenticate()`
+ * credentials on a proxy 407 challenge, so without re-supplying them here every
+ * request 407s (`ERR_INVALID_AUTH_CREDENTIALS`) → 0 responses → interception
+ * timeout. When `proxyAuth` is present we set `handleAuthRequests: true` and
+ * answer `Fetch.authRequired` with `Fetch.continueWithAuth(ProvideCredentials)`.
+ * When it is `null` (no-auth proxy) we leave auth handling OFF and behave as
+ * before — Chrome handles any (non-existent) challenge itself.
  */
 export function setupFetchInterception(
   cdp: CDPSession,
   domain: string,
   htmlBase64: string,
+  proxyAuth: ProxyAuth | null = null,
 ): FetchInterceptionResult {
   let fulfilled = false;
   let settled = false;
@@ -172,11 +205,15 @@ export function setupFetchInterception(
             doc_index: docResponseCount,
           });
         }
-        cdpSend(cdp, "Fetch.continueResponse", { requestId }).catch(() => {});
+        cdpSend(cdp, "Fetch.continueResponse", { requestId }).catch((e: unknown) =>
+          logCdpSendFailure("Fetch.continueResponse", requestId, e),
+        );
         return;
       }
       // Non-document ahrefs response — continue
-      cdpSend(cdp, "Fetch.continueResponse", { requestId }).catch(() => {});
+      cdpSend(cdp, "Fetch.continueResponse", { requestId }).catch((e: unknown) =>
+        logCdpSendFailure("Fetch.continueResponse", requestId, e),
+      );
     } else {
       // Request stage
       requestCount++;
@@ -215,11 +252,15 @@ export function setupFetchInterception(
       // We must allow the first load (sets up turnstile) but block the second (triggers redirect).
       // The fulfilled flag distinguishes them: false = challenge phase, true = our HTML is served.
       if (fulfilled && reqUrl.includes("cdn-cgi/challenge-platform") && reqUrl.includes("/flow/")) {
-        cdpSend(cdp, "Fetch.failRequest", { requestId, reason: "BlockedByClient" }).catch(() => {});
+        cdpSend(cdp, "Fetch.failRequest", { requestId, reason: "BlockedByClient" }).catch(
+          (e: unknown) => logCdpSendFailure("Fetch.failRequest", requestId, e),
+        );
         return;
       }
 
-      cdpSend(cdp, "Fetch.continueRequest", { requestId }).catch(() => {});
+      cdpSend(cdp, "Fetch.continueRequest", { requestId }).catch((e: unknown) =>
+        logCdpSendFailure("Fetch.continueRequest", requestId, e),
+      );
     }
   };
 
@@ -240,12 +281,52 @@ export function setupFetchInterception(
     }
   }, MAX_INTERCEPT_WAIT_MS);
 
-  // Register handler BEFORE Fetch.enable so no events are missed
+  // Proxy auth challenge handler. Only meaningful when proxyAuth is present and
+  // Fetch.enable runs with handleAuthRequests:true. Re-supplies the SAME
+  // session-injected credentials page.authenticate() uses, because active Fetch
+  // interception suppresses Chrome's auto-apply on proxy 407 (the root cause of
+  // requests=N responses=0 InterceptionTimeoutError). A non-proxy challenge
+  // (e.g. an origin 401) carries no creds and is answered with Default so we
+  // never block it on bogus credentials.
+  const authHandler = (params: any) => {
+    const requestId = params.requestId as string;
+    const challenge = (params.authChallenge ?? {}) as { source?: string };
+    const isProxy = challenge.source === "Proxy";
+    if (proxyAuth && isProxy) {
+      cdpSend(cdp, "Fetch.continueWithAuth", {
+        requestId,
+        authChallengeResponse: {
+          response: "ProvideCredentials",
+          username: proxyAuth.username,
+          password: proxyAuth.password,
+        },
+      }).catch((e: unknown) => logCdpSendFailure("Fetch.continueWithAuth", requestId, e));
+      return;
+    }
+    // No creds to supply (no-auth proxy, or a non-proxy challenge) — let the
+    // default flow proceed rather than cancelling the request.
+    cdpSend(cdp, "Fetch.continueWithAuth", {
+      requestId,
+      authChallengeResponse: { response: "Default" },
+    }).catch((e: unknown) => logCdpSendFailure("Fetch.continueWithAuth", requestId, e));
+  };
+
+  // Register handlers BEFORE Fetch.enable so no events are missed.
   cdp.on("Fetch.requestPaused" as any, handler);
+  // Only listen for auth challenges when we'll actually enable auth handling —
+  // keeps the no-auth path byte-identical to before.
+  if (proxyAuth) {
+    cdp.on("Fetch.authRequired" as any, authHandler);
+  }
 
   const ready = (async () => {
     await cdpSend(cdp, "Fetch.disable");
     await cdpSend(cdp, "Fetch.enable", {
+      // handleAuthRequests routes proxy 407s to Fetch.authRequired (above)
+      // instead of Chrome silently failing the request now that page.authenticate
+      // auto-apply is suppressed by active interception. Only enabled when we
+      // have credentials to answer with.
+      handleAuthRequests: proxyAuth != null,
       patterns: [
         { urlPattern: "*", requestStage: "Request" },
         { urlPattern: "https://ahrefs.com/*", requestStage: "Response" },
@@ -256,6 +337,9 @@ export function setupFetchInterception(
   const cleanup = () => {
     clearTimeout(timer);
     cdp.off("Fetch.requestPaused" as any, handler);
+    if (proxyAuth) {
+      cdp.off("Fetch.authRequired" as any, authHandler);
+    }
     cdpSend(cdp, "Fetch.disable").catch(() => {});
   };
 

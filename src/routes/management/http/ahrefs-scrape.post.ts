@@ -30,6 +30,7 @@ import { ScrapeInfraError } from "../../../scraping/ahrefs-errors.js";
 import type { ScrapeError } from "../../../scraping/ahrefs-errors.js";
 import { executeAhrefsScrape } from "../../../scraping/ahrefs-service.js";
 import { requireProxyUrl } from "../../../scraping/proxy-config.js";
+import type { ProxyAuth } from "../../../scraping/proxy-config.js";
 
 const PORT = process.env.PORT ?? "3000";
 const TOKEN = process.env.TOKEN ?? "";
@@ -91,20 +92,34 @@ export default class AhrefsScrapePostRoute extends HTTPRoute {
         );
 
         try {
+          // Compute proxy creds once: applied via page.authenticate() AND
+          // threaded into executeAhrefsScrape so the Fetch interception can
+          // re-supply them via Fetch.continueWithAuth (page.authenticate auto-
+          // apply is suppressed once Fetch.enable is active). null = no-auth proxy.
+          const proxyUrl = new URL(requireProxyUrl());
+          const proxyAuth: ProxyAuth | null = proxyUrl.username
+            ? {
+                username: decodeURIComponent(proxyUrl.username),
+                password: decodeURIComponent(proxyUrl.password),
+              }
+            : null;
+
           const page = yield* Effect.promise(async () => {
             const pages = await browser.pages();
             const p = pages[0] ?? (await browser.newPage());
-            const proxyUrl = new URL(requireProxyUrl());
-            if (proxyUrl.username) {
-              await p.authenticate({
-                username: decodeURIComponent(proxyUrl.username),
-                password: decodeURIComponent(proxyUrl.password),
-              });
+            if (proxyAuth) {
+              await p.authenticate(proxyAuth);
             }
             return p;
           });
 
-          const scrapeOutput = yield* executeAhrefsScrape(page, domain, scrapeType, sitekey).pipe(
+          const scrapeOutput = yield* executeAhrefsScrape(
+            page,
+            domain,
+            scrapeType,
+            proxyAuth,
+            sitekey,
+          ).pipe(
             Effect.catch((e: unknown) => {
               const tag = (e as any)?._tag;
               const msg = e instanceof Error ? e.message : String(e);

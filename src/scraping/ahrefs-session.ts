@@ -26,7 +26,7 @@ import type { ReplayMetadata } from "./ahrefs-cf-listener.js";
 import { runForkInServer } from "../otel-runtime.js";
 import { SessionTokenHolder } from "./session-token-holder.js";
 import { isBlockTrigger } from "./block-detection.js";
-import { requireProxyUrl } from "./proxy-config.js";
+import { authUsernameWithSession, requireProxyUrl } from "./proxy-config.js";
 import { writeFailure, writeResult } from "./r2-writer.js";
 
 // ── Config ──────────────────────────────────────────────────────────
@@ -102,30 +102,12 @@ function buildInternalWsUrl(): string {
   return `ws://127.0.0.1:${PORT}/chromium?${params.toString()}`;
 }
 
-/**
- * Compute the auth username for a given session_id. Chrome's `--proxy-server`
- * flag takes the proxy origin only; credentials flow through
- * `page.authenticate()` which sets HTTP Basic on the CONNECT. The relay's
- * `RouteParams::session` parser reads the session_id from the username
- * segment, so the rotation primitive is "inject session-{uuid} into the
- * username before authenticate."
- *
- * Returns `null` only when the proxy URL has no username segment (no auth).
- * requireProxyUrl() throws loudly if OEILI_PROXY_URL is missing.
- */
-function authUsernameWithSession(sessionId: string): {
-  username: string;
-  password: string;
-} | null {
-  const proxyUrl = new URL(requireProxyUrl());
-  if (!proxyUrl.username) return null;
-  const baseUser = decodeURIComponent(proxyUrl.username);
-  const password = decodeURIComponent(proxyUrl.password);
-  return {
-    username: `${baseUser}-session-${sessionId}`,
-    password,
-  };
-}
+// `authUsernameWithSession` (the session-injected proxy credential builder)
+// now lives in proxy-config.ts as the single source of truth — the same
+// credentials are consumed by `page.authenticate()` here AND by the
+// `Fetch.authRequired` handler inside the Fetch interception (ahrefs-cdp.ts),
+// which must re-apply them via `Fetch.continueWithAuth` once `Fetch.enable`
+// is active. See proxy-config.ts.
 
 // ── Proxy egress IP check ───────────────────────────────────────────
 //
@@ -602,12 +584,21 @@ export class AhrefsSessionManager {
           // the closed CDP socket. The timeout converts that hang into a
           // typed failure so Pool.invalidate runs and the permit releases.
           const pageCreateStart = Date.now();
+          // Compute the session-injected proxy credentials ONCE for this
+          // attempt. The SAME `proxyAuth` is applied two ways:
+          //   1. `page.authenticate()` — Chrome's auto-apply on proxy 407 when
+          //      Fetch interception is NOT active.
+          //   2. threaded into `executeAhrefsScrape` → `setupFetchInterception`
+          //      so the `Fetch.authRequired` handler can re-supply them via
+          //      `Fetch.continueWithAuth` once `Fetch.enable` is active — Chrome
+          //      stops auto-applying (1) while interception runs. Without (2)
+          //      every proxied request 407s → ERR_INVALID_AUTH_CREDENTIALS.
+          const proxyAuth = authUsernameWithSession(sessionTokenHolder.current());
           const page = yield* Effect.tryPromise({
             try: async () => {
               const p = await managed.browser.newPage();
-              const auth = authUsernameWithSession(sessionTokenHolder.current());
-              if (auth) {
-                await p.authenticate(auth);
+              if (proxyAuth) {
+                await p.authenticate(proxyAuth);
               }
               return p;
             },
@@ -640,8 +631,9 @@ export class AhrefsSessionManager {
           const pageCreateMs = Date.now() - pageCreateStart;
           yield* Effect.annotateCurrentSpan({ "session.page_create_ms": pageCreateMs });
 
-          // Run scrape
-          const scrapeOutput = yield* executeAhrefsScrape(page, domain, scrapeType).pipe(
+          // Run scrape — thread proxyAuth so the Fetch interception can
+          // re-supply proxy credentials on 407 via Fetch.continueWithAuth.
+          const scrapeOutput = yield* executeAhrefsScrape(page, domain, scrapeType, proxyAuth).pipe(
             Effect.catch((e) => {
               const msg = e instanceof Error ? e.message : String(e);
               // Preserve typed ScrapeError variants so the wide event can

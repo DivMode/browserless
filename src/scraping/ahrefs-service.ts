@@ -36,6 +36,7 @@ import {
   extractApiErrors,
 } from "./ahrefs-errors.js";
 import { minimalTrafficHtml, minimalTurnstileHtml } from "./ahrefs-html.js";
+import type { ProxyAuth } from "./proxy-config.js";
 import {
   AHREFS_BASE_URL,
   AHREFS_DEFAULT_ACTION,
@@ -212,6 +213,15 @@ export const executeAhrefsScrape = (
   page: Page,
   domain: string,
   scrapeType: ScrapeType,
+  /**
+   * Session-injected proxy credentials. Threaded down to
+   * `setupFetchInterception` so the `Fetch.authRequired` handler can re-supply
+   * them via `Fetch.continueWithAuth` once `Fetch.enable` is active — Chrome
+   * stops auto-applying `page.authenticate()` creds while interception runs.
+   * `null` when the proxy URL carries no auth (the no-auth path must not enable
+   * auth handling on the interception).
+   */
+  proxyAuth: ProxyAuth | null = null,
   sitekey: string = AHREFS_DEFAULT_SITEKEY,
 ) =>
   Effect.fn("ahrefs.scrape")(function* () {
@@ -263,7 +273,7 @@ export const executeAhrefsScrape = (
       const url = buildUrl(domain, scrapeType);
       const html = buildHtml(domain, scrapeType, sitekey);
       const htmlBase64 = Buffer.from(html).toString("base64");
-      const interception = setupFetchInterception(cdp, domain, htmlBase64);
+      const interception = setupFetchInterception(cdp, domain, htmlBase64, proxyAuth);
 
       yield* Effect.logInfo(`Scraping ${domain} (${scrapeType}) → ${url}`);
 
