@@ -43,6 +43,21 @@ const logCdpSendFailure = (method: string, requestId: string, e: unknown): void 
   );
 };
 
+/** Stable, greppable marker for the interception-stall diagnostic logs. */
+const DIAG_MARKER = "ahrefs.intercept.diag";
+
+/**
+ * Fire-and-forget a single BOUNDED diagnostic log from the sync Fetch handlers,
+ * reusing the same `runForkInServer` server-runtime path as `logCdpSendFailure`
+ * so it reaches Loki/Tempo. Every line carries `marker: "ahrefs.intercept.diag"`
+ * for filtering. Instrumentation ONLY — never participates in control flow.
+ */
+const logDiag = (fields: Record<string, unknown>): void => {
+  runForkInServer(
+    Effect.logInfo(DIAG_MARKER).pipe(Effect.annotateLogs({ marker: DIAG_MARKER, ...fields })),
+  );
+};
+
 // ── CDP session ─────────────────────────────────────────────────────
 
 export const acquireCdpSession = (page: Page) =>
@@ -123,6 +138,34 @@ export function setupFetchInterception(
   let docResponseCount = 0;
   const fetchDecisions: FetchDecision[] = [];
 
+  // Diagnostic-only: bound the per-interception `paused` diag lines so a
+  // 90-request page can't spam Loki. Caps at the first DIAG_PAUSED_CAP events.
+  const DIAG_PAUSED_CAP = 8;
+  let diagPausedCount = 0;
+
+  // Emit ONE bounded `phase:'paused'` diagnostic for the current event. Records
+  // the decision actually taken at the call site. Bounded by DIAG_PAUSED_CAP so
+  // a 90-request page logs at most 8 lines. Instrumentation ONLY.
+  const emitPaused = (
+    stage: "request" | "response",
+    status: number | "",
+    resourceType: string,
+    url: string,
+    action: "continueRequest" | "continueResponse" | "fulfill" | "failRequest",
+  ): void => {
+    if (diagPausedCount >= DIAG_PAUSED_CAP) return;
+    diagPausedCount++;
+    logDiag({
+      phase: "paused",
+      n: diagPausedCount,
+      stage,
+      status,
+      resourceType,
+      urlHead: url.slice(0, 80),
+      action,
+    });
+  };
+
   const handler = (params: any) => {
     const requestId = params.requestId as string;
 
@@ -149,6 +192,7 @@ export function setupFetchInterception(
             doc_index: docResponseCount,
           });
           fulfilled = true;
+          emitPaused("response", status, resourceType, url, "fulfill");
           cdpSend(cdp, "Fetch.fulfillRequest", {
             requestId,
             responseCode: 200,
@@ -184,6 +228,7 @@ export function setupFetchInterception(
           timer = setTimeout(() => {
             if (!settled) {
               settled = true;
+              logDiag({ phase: "timeout", requestCount, responseCount, docResponseCount });
               rejectIntercepted(
                 new InterceptionTimeoutError({
                   domain,
@@ -205,12 +250,14 @@ export function setupFetchInterception(
             doc_index: docResponseCount,
           });
         }
+        emitPaused("response", status, resourceType, url, "continueResponse");
         cdpSend(cdp, "Fetch.continueResponse", { requestId }).catch((e: unknown) =>
           logCdpSendFailure("Fetch.continueResponse", requestId, e),
         );
         return;
       }
       // Non-document ahrefs response — continue
+      emitPaused("response", status, resourceType, url, "continueResponse");
       cdpSend(cdp, "Fetch.continueResponse", { requestId }).catch((e: unknown) =>
         logCdpSendFailure("Fetch.continueResponse", requestId, e),
       );
@@ -252,12 +299,14 @@ export function setupFetchInterception(
       // We must allow the first load (sets up turnstile) but block the second (triggers redirect).
       // The fulfilled flag distinguishes them: false = challenge phase, true = our HTML is served.
       if (fulfilled && reqUrl.includes("cdn-cgi/challenge-platform") && reqUrl.includes("/flow/")) {
+        emitPaused("request", "", resourceType, reqUrl, "failRequest");
         cdpSend(cdp, "Fetch.failRequest", { requestId, reason: "BlockedByClient" }).catch(
           (e: unknown) => logCdpSendFailure("Fetch.failRequest", requestId, e),
         );
         return;
       }
 
+      emitPaused("request", "", resourceType, reqUrl, "continueRequest");
       cdpSend(cdp, "Fetch.continueRequest", { requestId }).catch((e: unknown) =>
         logCdpSendFailure("Fetch.continueRequest", requestId, e),
       );
@@ -275,6 +324,7 @@ export function setupFetchInterception(
   let timer = setTimeout(() => {
     if (!settled) {
       settled = true;
+      logDiag({ phase: "timeout", requestCount, responseCount, docResponseCount });
       rejectIntercepted(
         new InterceptionTimeoutError({ domain, requestCount, responseCount, docResponseCount }),
       );
@@ -292,6 +342,7 @@ export function setupFetchInterception(
     const requestId = params.requestId as string;
     const challenge = (params.authChallenge ?? {}) as { source?: string };
     const isProxy = challenge.source === "Proxy";
+    logDiag({ phase: "authRequired", source: challenge.source ?? "", requestId });
     if (proxyAuth && isProxy) {
       cdpSend(cdp, "Fetch.continueWithAuth", {
         requestId,
@@ -300,7 +351,16 @@ export function setupFetchInterception(
           username: proxyAuth.username,
           password: proxyAuth.password,
         },
-      }).catch((e: unknown) => logCdpSendFailure("Fetch.continueWithAuth", requestId, e));
+      })
+        .then(() =>
+          logDiag({
+            phase: "authContinued",
+            outcome: "ok",
+            response: "ProvideCredentials",
+            requestId,
+          }),
+        )
+        .catch((e: unknown) => logCdpSendFailure("Fetch.continueWithAuth", requestId, e));
       return;
     }
     // No creds to supply (no-auth proxy, or a non-proxy challenge) — let the
@@ -308,7 +368,11 @@ export function setupFetchInterception(
     cdpSend(cdp, "Fetch.continueWithAuth", {
       requestId,
       authChallengeResponse: { response: "Default" },
-    }).catch((e: unknown) => logCdpSendFailure("Fetch.continueWithAuth", requestId, e));
+    })
+      .then(() =>
+        logDiag({ phase: "authContinued", outcome: "ok", response: "Default", requestId }),
+      )
+      .catch((e: unknown) => logCdpSendFailure("Fetch.continueWithAuth", requestId, e));
   };
 
   // Register handlers BEFORE Fetch.enable so no events are missed.
@@ -331,6 +395,12 @@ export function setupFetchInterception(
         { urlPattern: "*", requestStage: "Request" },
         { urlPattern: "https://ahrefs.com/*", requestStage: "Response" },
       ],
+    });
+    logDiag({
+      phase: "enabled",
+      domain,
+      handleAuthRequests: proxyAuth != null,
+      proxyAuthPresent: proxyAuth != null,
     });
   })();
 
