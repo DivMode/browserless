@@ -19,6 +19,13 @@
  *      data showed this clusters 6-13× over baseline on specific proxy
  *      IPs; clean IP-block signature.
  *
+ *   4. RateLimitedError
+ *      Ahrefs answered the `backlink-checker` Document response with a 429
+ *      (rate-limited) or 403 from our proxy egress IP. This IS the canonical
+ *      IP-attributable block — rotating the session_id to a fresh egress IP
+ *      is exactly the remedy. The intercept handler fails fast on it (no 45s
+ *      interception wait) so rotation kicks in immediately.
+ *
  * Explicitly NOT a block trigger:
  *
  *   - TurnstileTimeoutError({apiCallStatus: "not_called"})
@@ -43,6 +50,8 @@ export function isBlockTrigger(error: ScrapeError | undefined): boolean {
       return error.typedApiErrors.some((e) => e.isCf);
     case "TurnstileTimeoutError":
       return error.apiCallStatus === "pending";
+    case "RateLimitedError":
+      return true;
     default:
       return false;
   }

@@ -60,6 +60,22 @@ export class FulfillError extends Schema.TaggedErrorClass<FulfillError>()("Fulfi
   cause: Schema.String,
 }) {}
 
+/**
+ * Ahrefs returned a rate-limit/block status (429 or 403) on the Document
+ * response from our proxy egress IP. NOT an interception bug — the request
+ * left Chrome, the upstream answered, and the answer is "you're rate-limited
+ * from this IP". Fail-fast on it (no 45s interception wait) and treat it as
+ * an IP-attributable block so the pipeline rotates the session_id to a fresh
+ * egress IP and retries.
+ */
+export class RateLimitedError extends Schema.TaggedErrorClass<RateLimitedError>()(
+  "RateLimitedError",
+  {
+    domain: Schema.String,
+    status: Schema.Number,
+  },
+) {}
+
 // ── API Error Info (extracted from browser-side JS) ────────────
 
 export interface ApiErrorInfo {
@@ -131,6 +147,7 @@ export type ScrapeError =
   | CdpSessionError
   | FetchEnableError
   | InterceptionTimeoutError
+  | RateLimitedError
   | NavigationError
   | ResultTimeoutError
   | FulfillError;
@@ -143,6 +160,7 @@ const SCRAPE_ERROR_TAGS = new Set<string>([
   "CdpSessionError",
   "FetchEnableError",
   "InterceptionTimeoutError",
+  "RateLimitedError",
   "NavigationError",
   "ResultTimeoutError",
   "FulfillError",
@@ -176,6 +194,8 @@ export const errorCategory = (error: ScrapeError): ErrorCategory => {
       return "upstream";
     case "InterceptionTimeoutError":
       return "transient";
+    case "RateLimitedError":
+      return "upstream";
     case "NavigationError":
       return "transient";
     case "FulfillError":
@@ -202,6 +222,8 @@ export const failurePoint = (error: ScrapeError): string => {
       return "api_backlinks";
     case "InterceptionTimeoutError":
       return "interception";
+    case "RateLimitedError":
+      return "rate_limited";
     case "NavigationError":
       return "navigation";
     case "FulfillError":
@@ -232,6 +254,8 @@ export const errorTypeString = (error: ScrapeError): string => {
       return error.message;
     case "InterceptionTimeoutError":
       return "interception_timeout";
+    case "RateLimitedError":
+      return "rate_limited";
     case "NavigationError":
       return "navigation_error";
     case "FulfillError":

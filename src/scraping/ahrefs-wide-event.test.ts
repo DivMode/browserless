@@ -16,6 +16,7 @@ import {
   CdpSessionError,
   FetchEnableError,
   InterceptionTimeoutError,
+  RateLimitedError,
   NavigationError,
   ResultTimeoutError,
   FulfillError,
@@ -464,22 +465,6 @@ describe("wide event — InterceptionTimeoutError diagnosis", () => {
     expect(event.failure_point).toBe("interception");
   });
 
-  // Label renamed proxy_no_response → interception_no_response: request was paused but
-  // no response stage arrived — an interception-layer fault, not a silent proxy.
-  it("requestCount>0, responseCount=0 → interception_no_response (request sent, no reply)", () => {
-    const event = callBuild(
-      new InterceptionTimeoutError({
-        domain: "test.com",
-        requestCount: 7,
-        responseCount: 0,
-        docResponseCount: 0,
-      }),
-    );
-    expect(event.api_diagnosis).toBe("interception_no_response");
-    expect(event.intercept_request_count).toBe("7");
-    expect(event.intercept_response_count).toBe("0");
-  });
-
   it("responseCount>0, docResponseCount=0 → no_document_response (redirect away)", () => {
     const event = callBuild(
       new InterceptionTimeoutError({
@@ -492,6 +477,18 @@ describe("wide event — InterceptionTimeoutError diagnosis", () => {
     expect(event.api_diagnosis).toBe("no_document_response");
     expect(event.intercept_response_count).toBe("5");
     expect(event.intercept_doc_response_count).toBe("0");
+  });
+
+  it("requestCount=2, responseCount=0 → no_response (request sent, upstream silent)", () => {
+    const event = callBuild(
+      new InterceptionTimeoutError({
+        domain: "test.com",
+        requestCount: 2,
+        responseCount: 0,
+        docResponseCount: 0,
+      }),
+    );
+    expect(event.api_diagnosis).toBe("no_response");
   });
 
   it("docResponseCount>0 → intercept_loop (Document arrived, fulfill failed)", () => {
@@ -531,5 +528,41 @@ describe("wide event — InterceptionTimeoutError diagnosis", () => {
     expect(event.intercept_request_count).toBeUndefined();
     expect(event.intercept_response_count).toBeUndefined();
     expect(event.intercept_doc_response_count).toBeUndefined();
+  });
+});
+
+describe("wide event — RateLimitedError diagnosis", () => {
+  const buildRateLimited = (status: number): AhrefsScrapeResult => ({
+    success: false,
+    domain: "test.com",
+    error: `RateLimitedError: status=${status}`,
+    scrapeError: new RateLimitedError({ domain: "test.com", status }),
+    timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
+  });
+
+  const callBuild = (status: number) =>
+    buildWideEvent({
+      result: buildRateLimited(status),
+      cfMetrics: emptyCfMetrics,
+      replayMeta: null,
+      diagnostics: null,
+      domain: "test.com",
+      scrapeType: "backlinks",
+      scrapeUrl: "https://ahrefs.com/backlink-checker?input=test.com",
+    });
+
+  it("429 → api_diagnosis=rate_limited + api_status_code=429", () => {
+    const event = callBuild(429);
+    expect(event.api_diagnosis).toBe("rate_limited");
+    expect(event.api_status_code).toBe("429");
+    expect(event.error_type).toBe("rate_limited");
+    expect(event.failure_point).toBe("rate_limited");
+    expect(event.scrape_error_category).toBe("upstream");
+  });
+
+  it("403 → api_diagnosis=rate_limited + api_status_code=403", () => {
+    const event = callBuild(403);
+    expect(event.api_diagnosis).toBe("rate_limited");
+    expect(event.api_status_code).toBe("403");
   });
 });

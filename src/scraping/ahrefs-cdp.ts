@@ -11,11 +11,20 @@ import {
   CdpSessionError,
   FetchEnableError,
   InterceptionTimeoutError,
+  RateLimitedError,
   ResultTimeoutError,
 } from "./ahrefs-errors.js";
 import { runForkInServer } from "../otel-runtime.js";
 import type { ProxyAuth } from "./proxy-config.js";
 import { MAX_INTERCEPT_WAIT_MS } from "./ahrefs-types.js";
+
+/**
+ * Upstream rate-limit / block statuses on the ahrefs Document response. These
+ * are IP-attributable: ahrefs is refusing this proxy egress IP. We fail-fast
+ * (no 45s interception wait) with a RateLimitedError so the pipeline rotates
+ * to a fresh IP and retries — see block-detection.ts.
+ */
+const RATE_LIMIT_STATUSES = new Set<number>([429, 403]);
 
 // ── Typed CDP send — eliminates `as never` casts ───────────────────
 
@@ -40,21 +49,6 @@ const logCdpSendFailure = (method: string, requestId: string, e: unknown): void 
         cdp_error: e instanceof Error ? e.message : String(e),
       }),
     ),
-  );
-};
-
-/** Stable, greppable marker for the interception-stall diagnostic logs. */
-const DIAG_MARKER = "ahrefs.intercept.diag";
-
-/**
- * Fire-and-forget a single BOUNDED diagnostic log from the sync Fetch handlers,
- * reusing the same `runForkInServer` server-runtime path as `logCdpSendFailure`
- * so it reaches Loki/Tempo. Every line carries `marker: "ahrefs.intercept.diag"`
- * for filtering. Instrumentation ONLY — never participates in control flow.
- */
-const logDiag = (fields: Record<string, unknown>): void => {
-  runForkInServer(
-    Effect.logInfo(DIAG_MARKER).pipe(Effect.annotateLogs({ marker: DIAG_MARKER, ...fields })),
   );
 };
 
@@ -138,34 +132,6 @@ export function setupFetchInterception(
   let docResponseCount = 0;
   const fetchDecisions: FetchDecision[] = [];
 
-  // Diagnostic-only: bound the per-interception `paused` diag lines so a
-  // 90-request page can't spam Loki. Caps at the first DIAG_PAUSED_CAP events.
-  const DIAG_PAUSED_CAP = 8;
-  let diagPausedCount = 0;
-
-  // Emit ONE bounded `phase:'paused'` diagnostic for the current event. Records
-  // the decision actually taken at the call site. Bounded by DIAG_PAUSED_CAP so
-  // a 90-request page logs at most 8 lines. Instrumentation ONLY.
-  const emitPaused = (
-    stage: "request" | "response",
-    status: number | "",
-    resourceType: string,
-    url: string,
-    action: "continueRequest" | "continueResponse" | "fulfill" | "failRequest",
-  ): void => {
-    if (diagPausedCount >= DIAG_PAUSED_CAP) return;
-    diagPausedCount++;
-    logDiag({
-      phase: "paused",
-      n: diagPausedCount,
-      stage,
-      status,
-      resourceType,
-      urlHead: url.slice(0, 80),
-      action,
-    });
-  };
-
   const handler = (params: any) => {
     const requestId = params.requestId as string;
 
@@ -192,7 +158,6 @@ export function setupFetchInterception(
             doc_index: docResponseCount,
           });
           fulfilled = true;
-          emitPaused("response", status, resourceType, url, "fulfill");
           cdpSend(cdp, "Fetch.fulfillRequest", {
             requestId,
             responseCode: 200,
@@ -228,7 +193,6 @@ export function setupFetchInterception(
           timer = setTimeout(() => {
             if (!settled) {
               settled = true;
-              logDiag({ phase: "timeout", requestCount, responseCount, docResponseCount });
               rejectIntercepted(
                 new InterceptionTimeoutError({
                   domain,
@@ -240,6 +204,33 @@ export function setupFetchInterception(
             }
           }, MAX_INTERCEPT_WAIT_MS);
         }
+        // Upstream rate-limit / block (429/403) — fail-fast. This is NOT a CF
+        // mitigation (already handled above) and NOT an interception bug: the
+        // request left Chrome and ahrefs answered "you're blocked from this
+        // egress IP". Waiting 45s for a 200 that never comes only hides it as
+        // an interception timeout, so we continueResponse (don't leave Chrome
+        // hanging) AND immediately reject with RateLimitedError. block-detection
+        // treats this as an IP-attributable block → rotate session_id + retry.
+        if (RATE_LIMIT_STATUSES.has(status) && !hasCfMitigated && !fulfilled) {
+          if (!fetchDecisions.some((d) => d.doc_index === docResponseCount)) {
+            fetchDecisions.push({
+              url: url.substring(0, 150),
+              status,
+              cf_mitigated: false,
+              action: "continue_other",
+              doc_index: docResponseCount,
+            });
+          }
+          cdpSend(cdp, "Fetch.continueResponse", { requestId }).catch((e: unknown) =>
+            logCdpSendFailure("Fetch.continueResponse", requestId, e),
+          );
+          clearTimeout(timer);
+          if (!settled) {
+            settled = true;
+            rejectIntercepted(new RateLimitedError({ domain, status }));
+          }
+          return;
+        }
         // CF challenge or already fulfilled — continue the response
         if (!fetchDecisions.some((d) => d.doc_index === docResponseCount)) {
           fetchDecisions.push({
@@ -250,14 +241,12 @@ export function setupFetchInterception(
             doc_index: docResponseCount,
           });
         }
-        emitPaused("response", status, resourceType, url, "continueResponse");
         cdpSend(cdp, "Fetch.continueResponse", { requestId }).catch((e: unknown) =>
           logCdpSendFailure("Fetch.continueResponse", requestId, e),
         );
         return;
       }
       // Non-document ahrefs response — continue
-      emitPaused("response", status, resourceType, url, "continueResponse");
       cdpSend(cdp, "Fetch.continueResponse", { requestId }).catch((e: unknown) =>
         logCdpSendFailure("Fetch.continueResponse", requestId, e),
       );
@@ -299,14 +288,12 @@ export function setupFetchInterception(
       // We must allow the first load (sets up turnstile) but block the second (triggers redirect).
       // The fulfilled flag distinguishes them: false = challenge phase, true = our HTML is served.
       if (fulfilled && reqUrl.includes("cdn-cgi/challenge-platform") && reqUrl.includes("/flow/")) {
-        emitPaused("request", "", resourceType, reqUrl, "failRequest");
         cdpSend(cdp, "Fetch.failRequest", { requestId, reason: "BlockedByClient" }).catch(
           (e: unknown) => logCdpSendFailure("Fetch.failRequest", requestId, e),
         );
         return;
       }
 
-      emitPaused("request", "", resourceType, reqUrl, "continueRequest");
       cdpSend(cdp, "Fetch.continueRequest", { requestId }).catch((e: unknown) =>
         logCdpSendFailure("Fetch.continueRequest", requestId, e),
       );
@@ -324,7 +311,6 @@ export function setupFetchInterception(
   let timer = setTimeout(() => {
     if (!settled) {
       settled = true;
-      logDiag({ phase: "timeout", requestCount, responseCount, docResponseCount });
       rejectIntercepted(
         new InterceptionTimeoutError({ domain, requestCount, responseCount, docResponseCount }),
       );
@@ -342,7 +328,6 @@ export function setupFetchInterception(
     const requestId = params.requestId as string;
     const challenge = (params.authChallenge ?? {}) as { source?: string };
     const isProxy = challenge.source === "Proxy";
-    logDiag({ phase: "authRequired", source: challenge.source ?? "", requestId });
     if (proxyAuth && isProxy) {
       cdpSend(cdp, "Fetch.continueWithAuth", {
         requestId,
@@ -351,16 +336,7 @@ export function setupFetchInterception(
           username: proxyAuth.username,
           password: proxyAuth.password,
         },
-      })
-        .then(() =>
-          logDiag({
-            phase: "authContinued",
-            outcome: "ok",
-            response: "ProvideCredentials",
-            requestId,
-          }),
-        )
-        .catch((e: unknown) => logCdpSendFailure("Fetch.continueWithAuth", requestId, e));
+      }).catch((e: unknown) => logCdpSendFailure("Fetch.continueWithAuth", requestId, e));
       return;
     }
     // No creds to supply (no-auth proxy, or a non-proxy challenge) — let the
@@ -368,11 +344,7 @@ export function setupFetchInterception(
     cdpSend(cdp, "Fetch.continueWithAuth", {
       requestId,
       authChallengeResponse: { response: "Default" },
-    })
-      .then(() =>
-        logDiag({ phase: "authContinued", outcome: "ok", response: "Default", requestId }),
-      )
-      .catch((e: unknown) => logCdpSendFailure("Fetch.continueWithAuth", requestId, e));
+    }).catch((e: unknown) => logCdpSendFailure("Fetch.continueWithAuth", requestId, e));
   };
 
   // Register handlers BEFORE Fetch.enable so no events are missed.
@@ -395,12 +367,6 @@ export function setupFetchInterception(
         { urlPattern: "*", requestStage: "Request" },
         { urlPattern: "https://ahrefs.com/*", requestStage: "Response" },
       ],
-    });
-    logDiag({
-      phase: "enabled",
-      domain,
-      handleAuthRequests: proxyAuth != null,
-      proxyAuthPresent: proxyAuth != null,
     });
   })();
 
@@ -435,6 +401,10 @@ export const waitForDocumentInterception = (result: FetchInterceptionResult) =>
     try: () => result.intercepted,
     catch: (e: unknown) => {
       if (e instanceof InterceptionTimeoutError) return e;
+      // RateLimitedError (429/403 fail-fast) must propagate as its own typed
+      // error so the caller's catchTag rotates the egress IP instead of
+      // mislabeling it as an interception timeout.
+      if (e instanceof RateLimitedError) return e;
       return new InterceptionTimeoutError({
         domain: "unknown",
         requestCount: 0,

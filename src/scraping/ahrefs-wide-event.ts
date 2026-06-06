@@ -266,6 +266,10 @@ function deriveErrorType(result: AhrefsScrapeResult): string {
     // CDP/navigation errors: specific tag name
     case "InterceptionTimeoutError":
       return "interception_timeout";
+    // Upstream IP block — surface as rate_limited (the status rides on
+    // api_status_code), distinct from any interception fallback.
+    case "RateLimitedError":
+      return "rate_limited";
     case "NavigationError":
       return "navigation_error";
     case "ResultTimeoutError":
@@ -277,6 +281,23 @@ function deriveErrorType(result: AhrefsScrapeResult): string {
     case "FulfillError":
       return "fulfill_error";
   }
+}
+
+/**
+ * Resolve `api_status_code` from whichever source carries a real HTTP status.
+ *
+ * Precedence:
+ *   1. RateLimitedError — the 429/403 the Document response actually returned.
+ *      It carries no `apiErrors` (it's a fail-fast on the Document, not an
+ *      ahrefs API call), so its `status` is the ONLY source of the code.
+ *   2. apiErrors[0].status — the ahrefs API (overview/list) error path.
+ * Empty string when neither applies.
+ */
+function apiStatusCode(result: AhrefsScrapeResult): string {
+  if (result.scrapeError?._tag === "RateLimitedError") {
+    return String(result.scrapeError.status);
+  }
+  return result.apiErrors?.[0]?.status ? String(result.apiErrors[0].status) : "";
 }
 
 /**
@@ -325,19 +346,26 @@ function fetchDecisionChain(
  * is intentionally flat (one label, one value) so dashboards and alerts can
  * pivot on it without inspecting other fields.
  *
- * Order matters: CF-blocked > non-CF HTTP error > turnstile failed >
- * interception failure modes (interception_no_request | interception_no_response |
- * no_document_response | intercept_loop). When no rule matches we emit ""
- * which renders as `?` in dashboards — that's the signal that a new failure
- * mode has appeared without a category.
+ * Order matters: CF-blocked > non-CF HTTP error > rate_limited (upstream
+ * 429/403) > turnstile failed > interception failure modes
+ * (interception_no_request | no_response | no_document_response |
+ * intercept_loop). When no rule matches we emit "" which renders as `?` in
+ * dashboards — that's the signal that a new failure mode has appeared without
+ * a category.
  *
- * NOTE: the requestCount===0 / responseCount===0 branches were FORMERLY named
- * `proxy_egress_dead` / `proxy_no_response`. Those labels lied: an
- * InterceptionTimeoutError with zero requests/responses is a BROWSER-INTERNAL
- * Fetch-interception/auth failure (e.g. proxy auth not re-applied under active
- * Fetch.enable → 407 → ERR_INVALID_AUTH_CREDENTIALS), NOT a dead/silent proxy.
- * They cost hours of mis-directed proxy debugging while the proxy was healthy
- * the whole time, so they now point at the interception layer.
+ * NOTE: `rate_limited` is the upstream IP-block diagnosis — the Document
+ * response itself returned 429/403 from our proxy egress IP. It's a REAL
+ * upstream status, so it must win over the interception fallbacks below.
+ *
+ * NOTE: the requestCount===0 branch was FORMERLY named `proxy_egress_dead`.
+ * That label lied: an InterceptionTimeoutError with zero requests is a
+ * BROWSER-INTERNAL Fetch-interception/auth failure (e.g. proxy auth not
+ * re-applied under active Fetch.enable → 407 → ERR_INVALID_AUTH_CREDENTIALS),
+ * NOT a dead proxy. The requestCount>0 && responseCount===0 branch was
+ * FORMERLY `proxy_no_response`, then `interception_no_response` — both lied
+ * the other way. The request DID leave Chrome; the upstream just returned
+ * nothing. That's an upstream/network outcome, so it's now `no_response`
+ * (NOT an interception bug).
  */
 function deriveApiDiagnosis(result: AhrefsScrapeResult, cfMetrics: CfSolveMetrics): string {
   if (result.success) return "healthy";
@@ -348,10 +376,16 @@ function deriveApiDiagnosis(result: AhrefsScrapeResult, cfMetrics: CfSolveMetric
     return `http_${result.apiErrors[0].status}`;
   }
   const e = result.scrapeError;
+  // A real upstream rate-limit/block status (429/403 on the Document) is the
+  // most specific diagnosis — beats every interception fallback below.
+  if (e?._tag === "RateLimitedError") return "rate_limited";
   if (e?._tag === "TurnstileTimeoutError") return "turnstile_failed";
   if (e?._tag === "InterceptionTimeoutError") {
     if (e.requestCount === 0) return "interception_no_request";
-    if (e.responseCount === 0) return "interception_no_response";
+    // requestCount>0 && responseCount===0: the request LEFT Chrome and the
+    // upstream returned nothing — that's an upstream/network "no_response", NOT
+    // an interception bug. (Was misleadingly "interception_no_response".)
+    if (e.responseCount === 0) return "no_response";
     if (e.docResponseCount === 0) return "no_document_response";
     return "intercept_loop";
   }
@@ -589,7 +623,7 @@ function buildWideEventInner(input: WideEventInput): Record<string, string> {
           result.apiErrors.map((e) => `${e.endpoint}:${e.status}${e.isCf ? ":cf" : ""}`),
         )
       : "",
-    [ATTR_API_STATUS_CODE]: result.apiErrors?.[0]?.status ? String(result.apiErrors[0].status) : "",
+    [ATTR_API_STATUS_CODE]: apiStatusCode(result),
     [ATTR_API_BLOCKED_BY_CF]: result.apiErrors?.some((e) => e.isCf) ? "true" : "",
     [ATTR_API_ENDPOINT]: result.apiErrors?.[0]?.endpoint ?? "",
     [ATTR_API_DIAGNOSIS]: deriveApiDiagnosis(result, cfMetrics),

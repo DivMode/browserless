@@ -6,6 +6,7 @@ import {
   CdpSessionError,
   InterceptionTimeoutError,
   NavigationError,
+  RateLimitedError,
   ResultTimeoutError,
   TurnstileTimeoutError,
 } from "./ahrefs-errors.js";
@@ -95,6 +96,18 @@ describe("isBlockTrigger", () => {
         apiCallStatus: "responded_200",
       });
       expect(isBlockTrigger(e)).toBe(false);
+    });
+  });
+
+  describe("RateLimitedError", () => {
+    it("triggers for a 429 (upstream IP rate-limit → rotate egress IP)", () => {
+      const e = new RateLimitedError({ domain: "x.com", status: 429 });
+      expect(isBlockTrigger(e)).toBe(true);
+    });
+
+    it("triggers for a 403 (upstream IP block → rotate egress IP)", () => {
+      const e = new RateLimitedError({ domain: "x.com", status: 403 });
+      expect(isBlockTrigger(e)).toBe(true);
     });
   });
 

@@ -478,6 +478,55 @@ export const executeAhrefsScrape = (
             ),
           ),
         ),
+        // In-band catch for RateLimitedError. The Document response came back
+        // 429/403 from our proxy egress IP — ahrefs is rate-limiting/blocking
+        // this IP. The intercept handler fail-fast-rejected (no 45s wait), so
+        // here we build the same ScrapeOutput shape with `success: false` +
+        // `scrapeError: e`. block-detection treats RateLimitedError as a block,
+        // so the pipeline rotates the session_id to a fresh IP and retries.
+        Effect.catchTag("RateLimitedError", (e) =>
+          Effect.logWarning(`Rate limited: ${domain} status=${e.status}`).pipe(
+            Effect.andThen(
+              Effect.fn("ahrefs.scrape.phases.body.rateLimited")(function* () {
+                navigationGuardActive = false;
+                cdp.off("Page.frameStartedLoading" as any, navGuardHandler);
+                connection?.off("Browserless.cloudflareSolved" as any, onSolvedGuard);
+                const cfMetrics = cfListener.collect();
+                const replayMeta = cfListener.getReplayMetadata();
+                cfListener.cleanup();
+                const capturedDecisions = [...interception.fetchDecisions];
+                interception.cleanup();
+                timings.totalMs = Date.now() - t0;
+                yield* Effect.annotateCurrentSpan({
+                  rate_limited_status: e.status,
+                  fetch_decisions_captured: capturedDecisions.length,
+                });
+                return {
+                  result: {
+                    success: false as const,
+                    domain,
+                    scrapedAt: Math.floor(Date.now() / 1000),
+                    error: `RateLimitedError: status=${e.status}`,
+                    scrapeError: e,
+                    timings,
+                  } satisfies AhrefsScrapeResult,
+                  cfMetrics,
+                  replayMeta,
+                  diagnostics: null,
+                  domain,
+                  scrapeType,
+                  scrapeUrl: url,
+                  timings,
+                  shellTimings: undefined,
+                  cfClearancePresent,
+                  apiCallStatus: "rate_limited",
+                  turnstileErrorCode: undefined,
+                  fetchDecisions: capturedDecisions,
+                };
+              })(),
+            ),
+          ),
+        ),
       );
     })().pipe(
       Effect.ensuring(

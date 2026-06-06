@@ -12,6 +12,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CDPSession } from "puppeteer-core";
 import { setupFetchInterception } from "./ahrefs-cdp.js";
+import { RateLimitedError } from "./ahrefs-errors.js";
 import { authUsernameWithSession } from "./proxy-config.js";
 
 // ── Mock CDP session ────────────────────────────────────────────────
@@ -153,6 +154,78 @@ describe("setupFetchInterception — proxy auth", () => {
       authChallenge: { source: "Proxy" },
     });
     expect(sent.find((c) => c.method === "Fetch.continueWithAuth")).toBeUndefined();
+
+    result.cleanup();
+  });
+});
+
+describe("setupFetchInterception — rate-limit fail-fast", () => {
+  /** Build a Document RESPONSE-stage Fetch.requestPaused event for an ahrefs URL. */
+  const ahrefsDocResponse = (status: number) => ({
+    requestId: "req-doc",
+    request: { url: "https://ahrefs.com/backlink-checker?input=example.com" },
+    resourceType: "Document",
+    responseStatusCode: status,
+    responseHeaders: [],
+  });
+
+  it("429 Document response → intercepted rejects with RateLimitedError (fail-fast, NOT a 45s InterceptionTimeoutError)", async () => {
+    const { cdp, sent, emitter } = makeMockCdp();
+    const result = setupFetchInterception(cdp, "example.com", "aGVsbG8=", null);
+    await result.ready;
+
+    // Emit the 429 Document response. The handler must fail-fast: continueResponse
+    // the request (don't leave Chrome hanging) AND reject the interception now.
+    emitter.emit("Fetch.requestPaused", ahrefsDocResponse(429));
+
+    // intercepted MUST reject immediately with RateLimitedError — not hang for
+    // MAX_INTERCEPT_WAIT_MS (45s) waiting for a 200 that never arrives.
+    const err = await result.intercepted.then(
+      () => {
+        throw new Error("intercepted should have rejected, not resolved");
+      },
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(RateLimitedError);
+    expect((err as RateLimitedError).status).toBe(429);
+    expect((err as RateLimitedError).domain).toBe("example.com");
+
+    // Chrome was NOT left hanging — continueResponse was sent for the 429.
+    expect(sent.some((c) => c.method === "Fetch.continueResponse")).toBe(true);
+    // We did NOT fulfill the 429 as if it were a good page.
+    expect(sent.some((c) => c.method === "Fetch.fulfillRequest")).toBe(false);
+
+    result.cleanup();
+  });
+
+  it("403 Document response → intercepted rejects with RateLimitedError(status=403)", async () => {
+    const { cdp, emitter } = makeMockCdp();
+    const result = setupFetchInterception(cdp, "example.com", "aGVsbG8=", null);
+    await result.ready;
+
+    emitter.emit("Fetch.requestPaused", ahrefsDocResponse(403));
+
+    const err = await result.intercepted.then(
+      () => {
+        throw new Error("intercepted should have rejected, not resolved");
+      },
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(RateLimitedError);
+    expect((err as RateLimitedError).status).toBe(403);
+
+    result.cleanup();
+  });
+
+  it("200 Document response still fulfills (rate-limit branch does not affect the happy path)", async () => {
+    const { cdp, sent, emitter } = makeMockCdp();
+    const result = setupFetchInterception(cdp, "example.com", "aGVsbG8=", null);
+    await result.ready;
+
+    emitter.emit("Fetch.requestPaused", ahrefsDocResponse(200));
+
+    await expect(result.intercepted).resolves.toBeUndefined();
+    expect(sent.some((c) => c.method === "Fetch.fulfillRequest")).toBe(true);
 
     result.cleanup();
   });
