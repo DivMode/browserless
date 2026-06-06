@@ -84,7 +84,12 @@ export interface FetchDecision {
   url: string;
   status: number;
   cf_mitigated: boolean;
-  action: "fulfill" | "continue_rechallenge" | "continue_already_fulfilled" | "continue_other";
+  action:
+    | "fulfill"
+    | "fulfill_request_stage"
+    | "continue_rechallenge"
+    | "continue_already_fulfilled"
+    | "continue_other";
   doc_index: number;
 }
 
@@ -291,6 +296,54 @@ export function setupFetchInterception(
         cdpSend(cdp, "Fetch.failRequest", { requestId, reason: "BlockedByClient" }).catch(
           (e: unknown) => logCdpSendFailure("Fetch.failRequest", requestId, e),
         );
+        return;
+      }
+
+      // REQUEST-STAGE FULFILL — bypass the slow ahrefs SSR shell.
+      //
+      // The ahrefs `?input=` backlink-checker document returns a FIXED ~127.6s
+      // (proven 2026-06-05: real Chrome, 3 domains, flat across them) — far past
+      // our 45s ceiling — and we DISCARD its body anyway (we replace it with our
+      // own turnstile harness). So don't wait for it: fulfill the MAIN navigation
+      // document IMMEDIATELY with the harness. The harness then solves Turnstile
+      // and POSTs the fast `/v4/stGetFreeBacklinks*` APIs (where the data actually
+      // lives) with the token in the body — no dependency on the shell. Only the
+      // main ahrefs.com Document, and only once (`!fulfilled`). Sub-resources (the
+      // challenges.cloudflare.com Turnstile widget, the `/v4/` XHRs) are NOT
+      // Documents and continue normally below.
+      //
+      // Was previously fulfilled at the RESPONSE stage (on the 200), which forced
+      // the full ~127.6s wait → InterceptionTimeoutError (`upstream_slow_no_doc_response`)
+      // → 0% for 14+ days.
+      if (!fulfilled && resourceType === "Document" && reqUrl.includes("ahrefs.com")) {
+        fetchDecisions.push({
+          url: reqUrl.substring(0, 150),
+          status: 0,
+          cf_mitigated: false,
+          action: "fulfill_request_stage",
+          doc_index: 0,
+        });
+        fulfilled = true;
+        cdpSend(cdp, "Fetch.fulfillRequest", {
+          requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: "Content-Type", value: "text/html; charset=utf-8" }],
+          body: htmlBase64,
+        })
+          .then(() => {
+            clearTimeout(timer);
+            if (!settled) {
+              settled = true;
+              resolveIntercepted();
+            }
+          })
+          .catch((e: unknown) => {
+            clearTimeout(timer);
+            if (!settled) {
+              settled = true;
+              rejectIntercepted(e);
+            }
+          });
         return;
       }
 

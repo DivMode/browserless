@@ -159,6 +159,32 @@ describe("setupFetchInterception — proxy auth", () => {
   });
 });
 
+describe("setupFetchInterception — request-stage fulfill (bypass slow ahrefs SSR shell)", () => {
+  it("Document REQUEST-stage → fulfilled immediately with the harness, not continued to the slow upstream", async () => {
+    const { cdp, sent, emitter } = makeMockCdp();
+    const result = setupFetchInterception(cdp, "example.com", "aGVsbG8=", null);
+    await result.ready;
+
+    // A Document at REQUEST stage (NO responseStatusCode) is the main navigation.
+    // The handler must fulfill it NOW with our harness (base64 "aGVsbG8="), not
+    // wait for ahrefs's ~127.6s document response (whose body we discard anyway).
+    emitter.emit("Fetch.requestPaused", {
+      requestId: "req-doc",
+      request: { url: "https://ahrefs.com/backlink-checker?input=example.com" },
+      resourceType: "Document",
+    });
+
+    await expect(result.intercepted).resolves.toBeUndefined();
+    const fulfill = sent.find((c) => c.method === "Fetch.fulfillRequest");
+    expect(fulfill, "Document request-stage must be fulfilled immediately").toBeTruthy();
+    expect(JSON.stringify(fulfill?.params)).toContain("aGVsbG8=");
+    // Fulfilled, NOT continued to the slow upstream — no 127.6s wait.
+    expect(sent.some((c) => c.method === "Fetch.continueRequest")).toBe(false);
+
+    result.cleanup();
+  });
+});
+
 describe("setupFetchInterception — rate-limit fail-fast", () => {
   /** Build a Document RESPONSE-stage Fetch.requestPaused event for an ahrefs URL. */
   const ahrefsDocResponse = (status: number) => ({
