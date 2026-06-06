@@ -479,7 +479,7 @@ describe("wide event — InterceptionTimeoutError diagnosis", () => {
     expect(event.intercept_doc_response_count).toBe("0");
   });
 
-  it("requestCount=2, responseCount=0 → no_response (request sent, upstream silent)", () => {
+  it("requestCount=2, responseCount=0 → upstream_slow_no_doc_response (request sent, upstream slow)", () => {
     const event = callBuild(
       new InterceptionTimeoutError({
         domain: "test.com",
@@ -488,7 +488,10 @@ describe("wide event — InterceptionTimeoutError diagnosis", () => {
         docResponseCount: 0,
       }),
     );
-    expect(event.api_diagnosis).toBe("no_response");
+    // Request left Chrome but no Document arrived within the 45s ceiling.
+    // Proven 2026-06-05: ahrefs ?input= SSR shell is ~127.6s — upstream slow,
+    // not a block. (Was "no_response", before that "interception_no_response".)
+    expect(event.api_diagnosis).toBe("upstream_slow_no_doc_response");
   });
 
   it("docResponseCount>0 → intercept_loop (Document arrived, fulfill failed)", () => {

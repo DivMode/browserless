@@ -348,10 +348,10 @@ function fetchDecisionChain(
  *
  * Order matters: CF-blocked > non-CF HTTP error > rate_limited (upstream
  * 429/403) > turnstile failed > interception failure modes
- * (interception_no_request | no_response | no_document_response |
- * intercept_loop). When no rule matches we emit "" which renders as `?` in
- * dashboards — that's the signal that a new failure mode has appeared without
- * a category.
+ * (interception_no_request | upstream_slow_no_doc_response |
+ * no_document_response | intercept_loop). When no rule matches we emit "" which
+ * renders as `?` in dashboards — that's the signal that a new failure mode has
+ * appeared without a category.
  *
  * NOTE: `rate_limited` is the upstream IP-block diagnosis — the Document
  * response itself returned 429/403 from our proxy egress IP. It's a REAL
@@ -361,11 +361,11 @@ function fetchDecisionChain(
  * That label lied: an InterceptionTimeoutError with zero requests is a
  * BROWSER-INTERNAL Fetch-interception/auth failure (e.g. proxy auth not
  * re-applied under active Fetch.enable → 407 → ERR_INVALID_AUTH_CREDENTIALS),
- * NOT a dead proxy. The requestCount>0 && responseCount===0 branch was
- * FORMERLY `proxy_no_response`, then `interception_no_response` — both lied
- * the other way. The request DID leave Chrome; the upstream just returned
- * nothing. That's an upstream/network outcome, so it's now `no_response`
- * (NOT an interception bug).
+ * NOT a dead proxy. The requestCount>0 && responseCount===0 branch lied twice:
+ * `proxy_no_response` → `interception_no_response` → `no_response` all hid WHY
+ * nothing came back. It's now `upstream_slow_no_doc_response` — proven 2026-06-05
+ * to be ahrefs's `?input=` SSR shell taking a fixed ~127.6s (vs our 45s ceiling),
+ * not a block/429/CF/proxy fault. See the inline note on that branch below.
  */
 function deriveApiDiagnosis(result: AhrefsScrapeResult, cfMetrics: CfSolveMetrics): string {
   if (result.success) return "healthy";
@@ -383,9 +383,22 @@ function deriveApiDiagnosis(result: AhrefsScrapeResult, cfMetrics: CfSolveMetric
   if (e?._tag === "InterceptionTimeoutError") {
     if (e.requestCount === 0) return "interception_no_request";
     // requestCount>0 && responseCount===0: the request LEFT Chrome and the
-    // upstream returned nothing — that's an upstream/network "no_response", NOT
-    // an interception bug. (Was misleadingly "interception_no_response".)
-    if (e.responseCount === 0) return "no_response";
+    // upstream returned NO Document response within the MAX_INTERCEPT_WAIT_MS
+    // (45s) ceiling.
+    //
+    // PROVEN 2026-06-05 (real Chrome, 3 domains, both home IP + mobile proxy):
+    // ahrefs's free backlink-checker `?input=<domain>&mode=subdomains` SSR shell
+    // takes a FIXED ~127.6s to return its 200 — flat across domains, so it's a
+    // deliberate throttle/tarpit, not per-domain compute. That's ~83s past our
+    // 45s ceiling, so we ALWAYS time out before the Document arrives. This is
+    // NOT a block, NOT a 429 (api_status_code is empty — no response to read a
+    // code from), NOT Cloudflare (cdn-cgi=false, no challenge page served), and
+    // NOT our proxy/auth/interception (the ahrefs.com landing page 200s through
+    // the SAME proxy in a vanilla browser). The real backlink data lives in fast
+    // `/v4/` API calls the shell fires AFTER it loads — the slow part is only the
+    // SSR shell, whose body the scraper discards (it fulfills with its own HTML).
+    // Per-scrape timing rides on the `ahrefs.intercept.timeout` correlated log.
+    if (e.responseCount === 0) return "upstream_slow_no_doc_response";
     if (e.docResponseCount === 0) return "no_document_response";
     return "intercept_loop";
   }

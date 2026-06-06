@@ -42,6 +42,7 @@ import {
   AHREFS_DEFAULT_ACTION,
   AHREFS_DEFAULT_SITEKEY,
   AHREFS_TRAFFIC_URL,
+  MAX_INTERCEPT_WAIT_MS,
 } from "./ahrefs-types.js";
 import type { AhrefsScrapeResult, ScrapeType } from "./ahrefs-types.js";
 
@@ -298,7 +299,33 @@ export const executeAhrefsScrape = (
             .goto(url, { timeout: 60_000, waitUntil: "domcontentloaded" })
             .catch(() => null);
 
-          yield* waitForDocumentInterception(interception);
+          // Correlated timing log on interception timeout. The wide event can't
+          // carry it (it's at its 113-label Loki cap on the ITE-failure case),
+          // and `responses=0` alone can't tell "blocked" from "upstream slow" —
+          // exactly the ambiguity that cost hours on 2026-06-05. This logs WHEN
+          // and HOW LONG we waited so future debugging starts from timing, not
+          // guessing. Observe-only: tapError re-raises the same typed error, so
+          // the outer catchTag still rewrites it into the failure ScrapeOutput.
+          yield* waitForDocumentInterception(interception).pipe(
+            Effect.tapError((e) =>
+              e._tag === "InterceptionTimeoutError"
+                ? Effect.logWarning("ahrefs.intercept.timeout").pipe(
+                    Effect.annotateLogs({
+                      domain,
+                      wait_ms: String(Date.now() - navStart),
+                      max_wait_ms: String(MAX_INTERCEPT_WAIT_MS),
+                      request_count: String(e.requestCount),
+                      response_count: String(e.responseCount),
+                      doc_response_count: String(e.docResponseCount),
+                      hint:
+                        e.requestCount > 0 && e.responseCount === 0
+                          ? "request left Chrome, upstream returned NO Document within the 45s ceiling — slow ahrefs ?input= SSR shell (~127.6s, proven 2026-06-05), NOT a block/429/CF/proxy fault"
+                          : "interception ceiling tripped — read request/response/doc counts to localize",
+                    }),
+                  )
+                : Effect.void,
+            ),
+          );
           timings.navMs = Date.now() - navStart;
 
           yield* Effect.tryPromise({
