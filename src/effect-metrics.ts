@@ -26,6 +26,9 @@ import {
   METRIC_BROWSERLESS_CF_PHASE3_DURATION,
   METRIC_BROWSERLESS_CF_PHASE4_DURATION,
   METRIC_BROWSERLESS_CF_CLICK_TO_RESOLVE,
+  METRIC_BROWSERLESS_AHREFS_SCRAPE,
+  METRIC_BROWSERLESS_AHREFS_DOC_FULFILL_DURATION,
+  METRIC_BROWSERLESS_AHREFS_SCRAPE_DURATION,
   METRIC_BROWSERLESS_REPLAY_EVENTS,
   METRIC_BROWSERLESS_REPLAY_OVERFLOWS,
   METRIC_BROWSERLESS_PROXY_DROPPED_MESSAGES,
@@ -234,6 +237,44 @@ export const cfClickToResolveDuration = Metric.histogram(
     description: "Time from click delivery to resolution settlement",
     boundaries: [0.5, 1, 2, 3, 5, 8, 10, 15, 20, 30],
     attributes: { unit: METRIC_BROWSERLESS_CF_CLICK_TO_RESOLVE.unit },
+  },
+);
+
+// ──────────────────────────────────────────────
+// Ahrefs scraper
+//
+// Makes the #2665 request-stage-fulfill fix diagnosable from Prometheus rather
+// than LogQL-over-Loki: success rate, failure-mode breakdown, which fulfill
+// stage was used, and how long the ahrefs Document took to fulfill.
+// ──────────────────────────────────────────────
+
+/** Every terminal scrape. Labels: {success, diagnosis, fulfill_stage, scrape_type} */
+export const ahrefsScrapeTotal = Metric.counter(METRIC_BROWSERLESS_AHREFS_SCRAPE.name, {
+  description: "Terminal ahrefs scrape outcomes (success rate + failure-mode breakdown)",
+  attributes: { unit: METRIC_BROWSERLESS_AHREFS_SCRAPE.unit },
+});
+
+/**
+ * Time from navigation start until the ahrefs Document was fulfilled. The key
+ * #2665 signal: ~7ms for the request-stage fulfill, would pile at the 45000
+ * ceiling pre-fix (waiting on ahrefs's ~127.6s response). Labels: {fulfill_stage}
+ */
+export const ahrefsDocFulfillDuration = Metric.histogram(
+  METRIC_BROWSERLESS_AHREFS_DOC_FULFILL_DURATION.name,
+  {
+    description: "Time from navigation start until the ahrefs Document was fulfilled",
+    boundaries: [5, 10, 25, 50, 100, 250, 500, 1000, 2000, 5000, 15000, 45000],
+    attributes: { unit: METRIC_BROWSERLESS_AHREFS_DOC_FULFILL_DURATION.unit },
+  },
+);
+
+/** Total scrape duration (navigation → terminal). No labels. */
+export const ahrefsScrapeDuration = Metric.histogram(
+  METRIC_BROWSERLESS_AHREFS_SCRAPE_DURATION.name,
+  {
+    description: "Total ahrefs scrape duration",
+    boundaries: [100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000, 120000, 180000],
+    attributes: { unit: METRIC_BROWSERLESS_AHREFS_SCRAPE_DURATION.unit },
   },
 );
 

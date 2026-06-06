@@ -7,6 +7,27 @@ export const METRIC_BROWSERLESS_ACTIVE_HANDLES_BY_TYPE = {
   unit: "{handle}",
   instrument: "gauge",
 } as const;
+/** Time from navigation start until the ahrefs Document was fulfilled (labels fulfill_stage) */
+export const METRIC_BROWSERLESS_AHREFS_DOC_FULFILL_DURATION = {
+  name: "browserless_ahrefs_doc_fulfill_duration_milliseconds",
+  otel_name: "browserless.ahrefs.doc.fulfill.duration",
+  unit: "ms",
+  instrument: "histogram",
+} as const;
+/** Terminal ahrefs scrape counter (labels success, diagnosis, fulfill_stage, scrape_type) */
+export const METRIC_BROWSERLESS_AHREFS_SCRAPE = {
+  name: "browserless_ahrefs_scrape_total",
+  otel_name: "browserless.ahrefs.scrape",
+  unit: "{scrape}",
+  instrument: "counter",
+} as const;
+/** Total ahrefs scrape duration */
+export const METRIC_BROWSERLESS_AHREFS_SCRAPE_DURATION = {
+  name: "browserless_ahrefs_scrape_duration_milliseconds",
+  otel_name: "browserless.ahrefs.scrape.duration",
+  unit: "ms",
+  instrument: "histogram",
+} as const;
 /** Service availability boolean gauge (1=yes, 0=no) */
 export const METRIC_BROWSERLESS_AVAILABLE = {
   name: "browserless_available_ratio",

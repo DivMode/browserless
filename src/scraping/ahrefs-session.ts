@@ -11,7 +11,7 @@
  * - TTL: 120s max browser age, invalidation on failure or CF solve TTL
  */
 import { cpus } from "os";
-import { Cause, Effect, Exit, Pool, Scope } from "effect";
+import { Cause, Effect, Exit, Metric, Pool, Scope } from "effect";
 import puppeteer from "puppeteer-core";
 import type { Browser } from "puppeteer-core";
 
@@ -28,6 +28,12 @@ import { SessionTokenHolder } from "./session-token-holder.js";
 import { isBlockTrigger } from "./block-detection.js";
 import { authUsernameWithSession, requireProxyUrl } from "./proxy-config.js";
 import { writeFailure, writeResult } from "./r2-writer.js";
+import {
+  ahrefsScrapeTotal,
+  ahrefsDocFulfillDuration,
+  ahrefsScrapeDuration,
+} from "../effect-metrics.js";
+import type { FetchDecision } from "./ahrefs-cdp.js";
 
 // ── Config ──────────────────────────────────────────────────────────
 
@@ -979,6 +985,20 @@ const writeR2Outcome = (
   })();
 
 /**
+ * Which Fetch stage fulfilled the ahrefs Document for this scrape.
+ *
+ * `request` is the #2665 fast path — the synthetic shell is served at the Fetch
+ * REQUEST stage (~7ms) instead of waiting on ahrefs's slow (~127.6s) response.
+ * `response` means we fell back to fulfilling at the response stage; `none`
+ * means the Document was never fulfilled (e.g. interception ceiling tripped).
+ */
+const deriveFulfillStage = (fetchDecisions: FetchDecision[] | undefined): string => {
+  if (fetchDecisions?.some((d) => d.action === "fulfill_request_stage")) return "request";
+  if (fetchDecisions?.some((d) => d.action === "fulfill")) return "response";
+  return "none";
+};
+
+/**
  * Emit the terminal record for this scrape — exactly one rich
  * `ahrefs.scrape.wide_event` PLUS one `scrape.terminal` reconciliation marker.
  *
@@ -1002,7 +1022,10 @@ const emitTerminalRecord = (
 ): Effect.Effect<void> =>
   Effect.fn("dispatch.emitTerminal")(function* () {
     // 1. The rich wide event (≤113 attrs; build can throw on the cap → caught).
-    yield* Effect.sync(() =>
+    //    Capture the built record (or null on a build throw) so the metrics
+    //    below can read the SAME `api_diagnosis` value the event carries —
+    //    never recomputing the taxonomy.
+    const wideEvent = yield* Effect.sync(() =>
       buildWideEvent({
         result: output.result,
         cfMetrics: output.cfMetrics ?? emptyCfMetrics(),
@@ -1020,27 +1043,53 @@ const emitTerminalRecord = (
         shellTimings: output.shellTimings,
       }),
     ).pipe(
-      Effect.andThen((wideEvent) =>
-        Effect.logInfo("ahrefs.scrape.wide_event").pipe(Effect.annotateLogs(wideEvent)),
+      Effect.tap((event) =>
+        Effect.logInfo("ahrefs.scrape.wide_event").pipe(Effect.annotateLogs(event)),
       ),
       Effect.timeout(WIDE_EVENT_TIMEOUT),
       Effect.matchCauseEffect({
-        onSuccess: () => Effect.void,
+        onSuccess: (event) => Effect.succeed<Record<string, string> | null>(event),
         onFailure: (cause) =>
           // A wide-event failure (e.g. attribute-cap throw) must be LOUD — but
           // it must never sink the dispatch fiber, because R2 is already
-          // written and the reconciliation marker below must still fire.
-          Effect.logError("dispatch.wide_event_failed").pipe(
-            Effect.annotateLogs({
-              dispatch_instance_id: instanceId,
-              dispatch_domain: domain,
-              dispatch_error: Cause.pretty(cause).slice(0, 256),
-            }),
-          ),
+          // written and the reconciliation marker + metrics below must still
+          // fire. Return null so the metrics fall back to output.apiCallStatus.
+          Effect.logError("dispatch.wide_event_failed")
+            .pipe(
+              Effect.annotateLogs({
+                dispatch_instance_id: instanceId,
+                dispatch_domain: domain,
+                dispatch_error: Cause.pretty(cause).slice(0, 256),
+              }),
+            )
+            .pipe(Effect.as<Record<string, string> | null>(null)),
       }),
     );
 
-    // 2. The reconciliation marker (ADR-0068 §4) — ALWAYS emitted, even if the
+    // 2. Terminal metrics — emitted on EVERY terminal scrape (not just failures)
+    //    so the #2665 fix is diagnosable from Prometheus, not LogQL-over-Loki.
+    //    `diagnosis` is the SAME `api_diagnosis` the wide event already derived
+    //    (fall back to output.apiCallStatus when the build threw above).
+    const fulfillStage = deriveFulfillStage(output.fetchDecisions);
+    const diagnosis = wideEvent?.["api_diagnosis"] ?? output.apiCallStatus ?? "unknown";
+    yield* Metric.update(
+      ahrefsScrapeTotal.pipe(
+        Metric.withAttributes({
+          success: String(output.result.success),
+          diagnosis,
+          fulfill_stage: fulfillStage,
+          scrape_type: scrapeType,
+        }),
+      ),
+      1,
+    );
+    yield* Metric.update(
+      ahrefsDocFulfillDuration.pipe(Metric.withAttributes({ fulfill_stage: fulfillStage })),
+      output.result.timings.navMs,
+    );
+    yield* Metric.update(ahrefsScrapeDuration, output.result.timings.totalMs);
+
+    // 3. The reconciliation marker (ADR-0068 §4) — ALWAYS emitted, even if the
     //    wide event threw above. Cheap (a handful of labels), so it never risks
     //    the Loki cap and never depends on the rich event succeeding.
     yield* Effect.logInfo("scrape.terminal").pipe(

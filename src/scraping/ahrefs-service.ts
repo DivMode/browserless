@@ -334,9 +334,23 @@ export const executeAhrefsScrape = (
           }).pipe(Effect.ignore);
           timings.interceptMs = Date.now() - navStart - timings.navMs;
 
+          // Which Fetch stage fulfilled the ahrefs Document (#2665): `request`
+          // = the synthetic shell served at the request stage (~7ms, the fast
+          // path), `response` = fell back to the response stage, `none` = never
+          // fulfilled. Same derivation as deriveFulfillStage in ahrefs-session.ts.
+          const fulfillStage = interception.fetchDecisions.some(
+            (d) => d.action === "fulfill_request_stage",
+          )
+            ? "request"
+            : interception.fetchDecisions.some((d) => d.action === "fulfill")
+              ? "response"
+              : "none";
+
           yield* Effect.annotateCurrentSpan({
             nav_ms: timings.navMs,
             intercept_ms: timings.interceptMs,
+            fulfill_stage: fulfillStage,
+            doc_fulfill_ms: timings.navMs,
           });
         })();
 
