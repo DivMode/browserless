@@ -15,6 +15,7 @@ import { Cause, Effect } from "effect";
 import { buildTerminalFailureOutput } from "./ahrefs-session.js";
 import { buildWideEvent } from "./ahrefs-wide-event.js";
 import { emptyCfMetrics } from "./ahrefs-cf-listener.js";
+import { ProxyEgressDeadError } from "./ahrefs-errors.js";
 import type { ScrapeOutput } from "./ahrefs-service.js";
 
 const wideEventOf = (output: ScrapeOutput) =>
@@ -41,6 +42,21 @@ describe("ADR-0068 terminal failure output", () => {
     expect(output.result.error).toContain("scrape_defect");
     // The failure carries a categorized typed error so the wide event surfaces it.
     expect(output.result.scrapeError?._tag).toBe("ScrapeInfraError");
+  });
+
+  it("a TYPED ScrapeError cause (ProxyEgressDeadError) is PRESERVED → proxy_down, not scrape_defect", () => {
+    // Regression (2026-06): the egress gate fails with ProxyEgressDeadError
+    // BEFORE executeAhrefsScrape's typed catch, so it propagates straight to this
+    // terminal handler. It MUST keep its type so the wide event diagnoses
+    // proxy_down — rather than being flattened into a generic scrape_defect.
+    const output = buildTerminalFailureOutput(
+      "boranaz.com",
+      "backlinks",
+      Cause.fail(new ProxyEgressDeadError({ domain: "boranaz.com" })),
+    );
+    expect(output.result.success).toBe(false);
+    expect(output.result.scrapeError?._tag).toBe("ProxyEgressDeadError");
+    expect(wideEventOf(output).api_diagnosis).toBe("proxy_down");
   });
 
   it("an interrupt cause (the hard-deadline trip) → scrape_timeout failure", () => {

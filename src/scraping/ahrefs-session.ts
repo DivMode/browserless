@@ -936,6 +936,35 @@ export function buildTerminalFailureOutput(
   //    too (same operator intent: the scrape was cut short, not buggy).
   //  - anything else (a defect thrown deep in scrape work) → `scrape_defect`.
   const squashed: unknown = Cause.squash(cause);
+  // Preserve a TYPED ScrapeError that reached this terminal catch — e.g.
+  // ProxyEgressDeadError from the egress gate, which fails BEFORE
+  // executeAhrefsScrape's typed catch and so propagates straight here. Without
+  // this, it gets flattened into a generic `scrape_defect` ScrapeInfraError,
+  // losing its precise `proxy_down` diagnosis. (2026-06 bug: dead egress was
+  // correctly DETECTED but mislabeled `scrape_defect` instead of `proxy_down` —
+  // the same wrap-a-known-cause-as-a-generic-defect anti-pattern, one layer up.)
+  if (isScrapeError(squashed)) {
+    const result: AhrefsScrapeResult = {
+      success: false,
+      domain,
+      scrapedAt: Math.floor(Date.now() / 1000),
+      error: `${squashed._tag}: ${Cause.pretty(cause).slice(0, 160)}`,
+      scrapeError: squashed,
+      timings: ZERO_TIMINGS,
+    };
+    return {
+      result,
+      cfMetrics: emptyCfMetrics(),
+      replayMeta: null,
+      diagnostics: null,
+      domain,
+      scrapeType,
+      scrapeUrl: "",
+      timings: ZERO_TIMINGS,
+      cfClearancePresent: false,
+      apiCallStatus: "terminal_typed",
+    };
+  }
   const isTimeout =
     (squashed as { _tag?: unknown } | null)?._tag === "TimeoutError" || Cause.hasInterrupts(cause);
   const causeText = Cause.pretty(cause).slice(0, 200);

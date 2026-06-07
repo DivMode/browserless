@@ -371,22 +371,29 @@ function fetchDecisionChain(
  */
 function deriveApiDiagnosis(result: AhrefsScrapeResult, cfMetrics: CfSolveMetrics): string {
   if (result.success) return "healthy";
-  if (result.apiErrors?.some((e) => e.isCf)) {
-    return cfMetrics.cf_solved ? "cf_rechallenge" : "cf_blocked";
-  }
-  if (result.apiErrors?.length) {
-    return `http_${result.apiErrors[0].status}`;
-  }
   const e = result.scrapeError;
-  // The proxy/egress is dead — the acquire-time egress check found no working
-  // egress (both IP-echo probes through the proxy failed = phone/tunnel down).
-  // The TRUE cause, beating every downstream diagnosis (a scrape with no
-  // network would otherwise be mislabeled turnstile_failed below).
+
+  // LAYER-ORDERED diagnosis. A scrape advances through ordered pipeline layers
+  // (egress → document → turnstile → /v4/ data API); each can only fail once
+  // every PRIOR layer succeeded, so we return the FIRST failing layer. This ORDER
+  // is the correctness property that kills the recurring mislabel class (2026-06:
+  // proxy-down reported as turnstile_failed; a 429 that was really browserless
+  // capacity; auth-407). An upstream failure can never surface as a downstream
+  // one, because upstream layers are checked first. To add a failure mode, insert
+  // it at its LAYER — never patch a downstream branch to paper over an upstream
+  // cause. (buildTerminalFailureOutput in ahrefs-session.ts likewise PRESERVES
+  // these typed errors instead of flattening them to a generic scrape_defect.)
+
+  // ── Layer 1 — egress / network ──────────────────────────────────────────────
+  // The acquire-time egress check found no working egress (both IP-echo probes
+  // through the proxy failed = phone/tunnel down). Beats every downstream label:
+  // a scrape with no network would otherwise be mislabeled turnstile_failed.
   if (e?._tag === "ProxyEgressDeadError") return "proxy_down";
-  // A real upstream rate-limit/block status (429/403 on the Document) is the
-  // most specific diagnosis — beats every interception fallback below.
+
+  // ── Layer 2 — document ──────────────────────────────────────────────────────
+  // A real upstream rate-limit/block status (429/403 on the Document) is the most
+  // specific document-layer diagnosis — beats the interception fallbacks below.
   if (e?._tag === "RateLimitedError") return "rate_limited";
-  if (e?._tag === "TurnstileTimeoutError") return "turnstile_failed";
   if (e?._tag === "InterceptionTimeoutError") {
     if (e.requestCount === 0) return "interception_no_request";
     // requestCount>0 && responseCount===0: the request LEFT Chrome and the
@@ -409,6 +416,23 @@ function deriveApiDiagnosis(result: AhrefsScrapeResult, cfMetrics: CfSolveMetric
     if (e.docResponseCount === 0) return "no_document_response";
     return "intercept_loop";
   }
+
+  // ── Layer 3 — turnstile ─────────────────────────────────────────────────────
+  // The harness loaded but no Turnstile token was obtained within the budget.
+  if (e?._tag === "TurnstileTimeoutError") return "turnstile_failed";
+
+  // ── Layer 4 — ahrefs /v4/ data API ──────────────────────────────────────────
+  // A token WAS obtained and the data call itself errored — the latest layer, so
+  // checked last. CF-intercepted vs a plain ahrefs HTTP status.
+  if (result.apiErrors?.some((x) => x.isCf)) {
+    return cfMetrics.cf_solved ? "cf_rechallenge" : "cf_blocked";
+  }
+  if (result.apiErrors?.length) {
+    return `http_${result.apiErrors[0].status}`;
+  }
+
+  // No layer matched — a NEW failure mode appeared. Renders as `?`; add its layer
+  // above rather than guessing.
   return "";
 }
 
