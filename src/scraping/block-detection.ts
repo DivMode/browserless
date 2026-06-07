@@ -26,6 +26,18 @@
  *      is exactly the remedy. The intercept handler fails fast on it (no 45s
  *      interception wait) so rotation kicks in immediately.
  *
+ *   5. ProxyEgressDeadError
+ *      The pooled browser's proxy egress was dead at acquire time — the
+ *      LAN-relay/QUIC tunnel to the pinned phone is down (both IP-echo probes
+ *      failed). This is IP/phone-attributable, NOT a local CDP fault:
+ *      rotating the session_id makes the relay pool-walk OFF the burned phone
+ *      onto a different (healthy) one on the retry. A 2026-06 incident proved
+ *      this: ~25-50% of ahrefs scrapes died with this error all pinned to ONE
+ *      session_id on a dead phone, while a SECOND phone scraped healthy under
+ *      a different token — the dead-egress error never rotated, so the wedged
+ *      token stayed stuck. Treating it as a block trigger lets the session
+ *      pool-walk to the healthy phone.
+ *
  * Explicitly NOT a block trigger:
  *
  *   - TurnstileTimeoutError({apiCallStatus: "not_called"})
@@ -34,7 +46,10 @@
  *     never minted; we'd burn the 60s phone cooldown for nothing.
  *
  *   - InterceptionTimeoutError, NavigationError, CdpSessionError, etc.
- *     Infrastructure / local CDP issues; rotating IPs doesn't address them.
+ *     LOCAL CDP / infrastructure issues (dead CDP socket, navigation fault).
+ *     Rotating the egress IP doesn't address a local fault. Note this does NOT
+ *     include a dead proxy egress (ProxyEgressDeadError) — that IS remediable
+ *     by rotating to a different phone, see case 5.
  *
  * See [ADR-0037](docs/adr/0037-customer-uuid-rotation-and-relay-auto-rotate.md)
  * for the rotation primitive that this trigger set drives.
@@ -51,6 +66,8 @@ export function isBlockTrigger(error: ScrapeError | undefined): boolean {
     case "TurnstileTimeoutError":
       return error.apiCallStatus === "pending";
     case "RateLimitedError":
+      return true;
+    case "ProxyEgressDeadError":
       return true;
     default:
       return false;

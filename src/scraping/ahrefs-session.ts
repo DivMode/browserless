@@ -134,7 +134,13 @@ const IP_SERVICES = [
   { url: "https://api.ipify.org?format=json", json: true },
   { url: "https://icanhazip.com", json: false },
 ] as const;
-const PROXY_CHECK_TIMEOUT_MS = 10_000;
+// Per-service probe budget. A degraded phone that black-holes the request
+// stalls until this trips. We RACE the services (Promise.any) instead of
+// probing them serially, so a healthy egress is declared after one fast
+// success rather than after one slow service times out. 6s (was 10s) lets a
+// genuinely-dead egress fail fast into the session-token rotation; both
+// services run concurrently so the worst-case wait is ~6s, not ~20s serial.
+const PROXY_CHECK_TIMEOUT_MS = 6_000;
 
 async function fetchProxyEgressIp(browser: Browser): Promise<string | undefined> {
   // OEILI_PROXY_URL guaranteed valid because the surrounding session
@@ -147,9 +153,15 @@ async function fetchProxyEgressIp(browser: Browser): Promise<string | undefined>
   } catch {
     return undefined;
   }
-  for (const svc of IP_SERVICES) {
-    try {
-      const result = await page.evaluate(
+  // Probe both IP-echo services concurrently and take the first REAL IP.
+  // Each per-service promise REJECTS when it can't produce an IP (timeout,
+  // !ok, bad body) so Promise.any skips it and waits for the other. Only when
+  // BOTH reject does Promise.any throw an AggregateError → egress declared
+  // dead (return undefined). Preserves the original contract: an IP string on
+  // success, undefined when both fail.
+  const probe = (svc: (typeof IP_SERVICES)[number]): Promise<string> =>
+    page
+      .evaluate(
         async (url: string, isJson: boolean, timeoutMs: number) => {
           const ctrl = new AbortController();
           const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -177,13 +189,23 @@ async function fetchProxyEgressIp(browser: Browser): Promise<string | undefined>
         svc.url,
         svc.json,
         PROXY_CHECK_TIMEOUT_MS,
-      );
-      if (typeof result === "string" && result.length > 0) return result;
-    } catch {
-      // try next service
-    }
+      )
+      .then((result) => {
+        if (typeof result === "string" && result.length > 0) return result;
+        // No real IP from this service — reject so Promise.any moves on.
+        throw new Error(`no_ip:${svc.url}`);
+      });
+
+  try {
+    return await Promise.any(IP_SERVICES.map(probe));
+  } catch (err) {
+    // Promise.any rejects with an AggregateError ONLY when every probe
+    // rejected → both IP services failed → the egress is dead.
+    if (err instanceof AggregateError) return undefined;
+    // Defensive: any non-AggregateError (e.g. page detached mid-probe) also
+    // means we couldn't observe an egress IP.
+    return undefined;
   }
-  return undefined;
 }
 
 // ── Managed Browser ─────────────────────────────────────────────────
@@ -581,7 +603,19 @@ export class AhrefsSessionManager {
           // egress is dead (phone/tunnel down). Without this gate the scrape would
           // proceed, fulfill the document locally (request-stage), then die at
           // Turnstile (no network to load the widget) → mislabeled
-          // `turnstile_unsolved`. Fail fast with the TRUE cause.
+          // `turnstile_unsolved`. Surface the TRUE cause (ProxyEgressDeadError).
+          //
+          // We do NOT `Effect.fail` here. A bare failure short-circuits straight
+          // out of `scrape()` (line ~465) to `runDispatch`'s catchCause, BYPASSING
+          // the in-band `observe()` → token-rotation between attempt 1 and 2. That
+          // is the 2026-06 incident root cause: a dead egress kept the session_id
+          // pinned to the burned phone for the whole batch (all 163 errors shared
+          // one session_id while a second phone scraped healthy). Instead we
+          // invalidate the dead browser and return a failure ScrapeOutput VALUE
+          // (same shape as the executeAhrefsScrape catch below). That flows back
+          // into `scrape()`, where `observe()` — now treating ProxyEgressDeadError
+          // as a block trigger — rotates the token so attempt 2 re-acquires on a
+          // fresh session_id and the relay pool-walks onto a healthy phone.
           if (!managed.proxyIpAddress) {
             yield* Effect.logWarning("session.proxy_egress_dead").pipe(
               Effect.annotateLogs({
@@ -590,7 +624,39 @@ export class AhrefsSessionManager {
                 session_id: sessionTokenHolder.current(),
               }),
             );
-            return yield* Effect.fail(new ProxyEgressDeadError({ domain }));
+            yield* Pool.invalidate(pool, managed);
+            const egressDeadContext = {
+              session_age_ms: Date.now() - managed.createdAt,
+              session_cf_solves: managed.cfSolveCount,
+              session_cf_solves_at_start: solveCountAtStart,
+              session_concurrent_tabs: managed.activeTabs,
+              session_warm: managed.cfSolveCount > 0,
+              generation_id: managed.id,
+              browser_acquire_ms: browserAcquireMs,
+              page_create_ms: 0,
+              proxy_ip_address: managed.proxyIpAddress,
+            };
+            managed.activeTabs--;
+            return {
+              result: {
+                success: false as const,
+                domain,
+                error: "ProxyEgressDeadError: proxy egress dead at acquire",
+                scrapeError: new ProxyEgressDeadError({ domain }),
+                timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
+              },
+              cfMetrics: emptyCfMetrics(),
+              replayMeta: null,
+              diagnostics: null,
+              domain,
+              scrapeType,
+              scrapeUrl: "",
+              timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
+              cfClearancePresent: false,
+              apiCallStatus: "proxy_egress_dead",
+              sessionContext: egressDeadContext,
+              sessionId: sessionTokenHolder.current(),
+            } satisfies ScrapeOutput;
           }
 
           // Create page on the pooled browser. Auth reads the CURRENT token

@@ -6,6 +6,7 @@ import {
   CdpSessionError,
   InterceptionTimeoutError,
   NavigationError,
+  ProxyEgressDeadError,
   RateLimitedError,
   ResultTimeoutError,
   TurnstileTimeoutError,
@@ -107,6 +108,13 @@ describe("isBlockTrigger", () => {
 
     it("triggers for a 403 (upstream IP block → rotate egress IP)", () => {
       const e = new RateLimitedError({ domain: "x.com", status: 403 });
+      expect(isBlockTrigger(e)).toBe(true);
+    });
+  });
+
+  describe("ProxyEgressDeadError", () => {
+    it("triggers (dead phone egress → rotate session to pool-walk to a healthy phone)", () => {
+      const e = new ProxyEgressDeadError({ domain: "x.com" });
       expect(isBlockTrigger(e)).toBe(true);
     });
   });
