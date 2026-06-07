@@ -20,6 +20,7 @@ import {
   NavigationError,
   ResultTimeoutError,
   FulfillError,
+  ProxyEgressDeadError,
   errorCategory,
   errorTypeString,
   failurePoint,
@@ -531,6 +532,31 @@ describe("wide event — InterceptionTimeoutError diagnosis", () => {
     expect(event.intercept_request_count).toBeUndefined();
     expect(event.intercept_response_count).toBeUndefined();
     expect(event.intercept_doc_response_count).toBeUndefined();
+  });
+});
+
+describe("wide event — ProxyEgressDeadError diagnosis", () => {
+  it("proxy egress dead → api_diagnosis=proxy_down (NOT mislabeled turnstile)", () => {
+    const result: AhrefsScrapeResult = {
+      success: false,
+      domain: "test.com",
+      error: "ProxyEgressDeadError",
+      scrapeError: new ProxyEgressDeadError({ domain: "test.com" }),
+      timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
+    };
+    const event = buildWideEvent({
+      result,
+      cfMetrics: emptyCfMetrics,
+      replayMeta: null,
+      diagnostics: null,
+      domain: "test.com",
+      scrapeType: "backlinks",
+      scrapeUrl: "https://ahrefs.com/backlink-checker?input=test.com",
+    });
+    expect(event.api_diagnosis).toBe("proxy_down");
+    expect(event.error_type).toBe("proxy_egress_dead");
+    expect(event.scrape_error_category).toBe("infrastructure");
+    expect(event.failure_point).toBe("proxy_egress");
   });
 });
 

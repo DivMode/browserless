@@ -137,6 +137,23 @@ export class ScrapeInfraError extends Schema.TaggedErrorClass<ScrapeInfraError>(
   },
 ) {}
 
+/**
+ * Proxy egress is dead — the mobile proxy's phone/tunnel behind the LAN relay
+ * is down. Detected at session-acquire time: `fetchProxyEgressIp` probes two
+ * IP-echo services THROUGH the proxy and both were unreachable, so
+ * `managed.proxyIpAddress` is undefined = no working egress. Fail fast on it
+ * BEFORE creating the page / navigating / waiting on Turnstile — otherwise the
+ * scrape proceeds, fulfills the document locally (request-stage), then dies at
+ * Turnstile (no network to load the widget) and gets mislabeled
+ * `turnstile_unsolved`. This is the TRUE cause: the proxy/phone is down.
+ */
+export class ProxyEgressDeadError extends Schema.TaggedErrorClass<ProxyEgressDeadError>()(
+  "ProxyEgressDeadError",
+  {
+    domain: Schema.String,
+  },
+) {}
+
 // ── Union of all scrape errors ─────────────────────────────────
 
 export type ScrapeError =
@@ -144,6 +161,7 @@ export type ScrapeError =
   | ApiError
   | BacklinksFetchFailed
   | ScrapeInfraError
+  | ProxyEgressDeadError
   | CdpSessionError
   | FetchEnableError
   | InterceptionTimeoutError
@@ -157,6 +175,7 @@ const SCRAPE_ERROR_TAGS = new Set<string>([
   "ApiError",
   "BacklinksFetchFailed",
   "ScrapeInfraError",
+  "ProxyEgressDeadError",
   "CdpSessionError",
   "FetchEnableError",
   "InterceptionTimeoutError",
@@ -206,6 +225,8 @@ export const errorCategory = (error: ScrapeError): ErrorCategory => {
       return "infrastructure";
     case "ScrapeInfraError":
       return "infrastructure";
+    case "ProxyEgressDeadError":
+      return "infrastructure";
   }
 };
 
@@ -234,6 +255,8 @@ export const failurePoint = (error: ScrapeError): string => {
       return "cdp";
     case "ScrapeInfraError":
       return "infrastructure";
+    case "ProxyEgressDeadError":
+      return "proxy_egress";
   }
 };
 
@@ -266,6 +289,8 @@ export const errorTypeString = (error: ScrapeError): string => {
       return "fetch_enable_error";
     case "ScrapeInfraError":
       return `${error.phase}_${error.cause}`.substring(0, 80);
+    case "ProxyEgressDeadError":
+      return "proxy_egress_dead";
   }
 };
 

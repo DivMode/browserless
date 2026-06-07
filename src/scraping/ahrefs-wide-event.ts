@@ -280,6 +280,8 @@ function deriveErrorType(result: AhrefsScrapeResult): string {
       return "fetch_enable_error";
     case "FulfillError":
       return "fulfill_error";
+    case "ProxyEgressDeadError":
+      return "proxy_egress_dead";
   }
 }
 
@@ -376,6 +378,11 @@ function deriveApiDiagnosis(result: AhrefsScrapeResult, cfMetrics: CfSolveMetric
     return `http_${result.apiErrors[0].status}`;
   }
   const e = result.scrapeError;
+  // The proxy/egress is dead — the acquire-time egress check found no working
+  // egress (both IP-echo probes through the proxy failed = phone/tunnel down).
+  // The TRUE cause, beating every downstream diagnosis (a scrape with no
+  // network would otherwise be mislabeled turnstile_failed below).
+  if (e?._tag === "ProxyEgressDeadError") return "proxy_down";
   // A real upstream rate-limit/block status (429/403 on the Document) is the
   // most specific diagnosis — beats every interception fallback below.
   if (e?._tag === "RateLimitedError") return "rate_limited";

@@ -19,7 +19,7 @@ import { executeAhrefsScrape, type ScrapeOutput } from "./ahrefs-service.js";
 import { buildWideEvent } from "./ahrefs-wide-event.js";
 import { MAX_CF_SOLVES_PER_SESSION } from "./ahrefs-types.js";
 import type { AhrefsScrapeResult, ScrapeTimings, ScrapeType } from "./ahrefs-types.js";
-import { ScrapeInfraError, isScrapeError } from "./ahrefs-errors.js";
+import { ProxyEgressDeadError, ScrapeInfraError, isScrapeError } from "./ahrefs-errors.js";
 import type { ScrapeError } from "./ahrefs-errors.js";
 import { emptyCfMetrics } from "./ahrefs-cf-listener.js";
 import type { ReplayMetadata } from "./ahrefs-cf-listener.js";
@@ -574,6 +574,23 @@ export class AhrefsSessionManager {
                 phase: "acquire",
               }),
             );
+          }
+
+          // Proxy-egress gate. fetchProxyEgressIp probed TWO IP-echo services
+          // THROUGH the proxy at acquire; undefined = both unreachable = the proxy
+          // egress is dead (phone/tunnel down). Without this gate the scrape would
+          // proceed, fulfill the document locally (request-stage), then die at
+          // Turnstile (no network to load the widget) → mislabeled
+          // `turnstile_unsolved`. Fail fast with the TRUE cause.
+          if (!managed.proxyIpAddress) {
+            yield* Effect.logWarning("session.proxy_egress_dead").pipe(
+              Effect.annotateLogs({
+                browser_id: String(managed.id),
+                domain,
+                session_id: sessionTokenHolder.current(),
+              }),
+            );
+            return yield* Effect.fail(new ProxyEgressDeadError({ domain }));
           }
 
           // Create page on the pooled browser. Auth reads the CURRENT token
