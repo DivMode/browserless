@@ -139,13 +139,23 @@ export class ScrapeInfraError extends Schema.TaggedErrorClass<ScrapeInfraError>(
 
 /**
  * Proxy egress is dead — the mobile proxy's phone/tunnel behind the LAN relay
- * is down. Detected at session-acquire time: `fetchProxyEgressIp` probes two
- * IP-echo services THROUGH the proxy and both were unreachable, so
- * `managed.proxyIpAddress` is undefined = no working egress. Fail fast on it
- * BEFORE creating the page / navigating / waiting on Turnstile — otherwise the
- * scrape proceeds, fulfills the document locally (request-stage), then dies at
- * Turnstile (no network to load the widget) and gets mislabeled
- * `turnstile_unsolved`. This is the TRUE cause: the proxy/phone is down.
+ * is down. Detected at TWO points:
+ *
+ *   - At session ACQUIRE: `probeProxyEgress` runs a MULTI-CHECK liveness probe
+ *     (3 IP-echo services × 2 passes, then an independent no-CORS round-trip)
+ *     and ALL checks agreed the egress is dead (`proxyEgressAlive === false`).
+ *     A missing IP alone is NOT enough — a blocked IP-echo service must not fail
+ *     an otherwise-working scrape (#2675 false positive).
+ *   - MID-SCRAPE: a pooled session alive at acquire can have its egress die
+ *     during the scrape. When the failure matches the "harness network never
+ *     came up" signature (Turnstile widget never loaded → no token, zero CF
+ *     events) we RE-VERIFY the egress; on a confirmed-dead re-probe the failure
+ *     is reclassified from `turnstile_failed` to this error.
+ *
+ * Either way we surface the TRUE cause (`proxy_down`) BEFORE/instead of the
+ * mislabeled downstream symptom — otherwise a no-network scrape proceeds,
+ * fulfills the document locally (request-stage), then dies at Turnstile and gets
+ * mislabeled `turnstile_failed`. This is the TRUE cause: the proxy/phone is down.
  */
 export class ProxyEgressDeadError extends Schema.TaggedErrorClass<ProxyEgressDeadError>()(
   "ProxyEgressDeadError",

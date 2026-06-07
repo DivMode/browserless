@@ -115,7 +115,7 @@ function buildInternalWsUrl(): string {
 // which must re-apply them via `Fetch.continueWithAuth` once `Fetch.enable`
 // is active. See proxy-config.ts.
 
-// ── Proxy egress IP check ───────────────────────────────────────────
+// ── Proxy egress probe ──────────────────────────────────────────────
 //
 // Mirrors packages/scraper/src/proxy_check.rs — issue a GET through
 // the mobile proxy to an IP echo service and return the observed outbound
@@ -130,82 +130,255 @@ function buildInternalWsUrl(): string {
 // friendly providers only (Access-Control-Allow-Origin: *) — checkip.amazonaws
 // is excluded because it doesn't set CORS headers, which would block reading
 // the body from the about:blank page context.
+//
+// CORRECTNESS — two distinct questions are answered SEPARATELY:
+//   1. "What is the egress IP?"   → best-effort dashboard label. `undefined`
+//      simply renders as "Geo Failed"; it must NEVER fail the scrape on its
+//      own (the IP-echo services can be down/blocked while the proxy works).
+//   2. "Is the egress ALIVE?"     → the acquire gate's real question. We only
+//      declare the egress dead when MULTIPLE independent checks agree: all
+//      IP-echo probes failed AND a final no-CORS liveness probe (which proves
+//      a network round-trip even when the body is unreadable) also failed.
+// Conflating the two is the #2675 false-positive: a blocked IP-echo service
+// wrongly failed an otherwise-working scrape as `proxy_down`.
 const IP_SERVICES = [
   { url: "https://api.ipify.org?format=json", json: true },
   { url: "https://icanhazip.com", json: false },
+  // 3rd independent provider (different operator + CDN) so a single-provider
+  // outage can't make all IP probes fail in lockstep. CORS-enabled (sets
+  // Access-Control-Allow-Origin: *), so the body is readable from about:blank.
+  { url: "https://api64.ipify.org?format=json", json: true },
 ] as const;
-// Per-service probe budget. A degraded phone that black-holes the request
-// stalls until this trips. We RACE the services (Promise.any) instead of
-// probing them serially, so a healthy egress is declared after one fast
-// success rather than after one slow service times out. 6s (was 10s) lets a
-// genuinely-dead egress fail fast into the session-token rotation; both
-// services run concurrently so the worst-case wait is ~6s, not ~20s serial.
+// Independent always-up liveness endpoints. Probed with `mode: "no-cors"` so a
+// successful network round-trip resolves (opaque response) even though the body
+// is unreadable — that opaque-but-resolved fetch is the strong "egress is alive"
+// signal, decoupled from whether we could PARSE an IP. Two operators so a single
+// CDN blip can't fake a dead egress.
+const LIVENESS_ENDPOINTS = [
+  "https://www.cloudflare.com/cdn-cgi/trace",
+  "https://www.gstatic.com/generate_204",
+] as const;
+// Per-IP-echo-service probe budget. A degraded phone that black-holes the
+// request stalls until this trips. 6s (was 10s, #2698) lets a genuinely-dead
+// egress fail fast into the session-token rotation rather than burning the
+// scrape budget — `probeProxyEgress` tries each service in order and stops on
+// the first IP, so a healthy egress is declared quickly and even the worst
+// case (every service slow, both passes) lands the no-CORS liveness
+// tie-breaker promptly instead of after a ~20s+ serial wait.
 const PROXY_CHECK_TIMEOUT_MS = 6_000;
+// The no-CORS liveness tie-breaker gets its own (slightly larger) budget: it
+// runs only once, after every IP-echo probe failed, so paying a touch more for
+// a definitive alive/dead verdict before declaring `proxy_egress_dead` is worth
+// it — that verdict gates the rotation off the current phone.
+const LIVENESS_CHECK_TIMEOUT_MS = 8_000;
 
-async function fetchProxyEgressIp(browser: Browser): Promise<string | undefined> {
-  // OEILI_PROXY_URL guaranteed valid because the surrounding session
-  // acquisition already called requireProxyUrl() via buildInternalWsUrl.
-  let page;
+/** Result of a proxy egress probe: the observed IP (if readable) + a liveness verdict. */
+interface EgressProbe {
+  /** Observed outbound IP, or undefined when no IP-echo service returned a value. */
+  readonly ip: string | undefined;
+  /**
+   * Whether the proxy egress is alive. `true` when ANY IP-echo probe returned an
+   * IP, OR (when none did) a final no-CORS liveness probe completed a network
+   * round-trip. `false` ONLY when every independent check failed — that is the
+   * one and only condition under which the acquire gate fails the scrape.
+   */
+  readonly alive: boolean;
+}
+
+/**
+ * Run a single in-page fetch attempt against an IP-echo service THROUGH the
+ * proxy. Returns the IP string on success, or null on any failure (non-ok,
+ * abort/timeout, parse miss). Runs inside the page realm so it egresses via
+ * Chrome's `--proxy-server`.
+ */
+async function fetchIpOnce(
+  page: import("puppeteer-core").Page,
+  url: string,
+  isJson: boolean,
+): Promise<string | null> {
   try {
-    const pages = await browser.pages();
-    page = pages[0];
-    if (!page) return undefined;
+    const result = await page.evaluate(
+      async (u: string, json: boolean, timeoutMs: number) => {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), timeoutMs);
+        try {
+          const res = await fetch(u, { signal: ctrl.signal, cache: "no-store" });
+          if (!res.ok) return null;
+          if (json) {
+            const body: unknown = await res.json();
+            if (
+              typeof body === "object" &&
+              body !== null &&
+              "ip" in body &&
+              typeof body.ip === "string"
+            ) {
+              return body.ip;
+            }
+            return null;
+          }
+          const text = await res.text();
+          return text.trim() || null;
+        } finally {
+          clearTimeout(t);
+        }
+      },
+      url,
+      isJson,
+      PROXY_CHECK_TIMEOUT_MS,
+    );
+    return typeof result === "string" && result.length > 0 ? result : null;
   } catch {
-    return undefined;
+    return null;
   }
-  // Probe both IP-echo services concurrently and take the first REAL IP.
-  // Each per-service promise REJECTS when it can't produce an IP (timeout,
-  // !ok, bad body) so Promise.any skips it and waits for the other. Only when
-  // BOTH reject does Promise.any throw an AggregateError → egress declared
-  // dead (return undefined). Preserves the original contract: an IP string on
-  // success, undefined when both fail.
-  const probe = (svc: (typeof IP_SERVICES)[number]): Promise<string> =>
-    page
-      .evaluate(
-        async (url: string, isJson: boolean, timeoutMs: number) => {
+}
+
+/**
+ * No-CORS liveness probe THROUGH the proxy. Resolves to true when a network
+ * round-trip completes (the opaque response is fine — we only care that bytes
+ * left and came back), false on abort/timeout/network error. This is the
+ * independent tie-breaker that distinguishes "the IP-echo services are
+ * down/blocked" (egress alive, just no readable IP) from "the phone/tunnel is
+ * actually dead" (no round-trip at all).
+ */
+async function isEgressAlive(page: import("puppeteer-core").Page): Promise<boolean> {
+  for (const url of LIVENESS_ENDPOINTS) {
+    try {
+      const ok = await page.evaluate(
+        async (u: string, timeoutMs: number) => {
           const ctrl = new AbortController();
           const t = setTimeout(() => ctrl.abort(), timeoutMs);
           try {
-            const res = await fetch(url, { signal: ctrl.signal });
-            if (!res.ok) return null;
-            if (isJson) {
-              const body: unknown = await res.json();
-              if (
-                typeof body === "object" &&
-                body !== null &&
-                "ip" in body &&
-                typeof body.ip === "string"
-              ) {
-                return body.ip;
-              }
-              return null;
-            }
-            const text = await res.text();
-            return text.trim() || null;
+            // mode:no-cors → opaque response on success; resolving at all means
+            // the request reached the network and returned. A dead egress
+            // rejects (network error) instead.
+            await fetch(u, { signal: ctrl.signal, mode: "no-cors", cache: "no-store" });
+            return true;
+          } catch {
+            return false;
           } finally {
             clearTimeout(t);
           }
         },
-        svc.url,
-        svc.json,
-        PROXY_CHECK_TIMEOUT_MS,
-      )
-      .then((result) => {
-        if (typeof result === "string" && result.length > 0) return result;
-        // No real IP from this service — reject so Promise.any moves on.
-        throw new Error(`no_ip:${svc.url}`);
-      });
-
-  try {
-    return await Promise.any(IP_SERVICES.map(probe));
-  } catch (err) {
-    // Promise.any rejects with an AggregateError ONLY when every probe
-    // rejected → both IP services failed → the egress is dead.
-    if (err instanceof AggregateError) return undefined;
-    // Defensive: any non-AggregateError (e.g. page detached mid-probe) also
-    // means we couldn't observe an egress IP.
-    return undefined;
+        url,
+        LIVENESS_CHECK_TIMEOUT_MS,
+      );
+      if (ok === true) return true;
+    } catch {
+      // page.evaluate itself threw (page gone) — try the next endpoint.
+    }
   }
+  return false;
+}
+
+/**
+ * Probe the proxy egress: read the outbound IP (best-effort, for the dashboard)
+ * AND determine whether the egress is alive (the gate's real question).
+ *
+ * Strategy (fast, bounded — this is on the acquire hot path):
+ *   1. Try each IP-echo service ONCE in order; first IP wins → alive.
+ *   2. If none returned an IP, retry the IP-echo services ONCE more (a transient
+ *      blip on the first pass shouldn't burn the scrape). First IP wins → alive.
+ *   3. If still no IP, run the independent no-CORS liveness probe. A completed
+ *      round-trip → alive (we just can't read the IP). Only a failed liveness
+ *      probe → dead, which is the sole `ProxyEgressDeadError` trigger.
+ */
+async function probeProxyEgress(browser: Browser): Promise<EgressProbe> {
+  // OEILI_PROXY_URL guaranteed valid because the surrounding session
+  // acquisition already called requireProxyUrl() via buildInternalWsUrl.
+  let page: import("puppeteer-core").Page | undefined;
+  try {
+    const pages = await browser.pages();
+    page = pages[0];
+  } catch {
+    page = undefined;
+  }
+  // No page to probe from — treat as alive (don't fail the scrape on an
+  // about:blank availability glitch); the IP stays undefined ("Geo Failed").
+  if (!page) return { ip: undefined, alive: true };
+
+  // Passes 1 + 2: each IP-echo service, retried once across the two passes.
+  for (let pass = 0; pass < 2; pass++) {
+    for (const svc of IP_SERVICES) {
+      const ip = await fetchIpOnce(page, svc.url, svc.json);
+      if (ip) return { ip, alive: true };
+    }
+  }
+
+  // No readable IP from any service across both passes. Before declaring the
+  // egress dead, confirm with the independent liveness probe.
+  const alive = await isEgressAlive(page);
+  return { ip: undefined, alive };
+}
+
+// ── Mid-scrape egress-death reclassification (GAP 2) ────────────────
+//
+// The acquire gate only checks egress liveness ONCE, at acquire. A pooled
+// session whose egress was alive at acquire but DIES mid-scrape keeps a stale
+// non-empty `proxyIpAddress`, so the gate doesn't catch it; the scrape then
+// fails downstream — typically the Turnstile widget never loads (no network) —
+// and is MISLABELED `turnstile_failed` instead of `proxy_down`.
+//
+// We close that gap by RE-VERIFYING egress when a scrape fails with the
+// specific "the harness network never came up" signature, then reclassifying to
+// ProxyEgressDeadError ONLY when the re-probe CONFIRMS the egress is dead. The
+// evidence bar is deliberately high so a real turnstile failure (token never
+// minted but egress alive) is never turned into a false `proxy_down`.
+
+/**
+ * Is this failed scrape a CANDIDATE for mid-scrape egress reclassification?
+ *
+ * Strong "the harness network never came up" signature — ALL must hold:
+ *   - the failure is a TurnstileTimeoutError with apiCallStatus "not_called"
+ *     (the widget never minted a token AND the ahrefs API was never called), OR
+ *     an InterceptionTimeoutError with requestCount === 0 (NOTHING ever left
+ *     Chrome — Fetch.requestPaused never fired).
+ *   - the CF widget produced ZERO events (cf_events === 0) — the Turnstile
+ *     script/widget never even loaded, which is what a dead network looks like.
+ *     A genuine solver failure produces detection/progress/failed events.
+ *
+ * Deliberately EXCLUDED (these are NOT network-down and must keep their label):
+ *   - InterceptionTimeoutError with requestCount > 0 && responseCount === 0 —
+ *     the request DID leave Chrome; this is the proven ahrefs ~127.6s SSR-shell
+ *     tarpit (`upstream_slow_no_doc_response`), not a dead egress.
+ *   - TurnstileTimeoutError with apiCallStatus "pending" — the token WAS minted
+ *     (so the network was up) and the API call hung; that's a block trigger.
+ *   - Any failure where cf_events > 0 — the widget loaded, so the network came
+ *     up; whatever failed is downstream of egress.
+ */
+export function isEgressDeathCandidate(output: ScrapeOutput): boolean {
+  if (output.result.success) return false;
+  const e = output.result.scrapeError;
+  if (!e) return false;
+  // The CF widget must have produced NO events — proof the harness network
+  // never came up. cfMetrics is always present on a real attempt; guard anyway.
+  if ((output.cfMetrics?.cf_events ?? 0) > 0) return false;
+  if (e._tag === "TurnstileTimeoutError") {
+    return e.apiCallStatus === "not_called";
+  }
+  if (e._tag === "InterceptionTimeoutError") {
+    return e.requestCount === 0;
+  }
+  return false;
+}
+
+/**
+ * Rewrite a failed `ScrapeOutput` to carry a ProxyEgressDeadError so the
+ * layer-ordered `deriveApiDiagnosis` reports `proxy_down` (egress layer) instead
+ * of the mislabeled downstream `turnstile_failed` / `interception_no_request`.
+ * Only the typed error + the human-readable error string change; all telemetry
+ * (timings, cfMetrics, fetchDecisions, replay) is preserved for forensics.
+ */
+export function reclassifyAsEgressDead(output: ScrapeOutput, domain: string): ScrapeOutput {
+  const priorTag = output.result.scrapeError?._tag ?? "unknown";
+  return {
+    ...output,
+    result: {
+      ...output.result,
+      error: `proxy_egress_dead (mid-scrape; was ${priorTag})`,
+      scrapeError: new ProxyEgressDeadError({ domain }),
+    },
+    apiCallStatus: "proxy_egress_dead",
+  };
 }
 
 // ── Managed Browser ─────────────────────────────────────────────────
@@ -224,9 +397,18 @@ interface ManagedBrowser {
    * Egress IP observed from the mobile proxy at session create time. Mirrors
    * godaddy-fetcher's `proxy.ip_address` field. `undefined` when the IP echo
    * services are unreachable through the proxy — the wide event will record
-   * an empty string and the dashboard renders that as "Geo Failed".
+   * an empty string and the dashboard renders that as "Geo Failed". A missing
+   * IP does NOT imply a dead egress (see `proxyEgressAlive`).
    */
   readonly proxyIpAddress: string | undefined;
+  /**
+   * Whether the proxy egress was confirmed ALIVE at acquire by the multi-check
+   * probe (any IP-echo IP, or — when none — an independent no-CORS liveness
+   * round-trip). This, NOT `proxyIpAddress`, is what the acquire gate keys on:
+   * a blocked IP-echo service must never fail an otherwise-working scrape
+   * (#2675 false positive). `false` only when every independent check failed.
+   */
+  proxyEgressAlive: boolean;
 }
 
 let nextBrowserId = 0;
@@ -308,14 +490,16 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
       }
     }
 
-    // Fetch egress IP through the mobile proxy. Best-effort: a failure here
-    // does NOT block session acquisition — we simply log undefined into the
-    // wide event so the dashboard reflects the reality that we couldn't see
-    // the IP, rather than inventing a fallback value.
-    const proxyIpAddress = yield* Effect.tryPromise({
-      try: () => fetchProxyEgressIp(browser),
-      catch: () => new Error("proxy_ip_check"),
-    }).pipe(Effect.catch(() => Effect.succeed<string | undefined>(undefined)));
+    // Probe the proxy egress through the mobile proxy. Returns BOTH the egress
+    // IP (best-effort dashboard label) AND a liveness verdict (the gate's real
+    // question). A failure of the probe itself does NOT block acquisition — we
+    // fall back to `{ ip: undefined, alive: true }` so a probe glitch never
+    // fabricates a `proxy_down` failure. The gate fails only when the probe
+    // ITSELF reports `alive: false` (every independent check agreed it's dead).
+    const egress = yield* Effect.tryPromise({
+      try: () => probeProxyEgress(browser),
+      catch: () => new Error("proxy_egress_probe"),
+    }).pipe(Effect.catch(() => Effect.succeed<EgressProbe>({ ip: undefined, alive: true })));
 
     const managed: ManagedBrowser = {
       browser,
@@ -325,7 +509,8 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
       cfSolveCount: 0,
       needsInvalidation: false,
       activeTabs: 0,
-      proxyIpAddress,
+      proxyIpAddress: egress.ip,
+      proxyEgressAlive: egress.alive,
     };
 
     // Puppeteer "disconnected" — fires when the underlying CDP WebSocket
@@ -388,6 +573,7 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
         browser_id: String(id),
         chrome_proxy_server: getProxyServerFlag(),
         proxy_ip_address: managed.proxyIpAddress ?? "",
+        proxy_egress_alive: String(managed.proxyEgressAlive),
         session_id: sessionId,
       }),
     );
@@ -598,29 +784,36 @@ export class AhrefsSessionManager {
             );
           }
 
-          // Proxy-egress gate. fetchProxyEgressIp probed TWO IP-echo services
-          // THROUGH the proxy at acquire; undefined = both unreachable = the proxy
-          // egress is dead (phone/tunnel down). Without this gate the scrape would
-          // proceed, fulfill the document locally (request-stage), then die at
-          // Turnstile (no network to load the widget) → mislabeled
-          // `turnstile_unsolved`. Surface the TRUE cause (ProxyEgressDeadError).
+          // Proxy-egress gate. `probeProxyEgress` ran a MULTI-CHECK liveness
+          // probe at acquire (3 IP-echo services × 2 passes, then an independent
+          // no-CORS round-trip). `proxyEgressAlive === false` means EVERY check
+          // agreed the egress is dead (phone/tunnel down) — NOT merely that the
+          // IP-echo services were blocked (#2675 false positive: a missing IP
+          // alone no longer fails the scrape, which is why this keys on
+          // `proxyEgressAlive` and not `proxyIpAddress`). Without this gate a
+          // truly-dead egress would proceed, fulfill the document locally
+          // (request-stage), then die at Turnstile (no network to load the
+          // widget) → mislabeled `turnstile_failed`. Surface the TRUE cause.
           //
-          // We do NOT `Effect.fail` here. A bare failure short-circuits straight
-          // out of `scrape()` (line ~465) to `runDispatch`'s catchCause, BYPASSING
-          // the in-band `observe()` → token-rotation between attempt 1 and 2. That
-          // is the 2026-06 incident root cause: a dead egress kept the session_id
-          // pinned to the burned phone for the whole batch (all 163 errors shared
-          // one session_id while a second phone scraped healthy). Instead we
-          // invalidate the dead browser and return a failure ScrapeOutput VALUE
-          // (same shape as the executeAhrefsScrape catch below). That flows back
-          // into `scrape()`, where `observe()` — now treating ProxyEgressDeadError
-          // as a block trigger — rotates the token so attempt 2 re-acquires on a
-          // fresh session_id and the relay pool-walks onto a healthy phone.
-          if (!managed.proxyIpAddress) {
+          // We do NOT `Effect.fail` here (#2698). A bare failure short-circuits
+          // straight out of `scrape()` to `runDispatch`'s catchCause, BYPASSING
+          // the in-band `observe()` → token-rotation between attempt 1 and 2.
+          // That is the 2026-06 incident root cause: a dead egress kept the
+          // session_id pinned to the burned phone for the whole batch (all 163
+          // errors shared one session_id while a second phone scraped healthy).
+          // Instead we invalidate the dead browser and return a failure
+          // ScrapeOutput VALUE (same shape as the executeAhrefsScrape catch
+          // below). That flows back into `scrape()`, where `observe()` — which
+          // treats ProxyEgressDeadError as a block trigger — rotates the token
+          // so attempt 2 re-acquires on a fresh session_id and the relay
+          // pool-walks OFF the burned phone onto a healthy one.
+          if (!managed.proxyEgressAlive) {
             yield* Effect.logWarning("session.proxy_egress_dead").pipe(
               Effect.annotateLogs({
                 browser_id: String(managed.id),
                 domain,
+                detected_at: "acquire",
+                proxy_ip_address: managed.proxyIpAddress ?? "",
                 session_id: sessionTokenHolder.current(),
               }),
             );
@@ -722,7 +915,12 @@ export class AhrefsSessionManager {
 
           // Run scrape — thread proxyAuth so the Fetch interception can
           // re-supply proxy credentials on 407 via Fetch.continueWithAuth.
-          const scrapeOutput = yield* executeAhrefsScrape(page, domain, scrapeType, proxyAuth).pipe(
+          const rawScrapeOutput = yield* executeAhrefsScrape(
+            page,
+            domain,
+            scrapeType,
+            proxyAuth,
+          ).pipe(
             Effect.catch((e) => {
               const msg = e instanceof Error ? e.message : String(e);
               // Preserve typed ScrapeError variants so the wide event can
@@ -768,6 +966,45 @@ export class AhrefsSessionManager {
               });
             }),
           );
+
+          // ── GAP 2: mid-scrape egress-death reclassification ──────────
+          //
+          // The acquire gate checked egress liveness ONCE, at acquire. A pooled
+          // session's egress can DIE mid-scrape (phone tunnel drops). The widget
+          // then never loads and the scrape fails as turnstile/interception —
+          // mislabeled `turnstile_failed` / `interception_no_request` instead of
+          // `proxy_down`. When the failure matches the strong "network never came
+          // up" signature, RE-VERIFY the egress (the page is still alive here, so
+          // we can probe through its realm) and reclassify ONLY when the re-probe
+          // CONFIRMS dead. Bounded; runs only on a candidate failure (rare), not
+          // the hot success path. The high evidence bar keeps real turnstile
+          // failures from being turned into false `proxy_down`.
+          const scrapeOutput = yield* isEgressDeathCandidate(rawScrapeOutput)
+            ? Effect.fn("session.egress.reprobe")(function* () {
+                const aliveStart = Date.now();
+                const alive = yield* Effect.tryPromise({
+                  try: () => isEgressAlive(page),
+                  catch: () => false,
+                }).pipe(Effect.catch(() => Effect.succeed(false)));
+                managed.proxyEgressAlive = alive;
+                yield* Effect.annotateCurrentSpan({
+                  "egress.reprobe_alive": alive,
+                  "egress.reprobe_ms": Date.now() - aliveStart,
+                });
+                if (alive) return rawScrapeOutput;
+                yield* Effect.logWarning("session.proxy_egress_dead").pipe(
+                  Effect.annotateLogs({
+                    browser_id: String(managed.id),
+                    domain,
+                    detected_at: "mid_scrape",
+                    prior_error_tag: rawScrapeOutput.result.scrapeError?._tag ?? "unknown",
+                    proxy_ip_address: managed.proxyIpAddress ?? "",
+                    session_id: sessionTokenHolder.current(),
+                  }),
+                );
+                return reclassifyAsEgressDead(rawScrapeOutput, domain);
+              })()
+            : Effect.succeed(rawScrapeOutput);
 
           // Get targetId for replay matching
           const pageTargetId: string = yield* Effect.tryPromise({
