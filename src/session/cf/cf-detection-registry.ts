@@ -102,7 +102,7 @@ export class DetectionRegistry {
           // handler fiber waits for bridge push or 60s timeout (the zombie fix).
           yield* Scope.addFinalizer(
             scope,
-            Effect.gen(function* () {
+            Effect.fn("cf.detection.finalizeOrphan")(function* () {
               // Remove from map (idempotent — may already be gone if destroyAll iterates)
               self.entries.delete(targetId);
 
@@ -116,7 +116,7 @@ export class DetectionRegistry {
                 yield* active.resolution.fail(reason, duration);
                 self.emitFallback(active, reason);
               }
-            }),
+            })(),
           );
 
           return context;
@@ -137,7 +137,7 @@ export class DetectionRegistry {
     if (!context) return Effect.void;
 
     const self = this;
-    return Effect.gen(function* () {
+    return Effect.fn("cf.detection.unregister")(function* () {
       if (!context.resolved) {
         const mutable = context.mutableActive;
         if (mutable.resolution.isDone) {
@@ -155,7 +155,7 @@ export class DetectionRegistry {
         }
       }
       yield* Scope.close(context.scope, Exit.void);
-    });
+    })();
   }
 
   /**

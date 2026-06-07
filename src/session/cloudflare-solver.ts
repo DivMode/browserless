@@ -212,7 +212,7 @@ export class CloudflareSolver {
     const CDP_CONCURRENCY = 3;
     const cdpSenderLayer = Layer.effect(
       CdpSender,
-      Effect.gen(function* () {
+      Effect.fn("cf.solver.buildCdpSender")(function* () {
         const sem = yield* Semaphore.make(CDP_CONCURRENCY);
         const throttle = <A, E>(effect: Effect.Effect<A, E>) => sem.withPermits(1)(effect);
         return CdpSender.of({
@@ -223,7 +223,7 @@ export class CloudflareSolver {
           sendViaBrowser: (method, params, sessionId, timeoutMs) =>
             throttle(liftSend(proxyOrDirect, method, params, sessionId, timeoutMs)),
         });
-      }),
+      })(),
     );
 
     const solverEventsLayer = Layer.succeed(
@@ -247,7 +247,7 @@ export class CloudflareSolver {
     // for findAndClickViaCDP — use Layer.effect to yield them from the runtime.
     const solveDepsLayer = Layer.effect(
       SolveDeps,
-      Effect.gen(function* () {
+      Effect.fn("cf.solver.buildSolveDeps")(function* () {
         const oopifChecker = yield* OOPIFChecker;
         const cdpSender = yield* CdpSender;
         const solverEvents = yield* SolverEvents;
@@ -279,7 +279,7 @@ export class CloudflareSolver {
           setClickDelivered: () => Effect.void,
           markActivityLoopStarted: () => Effect.void,
         });
-      }),
+      })(),
     );
 
     // SolveDispatcher — routes solve attempts through the Effect solver.
@@ -287,7 +287,7 @@ export class CloudflareSolver {
     // Browser-level sends (originalSender) inherit the Semaphore from cdpSenderLayer.
     const solveDispatcherLayer = Layer.effect(
       SolveDispatcher,
-      Effect.gen(function* () {
+      Effect.fn("cf.solver.buildSolveDispatcher")(function* () {
         const solverEvents = yield* SolverEvents;
         const solveDeps = yield* SolveDeps;
         const originalSender = yield* CdpSender;
@@ -400,13 +400,13 @@ export class CloudflareSolver {
             if (self.createIsolatedConn) {
               // Legacy path — kept for backward compatibility during migration.
               return Effect.acquireRelease(
-                Effect.gen(function* () {
+                Effect.fn("ws.acquire.solver_isolated")(function* () {
                   yield* incCounter(wsLifecycle, {
                     "handle.type": "solver_isolated",
                     "ws.action": "create",
                   });
                   return self.createIsolatedConn!();
-                }),
+                })(),
                 (c) =>
                   Effect.fn("ws.release.solver_isolated")(function* () {
                     c.cleanup();
@@ -435,7 +435,7 @@ export class CloudflareSolver {
             return provideServices(active, originalSender);
           },
         });
-      }),
+      })(),
     );
 
     // DetectionLoopStarter — starts detection fibers via FiberMap
@@ -451,7 +451,7 @@ export class CloudflareSolver {
     // checkOOPIFStateViaCDP now yields CdpSender — provide it here.
     const oopifCheckerLayer = Layer.effect(
       OOPIFChecker,
-      Effect.gen(function* () {
+      Effect.fn("cf.solver.buildOopifChecker")(function* () {
         const cdpSender = yield* CdpSender;
         return OOPIFChecker.of({
           check: (iframeCdpSessionId) =>
@@ -459,7 +459,7 @@ export class CloudflareSolver {
               .checkOOPIFStateViaCDP(iframeCdpSessionId)
               .pipe(Effect.provideService(CdpSender, cdpSender)),
         });
-      }),
+      })(),
     );
 
     // SolverConfig — defaults, overridden by enable() via stateTracker.config
@@ -657,8 +657,12 @@ export class CloudflareSolver {
       // Provide per-tab services — baked-in filtering, impossible to bypass
       Effect.provideServiceEffect(
         TabDetector,
-        Effect.gen(function* () {
+        Effect.fn("cf.solver.buildTabDetector")(function* () {
           const cdpSender = yield* CdpSender;
+          yield* Effect.annotateCurrentSpan({
+            "cf.tab.targetId": tab.targetId.slice(0, 8),
+            "cf.tab.cdpSessionId": tab.cdpSessionId.slice(0, 8),
+          });
           return TabDetector.of({
             detect: (excludeIds) =>
               strategies.detectTurnstileViaCDP(tab.cdpSessionId, excludeIds).pipe(
@@ -688,7 +692,7 @@ export class CloudflareSolver {
                 Effect.orElseSucceed(() => ({ _tag: "not_detected" as const })),
               ),
           });
-        }),
+        })(),
       ),
       Effect.provideService(
         TabSolverContext,

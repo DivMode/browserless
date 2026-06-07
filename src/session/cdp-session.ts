@@ -357,10 +357,10 @@ export class CdpSession {
     // LifecycleLayer — acquireRelease: FiberMap + Queue + cleanup
     const lifecycleLayer = Layer.effectDiscard(
       Effect.acquireRelease(
-        Effect.gen(function* () {
+        Effect.fn("cdp.session.lifecycleAcquire")(function* () {
           self._fiberMap = yield* FiberMap.make<string>();
           self.cdpEventQueue = yield* Queue.unbounded<any, Cause.Done>();
-        }),
+        })(),
         () =>
           Effect.sync(() => {
             if (self.cdpEventQueue) Queue.endUnsafe(self.cdpEventQueue);
@@ -838,7 +838,7 @@ export class CdpSession {
 
       // acquireRelease guarantees WS cleanup even on fiber interruption
       const pageWs = yield* Effect.acquireRelease(
-        Effect.gen(function* () {
+        Effect.fn("cdp.session.openPageWsAcquire")(function* () {
           const pageWs = new WebSocket(pageWsUrl);
           Effect.runSync(incCounter(wsLifecycle, { "handle.type": "page", "ws.action": "create" }));
 
@@ -892,7 +892,7 @@ export class CdpSession {
           );
 
           return pageWs;
-        }),
+        })(),
         // Release: guaranteed cleanup — runs on normal exit, failure, AND interruption
         (pageWs) =>
           Effect.sync(() => {
@@ -1628,7 +1628,7 @@ export class CdpSession {
         // FINALIZER 4 (registered 2nd = runs 5th): callback + video + target removal
         yield* Scope.addFinalizer(
           tabScope,
-          Effect.gen(function* () {
+          Effect.fn("cdp.session.tabFinalizeCallback")(function* () {
             const target = session.targets.getByTarget(targetId);
             const tab = session.tabs.get(targetId);
             // Replay callback + video cleanup only if Phase 2 was entered
@@ -1662,13 +1662,13 @@ export class CdpSession {
             }
             session.targets.remove(targetId);
             session.targets.removeIframeTarget(targetId);
-          }),
+          })(),
         );
 
         // FINALIZER 3 (registered 3rd = runs 4th): queue end + consumer drain
         yield* Scope.addFinalizer(
           tabScope,
-          Effect.gen(function* () {
+          Effect.fn("cdp.session.tabDrainQueue")(function* () {
             const tab = session.tabs.get(targetId);
             if (!tab?.activated) return; // No queue was created — skip drain
             const tabQueue = session.tabQueues.get(targetId);
@@ -1684,7 +1684,7 @@ export class CdpSession {
               yield* Deferred.await(consumerDone).pipe(Effect.timeout("45 seconds"), Effect.ignore);
               session.tabDeferreds.delete(targetId);
             }
-          }),
+          })(),
         );
 
         // FINALIZER 2 (registered 4th = runs 3rd): CF cleanup
@@ -1880,7 +1880,7 @@ export class CdpSession {
 
         // Diagnostic probe: check rrweb state 2s after activation
         if (session._fiberMap) {
-          const probeEffect = Effect.gen(function* () {
+          const probeEffect = Effect.fn("cdp.session.rrwebProbe")(function* () {
             yield* Effect.sleep("2 seconds");
             const result = yield* session
               .send(
@@ -1911,7 +1911,7 @@ export class CdpSession {
                   session_id: session.sessionId,
                 }),
               );
-          }).pipe(Effect.ignore);
+          })().pipe(Effect.ignore);
           forkTracedFiber(
             session.runtime,
             session._fiberMap,

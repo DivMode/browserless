@@ -206,25 +206,23 @@ export class SessionSolverState {
   /** Emit cf.failed for orphaned detections and clean up all state. */
   destroy(): Effect.Effect<void> {
     this.destroyed = true;
-    return Effect.gen(
-      function* (this: SessionSolverState) {
-        yield* this.registry.destroyAll();
-        this.iframeToPage.clear();
-        this.knownPages.clear();
-        this.bindingSolvedTargets.clear();
+    return Effect.fn("cf.session.destroy")({ self: this }, function* () {
+      yield* this.registry.destroyAll();
+      this.iframeToPage.clear();
+      this.knownPages.clear();
+      this.bindingSolvedTargets.clear();
 
-        for (const scope of this.pageCleanupScopes.values()) {
-          yield* Scope.close(scope, Exit.void);
-        }
-        this.pageCleanupScopes.clear();
+      for (const scope of this.pageCleanupScopes.values()) {
+        yield* Scope.close(scope, Exit.void);
+      }
+      this.pageCleanupScopes.clear();
 
-        this.solvedCFTargetIds.clear();
-        this.solvedPages.clear();
-        this.pendingIframes.clear();
-        this.widgetReloadCount.clear();
-        this.clickRejectionCount.clear();
-        this.summaryPhases.clear();
-      }.bind(this),
-    );
+      this.solvedCFTargetIds.clear();
+      this.solvedPages.clear();
+      this.pendingIframes.clear();
+      this.widgetReloadCount.clear();
+      this.clickRejectionCount.clear();
+      this.summaryPhases.clear();
+    })();
   }
 }
