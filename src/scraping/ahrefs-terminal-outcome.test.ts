@@ -15,7 +15,7 @@ import { Cause, Effect } from "effect";
 import { buildTerminalFailureOutput } from "./ahrefs-session.js";
 import { buildWideEvent } from "./ahrefs-wide-event.js";
 import { emptyCfMetrics } from "./ahrefs-cf-listener.js";
-import { ProxyEgressDeadError } from "./ahrefs-errors.js";
+import { InterceptionTimeoutError, ProxyEgressDeadError } from "./ahrefs-errors.js";
 import type { ScrapeOutput } from "./ahrefs-service.js";
 
 const wideEventOf = (output: ScrapeOutput) =>
@@ -83,6 +83,74 @@ describe("ADR-0068 terminal failure output", () => {
     // Wide event must stay well under the 113 attribute ceiling.
     expect(Object.keys(event).length).toBeLessThanOrEqual(113);
     expect(Object.keys(event).length).toBeGreaterThanOrEqual(90);
+  });
+
+  // ── Loki-label headroom guard (113-cap landmine) ──────────────────────────
+  //
+  // The HARD ingest cap is 113 user-attrs (Loki's 128-label limit minus ~15
+  // Effect framework attrs). Exceeding it makes the OTLP exporter dump its whole
+  // buffer and disable for 60s — a production landmine. Headroom work (2026-06)
+  // dropped 16 redundant/constant/high-cardinality labels, bringing the success
+  // base 110→94 and the worst case 115→99. This test asserts a TIGHTER SAFE
+  // ceiling than the hard cap so a future addition that re-consumes the headroom
+  // fails HERE (dev time) instead of silently in prod. The lower SANITY floor
+  // catches the opposite failure: a refactor that silently guts the wide event.
+  //
+  // SAFE_LABEL_CEILING (105): hard cap 113 minus an 8-label safety buffer.
+  // SANITY_LABEL_FLOOR (85): below this, diagnostic fields have been gutted.
+  const SAFE_LABEL_CEILING = 105;
+  const SANITY_LABEL_FLOOR = 85;
+
+  it("WORST-CASE wide event stays under the SAFE label ceiling (headroom guard)", () => {
+    // Heaviest realistic terminal record: an InterceptionTimeoutError failure
+    // (adds the 3 intercept_*_count labels + a fetch_decision_chain) PLUS a
+    // turnstile_error_code. These don't all co-occur in practice (turnstile
+    // failure precedes interception in the pipeline), so this is a conservative
+    // upper bound on the always-on + conditional label budget.
+    const event = buildWideEvent({
+      result: {
+        success: false,
+        domain: "example.com",
+        error: "InterceptionTimeoutError",
+        scrapeError: new InterceptionTimeoutError({
+          domain: "example.com",
+          requestCount: 5,
+          responseCount: 3,
+          docResponseCount: 1,
+        }),
+        timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
+      },
+      cfMetrics: emptyCfMetrics(),
+      replayMeta: null,
+      diagnostics: null,
+      domain: "example.com",
+      scrapeType: "backlinks",
+      scrapeUrl: "https://ahrefs.com/backlink-checker?input=example.com",
+      apiCallStatus: "scrape_defect",
+      turnstileErrorCode: "300010",
+      fetchDecisions: [
+        {
+          url: "https://ahrefs.com/x",
+          status: 503,
+          action: "continue_rechallenge",
+          cf_mitigated: true,
+          doc_index: 0,
+        },
+      ],
+    });
+    const worstCaseCount = Object.keys(event).length;
+    expect(worstCaseCount).toBeLessThanOrEqual(SAFE_LABEL_CEILING);
+  });
+
+  it("SUCCESS-PATH wide event sits between the sanity floor and the safe ceiling", () => {
+    const output = buildTerminalFailureOutput(
+      "example.com",
+      "backlinks",
+      Cause.die(new Error("teardown wedged")),
+    );
+    const failureCount = Object.keys(wideEventOf(output)).length;
+    expect(failureCount).toBeLessThanOrEqual(SAFE_LABEL_CEILING);
+    expect(failureCount).toBeGreaterThanOrEqual(SANITY_LABEL_FLOOR);
   });
 });
 

@@ -41,7 +41,6 @@ const ATTR_SCRAPE_URL = "scrape_url";
 const ATTR_SCRAPER_TYPE = "scraper_type";
 const ATTR_SCRAPE_ERROR_CATEGORY = "scrape_error_category";
 const ATTR_SESSION_ID = "session_id";
-const ATTR_CHROME_ENDPOINT = "chrome_endpoint";
 // ADR-0045 Q21 — which relay served this scrape. Values: "lan" (VM 200
 // LAN relay) or "hetzner" (legacy Hetzner relay). Lets dashboards split
 // p50/p95 by path so the +3.4s Talos recovery is observable as soon as
@@ -84,13 +83,13 @@ const ATTR_INTERCEPT_RESPONSE_COUNT = "intercept_response_count";
 const ATTR_INTERCEPT_DOC_RESPONSE_COUNT = "intercept_doc_response_count";
 
 // Replay
-const ATTR_REPLAY_ENABLED = "replay_enabled";
+// replay_enabled (const "true") + video_enabled (const "false") intentionally
+// NOT emitted — single-valued constants carry no label information (headroom).
 const ATTR_REPLAY_ID = "replay_id";
 const ATTR_REPLAY_URL = "replay_url";
 const ATTR_REPLAY_DURATION_MS = "replay_duration_ms";
 const ATTR_REPLAY_EVENT_COUNT = "replay_event_count";
 const ATTR_REPLAY_LABEL = "replay_label";
-const ATTR_VIDEO_ENABLED = "video_enabled";
 
 // Retry
 const ATTR_RETRY_REASON = "retry_reason";
@@ -119,10 +118,8 @@ const ATTR_TURNSTILE_CF_TOKEN_LENGTH = "turnstile_cf_token_length";
 const ATTR_TURNSTILE_CF_VERIFIED = "turnstile_cf_verified";
 const ATTR_TURNSTILE_CF_WIDGET_FIND_METHOD = "turnstile_cf_widget_find_method";
 const ATTR_TURNSTILE_CF_WIDGET_FIND_METHODS = "turnstile_cf_widget_find_methods";
-const ATTR_TURNSTILE_CF_WIDGET_X = "turnstile_cf_widget_x";
-const ATTR_TURNSTILE_CF_WIDGET_Y = "turnstile_cf_widget_y";
-const ATTR_TURNSTILE_CF_CLICK_X = "turnstile_cf_click_x";
-const ATTR_TURNSTILE_CF_CLICK_Y = "turnstile_cf_click_y";
+// turnstile_cf_widget_x/y + turnstile_cf_click_x/y intentionally NOT emitted —
+// pixel geometry lives on the cf.solved replay/span marker (headroom).
 const ATTR_TURNSTILE_CF_PRESENCE_DURATION_MS = "turnstile_cf_presence_duration_ms";
 const ATTR_TURNSTILE_CF_PRESENCE_PHASES = "turnstile_cf_presence_phases";
 const ATTR_TURNSTILE_CF_APPROACH_PHASES = "turnstile_cf_approach_phases";
@@ -131,7 +128,7 @@ const ATTR_TURNSTILE_CF_FALSE_POSITIVE_COUNT = "turnstile_cf_false_positive_coun
 const ATTR_TURNSTILE_CF_WIDGET_ERROR_COUNT = "turnstile_cf_widget_error_count";
 const ATTR_TURNSTILE_CF_WIDGET_ERROR_TYPE = "turnstile_cf_widget_error_type";
 const ATTR_TURNSTILE_CF_IFRAME_STATES = "turnstile_cf_iframe_states";
-const ATTR_TURNSTILE_CF_WIDGET_FIND_DEBUG = "turnstile_cf_widget_find_debug";
+// turnstile_cf_widget_find_debug intentionally NOT emitted — unbounded debug blob (headroom).
 const ATTR_TURNSTILE_SUMMARY = "turnstile_summary";
 const ATTR_TURNSTILE_FAILURE_REASON = "turnstile_failure_reason";
 const ATTR_TURNSTILE_ERROR_DETECTED = "turnstile_error_detected";
@@ -151,16 +148,12 @@ const ATTR_TURNSTILE_EMBEDDED_PASSED = "turnstile_embedded_passed";
 const ATTR_TURNSTILE_EMBEDDED_AUTO_RESOLVED = "turnstile_embedded_auto_resolved";
 const ATTR_TURNSTILE_EMBEDDED_CLICK_COUNT = "turnstile_embedded_click_count";
 
-// Short-form CF attrs (the scraper emits both prefixed and short)
-const ATTR_CF_METHOD = "cf_method";
-const ATTR_CF_DURATION_MS = "cf_duration_ms";
+// Short-form CF attrs: 8 of 9 intentionally NOT emitted — they were byte-for-byte
+// duplicates of the prefixed turnstile_cf_* / turnstile_embedded_* /
+// turnstile_interstitial_* labels and no dashboard/alert filters on the bare
+// short forms. Dropped to reclaim 8 always-on label slots (headroom).
+// `cf_solved` is RETAINED — the most-queried CF boolean + asserted by unit tests.
 const ATTR_CF_SOLVED = "cf_solved";
-const ATTR_CF_TYPE = "cf_type";
-const ATTR_CF_EVENTS = "cf_events";
-const ATTR_EMBEDDED_DETECTED = "embedded_detected";
-const ATTR_EMBEDDED_PASSED = "embedded_passed";
-const ATTR_INTERSTITIAL_DETECTED = "interstitial_detected";
-const ATTR_INTERSTITIAL_PASSED = "interstitial_passed";
 
 // Session telemetry — registered in registry/ahrefs.yaml (ahrefs.session group)
 // Values MUST match ahrefs_gen.ts. Hardcoded because browserless is not in bun workspace.
@@ -494,17 +487,35 @@ function shellTimingLabels(st?: import("./ahrefs-cdp.js").ShellTimings): Record<
  * Effect's logger adds ~15 framework attrs of its own (trace_id, span_id,
  * fiberId, severity_number, severity_text, observed_timestamp, scope_name,
  * service_name, deployment_environment, detected_level), so user attrs must
- * stay under (128 - 15) = 113. We're AT 113 on InterceptionTimeoutError
- * failures (110 base + 3 intercept counts). 2026-05-21 ADR-0045 swapped
- * `use_proxy` (always "true", dead constant) for `relay_path` (varies between
- * "lan" and "hetzner") — net label count unchanged.
+ * stay under (128 - 15) = 113. `WIDE_EVENT_MAX_ATTRS` is that true hard ingest
+ * ceiling — the runtime throw below uses it so production never silently emits a
+ * record Loki will reject.
+ *
+ * HEADROOM (2026-06): the builder previously ran with ~0 spare — 110 always-on
+ * labels on the success path and 115 on the worst case (ITE failure + a
+ * fetch_decision_chain + a turnstile_error_code), which ALREADY exceeded 113 and
+ * threw in production. We reclaimed 16 always-on labels with no loss of query
+ * surface (verified against every dashboard/alert/skill):
+ *   - 8 short-form CF duplicates (cf_method/cf_events/cf_type/cf_duration_ms +
+ *     embedded_/interstitial_detected/passed) that mirrored the canonical
+ *     prefixed turnstile_cf_* labels byte-for-byte. `cf_solved` is RETAINED
+ *     (most-queried CF boolean + asserted by the wide-event unit test);
+ *   - 3 single-valued constants (chrome_endpoint/replay_enabled/video_enabled);
+ *   - 5 unqueried high-cardinality CF geometry/debug labels (widget_x/y,
+ *     click_x/y, widget_find_debug) — the coords still ride on the cf.solved
+ *     replay/span marker.
+ * New counts: success base = 94, worst case = 99 (94 + 3 intercept + 1
+ * fetch_decision_chain + 1 turnstile_error_code). That is a ~14-label buffer
+ * under the 113 hard cap. The unit guard in ahrefs-terminal-outcome.test.ts
+ * asserts a TIGHTER safe ceiling (<=105) so a future addition that eats the
+ * headroom fails loudly at dev time, long before it can trip the 128 ingest cap.
  *
  * ADR-0068 deliberately does NOT add reconciliation labels (`instance_id`) to
- * this record — the wide event is already at its 113 ceiling, and one more
- * always-on label would risk the 128 ingest cap on the ITE-failure case. The
- * `instance_id` reconciliation rides on SEPARATE, cheap `scrape.dispatched` /
- * `scrape.terminal` marker log lines instead (see ahrefs-session.ts). The wide
- * event's `event_type` already uniquely identifies it as a terminal record.
+ * this record — the `instance_id` reconciliation rides on SEPARATE, cheap
+ * `scrape.dispatched` / `scrape.terminal` marker log lines instead (see
+ * ahrefs-session.ts). The wide event's `event_type` already uniquely identifies
+ * it as a terminal record. With the new headroom an instance_id could now fit,
+ * but the separate-marker design is still preferred (cheaper, decoupled).
  */
 const WIDE_EVENT_MAX_ATTRS = 113;
 
@@ -512,11 +523,12 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
   const event = buildWideEventInner(input);
 
   // Conditional labels — only emitted when their value is non-empty so the
-  // common-case wide event stays under Loki's 113 always-on cap. The
-  // worst-case attribute count (InterceptionTimeoutError + a turnstile
-  // error_code present) is 113 + 1 = 114, still under the 128 ingest
-  // threshold; never both fire on the same scrape because turnstile
-  // failure precedes interception in the pipeline.
+  // common-case wide event stays well under Loki's 113 always-on cap. Worst-case
+  // attribute count is now 99 (94 base + 3 intercept counts + 1
+  // fetch_decision_chain + 1 turnstile_error_code), a ~14-label buffer under the
+  // hard cap. (turnstile_error_code + interception don't co-occur — turnstile
+  // failure precedes interception in the pipeline — so the realistic worst case
+  // is even lower; we count them together as a conservative upper bound.)
   if (input.turnstileErrorCode && input.turnstileErrorCode.length > 0) {
     event["turnstile_error_code"] = input.turnstileErrorCode;
   }
@@ -559,7 +571,9 @@ function buildWideEventInner(input: WideEventInput): Record<string, string> {
     [ATTR_SCRAPER_TYPE]: scrapeType,
     [ATTR_SCRAPE_URL]: scrapeUrl,
     [ATTR_SESSION_ID]: input.sessionId ?? "",
-    [ATTR_CHROME_ENDPOINT]: "browserless",
+    // HEADROOM: chrome_endpoint dropped — a hardcoded constant ("browserless")
+    // that carries zero information as a label; the OTel resource's service_name
+    // already identifies the emitter. (Constant dropped, 1 label reclaimed.)
     [ATTR_RELAY_PATH]: currentRelayPath(),
 
     // Outcome — all derived from scrapeError (single source of truth)
@@ -609,10 +623,10 @@ function buildWideEventInner(input: WideEventInput): Record<string, string> {
     // CF widget (prefixed)
     [ATTR_TURNSTILE_CF_WIDGET_FIND_METHOD]: cfMetrics.cf_widget_find_method,
     [ATTR_TURNSTILE_CF_WIDGET_FIND_METHODS]: cfMetrics.cf_widget_find_methods,
-    [ATTR_TURNSTILE_CF_WIDGET_X]: cfMetrics.cf_widget_x,
-    [ATTR_TURNSTILE_CF_WIDGET_Y]: cfMetrics.cf_widget_y,
-    [ATTR_TURNSTILE_CF_CLICK_X]: cfMetrics.cf_click_x,
-    [ATTR_TURNSTILE_CF_CLICK_Y]: cfMetrics.cf_click_y,
+    // HEADROOM: widget_x/y + click_x/y pixel geometry dropped from labels — never
+    // queried by any dashboard/alert; the exact coords still ride on the `cf.solved`
+    // replay/span marker (see cloudflare-debug/references/cdp-events.md), so no
+    // diagnostic signal is lost. (4 labels reclaimed.)
     [ATTR_TURNSTILE_CF_PRESENCE_DURATION_MS]: String(cfMetrics.cf_presence_duration_ms),
     [ATTR_TURNSTILE_CF_PRESENCE_PHASES]: String(cfMetrics.cf_presence_phases),
     [ATTR_TURNSTILE_CF_APPROACH_PHASES]: String(cfMetrics.cf_approach_phases),
@@ -621,7 +635,9 @@ function buildWideEventInner(input: WideEventInput): Record<string, string> {
     [ATTR_TURNSTILE_CF_WIDGET_ERROR_COUNT]: String(cfMetrics.cf_widget_error_count),
     [ATTR_TURNSTILE_CF_WIDGET_ERROR_TYPE]: cfMetrics.cf_widget_error_type,
     [ATTR_TURNSTILE_CF_IFRAME_STATES]: cfMetrics.cf_iframe_states,
-    [ATTR_TURNSTILE_CF_WIDGET_FIND_DEBUG]: cfMetrics.cf_widget_find_debug,
+    // HEADROOM: cf_widget_find_debug dropped from labels — a free-form debug blob
+    // (high cardinality, unbounded text), never queried by any dashboard/alert.
+    // Widget-find provenance is still carried by `turnstile_cf_widget_find_method(s)`.
     [ATTR_TURNSTILE_SUMMARY]: summaryLabel,
     [ATTR_TURNSTILE_FAILURE_REASON]: cfMetrics.failure_reason,
     [ATTR_TURNSTILE_ERROR_DETECTED]: String(cfMetrics.error_detected),
@@ -641,25 +657,29 @@ function buildWideEventInner(input: WideEventInput): Record<string, string> {
     [ATTR_TURNSTILE_EMBEDDED_AUTO_RESOLVED]: String(cfMetrics.embedded_auto_resolved),
     [ATTR_TURNSTILE_EMBEDDED_CLICK_COUNT]: String(cfMetrics.embedded_click_count),
 
-    // Short-form CF attrs (dashboard queries use both)
-    [ATTR_CF_METHOD]: cfMetrics.cf_method,
-    [ATTR_CF_DURATION_MS]: String(cfMetrics.cf_duration_ms),
+    // HEADROOM: 8 of the 9 short-form CF duplicates (cf_method / cf_duration_ms /
+    // cf_type / cf_events / embedded_detected / embedded_passed /
+    // interstitial_detected / interstitial_passed) were dropped. They were
+    // byte-for-byte duplicates of the canonical prefixed `turnstile_cf_*` /
+    // `turnstile_embedded_*` / `turnstile_interstitial_*` labels above (the
+    // cloudflare-debug skill's cross-reference.md documents the short forms only
+    // as "alternate names" of the prefixed ones). No dashboard/alert filters on
+    // the bare short forms, so dropping them loses zero query surface.
+    //
+    // `cf_solved` is RETAINED: it's the single most-queried CF boolean (the
+    // success/fail pivot) and the wide-event unit test asserts it round-trips
+    // solver data. Keeping it costs 1 label and still leaves a ~14-label buffer.
     [ATTR_CF_SOLVED]: String(cfMetrics.cf_solved),
-    [ATTR_CF_TYPE]: cfMetrics.cf_type,
-    [ATTR_CF_EVENTS]: String(cfMetrics.cf_events),
-    [ATTR_EMBEDDED_DETECTED]: String(cfMetrics.embedded_detected),
-    [ATTR_EMBEDDED_PASSED]: String(cfMetrics.embedded_passed),
-    [ATTR_INTERSTITIAL_DETECTED]: String(cfMetrics.interstitial_detected),
-    [ATTR_INTERSTITIAL_PASSED]: String(cfMetrics.interstitial_passed),
 
     // Replay
-    [ATTR_REPLAY_ENABLED]: "true",
     [ATTR_REPLAY_ID]: replayMeta?.replay_id ?? "",
     [ATTR_REPLAY_URL]: replayMeta?.replay_url ?? "",
     [ATTR_REPLAY_DURATION_MS]: String(replayMeta?.replay_duration_ms ?? 0),
     [ATTR_REPLAY_EVENT_COUNT]: String(replayMeta?.replay_event_count ?? 0),
     [ATTR_REPLAY_LABEL]: replayLabel,
-    [ATTR_VIDEO_ENABLED]: "false",
+    // HEADROOM: replay_enabled (constant "true") and video_enabled (constant
+    // "false") dropped — single-valued constants carry zero information as labels.
+    // The presence of replay_url already signals recording was enabled.
 
     // API health — populated from result.apiErrors (extracted from browser-side JS)
     [ATTR_API_ERRORS]: result.apiErrors?.length
