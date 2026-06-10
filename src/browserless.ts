@@ -43,6 +43,7 @@ import type { ServiceContainer } from "./container/container.js";
 import { createContainer, Services } from "./container/bootstrap.js";
 import { gaugeCollector, setPressureState } from "./effect-metrics.js";
 import { initOtelRuntime, runForkInServer, disposeOtelRuntime } from "./otel-runtime.js";
+import { startLanRelayHealthMonitor } from "./scraping/lan-relay-health.js";
 import { VideoManager } from "./video/video-manager.js";
 
 const routeSchemas = ["body", "query"];
@@ -76,6 +77,7 @@ export class Browserless extends EventEmitter {
   httpRouteFiles: string[] = [];
   server?: HTTPServer;
   protected gaugeCollectorFiber: Fiber.Fiber<unknown> | null = null;
+  protected lanRelayHealthFiber: Fiber.Fiber<unknown> | null = null;
 
   constructor({
     browserManager,
@@ -186,6 +188,10 @@ export class Browserless extends EventEmitter {
     if (this.gaugeCollectorFiber) {
       yield* Fiber.interrupt(this.gaugeCollectorFiber);
       this.gaugeCollectorFiber = null;
+    }
+    if (this.lanRelayHealthFiber) {
+      yield* Fiber.interrupt(this.lanRelayHealthFiber);
+      this.lanRelayHealthFiber = null;
     }
     yield* Effect.promise(() =>
       Promise.all([
@@ -402,6 +408,14 @@ export class Browserless extends EventEmitter {
     // OTLP metrics export + gauge collection at server level.
     // Runs in the server runtime — shares the same exporter as all session runtimes.
     this.gaugeCollectorFiber = runForkInServer(gaugeCollector);
+
+    // LAN-relay two-path health failover (scraping/lan-relay-health.ts).
+    // Background fiber polls the VM 200 LAN relay roster; on relay death it
+    // flips the cached verdict so resolveProxy() fails ahrefs scraping over to
+    // the Hetzner edge (and back on recovery). No-op when OEILI_PROXY_LOCAL is
+    // unset. Forked here alongside the gauge collector so it shares the server
+    // runtime's Tracer/Metrics/Logger services.
+    this.lanRelayHealthFiber = runForkInServer(startLanRelayHealthMonitor());
   });
 
   public async start() {

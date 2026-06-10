@@ -15,9 +15,23 @@
  *   - `OEILI_PROXY_LOCAL`   — VM 200 LAN relay (Talos path, primary)
  *   - `OEILI_PROXY_HETZNER` — Hetzner relay (external customers, fallback)
  *
- * Resolution order: LOCAL wins if set, else HETZNER, else throw. We
- * stamp `relay.path = 'lan' | 'hetzner'` on every scrape wide event so
+ * Resolution order: LOCAL wins if set AND healthy, else HETZNER, else throw.
+ * We stamp `relay.path = 'lan' | 'hetzner'` on every scrape wide event so
  * dashboards can split p50/p95 by path and prove the +3.4s recovery.
+ *
+ * AUTOMATIC HEALTH FAILOVER (2026-06-09). LOCAL was previously preferred
+ * STATICALLY with no health check, so when the LAN relay went dead (roster =
+ * 0 phones) while Hetzner stayed up, browserless stayed pinned to the dead LAN
+ * relay → ~100% scrape outage for 2h. `resolveProxy()` now consults
+ * `getLanRelayHealthy()` — a sync read of a verdict maintained by the
+ * background `lan-relay-health.ts` monitor (forked at boot). When LOCAL is set
+ * but the relay is confirmed dead AND Hetzner is available, we fail over to
+ * Hetzner; when the LAN relay recovers we fail back. The verdict only changes
+ * on REAL relay death/recovery and only after hysteresis (2 consecutive
+ * agreeing probes), so it can't thrash — a rare mid-scrape flip is acceptable
+ * for v1. (Per-scrape path PINNING, so an in-flight scrape never switches
+ * paths under it, is a future enhancement.) `resolveProxy()` stays SYNC: it
+ * just reads the cached boolean, never blocks on a probe.
  *
  * Why NOT throw at module load: the Docker build runs `npm run
  * build:openapi`, which imports route modules to extract their schemas.
@@ -29,6 +43,8 @@
  * if the env var is missing at runtime, but the build can complete and
  * the pod can boot to surface a real error log instead of timing out.
  */
+
+import { decideRelayPath, getLanRelayHealthy } from "./lan-relay-health.js";
 
 /** Which relay the current pod is configured to use. */
 export type RelayPath = "lan" | "hetzner";
@@ -78,9 +94,20 @@ interface ResolvedProxy {
 
 function resolveProxy(): ResolvedProxy | undefined {
   const local = process.env.OEILI_PROXY_LOCAL?.trim();
-  if (local) return { url: local, path: "lan" };
   const hetzner = process.env.OEILI_PROXY_HETZNER?.trim();
-  if (hetzner) return { url: hetzner, path: "hetzner" };
+  // Health-based path decision (see "AUTOMATIC HEALTH FAILOVER" above). When
+  // the LAN relay is confirmed dead the background monitor flips
+  // getLanRelayHealthy() to false; with Hetzner configured we then return the
+  // Hetzner URL instead of the dead LAN one. lanHealthy defaults to true (no
+  // monitor / pre-first-probe), so the historical LOCAL-wins behavior is
+  // preserved everywhere the relay is healthy.
+  const path = decideRelayPath({
+    hasLocal: Boolean(local),
+    hasHetzner: Boolean(hetzner),
+    lanHealthy: getLanRelayHealthy(),
+  });
+  if (path === "lan" && local) return { url: local, path: "lan" };
+  if (path === "hetzner" && hetzner) return { url: hetzner, path: "hetzner" };
   return undefined;
 }
 
