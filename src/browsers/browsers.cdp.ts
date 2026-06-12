@@ -342,6 +342,15 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
           `--no-default-browser-check`,
           `--homepage=about:blank`,
           `--no-pings`,
+          // ── Kill Chrome's background phone-home (2026-06-12) ──────────
+          // GCM/mtalk (mtalk.google.com:5228), sync (accounts.google.com),
+          // domain reliability, component pings — none are needed for
+          // scraping, and on the mobile-proxy path every one of these
+          // long-lived connections squats a scarce per-phone egress slot,
+          // starving real ahrefs serves (the single-phone LAN saturation).
+          `--disable-background-networking`,
+          `--disable-domain-reliability`,
+          `--disable-sync`,
           `--password-store=basic`,
 
           // ── Disable features that leak automation fingerprint ────────
