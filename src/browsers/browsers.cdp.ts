@@ -30,6 +30,7 @@ import type {
   TabReplayCompleteParams,
 } from "../cdp-proxy.js";
 import { CDPProxy } from "../cdp-proxy.js";
+import { OEILI_TELEMETRY_BYPASS_HOSTS } from "./oeili-bypass-hosts.js";
 import type { CloudflareSolver } from "../session/cloudflare-solver.js";
 import { runForkInServer } from "../otel-runtime.js";
 import type { CloudflareConfig } from "../shared/cloudflare-detection.js";
@@ -303,6 +304,24 @@ export class ChromiumCDP extends EventEmitter implements ReplayCapableBrowser {
         const defaultBypassList = [
           this.config.getHost(),
           new URL(this.config.getExternalAddress()).hostname,
+          // Route Chrome's OWN background phone-home DIRECT (off the proxy).
+          // None of it is needed for scraping, and on the oeili mobile-proxy path
+          // every one of these connections squats a scarce per-phone egress slot,
+          // choking the single phone so the REAL scrape traffic (the CF
+          // challenge `api.js`) hangs and the scrape gets MISLABELED
+          // `turnstile_failed` (proven 2026-06-12: ~75% of phone traffic was this
+          // junk; the CF script got no response). #2793's
+          // `--disable-background-networking` does NOT stop it (flags present,
+          // traffic still flows), so we keep it OFF the phone at the proxy layer
+          // where it's guaranteed. Fingerprint-safe: Chrome still does all its
+          // background networking — it just goes out the node's normal internet,
+          // not the cellular IP (Google never cares which IP its telemetry uses).
+          //
+          // NOT bypassed (these MUST stay on the proxy): the egress-liveness
+          // probes hit `*.cloudflare.com` + `www.gstatic.com/generate_204` and the
+          // IP-echo probes hit `*.ipify.org`/`icanhazip.com` — bypassing those
+          // would make the proxy-health checks test the node, not the phone.
+          ...OEILI_TELEMETRY_BYPASS_HOSTS,
         ];
         const bypassProxyListIdx = options.args?.findIndex((arg) =>
           arg.includes("--proxy-bypass-list"),
