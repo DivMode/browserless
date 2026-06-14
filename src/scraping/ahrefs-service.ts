@@ -86,6 +86,13 @@ export interface ScrapeOutput {
    * error text for the wide event.
    */
   proxyTunnelFailed?: boolean;
+  /**
+   * OBSERVED an AMBIGUOUS hold-close net error (`ERR_EMPTY_RESPONSE`) this scrape.
+   * Consistent with a dead proxy but not conclusive, so it does NOT reclassify on
+   * its own — it routes the failure through the post-hoc egress re-probe, which
+   * confirms before any `proxy_down`. Preserves the never-a-false-`proxy_down` invariant.
+   */
+  proxyTunnelSuspect?: boolean;
   proxyTunnelError?: string;
   /**
    * Per-attempt session telemetry (browser id, age, solve count, concurrent
@@ -463,6 +470,7 @@ export const executeAhrefsScrape = (
         connection?.off("Browserless.cloudflareSolved" as any, onSolvedGuard);
         cfListener.cleanup();
         const proxyTunnelFailed = proxyWatch.failed();
+        const proxyTunnelSuspect = proxyWatch.suspect();
         const proxyTunnelError = proxyWatch.detail()?.errorText;
         interception.cleanup();
         proxyWatch.cleanup();
@@ -483,6 +491,7 @@ export const executeAhrefsScrape = (
           turnstileErrorCode,
           fetchDecisions: interception.fetchDecisions,
           proxyTunnelFailed,
+          proxyTunnelSuspect,
           proxyTunnelError,
         };
       })().pipe(
@@ -541,6 +550,7 @@ export const executeAhrefsScrape = (
                   // An interception timeout with NOTHING leaving Chrome is often
                   // the proxy refusing the CONNECT — capture the observed signal.
                   proxyTunnelFailed: proxyWatch.failed(),
+                  proxyTunnelSuspect: proxyWatch.suspect(),
                   proxyTunnelError: proxyWatch.detail()?.errorText,
                 };
               })(),
@@ -592,6 +602,7 @@ export const executeAhrefsScrape = (
                   turnstileErrorCode: undefined,
                   fetchDecisions: capturedDecisions,
                   proxyTunnelFailed: proxyWatch.failed(),
+                  proxyTunnelSuspect: proxyWatch.suspect(),
                   proxyTunnelError: proxyWatch.detail()?.errorText,
                 };
               })(),

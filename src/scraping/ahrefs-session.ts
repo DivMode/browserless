@@ -336,14 +336,16 @@ async function probeProxyEgress(browser: Browser): Promise<EgressProbe> {
  *     script/widget never even loaded, which is what a dead network looks like.
  *     A genuine solver failure produces detection/progress/failed events.
  *
+ * The DEGRADED-proxy case (widget loaded, cf_events > 0, then the solve starved)
+ * is handled by the SEPARATE {@link isDegradedEgressSuspect} trigger — kept
+ * distinct so this strict "never came up" signature stays as-is.
+ *
  * Deliberately EXCLUDED (these are NOT network-down and must keep their label):
  *   - InterceptionTimeoutError with requestCount > 0 && responseCount === 0 —
  *     the request DID leave Chrome; this is the proven ahrefs ~127.6s SSR-shell
  *     tarpit (`upstream_slow_no_doc_response`), not a dead egress.
  *   - TurnstileTimeoutError with apiCallStatus "pending" — the token WAS minted
  *     (so the network was up) and the API call hung; that's a block trigger.
- *   - Any failure where cf_events > 0 — the widget loaded, so the network came
- *     up; whatever failed is downstream of egress.
  */
 export function isEgressDeathCandidate(output: ScrapeOutput): boolean {
   if (output.result.success) return false;
@@ -359,6 +361,66 @@ export function isEgressDeathCandidate(output: ScrapeOutput): boolean {
     return e.requestCount === 0;
   }
   return false;
+}
+
+/**
+ * SECOND egress-reclassification trigger — the DEGRADED-proxy case that
+ * {@link isEgressDeathCandidate}'s `cf_events === 0` guard deliberately excludes.
+ *
+ * The Turnstile widget script LOADED (cf_events > 0, e.g. `Emb✗
+ * resolution_timeout`) but no token was ever minted (apiCallStatus
+ * "not_called"). The old assumption was "widget loaded ⇒ network up ⇒ not the
+ * proxy" — but that REVERSES on a degraded/saturated proxy: the widget's static
+ * script loads, then its solve round-trips (challenges.cloudflare.com) starve, so
+ * the token never mints. The widget loading does NOT prove the egress stayed
+ * healthy enough to SOLVE. This guard-free path was the leak that mislabeled a
+ * proxy outage as `turnstile_failed`.
+ *
+ * Like the death candidate, this is ONLY a CANDIDATE: the call-site re-probe is
+ * the sole discriminator — reclassified to `proxy_down` ONLY when a fresh egress
+ * probe CONFIRMS the egress dead. A genuine turnstile failure on a HEALTHY egress
+ * passes the re-probe and keeps `turnstile_failed`, so this never invents a false
+ * `proxy_down`; it only stops the reverse mislabel.
+ */
+export function isDegradedEgressSuspect(output: ScrapeOutput): boolean {
+  if (output.result.success) return false;
+  const e = output.result.scrapeError;
+  if (e?._tag !== "TurnstileTimeoutError") return false;
+  // The complement of isEgressDeathCandidate's first branch: token never minted,
+  // but the widget DID load (cf_events > 0). Together the two triggers cover the
+  // token-never-minted failure regardless of cf_events.
+  return e.apiCallStatus === "not_called" && (output.cfMetrics?.cf_events ?? 0) > 0;
+}
+
+/**
+ * THE single call-site decision: should the GAP-2 path re-probe egress on this
+ * failed scrape (and reclassify to `proxy_down` if the probe confirms dead)?
+ *
+ * Union of the inference triggers — `isEgressDeathCandidate` (network never came
+ * up, cf_events 0), `isDegradedEgressSuspect` (widget loaded then solve starved,
+ * cf_events > 0), and `proxyTunnelSuspect` (an OBSERVED but AMBIGUOUS hold-close
+ * net error like `ERR_EMPTY_RESPONSE`, which must be confirmed before it can mean
+ * `proxy_down`). The UNAMBIGUOUS observed signal (`proxyTunnelFailed`) does NOT go
+ * through here — it reclassifies authoritatively with no re-probe (see GAP-2).
+ *
+ * Extracted ON PURPOSE: it is the one place that decides re-probe-or-not, and its
+ * test exhaustively pins that a proxy-down failure of EITHER inference shape
+ * triggers a re-probe. If a future edit drops the degraded (cf_events > 0) arm —
+ * the exact regression that mislabeled a live proxy outage as `turnstile_failed` —
+ * that test fails the build. This is the lock against the mislabel coming back.
+ */
+export function shouldReprobeEgress(output: ScrapeOutput): boolean {
+  // Never re-probe (or reclassify) a scrape that SUCCEEDED — we got the data.
+  // The first two predicates already guard success internally; this also covers
+  // the `proxyTunnelSuspect` arm, since a stray sub-resource hold-close can be
+  // observed on an otherwise-successful scrape (a mid-scrape egress flap that
+  // recovered before the data POST landed).
+  if (output.result.success) return false;
+  return (
+    isEgressDeathCandidate(output) ||
+    isDegradedEgressSuspect(output) ||
+    output.proxyTunnelSuspect === true
+  );
 }
 
 /**
@@ -966,6 +1028,7 @@ export class AhrefsSessionManager {
                 // Infra failure before/around the scrape — no in-scrape proxy
                 // observation available here; the watch lives inside the scrape.
                 proxyTunnelFailed: false,
+                proxyTunnelSuspect: false,
                 proxyTunnelError: undefined,
               });
             }),
@@ -986,12 +1049,22 @@ export class AhrefsSessionManager {
           //    post-hoc probe sees a healthy egress and wrongly keeps the turnstile
           //    label. Reading the proxy's actual answer can't miss the transient.
           //
-          // 2. RE-PROBE (fallback) — `isEgressDeathCandidate`: for the "network
-          //    never came up" signature with no observed tunnel error, RE-VERIFY
+          // 2. RE-PROBE (guarded fallback) — `shouldReprobeEgress`: for the
+          //    inference signatures (network never came up, widget loaded then
+          //    solve starved, or an AMBIGUOUS observed hold-close like
+          //    `ERR_EMPTY_RESPONSE`) with no UNAMBIGUOUS tunnel error, RE-VERIFY
           //    the egress through the still-alive page and reclassify ONLY when the
           //    probe CONFIRMS dead. The high bar keeps real turnstile failures from
           //    becoming false `proxy_down`.
-          const scrapeOutput = yield* rawScrapeOutput.proxyTunnelFailed
+          //
+          // The `!success` guard on path 1 is load-bearing: the watch records a
+          // tunnel error on ANY request, so a scrape that SUCCEEDED through a
+          // mid-scrape egress flap can still carry `proxyTunnelFailed` —
+          // reclassifying it would wrongly mark a success `proxy_down` AND rotate
+          // off a working phone (ProxyEgressDeadError is a block trigger).
+          // `shouldReprobeEgress` guards success symmetrically.
+          const scrapeOutput = yield* !rawScrapeOutput.result.success &&
+          rawScrapeOutput.proxyTunnelFailed
             ? Effect.fn("session.proxy_tunnel_observed")(function* () {
                 managed.proxyEgressAlive = false;
                 yield* Effect.logWarning("session.proxy_egress_dead").pipe(
@@ -1007,7 +1080,7 @@ export class AhrefsSessionManager {
                 );
                 return reclassifyAsEgressDead(rawScrapeOutput, domain);
               })()
-            : isEgressDeathCandidate(rawScrapeOutput)
+            : shouldReprobeEgress(rawScrapeOutput)
               ? Effect.fn("session.egress.reprobe")(function* () {
                   const aliveStart = Date.now();
                   const alive = yield* Effect.tryPromise({
@@ -1018,14 +1091,18 @@ export class AhrefsSessionManager {
                   yield* Effect.annotateCurrentSpan({
                     "egress.reprobe_alive": alive,
                     "egress.reprobe_ms": Date.now() - aliveStart,
+                    "egress.reprobe_suspect": rawScrapeOutput.proxyTunnelSuspect === true,
                   });
                   if (alive) return rawScrapeOutput;
                   yield* Effect.logWarning("session.proxy_egress_dead").pipe(
                     Effect.annotateLogs({
                       browser_id: String(managed.id),
                       domain,
-                      detected_at: "mid_scrape",
+                      detected_at: rawScrapeOutput.proxyTunnelSuspect
+                        ? "hold_close_reprobe"
+                        : "mid_scrape",
                       prior_error_tag: rawScrapeOutput.result.scrapeError?._tag ?? "unknown",
+                      proxy_tunnel_error: rawScrapeOutput.proxyTunnelError ?? "",
                       proxy_ip_address: managed.proxyIpAddress ?? "",
                       session_id: sessionTokenHolder.current(),
                     }),
