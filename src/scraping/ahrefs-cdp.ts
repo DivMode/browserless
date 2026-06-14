@@ -109,33 +109,12 @@ export function isProxyTunnelError(errorText: string | null | undefined): boolea
   return PROXY_TUNNEL_ERROR_TEXTS.some((t) => errorText.includes(t));
 }
 
-/**
- * Net errors CONSISTENT with a proxy hold-then-close but AMBIGUOUS — a target can
- * legitimately emit them too. Post-#2811 the relay no longer holds 25s on permit
- * starvation, so this is the rarer residual hold-close mode (genuine no-phone /
- * mid-rotation `HOLD_BUDGET` exhaustion → silent close → `ERR_EMPTY_RESPONSE`).
- * Treated as a SUSPECT only: the session-layer egress re-probe CONFIRMS before any
- * `proxy_down`, so an empty target response can never become a false `proxy_down`.
- */
-const PROXY_SUSPECT_ERROR_TEXTS = ["ERR_EMPTY_RESPONSE"] as const;
-
-/**
- * Pure: is this errorText a hold-close SUSPECT — consistent with a dead proxy but
- * ambiguous, so it must be CONFIRMED by a re-probe before becoming `proxy_down`?
- */
-export function isProxySuspectError(errorText: string | null | undefined): boolean {
-  if (!errorText) return false;
-  return PROXY_SUSPECT_ERROR_TEXTS.some((t) => errorText.includes(t));
-}
-
 export interface ProxyFailureWatch {
   /** Resolves after `Network.enable` completes — await BEFORE navigating. */
   ready: Promise<void>;
-  /** True once a request failed with an AUTHORITATIVE proxy-layer net error. */
+  /** True once ANY request in this scrape failed with a proxy-layer net error. */
   failed: () => boolean;
-  /** True once a request failed with an AMBIGUOUS hold-close net error (confirm via re-probe). */
-  suspect: () => boolean;
-  /** First observed `{ errorText, url }` (authoritative preferred), or null. For the wide event. */
+  /** First observed `{ errorText, url }`, or null. For the wide event. */
   detail: () => { errorText: string; url: string } | null;
   /** Remove the listeners + disable Network. */
   cleanup: () => void;
@@ -150,7 +129,6 @@ export const setupProxyFailureWatch = (cdp: CDPSession): ProxyFailureWatch => {
   // requestId → url, so a loadingFailed (which carries no URL) can be named.
   const urls = new Map<string, string>();
   let firstFailure: { errorText: string; url: string } | null = null;
-  let firstSuspect: { errorText: string; url: string } | null = null;
 
   const onRequest = (params: any) => {
     const requestId = params?.requestId as string;
@@ -162,8 +140,6 @@ export const setupProxyFailureWatch = (cdp: CDPSession): ProxyFailureWatch => {
     const errorText = (params?.errorText as string) ?? "";
     if (!firstFailure && isProxyTunnelError(errorText)) {
       firstFailure = { errorText, url: urls.get(requestId) ?? "" };
-    } else if (!firstSuspect && isProxySuspectError(errorText)) {
-      firstSuspect = { errorText, url: urls.get(requestId) ?? "" };
     }
     urls.delete(requestId);
   };
@@ -184,8 +160,7 @@ export const setupProxyFailureWatch = (cdp: CDPSession): ProxyFailureWatch => {
   return {
     ready,
     failed: () => firstFailure !== null,
-    suspect: () => firstSuspect !== null,
-    detail: () => firstFailure ?? firstSuspect,
+    detail: () => firstFailure,
     cleanup: () => {
       cdp.off("Network.requestWillBeSent" as any, onRequest);
       cdp.off("Network.loadingFailed" as any, onFailed);
