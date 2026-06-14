@@ -23,6 +23,7 @@ import {
   getTurnstileErrorCode,
   getTargetId,
   setupFetchInterception,
+  setupProxyFailureWatch,
   waitForDocumentInterception,
   waitForResult,
 } from "./ahrefs-cdp.js";
@@ -75,6 +76,17 @@ export interface ScrapeOutput {
    */
   turnstileErrorCode?: string;
   fetchDecisions?: import("./ahrefs-cdp.js").FetchDecision[];
+  /**
+   * OBSERVED ground truth that a request failed at the PROXY layer this scrape —
+   * the relay's `503 no-backend` surfaced as `ERR_TUNNEL_CONNECTION_FAILED` (or
+   * the proxy was unreachable). Set by `setupProxyFailureWatch`. The session
+   * layer reclassifies such a failure to `ProxyEgressDeadError` (→ `proxy_down`)
+   * AUTHORITATIVELY — no re-probe, no inference — killing the proxy-down →
+   * `turnstile_failed` mislabel at the source. `proxyTunnelError` carries the net
+   * error text for the wide event.
+   */
+  proxyTunnelFailed?: boolean;
+  proxyTunnelError?: string;
   /**
    * Per-attempt session telemetry (browser id, age, solve count, concurrent
    * tabs, proxy egress IP). Populated by `scrapeAttempt` so the GUARANTEED
@@ -275,6 +287,11 @@ export const executeAhrefsScrape = (
       const html = buildHtml(domain, scrapeType, sitekey);
       const htmlBase64 = Buffer.from(html).toString("base64");
       const interception = setupFetchInterception(cdp, domain, htmlBase64, proxyAuth);
+      // OBSERVE the proxy's actual answer: if any request fails with a proxy-layer
+      // net error (the relay's 503 no-backend → ERR_TUNNEL_CONNECTION_FAILED), the
+      // failure is reclassified `proxy_down` directly — never mislabeled as a
+      // turnstile timeout (see ahrefs-session.ts GAP-2).
+      const proxyWatch = setupProxyFailureWatch(cdp);
 
       yield* Effect.logInfo(`Scraping ${domain} (${scrapeType}) → ${url}`);
 
@@ -293,6 +310,8 @@ export const executeAhrefsScrape = (
         // here; the outer catchTag wraps the whole body to capture it.
         yield* Effect.fn("ahrefs.phase.navigate")(function* () {
           yield* enableFetchInterception(interception);
+          // Enable the Network domain before navigating so loadingFailed fires.
+          yield* Effect.promise(() => proxyWatch.ready);
 
           const navStart = Date.now();
           const navPromise = page
@@ -443,7 +462,10 @@ export const executeAhrefsScrape = (
         cdp.off("Page.frameStartedLoading" as any, navGuardHandler);
         connection?.off("Browserless.cloudflareSolved" as any, onSolvedGuard);
         cfListener.cleanup();
+        const proxyTunnelFailed = proxyWatch.failed();
+        const proxyTunnelError = proxyWatch.detail()?.errorText;
         interception.cleanup();
+        proxyWatch.cleanup();
 
         // Return everything the dispatch route needs to build the wide event.
         return {
@@ -460,6 +482,8 @@ export const executeAhrefsScrape = (
           apiCallStatus,
           turnstileErrorCode,
           fetchDecisions: interception.fetchDecisions,
+          proxyTunnelFailed,
+          proxyTunnelError,
         };
       })().pipe(
         // In-band catch for InterceptionTimeoutError. The catchTag
@@ -514,6 +538,10 @@ export const executeAhrefsScrape = (
                   apiCallStatus: "intercept_timeout",
                   turnstileErrorCode: undefined,
                   fetchDecisions: capturedDecisions,
+                  // An interception timeout with NOTHING leaving Chrome is often
+                  // the proxy refusing the CONNECT — capture the observed signal.
+                  proxyTunnelFailed: proxyWatch.failed(),
+                  proxyTunnelError: proxyWatch.detail()?.errorText,
                 };
               })(),
             ),
@@ -563,6 +591,8 @@ export const executeAhrefsScrape = (
                   apiCallStatus: "rate_limited",
                   turnstileErrorCode: undefined,
                   fetchDecisions: capturedDecisions,
+                  proxyTunnelFailed: proxyWatch.failed(),
+                  proxyTunnelError: proxyWatch.detail()?.errorText,
                 };
               })(),
             ),

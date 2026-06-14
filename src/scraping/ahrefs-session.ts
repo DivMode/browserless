@@ -963,48 +963,76 @@ export class AhrefsSessionManager {
                 timings: { navMs: 0, interceptMs: 0, resultMs: 0, totalMs: 0 },
                 cfClearancePresent: false,
                 apiCallStatus: "scrape_error",
+                // Infra failure before/around the scrape — no in-scrape proxy
+                // observation available here; the watch lives inside the scrape.
+                proxyTunnelFailed: false,
+                proxyTunnelError: undefined,
               });
             }),
           );
 
-          // ── GAP 2: mid-scrape egress-death reclassification ──────────
+          // ── Mid-scrape egress-death reclassification → proxy_down ──────────
           //
-          // The acquire gate checked egress liveness ONCE, at acquire. A pooled
-          // session's egress can DIE mid-scrape (phone tunnel drops). The widget
-          // then never loads and the scrape fails as turnstile/interception —
-          // mislabeled `turnstile_failed` / `interception_no_request` instead of
-          // `proxy_down`. When the failure matches the strong "network never came
-          // up" signature, RE-VERIFY the egress (the page is still alive here, so
-          // we can probe through its realm) and reclassify ONLY when the re-probe
-          // CONFIRMS dead. Bounded; runs only on a candidate failure (rare), not
-          // the hot success path. The high evidence bar keeps real turnstile
-          // failures from being turned into false `proxy_down`.
-          const scrapeOutput = yield* isEgressDeathCandidate(rawScrapeOutput)
-            ? Effect.fn("session.egress.reprobe")(function* () {
-                const aliveStart = Date.now();
-                const alive = yield* Effect.tryPromise({
-                  try: () => isEgressAlive(page),
-                  catch: () => false,
-                }).pipe(Effect.catch(() => Effect.succeed(false)));
-                managed.proxyEgressAlive = alive;
-                yield* Effect.annotateCurrentSpan({
-                  "egress.reprobe_alive": alive,
-                  "egress.reprobe_ms": Date.now() - aliveStart,
-                });
-                if (alive) return rawScrapeOutput;
+          // The scrape can fail as turnstile/interception when the REAL cause is a
+          // dead proxy — the historical `turnstile_failed` mislabel. Two paths fix
+          // it, in priority order:
+          //
+          // 1. OBSERVED (authoritative) — `proxyTunnelFailed`: the proxy answered a
+          //    request with a tunnel failure DURING the scrape (the relay's `503
+          //    no-backend` → `ERR_TUNNEL_CONNECTION_FAILED`). This is ground truth,
+          //    captured at the moment it happened, so we reclassify `proxy_down`
+          //    with NO re-probe and NO inference. This is the fix for the racy gap
+          //    the re-probe below misses: the phone reconnects ~2 min later, so a
+          //    post-hoc probe sees a healthy egress and wrongly keeps the turnstile
+          //    label. Reading the proxy's actual answer can't miss the transient.
+          //
+          // 2. RE-PROBE (fallback) — `isEgressDeathCandidate`: for the "network
+          //    never came up" signature with no observed tunnel error, RE-VERIFY
+          //    the egress through the still-alive page and reclassify ONLY when the
+          //    probe CONFIRMS dead. The high bar keeps real turnstile failures from
+          //    becoming false `proxy_down`.
+          const scrapeOutput = yield* rawScrapeOutput.proxyTunnelFailed
+            ? Effect.fn("session.proxy_tunnel_observed")(function* () {
+                managed.proxyEgressAlive = false;
                 yield* Effect.logWarning("session.proxy_egress_dead").pipe(
                   Effect.annotateLogs({
                     browser_id: String(managed.id),
                     domain,
-                    detected_at: "mid_scrape",
+                    detected_at: "proxy_tunnel_failed",
                     prior_error_tag: rawScrapeOutput.result.scrapeError?._tag ?? "unknown",
+                    proxy_tunnel_error: rawScrapeOutput.proxyTunnelError ?? "",
                     proxy_ip_address: managed.proxyIpAddress ?? "",
                     session_id: sessionTokenHolder.current(),
                   }),
                 );
                 return reclassifyAsEgressDead(rawScrapeOutput, domain);
               })()
-            : Effect.succeed(rawScrapeOutput);
+            : isEgressDeathCandidate(rawScrapeOutput)
+              ? Effect.fn("session.egress.reprobe")(function* () {
+                  const aliveStart = Date.now();
+                  const alive = yield* Effect.tryPromise({
+                    try: () => isEgressAlive(page),
+                    catch: () => false,
+                  }).pipe(Effect.catch(() => Effect.succeed(false)));
+                  managed.proxyEgressAlive = alive;
+                  yield* Effect.annotateCurrentSpan({
+                    "egress.reprobe_alive": alive,
+                    "egress.reprobe_ms": Date.now() - aliveStart,
+                  });
+                  if (alive) return rawScrapeOutput;
+                  yield* Effect.logWarning("session.proxy_egress_dead").pipe(
+                    Effect.annotateLogs({
+                      browser_id: String(managed.id),
+                      domain,
+                      detected_at: "mid_scrape",
+                      prior_error_tag: rawScrapeOutput.result.scrapeError?._tag ?? "unknown",
+                      proxy_ip_address: managed.proxyIpAddress ?? "",
+                      session_id: sessionTokenHolder.current(),
+                    }),
+                  );
+                  return reclassifyAsEgressDead(rawScrapeOutput, domain);
+                })()
+              : Effect.succeed(rawScrapeOutput);
 
           // Get targetId for replay matching
           const pageTargetId: string = yield* Effect.tryPromise({

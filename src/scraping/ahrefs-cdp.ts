@@ -77,6 +77,100 @@ export const cleanupCdp = (cdp: CDPSession) =>
     catch: () => undefined as void, // detach never meaningfully fails
   }).pipe(Effect.ignore);
 
+// ── Proxy-failure watch — OBSERVE the proxy's answer, don't infer it ─────────
+//
+// When the oeili relay can't serve (no connected phone), it answers the CONNECT
+// with `503 no-backend`. Chrome surfaces that as a `Network.loadingFailed` with
+// `errorText: net::ERR_TUNNEL_CONNECTION_FAILED`; a relay that's unreachable
+// surfaces `ERR_PROXY_CONNECTION_FAILED`. Those net errors are GROUND TRUTH:
+// "the proxy is down", observed at the moment of the request. The historical
+// mislabel (proxy-down reported as `turnstile_failed`) happened because nothing
+// read this — the scrape only watched "did Turnstile mint a token?", timed out,
+// and threw `TurnstileTimeoutError`; the post-hoc egress re-probe then MISSED the
+// transient (the phone reconnects ~2 min later, so the probe sees a healthy
+// egress). This watch records the proxy's actual failure so the scrape can
+// construct `ProxyEgressDeadError` directly — no inference, no race.
+
+/** Net error texts Chrome reports when a request fails at the PROXY layer. */
+const PROXY_TUNNEL_ERROR_TEXTS = [
+  "ERR_TUNNEL_CONNECTION_FAILED", // proxy answered CONNECT non-2xx (relay 503 no-backend)
+  "ERR_PROXY_CONNECTION_FAILED", // could not reach the proxy at all
+  "ERR_PROXY_CERTIFICATE_INVALID",
+  "ERR_PROXY_AUTH_UNSUPPORTED",
+  "ERR_MANDATORY_PROXY_CONFIGURATION_FAILED",
+] as const;
+
+/**
+ * Pure: does this `Network.loadingFailed` errorText mean the request failed at
+ * the proxy layer (vs. a normal target error)? Unit-tested without a browser.
+ */
+export function isProxyTunnelError(errorText: string | null | undefined): boolean {
+  if (!errorText) return false;
+  return PROXY_TUNNEL_ERROR_TEXTS.some((t) => errorText.includes(t));
+}
+
+export interface ProxyFailureWatch {
+  /** Resolves after `Network.enable` completes — await BEFORE navigating. */
+  ready: Promise<void>;
+  /** True once ANY request in this scrape failed with a proxy-layer net error. */
+  failed: () => boolean;
+  /** First observed `{ errorText, url }`, or null. For the wide event. */
+  detail: () => { errorText: string; url: string } | null;
+  /** Remove the listeners + disable Network. */
+  cleanup: () => void;
+}
+
+/**
+ * Attach a proxy-failure watch to the scrape's CDP session. Call right after
+ * `acquireCdpSession`, await `ready` before navigating. Reads the proxy's actual
+ * answer (`Network.loadingFailed` net errors) — the definitive proxy-down signal.
+ */
+export const setupProxyFailureWatch = (cdp: CDPSession): ProxyFailureWatch => {
+  // requestId → url, so a loadingFailed (which carries no URL) can be named.
+  const urls = new Map<string, string>();
+  let firstFailure: { errorText: string; url: string } | null = null;
+
+  const onRequest = (params: any) => {
+    const requestId = params?.requestId as string;
+    const url = ((params?.request as Record<string, unknown>)?.url as string) ?? "";
+    if (requestId) urls.set(requestId, url);
+  };
+  const onFailed = (params: any) => {
+    const requestId = (params?.requestId as string) ?? "";
+    const errorText = (params?.errorText as string) ?? "";
+    if (!firstFailure && isProxyTunnelError(errorText)) {
+      firstFailure = { errorText, url: urls.get(requestId) ?? "" };
+    }
+    urls.delete(requestId);
+  };
+  const onFinished = (params: any) => {
+    urls.delete((params?.requestId as string) ?? "");
+  };
+
+  cdp.on("Network.requestWillBeSent" as any, onRequest);
+  cdp.on("Network.loadingFailed" as any, onFailed);
+  cdp.on("Network.loadingFinished" as any, onFinished);
+
+  // Network MUST be enabled for loadingFailed to fire — Fetch interception does
+  // NOT imply the Network domain.
+  const ready = cdpSend(cdp, "Network.enable")
+    .then(() => undefined)
+    .catch(() => undefined);
+
+  return {
+    ready,
+    failed: () => firstFailure !== null,
+    detail: () => firstFailure,
+    cleanup: () => {
+      cdp.off("Network.requestWillBeSent" as any, onRequest);
+      cdp.off("Network.loadingFailed" as any, onFailed);
+      cdp.off("Network.loadingFinished" as any, onFinished);
+      urls.clear();
+      cdpSend(cdp, "Network.disable").catch(() => {});
+    },
+  };
+};
+
 // ── Fetch interception ──────────────────────────────────────────────
 
 /** One Fetch Document decision — accumulated during interception, emitted in wide event. */
