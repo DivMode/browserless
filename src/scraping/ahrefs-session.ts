@@ -894,7 +894,16 @@ export class AhrefsSessionManager {
           //      `Fetch.continueWithAuth` once `Fetch.enable` is active — Chrome
           //      stops auto-applying (1) while interception runs. Without (2)
           //      every proxied request 407s → ERR_INVALID_AUTH_CREDENTIALS.
-          const proxyAuth = authUsernameWithSession(sessionTokenHolder.current());
+          // Stamp the scrape's trace-id into the proxy username so the relay
+          // parents its serve/splice spans to THIS trace = one end-to-end
+          // trace. Read from the current span via `fiber.currentSpan` (the
+          // codebase idiom — see trace-helpers.ts). The same ProxyAuth object
+          // flows to page.authenticate() + the Fetch re-auth handler, so the
+          // username stays byte-identical.
+          const scrapeTraceId = yield* Effect.withFiber((fiber) =>
+            Effect.succeed(fiber.currentSpan?.traceId),
+          );
+          const proxyAuth = authUsernameWithSession(sessionTokenHolder.current(), scrapeTraceId);
           const page = yield* Effect.tryPromise({
             try: async () => {
               const p = await managed.browser.newPage();

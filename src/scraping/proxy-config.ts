@@ -76,13 +76,22 @@ export interface ProxyAuth {
  * `Fetch.authRequired` handler (ahrefs-cdp.ts), so both apply byte-identical
  * credentials. Throws (via `requireProxyUrl`) if no proxy env var is set.
  */
-export function authUsernameWithSession(sessionId: string): ProxyAuth | null {
+export function authUsernameWithSession(sessionId: string, traceId?: string): ProxyAuth | null {
   const proxyUrl = new URL(requireProxyUrl());
   if (!proxyUrl.username) return null;
   const baseUser = decodeURIComponent(proxyUrl.username);
   const password = decodeURIComponent(proxyUrl.password);
+  // Append the scrape's W3C trace-id (32 hex, no dashes → round-trips as a
+  // single value) so the relay can parent its serve/splice spans to THIS
+  // browserless trace = ONE end-to-end trace. The relay's RouteParams username
+  // parser already tolerates (and currently ignores) extra `-key-value` pairs,
+  // so this is backward-compatible until the relay reads `trace`. The SAME
+  // ProxyAuth object is applied to BOTH page.authenticate() and the
+  // Fetch.continueWithAuth re-auth handler, so the username stays byte-identical
+  // (no 407/ERR_INVALID_AUTH_CREDENTIALS risk).
+  const traceSuffix = traceId ? `-trace-${traceId}` : "";
   return {
-    username: `${baseUser}-session-${sessionId}`,
+    username: `${baseUser}-session-${sessionId}${traceSuffix}`,
     password,
   };
 }
