@@ -112,6 +112,18 @@ export const PHASE3_TIMEOUT_MS = 30_000;
  * plenty of margin. Saves ~75ms avg per scrape (1.6-4.8s CF WASM init). */
 export const CHECKBOX_POLL_INTERVAL_MS = 50;
 
+/** Phase 3 A/B (CF-contention hypothesis) — light-arm poll interval (ms).
+ * The control polls every 50ms with `DOM.getDocument(depth:-1, pierce:true)`
+ * (a full pierced-tree serialization, ~100ms of Chrome main-thread work). The
+ * hypothesis (2026-06-14, Tempo phase3 p50 ≈ 3.1-3.4s) is that those frequent
+ * heavy dumps steal main-thread cycles from CF's Turnstile WASM, delaying the
+ * checkbox render. The light arm runs the SAME (CF-invisible, identical-
+ * correctness) detection far less often → fewer main-thread steals. Only the
+ * interval differs between arms, so a phase3 DROP under the light arm is clean
+ * evidence the dumps were the bottleneck. Gated by `CF_PHASE3_POLL_AB=1`,
+ * assigned per-scrape by hashing the tab target id (50/50). */
+export const PHASE3_AB_LIGHT_POLL_INTERVAL_MS = 250;
+
 /** Clean WS open timeout (ms). */
 export const CLEAN_WS_OPEN_TIMEOUT_MS = 2_000;
 

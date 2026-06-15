@@ -11,8 +11,31 @@ import { Effect, Fiber } from "effect";
 import type { CdpSessionId } from "../../shared/cloudflare-detection.js";
 import type { ReadonlyActiveDetection } from "./cloudflare-event-emitter.js";
 import { SolverEvents } from "./cf-services.js";
-import { CDP_CALL_TIMEOUT, PHASE3_TIMEOUT_MS, CHECKBOX_POLL_INTERVAL_MS } from "./cf-schedules.js";
+import {
+  CDP_CALL_TIMEOUT,
+  PHASE3_TIMEOUT_MS,
+  CHECKBOX_POLL_INTERVAL_MS,
+  PHASE3_AB_LIGHT_POLL_INTERVAL_MS,
+} from "./cf-schedules.js";
 import { cfPhase3Duration, observeHistogram } from "../../effect-metrics.js";
+
+/**
+ * Phase 3 A/B (CF-contention hypothesis) — gated by `CF_PHASE3_POLL_AB=1`.
+ * Read once at module load (deploy-time flag). When off, every scrape runs the
+ * "heavy" control arm (current behavior) — zero change.
+ */
+const PHASE3_AB_ENABLED = process.env.CF_PHASE3_POLL_AB === "1";
+
+/**
+ * Deterministic 50/50 arm assignment from the (per-scrape-stable) tab target id.
+ * Same scrape → same arm across all phase3 attempts/reloads, so a scrape is
+ * entirely control or entirely variant (no within-scrape mixing).
+ */
+function phase3ArmHash(targetId: string): number {
+  let h = 0;
+  for (let i = 0; i < targetId.length; i++) h = (h + targetId.charCodeAt(i)) | 0;
+  return Math.abs(h) % 2;
+}
 
 /** Effect-returning CDP sender — eliminates the Promise bridge. */
 type EffectSend = (
@@ -312,11 +335,22 @@ export function phase3CheckboxFind(
   typeof SolverEvents.Identifier
 > {
   const pageTargetId = active.pageTargetId;
+  // Phase 3 A/B arm (CF-contention hypothesis). Computed once per scrape from
+  // the stable tab target id so every attempt uses the same interval. When the
+  // flag is off, always "heavy" = unchanged control behavior. The ONLY thing
+  // the arm changes is the poll interval — identical detection method either
+  // way, so a phase3 latency drop under "light" is clean evidence the frequent
+  // heavy DOM dumps were starving CF's WASM. Read the result in Tempo:
+  // `{ name="cf.phase3CheckboxFind" && span.cf.phase3.arm="light" } | quantile_over_time(duration,.5,.9)`.
+  const arm = PHASE3_AB_ENABLED && phase3ArmHash(pageTargetId) === 1 ? "light" : "heavy";
+  const pollInterval =
+    arm === "light" ? PHASE3_AB_LIGHT_POLL_INTERVAL_MS : CHECKBOX_POLL_INTERVAL_MS;
   return Effect.fn("cf.phase3CheckboxFind")(function* () {
     yield* Effect.annotateCurrentSpan({
       "cf.type": active.info.type,
       "cf.target_id": pageTargetId,
       "cf.via": via,
+      "cf.phase3.arm": arm,
     });
     const events = yield* SolverEvents;
 
@@ -362,7 +396,7 @@ export function phase3CheckboxFind(
     let pollCount = 0;
 
     const deadline = Date.now() + PHASE3_TIMEOUT_MS;
-    const pollInterval = CHECKBOX_POLL_INTERVAL_MS;
+    // `pollInterval` is the A/B arm's interval (see arm derivation above).
 
     for (let poll = 0; Date.now() < deadline; poll++) {
       if (active.aborted) return null;
