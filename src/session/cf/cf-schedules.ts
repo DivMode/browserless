@@ -108,21 +108,16 @@ export const OOPIF_PROBE_TIMEOUT = "3 seconds" as const;
 export const PHASE3_TIMEOUT_MS = 30_000;
 
 /** Phase 3 checkbox polling: interval between attempts (ms).
- * Reduced from 200 to 50 — DOM.getDocument is ~2-6ms, so 50ms gives
- * plenty of margin. Saves ~75ms avg per scrape (1.6-4.8s CF WASM init). */
-export const CHECKBOX_POLL_INTERVAL_MS = 50;
-
-/** Phase 3 A/B (CF-contention hypothesis) — light-arm poll interval (ms).
- * The control polls every 50ms with `DOM.getDocument(depth:-1, pierce:true)`
- * (a full pierced-tree serialization, ~100ms of Chrome main-thread work). The
- * hypothesis (2026-06-14, Tempo phase3 p50 ≈ 3.1-3.4s) is that those frequent
- * heavy dumps steal main-thread cycles from CF's Turnstile WASM, delaying the
- * checkbox render. The light arm runs the SAME (CF-invisible, identical-
- * correctness) detection far less often → fewer main-thread steals. Only the
- * interval differs between arms, so a phase3 DROP under the light arm is clean
- * evidence the dumps were the bottleneck. Gated by `CF_PHASE3_POLL_AB=1`,
- * assigned per-scrape by hashing the tab target id (50/50). */
-export const PHASE3_AB_LIGHT_POLL_INTERVAL_MS = 250;
+ * Was 50ms. The `CF_PHASE3_POLL_AB` experiment (2026-06-15) settled the
+ * CF-contention hypothesis: 50ms (heavy) vs 250ms (light) gave IDENTICAL phase3
+ * latency — p50 3.19s vs 3.25s, p90 4.29s both, n≈361 buckets/arm over 6h. So
+ * the frequent heavy `DOM.getDocument(depth:-1, pierce:true)` dumps were NOT
+ * starving CF's Turnstile WASM (the ~3.2s is inherent CF-WASM render time). We
+ * adopt the 250ms interval as the single default: latency-neutral (proven) and
+ * 5× fewer pierced-tree serializations → less Chrome main-thread / host CPU on
+ * a CPU-bound box (the throughput lever). The light arm already ran on 50% of
+ * production scrapes for the experiment with no regression. */
+export const CHECKBOX_POLL_INTERVAL_MS = 250;
 
 /** Clean WS open timeout (ms). */
 export const CLEAN_WS_OPEN_TIMEOUT_MS = 2_000;

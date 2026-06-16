@@ -455,7 +455,8 @@ describe("CF Solver Integration (real nopecha.com)", () => {
           const sleepGap = gap - cdpMs;
           console.log(`  poll_gap: ${gap}ms (cdp=${cdpMs}ms, sleep≈${sleepGap}ms)`);
           // Isolate sleep interval from CDP call time.
-          // CHECKBOX_POLL_INTERVAL_MS = 50 + scheduling overhead ≈ < 500ms.
+          // CHECKBOX_POLL_INTERVAL_MS = 250 (post A/B resolution) + scheduling
+          // overhead ≈ < 500ms.
           expect(sleepGap).toBeLessThan(500);
           // Full gap sanity: even with slow CDP under concurrent load, < 3s
           expect(gap).toBeLessThan(3000);
