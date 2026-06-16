@@ -404,6 +404,44 @@ export const executeAhrefsScrape = (
         const shellTimings = yield* getShellTimings(page);
         const turnstileErrorCode = yield* getTurnstileErrorCode(page);
 
+        // Decompose the post-navigation `waitForResult` wait (the ~7s that
+        // dominates a scrape — `ahrefs.phase.navigate` is ~100ms, `parseResult`
+        // ~0ms, the relay serve ~0.1-0.3s) into CF-token-wait vs the ahrefs API
+        // call(s), IN the trace. `__shellTimings` already measured this per
+        // scrape, but it only reached the R2 output — never a span — so the
+        // single biggest chunk of every scrape was an opaque 7s block in Tempo
+        // (the cf.* solver spans live in a SEPARATE per-tab trace, so the
+        // dispatch trace couldn't answer "of that 7s, how much is CF-token
+        // acquisition (inherent) vs the API call over cellular (where a faster
+        // link helps)?"). All values are ms-since-shell-start (page
+        // performance.now()); null = that step never ran → emit -1 so the
+        // attribute is always present (queryable) and never silently absent.
+        // Annotates the open `ahrefs.scrape.phases.body` span.
+        const st = shellTimings;
+        const lastApiEnd = st.list_call_end ?? st.overview_call_end ?? st.result_set_at;
+        yield* Effect.annotateCurrentSpan({
+          // Shell load → CF Turnstile token received (the CF solve portion).
+          "shell.cf_token_ms": st.token_received_at ?? -1,
+          // The ahrefs overview API call round-trip (upstream over cellular).
+          "shell.overview_ms":
+            st.overview_call_start != null && st.overview_call_end != null
+              ? st.overview_call_end - st.overview_call_start
+              : -1,
+          // The backlinks-list API call (only when triggered, i.e. backlinks > 0).
+          "shell.list_ms":
+            st.list_called && st.list_call_start != null && st.list_call_end != null
+              ? st.list_call_end - st.list_call_start
+              : -1,
+          // Token-received → last API/result: the portion a faster cellular
+          // link (5G vs single-carrier LTE) can actually move.
+          "shell.api_ms":
+            st.token_received_at != null && lastApiEnd != null
+              ? lastApiEnd - st.token_received_at
+              : -1,
+          "shell.result_set_ms": st.result_set_at ?? -1,
+          "shell.list_called": String(st.list_called),
+        });
+
         const result = yield* Effect.fn("ahrefs.phase.parseResult")(function* () {
           return yield* parseResult(apiResult, domain, scrapeType, timings, apiCallStatus).pipe(
             Effect.catchTag("TurnstileTimeoutError", (e) =>
