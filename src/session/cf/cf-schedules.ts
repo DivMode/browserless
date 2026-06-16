@@ -108,16 +108,25 @@ export const OOPIF_PROBE_TIMEOUT = "3 seconds" as const;
 export const PHASE3_TIMEOUT_MS = 30_000;
 
 /** Phase 3 checkbox polling: interval between attempts (ms).
- * Was 50ms. The `CF_PHASE3_POLL_AB` experiment (2026-06-15) settled the
- * CF-contention hypothesis: 50ms (heavy) vs 250ms (light) gave IDENTICAL phase3
- * latency — p50 3.19s vs 3.25s, p90 4.29s both, n≈361 buckets/arm over 6h. So
- * the frequent heavy `DOM.getDocument(depth:-1, pierce:true)` dumps were NOT
- * starving CF's Turnstile WASM (the ~3.2s is inherent CF-WASM render time). We
- * adopt the 250ms interval as the single default: latency-neutral (proven) and
- * 5× fewer pierced-tree serializations → less Chrome main-thread / host CPU on
- * a CPU-bound box (the throughput lever). The light arm already ran on 50% of
- * production scrapes for the experiment with no regression. */
-export const CHECKBOX_POLL_INTERVAL_MS = 250;
+ *
+ * MUST stay 50ms. The `CF_PHASE3_POLL_AB` experiment (#2913) concluded 50ms vs
+ * 250ms were "latency-identical" and #2933 adopted 250ms — but PRODUCTION
+ * DISPROVED that the moment 250ms went to 100% of scrapes (#2933 deployed
+ * 2026-06-15 16:33 HST). `cf.phase3CheckboxFind` mean stepped from a rock-steady
+ * ~4.0–4.6s (10:00–16:00, all-50ms) to ~6–18s (17:00+, all-250ms) — a clean
+ * step at the deploy, with the heavy tail reaching 13–22s per scrape. The A/B's
+ * per-arm quantiles missed it (the effect concentrates in the tail under load /
+ * harder challenges, which the 6h p50/p90 sample averaged away).
+ *
+ * Mechanism (this is why 50ms is load-bearing, NOT just a detection cadence):
+ * the per-poll CDP `DOM.getDocument(depth:-1, pierce:true)` keeps CF's Turnstile
+ * WASM scheduled on Chrome's main thread; at 250ms the WASM starves between
+ * polls, so the challenge renders the checkbox far later → phase3 balloons. The
+ * "throughput vs latency" trade the comment claimed was a false economy: 250ms
+ * roughly TRIPLED per-scrape latency, which costs far more concurrency than the
+ * serialization it saved. Reverted to 50ms (#2933 → revert). Do NOT re-raise
+ * without a tail-aware (p95/p99 + per-trace) A/B, not just p50/p90. */
+export const CHECKBOX_POLL_INTERVAL_MS = 50;
 
 /** Clean WS open timeout (ms). */
 export const CLEAN_WS_OPEN_TIMEOUT_MS = 2_000;

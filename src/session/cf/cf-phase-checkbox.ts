@@ -312,10 +312,11 @@ export function phase3CheckboxFind(
   typeof SolverEvents.Identifier
 > {
   const pageTargetId = active.pageTargetId;
-  // Single poll interval (CHECKBOX_POLL_INTERVAL_MS = 250ms). The
-  // `CF_PHASE3_POLL_AB` experiment proved 50ms vs 250ms is latency-identical
-  // (the ~3.2s is inherent CF-WASM render, not DOM-dump contention), so the
-  // A/B arm split was removed — see cf-schedules.ts.
+  // Single poll interval (CHECKBOX_POLL_INTERVAL_MS = 50ms). The 250ms variant
+  // (#2933) TRIPLED phase3 latency in production (the per-poll pierced DOM dump
+  // is load-bearing: it keeps CF's Turnstile WASM scheduled; at 250ms it starves
+  // → checkbox renders late). Reverted to 50ms — see cf-schedules.ts for the
+  // production step-change evidence.
   const pollInterval = CHECKBOX_POLL_INTERVAL_MS;
   return Effect.fn("cf.phase3CheckboxFind")(function* () {
     yield* Effect.annotateCurrentSpan({
