@@ -235,6 +235,13 @@ export const executeAhrefsScrape = (
    * auth handling on the interception).
    */
   proxyAuth: ProxyAuth | null = null,
+  // Egress IP from the per-browser proxy probe (acquireBrowser →
+  // managed.proxyIpAddress). Stamped onto the cf_token span so the egress
+  // carrier (Verizon vs T-Mobile, by IP range) and CF-solve time are
+  // CO-LOCATED on ONE browserless span — bulletproof correlation with NO
+  // cross-service Tempo stitch (the relay's `relay.backend.*` lives on a
+  // separate service/exporter, which Tempo merges by trace-id with a lag).
+  egressIp: string | undefined = undefined,
   sitekey: string = AHREFS_DEFAULT_SITEKEY,
 ) =>
   Effect.fn("ahrefs.scrape")(function* () {
@@ -420,6 +427,10 @@ export const executeAhrefsScrape = (
         const st = shellTimings;
         const lastApiEnd = st.list_call_end ?? st.overview_call_end ?? st.result_set_at;
         yield* Effect.annotateCurrentSpan({
+          // Egress phone IP (carrier-identifying) CO-LOCATED with cf_token on
+          // this ONE span, so cf_token can be bucketed by carrier (Verizon vs
+          // T-Mobile, by IP range) directly — NO cross-service Tempo join.
+          "proxy.egress_ip": egressIp ?? "unknown",
           // Shell load → CF Turnstile token received (the CF solve portion).
           "shell.cf_token_ms": st.token_received_at ?? -1,
           // The ahrefs overview API call round-trip (upstream over cellular).

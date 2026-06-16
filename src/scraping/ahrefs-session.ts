@@ -945,12 +945,15 @@ export class AhrefsSessionManager {
           yield* Effect.annotateCurrentSpan({ "session.page_create_ms": pageCreateMs });
 
           // Run scrape — thread proxyAuth so the Fetch interception can
-          // re-supply proxy credentials on 407 via Fetch.continueWithAuth.
+          // re-supply proxy credentials on 407 via Fetch.continueWithAuth, and
+          // the per-browser egress IP so the cf_token span carries the egress
+          // carrier (Verizon vs T-Mobile) co-located, no cross-service join.
           const rawScrapeOutput = yield* executeAhrefsScrape(
             page,
             domain,
             scrapeType,
             proxyAuth,
+            managed.proxyIpAddress,
           ).pipe(
             Effect.catch((e) => {
               const msg = e instanceof Error ? e.message : String(e);
