@@ -29,6 +29,7 @@ import {
   METRIC_BROWSERLESS_AHREFS_SCRAPE,
   METRIC_BROWSERLESS_AHREFS_DOC_FULFILL_DURATION,
   METRIC_BROWSERLESS_AHREFS_SCRAPE_DURATION,
+  METRIC_BROWSERLESS_AHREFS_SERVES_BEFORE_BLOCK,
   METRIC_BROWSERLESS_REPLAY_EVENTS,
   METRIC_BROWSERLESS_REPLAY_OVERFLOWS,
   METRIC_BROWSERLESS_PROXY_DROPPED_MESSAGES,
@@ -275,6 +276,23 @@ export const ahrefsScrapeDuration = Metric.histogram(
     description: "Total ahrefs scrape duration",
     boundaries: [100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000, 120000, 180000],
     attributes: { unit: METRIC_BROWSERLESS_AHREFS_SCRAPE_DURATION.unit },
+  },
+);
+
+/**
+ * Scrape attempts a cellular IP served before a real block rotated the sticky
+ * session token — the single most valuable rotation-tuning number. Labels:
+ * {block_trigger, scrape_type}. The serve counter is SHARED across concurrent
+ * scrapes on the one sticky IP, so the labels describe the BLOCK EVENT that
+ * ended the IP, not each individual serve (intentional and coherent).
+ */
+export const ahrefsServesBeforeBlock = Metric.histogram(
+  METRIC_BROWSERLESS_AHREFS_SERVES_BEFORE_BLOCK.name,
+  {
+    description:
+      "Scrape attempts a cellular IP served before a real block rotated the sticky token",
+    boundaries: [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000],
+    attributes: { unit: METRIC_BROWSERLESS_AHREFS_SERVES_BEFORE_BLOCK.unit },
   },
 );
 

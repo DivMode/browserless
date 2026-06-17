@@ -16,6 +16,12 @@
  * already working — the exact failure ADR-0065 was written to fix, where every
  * browser minted its own fresh token and forced a rotation per scrape.
  *
+ * It also tracks a serve counter (`recordServe()` / `servesOnCurrentToken()`):
+ * how many scrape attempts have egressed on the current sticky token. A block
+ * rotation resets it to 0 (the fresh IP starts clean), so the value captured
+ * just before a rotation is "serves before block" — the single most valuable
+ * rotation-tuning number, surfaced as a histogram on the scrape path.
+ *
  * The token is hyphen-free by construction (`freshSessionId` → 32-hex); see
  * `session-id.ts` for why the relay parser requires that.
  *
@@ -31,6 +37,7 @@ import { freshSessionId } from "./session-id.js";
 
 export class SessionTokenHolder {
   #token: string;
+  #servesOnToken = 0;
   readonly #generate: () => string;
 
   /**
@@ -53,17 +60,38 @@ export class SessionTokenHolder {
   }
 
   /**
+   * Record that one scrape attempt egressed on the current sticky token (= one
+   * serve on the pinned cellular IP). The caller bumps this once per attempt;
+   * `observe()` resets it to 0 on rotation so the count read just before a
+   * block is "serves before block."
+   */
+  recordServe(): void {
+    this.#servesOnToken += 1;
+  }
+
+  /**
+   * Serves recorded against the current token since it was last minted/rotated.
+   */
+  servesOnCurrentToken(): number {
+    return this.#servesOnToken;
+  }
+
+  /**
    * Inspect a scrape outcome and rotate the token iff it was an
    * IP-attributable block (`isBlockTrigger`). Successes and non-block errors
    * (solver failures, CDP/navigation faults) leave the token untouched — that
    * is the stable-until-block guarantee. Rotating on a non-block error would
    * burn a fresh IP that the block detector says rotation cannot help.
    *
+   * On rotation the serve counter resets to 0 — the fresh IP starts clean, so
+   * the value read just before this call is "serves before block."
+   *
    * @returns `true` if the token was rotated, `false` if held.
    */
   observe(error: ScrapeError | undefined): boolean {
     if (!isBlockTrigger(error)) return false;
     this.#token = this.#generate();
+    this.#servesOnToken = 0;
     return true;
   }
 }

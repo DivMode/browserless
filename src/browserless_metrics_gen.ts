@@ -28,6 +28,13 @@ export const METRIC_BROWSERLESS_AHREFS_SCRAPE_DURATION = {
   unit: "ms",
   instrument: "histogram",
 } as const;
+/** Scrape attempts a cellular IP served before a real block rotated the sticky session token (labels block_trigger, scrape_type). */
+export const METRIC_BROWSERLESS_AHREFS_SERVES_BEFORE_BLOCK = {
+  name: "browserless_ahrefs_serves_before_block",
+  otel_name: "browserless.ahrefs.serves_before_block",
+  unit: "{serve}",
+  instrument: "histogram",
+} as const;
 /** Service availability boolean gauge (1=yes, 0=no) */
 export const METRIC_BROWSERLESS_AVAILABLE = {
   name: "browserless_available_ratio",

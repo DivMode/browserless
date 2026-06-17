@@ -32,6 +32,8 @@ import {
   ahrefsScrapeTotal,
   ahrefsDocFulfillDuration,
   ahrefsScrapeDuration,
+  ahrefsServesBeforeBlock,
+  observeHistogram,
 } from "../effect-metrics.js";
 import type { FetchDecision } from "./ahrefs-cdp.js";
 
@@ -690,6 +692,8 @@ export class AhrefsSessionManager {
   scrape(domain: string, scrapeType: ScrapeType): Effect.Effect<ScrapeOutput, Error> {
     return Effect.fn("session.scrape")(function* (this: AhrefsSessionManager) {
       const firstOutput = yield* this.scrapeAttempt(domain, scrapeType, 1);
+      // The attempt egressed on the current sticky IP = one serve on this token.
+      sessionTokenHolder.recordServe();
 
       // Stable-until-block: a success keeps the IP pinned (sticky); a block
       // rotates the token (fresh IP on the retry); a non-block error neither
@@ -697,11 +701,20 @@ export class AhrefsSessionManager {
       if (firstOutput.result.success) {
         return firstOutput;
       }
+      // Capture the serve count BEFORE observe() — observe resets it to 0 on a
+      // rotation, so this is "serves before block." The counter is SHARED across
+      // concurrent scrapes on the one sticky IP, so the metric describes the
+      // BLOCK EVENT that ended the IP, not each individual serve (intentional).
+      const servesBeforeBlock = sessionTokenHolder.servesOnCurrentToken();
       if (!sessionTokenHolder.observe(firstOutput.result.scrapeError)) {
         return firstOutput;
       }
 
       const triggerTag = firstOutput.result.scrapeError?._tag ?? "unknown";
+      yield* observeHistogram(ahrefsServesBeforeBlock, servesBeforeBlock, {
+        block_trigger: triggerTag,
+        scrape_type: scrapeType,
+      });
       yield* Effect.logInfo("ahrefs.rotation.triggered").pipe(
         Effect.annotateLogs({
           domain,
@@ -713,6 +726,8 @@ export class AhrefsSessionManager {
       );
 
       const secondOutput = yield* this.scrapeAttempt(domain, scrapeType, 2);
+      // The retry egressed on the rotated (fresh) sticky IP = one serve on it.
+      sessionTokenHolder.recordServe();
 
       const postOutcome = secondOutput.result.success
         ? "success"
@@ -720,8 +735,16 @@ export class AhrefsSessionManager {
           ? "same_block"
           : "different_error";
 
+      // Capture before the trailing observe() resets the (fresh-IP) serve count.
+      const servesBeforeBlock2 = sessionTokenHolder.servesOnCurrentToken();
       // Trailing block → rotate so the next request starts on a fresh IP.
       const trailingRotated = sessionTokenHolder.observe(secondOutput.result.scrapeError);
+      if (trailingRotated) {
+        yield* observeHistogram(ahrefsServesBeforeBlock, servesBeforeBlock2, {
+          block_trigger: secondOutput.result.scrapeError?._tag ?? "unknown",
+          scrape_type: scrapeType,
+        });
+      }
 
       yield* Effect.logInfo("ahrefs.rotation.completed").pipe(
         Effect.annotateLogs({

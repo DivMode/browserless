@@ -79,4 +79,35 @@ describe("SessionTokenHolder", () => {
     holder.observe(cfBlock());
     expect(holder.current()).toBe("cccc3333");
   });
+
+  // ── Serve counter (serves-before-block metric source) ──
+  it("recordServe increments servesOnCurrentToken", () => {
+    const holder = new SessionTokenHolder(sequence("aaaa1111", "bbbb2222"));
+    expect(holder.servesOnCurrentToken()).toBe(0);
+    holder.recordServe();
+    expect(holder.servesOnCurrentToken()).toBe(1);
+    holder.recordServe();
+    holder.recordServe();
+    expect(holder.servesOnCurrentToken()).toBe(3);
+  });
+
+  it("resets the serve count to 0 when a block rotates the token", () => {
+    const holder = new SessionTokenHolder(sequence("aaaa1111", "bbbb2222"));
+    holder.recordServe();
+    holder.recordServe();
+    expect(holder.servesOnCurrentToken()).toBe(2);
+
+    // The count read just before this rotation is "serves before block".
+    expect(holder.observe(cfBlock())).toBe(true);
+    expect(holder.servesOnCurrentToken()).toBe(0);
+  });
+
+  it("does NOT reset the serve count on a non-block observe", () => {
+    const holder = new SessionTokenHolder(sequence("aaaa1111", "bbbb2222"));
+    holder.recordServe();
+    holder.recordServe();
+    expect(holder.observe(nonBlockApi())).toBe(false);
+    expect(holder.observe(undefined)).toBe(false);
+    expect(holder.servesOnCurrentToken()).toBe(2);
+  });
 });
