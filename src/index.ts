@@ -1,6 +1,7 @@
 import Pyroscope from "@pyroscope/nodejs";
 import { Browserless } from "@browserless.io/browserless";
 import { Effect } from "effect";
+import { validateR2Config } from "./scraping/r2-writer.js";
 
 // ── Continuous profiling (Pyroscope) ─────────────────────────────────
 // Must init before any other code to capture full startup profile.
@@ -33,6 +34,24 @@ for (const key of REQUIRED_ENV) {
     console.error(`  Set it in .env.dev (local) or production config.\n`);
     process.exit(1);
   }
+}
+
+// ── R2 fail-closed config (ADR-0093 charter rider) ───────────────────
+// The ahrefs enrichment pipeline writes EVERY scrape result to R2; with the
+// credential vars empty the S3 client is null and all results are SILENTLY
+// dropped (R2→queue→workflow→Postgres→Meilisearch goes dark with NO error).
+// When R2 is REQUIRED (R2_REQUIRED=1, set by infra for the prod ahrefs path),
+// refuse to boot if any of R2_ACCOUNT_ID / R2_ACCESS_KEY_ID /
+// R2_SECRET_ACCESS_KEY is missing — naming the offenders — instead of booting
+// into silent total data loss. No-op in local dev / non-ahrefs runs (which set
+// no R2 vars and leave R2_REQUIRED unset). Mirrors the relay's startup
+// validate_rotation_config gate. Checked HERE, in the single shared startup
+// path before the server accepts connections, alongside the REQUIRED_ENV block.
+try {
+  validateR2Config();
+} catch (err) {
+  console.error(`\n  ${err instanceof Error ? err.message : String(err)}\n`);
+  process.exit(1);
 }
 
 const program = Effect.fn("browserless.main")(function* () {
