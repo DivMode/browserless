@@ -66,9 +66,22 @@ describe("ahrefs InvalidCaptcha false-success fix", () => {
       parseResult(
         {
           success: true,
+          // Full numeric block the PG writer persists. The prior fixture
+          // omitted dofollowBacklinks/dofollowRefdomains — an incomplete-data
+          // overview the new allowlist (and downstream strict schema) correctly
+          // reject. User-approved update (2026-06-30); assertion unchanged.
           overview: [
             "Ok",
-            { data: { backlinks: 5, domainRating: 10, refdomains: 3 }, signedInput: {} },
+            {
+              data: {
+                backlinks: 5,
+                domainRating: 10,
+                refdomains: 3,
+                dofollowBacklinks: 4,
+                dofollowRefdomains: 2,
+              },
+              signedInput: {},
+            },
           ],
           backlinks: [{}, { backlinks: [] }],
         },

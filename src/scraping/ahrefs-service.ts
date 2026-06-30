@@ -29,6 +29,7 @@ import {
 } from "./ahrefs-cdp.js";
 import { setupCfListener } from "./ahrefs-cf-listener.js";
 import type { CfSolveMetrics } from "./ahrefs-cf-listener.js";
+import { checkOverviewContract } from "./ahrefs-contract.js";
 import type { DiagnosticInfo } from "./ahrefs-cdp.js";
 import {
   ApiError,
@@ -177,36 +178,45 @@ export const parseResult = (
     );
   }
 
-  // The token-bearing overview/traffic call returned a STRUCTURED ahrefs error
-  // envelope — an HTTP-200 body of the form ["Error", [<reason>]] (e.g.
-  // ["Error",["InvalidCaptcha"]]). `fetchJSON` only throws on non-2xx, so the
-  // browser shell parses this 200 and calls completeSuccess — WITHOUT this branch
-  // the scrape is silently recorded success:true while carrying ZERO data: the wide
-  // event reads api_diagnosis="healthy" / ahrefs_success="true" even though the
-  // domain got nothing. (The 2026-06-30 ahrefs InvalidCaptcha incident showed 99%
-  // "healthy" while ~300 domains/30m lost their overview, caught only by the
-  // downstream workflow validator — backlinks.ts mirrors exactly this check.)
-  // InvalidCaptcha is ahrefs rejecting our Turnstile token; it is NOT IP-attributable
-  // (a fresh token from the SAME cellular egress is accepted — verified 2026-06-30),
-  // so cfBlocked:false keeps it OUT of the rotation trigger set (block-detection.ts) —
-  // rotating would burn a phone cooldown for nothing. It IS retryable: success:false
-  // makes the workflow re-dispatch a fresh scrape (fresh token) WITHOUT rotation,
-  // matching the prior retry behavior but correctly classified.
-  const overview = apiResult.overview;
-  if (Array.isArray(overview) && overview[0] === "Error") {
-    const reasons = Array.isArray(overview[1]) ? overview[1] : [];
-    const reason = reasons.length ? reasons.map(String).join(",") : "unknown";
+  // ── SUCCESS CONTRACT: ALLOWLIST (not denylist) ─────────────────────────
+  // Historically this layer recorded success for ANYTHING that wasn't a known
+  // error shape ("success unless overview[0]==='Error'"), so any unanticipated
+  // 200 body — an InvalidCaptcha envelope, a missing/undefined overview, an
+  // ["Ok",…] shell with an incomplete data block, a future ahrefs change —
+  // was silently recorded success:true while carrying ZERO usable data: the
+  // wide event read api_diagnosis="healthy" / ahrefs_success="true" (99% green)
+  // even though the domain got nothing, caught only DOWNSTREAM by the workflow
+  // validator (backlinks.ts) → retry → exhaust → terminal-fail.
+  //
+  // Inverted: succeed ONLY IF the overview is a well-formed ["Ok", { data: … }]
+  // envelope carrying the numeric fields the Postgres writer persists
+  // (checkOverviewContract mirrors @catchseo/core's strict schema). Everything
+  // else is a typed ApiError with a precise reason. This holds the invariant
+  // ahrefs_success="true" ⇔ valid data will be persisted downstream — by
+  // construction. See ahrefs-contract.ts for the field-level contract.
+  //
+  // The reason carries through the existing `ahrefs_<type>_api_error:<reason>`
+  // message scheme so deriveApiDiagnosis still maps an InvalidCaptcha envelope
+  // → api_diagnosis="invalid_captcha" (and other reasons → "ahrefs_api_error").
+  // cfBlocked:false: an InvalidCaptcha is ahrefs rejecting our Turnstile token,
+  // NOT IP-attributable (a fresh token from the SAME cellular egress is accepted
+  // — verified 2026-06-30), so it stays OUT of the rotation trigger set; it IS
+  // retryable (success:false re-dispatches a fresh scrape WITHOUT rotation).
+  const contract = checkOverviewContract(scrapeType, apiResult.overview);
+  if (!contract.ok) {
     return Effect.fail(
       new ApiError({
         domain,
-        message: `ahrefs_${scrapeType}_api_error:${reason}`,
+        message: `ahrefs_${scrapeType}_api_error:${contract.reason}`,
         apiErrors,
         cfBlocked: false,
       }),
     );
   }
 
-  // Backlinks mode — check for partial failure (overview OK, backlinks failed)
+  // Backlinks mode — overview is valid; check for partial failure on the
+  // backlinks-LIST call (the list is nullable downstream, retried via
+  // backlinksPartial, so a list error is distinct from an invalid overview).
   if (scrapeType === "backlinks") {
     const bl = apiResult.backlinks as Record<string, unknown> | undefined;
     if (bl?.error) {
@@ -230,7 +240,7 @@ export const parseResult = (
     });
   }
 
-  // Traffic mode — success
+  // Traffic mode — overview is valid.
   return Effect.succeed({
     success: true,
     domain,
