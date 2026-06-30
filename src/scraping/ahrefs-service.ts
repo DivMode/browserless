@@ -141,7 +141,7 @@ interface ScrapeTimings {
  * ApiError, BacklinksFetchFailed). The caller uses Effect.catchTags to convert
  * them back to AhrefsScrapeResult with full error context for the wide event.
  */
-const parseResult = (
+export const parseResult = (
   apiResult: Record<string, unknown> | undefined,
   domain: string,
   scrapeType: ScrapeType,
@@ -173,6 +173,35 @@ const parseResult = (
         message: String(apiResult.message ?? apiResult.error),
         apiErrors,
         cfBlocked: hasCfBlock,
+      }),
+    );
+  }
+
+  // The token-bearing overview/traffic call returned a STRUCTURED ahrefs error
+  // envelope — an HTTP-200 body of the form ["Error", [<reason>]] (e.g.
+  // ["Error",["InvalidCaptcha"]]). `fetchJSON` only throws on non-2xx, so the
+  // browser shell parses this 200 and calls completeSuccess — WITHOUT this branch
+  // the scrape is silently recorded success:true while carrying ZERO data: the wide
+  // event reads api_diagnosis="healthy" / ahrefs_success="true" even though the
+  // domain got nothing. (The 2026-06-30 ahrefs InvalidCaptcha incident showed 99%
+  // "healthy" while ~300 domains/30m lost their overview, caught only by the
+  // downstream workflow validator — backlinks.ts mirrors exactly this check.)
+  // InvalidCaptcha is ahrefs rejecting our Turnstile token; it is NOT IP-attributable
+  // (a fresh token from the SAME cellular egress is accepted — verified 2026-06-30),
+  // so cfBlocked:false keeps it OUT of the rotation trigger set (block-detection.ts) —
+  // rotating would burn a phone cooldown for nothing. It IS retryable: success:false
+  // makes the workflow re-dispatch a fresh scrape (fresh token) WITHOUT rotation,
+  // matching the prior retry behavior but correctly classified.
+  const overview = apiResult.overview;
+  if (Array.isArray(overview) && overview[0] === "Error") {
+    const reasons = Array.isArray(overview[1]) ? overview[1] : [];
+    const reason = reasons.length ? reasons.map(String).join(",") : "unknown";
+    return Effect.fail(
+      new ApiError({
+        domain,
+        message: `ahrefs_${scrapeType}_api_error:${reason}`,
+        apiErrors,
+        cfBlocked: false,
       }),
     );
   }

@@ -417,6 +417,17 @@ function deriveApiDiagnosis(result: AhrefsScrapeResult, cfMetrics: CfSolveMetric
   // ── Layer 4 — ahrefs /v4/ data API ──────────────────────────────────────────
   // A token WAS obtained and the data call itself errored — the latest layer, so
   // checked last. CF-intercepted vs a plain ahrefs HTTP status.
+
+  // A STRUCTURED ahrefs error envelope (HTTP 200 body ["Error",[reason]]) carries NO
+  // HTTP apiError (it's a 200), so parseResult surfaces it as ApiError with a
+  // `ahrefs_<type>_api_error:<reason>` message. Match it HERE — before the apiErrors
+  // checks below, which would otherwise leave it as "" (the false `?`). InvalidCaptcha
+  // (ahrefs rejecting our Turnstile token) is the dominant reason; surface it distinctly
+  // so the dashboard/alerts can see it. Cardinality-bounded: InvalidCaptcha vs one
+  // generic bucket.
+  if (e?._tag === "ApiError" && !e.cfBlocked && e.message.startsWith("ahrefs_")) {
+    return /InvalidCaptcha/i.test(e.message) ? "invalid_captcha" : "ahrefs_api_error";
+  }
   if (result.apiErrors?.some((x) => x.isCf)) {
     return cfMetrics.cf_solved ? "cf_rechallenge" : "cf_blocked";
   }
