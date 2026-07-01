@@ -926,8 +926,18 @@ export class AhrefsSessionManager {
           // flows to page.authenticate() + the Fetch re-auth handler, so the
           // username stays byte-identical.
           const scrapeSpan = yield* Effect.withFiber((fiber) => Effect.succeed(fiber.currentSpan));
+          // Capture the session token THIS attempt actually serves on. The
+          // process-wide `sessionTokenHolder` is MUTABLE and rotates on blocks
+          // (shared across all concurrent scrapes), so a fresh `.current()` read
+          // later in this attempt can drift to a different token the relay never
+          // pinned for this scrape. The token is stable WITHIN a single
+          // scrapeAttempt (rotation happens BETWEEN attempts, at the higher-level
+          // retry via `sessionTokenHolder.observe()`), so this captured value is
+          // the exact key the relay pins to a phone for every CONNECT this
+          // attempt makes. Reuse it for the whoami read below (~line 1130).
+          const scrapeSessionId = sessionTokenHolder.current();
           const proxyAuth = authUsernameWithSession(
-            sessionTokenHolder.current(),
+            scrapeSessionId,
             scrapeSpan?.traceId,
             scrapeSpan?.spanId,
           );
@@ -1122,12 +1132,18 @@ export class AhrefsSessionManager {
           // Ground-truth per-scrape egress provenance (relay-whoami.ts). FORK it
           // here so the session-keyed `/v1/whoami` read runs CONCURRENTLY with
           // page.close + the ≥2s replay-flush wait below — it completes inside a
-          // window that already exists, so it adds ZERO scrape latency. The pin
-          // is LIVE at this point (the last CONNECT was seconds ago; sticky TTI
-          // is 10 min), so the read returns the phone that ACTUALLY carried this
-          // scrape. `relayWhoami` never fails (1.5s abort + fail-to-null), so
-          // joining below always yields the value or null (→ ipify fallback).
-          const whoamiFiber = yield* Effect.forkChild(relayWhoami(sessionTokenHolder.current()));
+          // window that already exists, so it adds ZERO scrape latency. Query with
+          // `scrapeSessionId` — the token THIS attempt's CONNECTs carried, so the
+          // relay pinned THAT key to a phone — NOT a fresh
+          // `sessionTokenHolder.current()`, which may have rotated (this scrape's
+          // own block, OR any concurrent scrape's) to a token the relay never
+          // pinned for this scrape → a wrong-key read that returns null. Keyed on
+          // the captured serving token the pin is LIVE (the last CONNECT was
+          // seconds ago; sticky TTI is 10 min), so the read returns the phone that
+          // ACTUALLY carried this scrape. `relayWhoami` never fails (1.5s abort +
+          // fail-to-null), so joining below always yields the value or null (→
+          // ipify fallback).
+          const whoamiFiber = yield* Effect.forkChild(relayWhoami(scrapeSessionId));
 
           // Close page (triggers replay flush) — bounded best-effort.
           yield* Effect.fn("ahrefs.page.close")(function* () {
