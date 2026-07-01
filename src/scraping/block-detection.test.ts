@@ -18,6 +18,16 @@ describe("isBlockTrigger", () => {
   });
 
   describe("ApiError", () => {
+    it("triggers on InvalidCaptcha even when cfBlocked is false (rotate on token reject)", () => {
+      const e = new ApiError({
+        domain: "x.com",
+        message: "ahrefs_backlinks_api_error:InvalidCaptcha",
+        apiErrors: [],
+        cfBlocked: false,
+      });
+      expect(isBlockTrigger(e)).toBe(true);
+    });
+
     it("triggers when cfBlocked is true", () => {
       const e = new ApiError({
         domain: "x.com",

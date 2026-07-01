@@ -9,6 +9,15 @@
  *   1. ApiError({cfBlocked: true})
  *      Overview API call returned with a CF challenge or a CF-flagged 4xx.
  *
+ *   1b. ApiError whose message matches /InvalidCaptcha/i (cfBlocked stays false)
+ *      ahrefs rejected our Turnstile token on the overview/traffic call. A fresh
+ *      session token → fresh egress IP + a fresh solve on the retry recovers far
+ *      faster than the workflow's exponential-backoff retry. NOTE: prior evidence
+ *      (a fresh token from the SAME cellular egress was accepted) suggests this may
+ *      be ahrefs-side and IP-independent; we rotate anyway (product decision) and
+ *      measure efficacy via post_rotation_outcome + the per-IP reject dashboard.
+ *      cfBlocked is deliberately NOT set so it isn't mislabeled a Cloudflare block.
+ *
  *   2. BacklinksFetchFailed with any apiErrors[*].isCf === true
  *      Overview succeeded but the secondary backlinks-list call hit a
  *      CF challenge — same IP-attributable block.
@@ -60,7 +69,18 @@ export function isBlockTrigger(error: ScrapeError | undefined): boolean {
   if (!error) return false;
   switch (error._tag) {
     case "ApiError":
-      return error.cfBlocked;
+      // CF-flagged blocks always rotate (cfBlocked). InvalidCaptcha ALSO
+      // rotates: ahrefs rejected our Turnstile token, and a fresh session token
+      // → fresh egress IP + a fresh solve on the retry is the fastest recovery
+      // — far quicker than sitting in the workflow's exponential-backoff retry
+      // (exp(least(attempts,10)) seconds → hours after a few failures). Matched
+      // on the message (`ahrefs_<type>_api_error:InvalidCaptcha`, the same
+      // /InvalidCaptcha/i the wide event uses) WITHOUT flipping cfBlocked, so
+      // downstream labels never mislabel it as a Cloudflare block. Whether
+      // rotation actually clears InvalidCaptcha (vs it being ahrefs-side and
+      // IP-independent) is now measurable per rotation: post_rotation_outcome
+      // (success vs same_block) + the per-IP reject dashboard (#3297).
+      return error.cfBlocked || /InvalidCaptcha/i.test(error.message);
     case "BacklinksFetchFailed":
       return error.typedApiErrors.some((e) => e.isCf);
     case "TurnstileTimeoutError":
