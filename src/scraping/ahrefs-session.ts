@@ -11,7 +11,7 @@
  * - TTL: 120s max browser age, invalidation on failure or CF solve TTL
  */
 import { cpus } from "os";
-import { Cause, Effect, Exit, Metric, Pool, Scope } from "effect";
+import { Cause, Effect, Exit, Fiber, Metric, Pool, Scope } from "effect";
 import puppeteer from "puppeteer-core";
 import type { Browser } from "puppeteer-core";
 
@@ -27,7 +27,8 @@ import { runForkInServer } from "../otel-runtime.js";
 import { SessionTokenHolder } from "./session-token-holder.js";
 import { isBlockTrigger } from "./block-detection.js";
 import { authUsernameWithSession, requireProxyUrl } from "./proxy-config.js";
-import { writeFailure, writeResult } from "./r2-writer.js";
+import { writeFailure, writeResult, type ScrapeProvenance } from "./r2-writer.js";
+import { relayWhoami } from "./relay-whoami.js";
 import {
   ahrefsScrapeTotal,
   ahrefsDocFulfillDuration,
@@ -1118,6 +1119,16 @@ export class AhrefsSessionManager {
           // time-bounded AND no longer gate the outcome record. The worst case
           // is a scrape with `replay_url=""`, never a vanished scrape.
 
+          // Ground-truth per-scrape egress provenance (relay-whoami.ts). FORK it
+          // here so the session-keyed `/v1/whoami` read runs CONCURRENTLY with
+          // page.close + the ≥2s replay-flush wait below — it completes inside a
+          // window that already exists, so it adds ZERO scrape latency. The pin
+          // is LIVE at this point (the last CONNECT was seconds ago; sticky TTI
+          // is 10 min), so the read returns the phone that ACTUALLY carried this
+          // scrape. `relayWhoami` never fails (1.5s abort + fail-to-null), so
+          // joining below always yields the value or null (→ ipify fallback).
+          const whoamiFiber = yield* Effect.forkChild(relayWhoami(sessionTokenHolder.current()));
+
           // Close page (triggers replay flush) — bounded best-effort.
           yield* Effect.fn("ahrefs.page.close")(function* () {
             const closeStart = Date.now();
@@ -1136,6 +1147,16 @@ export class AhrefsSessionManager {
           yield* Effect.sleep(REPLAY_FLUSH_WAIT);
           const replayMeta = yield* resolveReplayUrl(scrapeOutput, pageTargetId);
 
+          // AWAIT the forked whoami read. It ran concurrently with page.close +
+          // the ≥2s replay-flush above, so by now it is already resolved — this
+          // join returns immediately with the ground-truth provenance or null.
+          // Bounded + fail-to-null defensively so a wedged relay can never make
+          // the join the thing that hangs the terminal path.
+          const whoami = yield* Fiber.join(whoamiFiber).pipe(
+            Effect.timeout("2 seconds"),
+            Effect.orElseSucceed(() => null),
+          );
+
           // Build the session context the terminal wide event needs. We do NOT
           // emit the wide event here — the guaranteed terminal path owns the
           // single emit so it fires even if this attempt is interrupted before
@@ -1150,6 +1171,10 @@ export class AhrefsSessionManager {
             browser_acquire_ms: browserAcquireMs,
             page_create_ms: pageCreateMs,
             proxy_ip_address: managed.proxyIpAddress,
+            // Ground-truth per-scrape provenance (null when whoami had no live pin).
+            scrape_phone_id: whoami?.phone_id ?? null,
+            scrape_cellular_ip: whoami?.cellular_ip ?? null,
+            scrape_carrier: whoami?.carrier ?? null,
           };
 
           // Patch replay with scrape context (domain, error_type, success) for
@@ -1398,9 +1423,17 @@ const writeR2Outcome = (
   output: ScrapeOutput,
 ): Effect.Effect<void> =>
   Effect.fn("dispatch.writeR2")(function* () {
+    // Ground-truth per-scrape egress provenance (relay-whoami.ts), stamped onto
+    // the R2 payload so the downstream workflow/Postgres row carries the exact
+    // phone + cellular IP + carrier the scrape egressed from.
+    const provenance: ScrapeProvenance = {
+      scrape_phone_id: output.sessionContext?.scrape_phone_id ?? null,
+      scrape_cellular_ip: output.sessionContext?.scrape_cellular_ip ?? null,
+      scrape_carrier: output.sessionContext?.scrape_carrier ?? null,
+    };
     const write = output.result.success
-      ? writeResult(instanceId, domain, scrapeType, output.result)
-      : writeFailure(instanceId, domain, scrapeType, output.result.error ?? "unknown");
+      ? writeResult(instanceId, domain, scrapeType, output.result, provenance)
+      : writeFailure(instanceId, domain, scrapeType, output.result.error ?? "unknown", provenance);
     yield* write.pipe(
       Effect.timeout(R2_WRITE_TIMEOUT),
       Effect.matchCauseEffect({

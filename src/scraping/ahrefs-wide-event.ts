@@ -174,6 +174,14 @@ const ATTR_API_CALL_STATUS = "api_call_status";
 // `session.browser.acquired` log so it's joinable by trace_id without costing
 // a slot here.
 const ATTR_PROXY_IP_ADDRESS = "proxy_ip_address";
+// Ground-truth per-scrape egress provenance from the relay's session-keyed
+// /v1/whoami (relay-whoami.ts). `proxy_phone` = the backend phone that carried
+// this scrape; `proxy_carrier` = its reported carrier. `proxy_ip_address` now
+// PREFERS the relay's cellular_ip and only falls back to the acquire-time ipify
+// probe when whoami had no live pin. Two extra always-on labels — success base
+// 94→96, worst case 99→101, still well under the 113 hard cap (see below).
+const ATTR_PROXY_PHONE = "proxy_phone";
+const ATTR_PROXY_CARRIER = "proxy_carrier";
 
 // ── Builder ─────────────────────────────────────────────────────────
 
@@ -189,9 +197,19 @@ export interface SessionContext {
   /**
    * Egress IP observed at browser acquire time, captured by an IP-echo
    * fetch through Chrome's `--proxy-server`. `undefined` when the IP echo
-   * services were unreachable.
+   * services were unreachable. FALLBACK only — `scrape_cellular_ip` (the
+   * relay's ground-truth per-scrape IP) is preferred when present.
    */
   proxy_ip_address?: string;
+  /**
+   * GROUND-TRUTH per-scrape egress provenance, read from the relay's
+   * session-keyed `/v1/whoami` at page-close time (see relay-whoami.ts).
+   * `null` when the whoami read failed / had no live pin (e.g. a Hetzner
+   * failover) — the wide event then falls back to the ipify `proxy_ip_address`.
+   */
+  scrape_phone_id?: string | null;
+  scrape_cellular_ip?: string | null;
+  scrape_carrier?: string | null;
 }
 
 export interface WideEventInput {
@@ -731,7 +749,16 @@ function buildWideEventInner(input: WideEventInput): Record<string, string> {
     // Proxy observability — fixes the "Scrapes by IP" panel.
     // `chrome_proxy_server` is emitted on `session.browser.acquired` instead;
     // dropping here to stay under Loki's 128-label cap on log records.
-    [ATTR_PROXY_IP_ADDRESS]: input.sessionContext?.proxy_ip_address ?? "",
+    //
+    // GROUND-TRUTH provenance (relay /v1/whoami, see relay-whoami.ts). The IP now
+    // PREFERS the relay's per-scrape `scrape_cellular_ip`; it only falls back to
+    // the acquire-time ipify probe (`proxy_ip_address`, often null/pool-stale at
+    // the LAN relay) when whoami had no live pin. `||` (not `??`) so an empty
+    // cellular_ip (phone hasn't reported an IP yet) also falls through to ipify.
+    [ATTR_PROXY_IP_ADDRESS]:
+      input.sessionContext?.scrape_cellular_ip || input.sessionContext?.proxy_ip_address || "",
+    [ATTR_PROXY_PHONE]: input.sessionContext?.scrape_phone_id ?? "",
+    [ATTR_PROXY_CARRIER]: input.sessionContext?.scrape_carrier ?? "",
   };
 }
 

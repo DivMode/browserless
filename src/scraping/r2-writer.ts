@@ -35,6 +35,28 @@ import type { AhrefsScrapeResult } from "./ahrefs-types.js";
 
 const KEY_PREFIX = "ahrefs-results";
 
+/**
+ * Ground-truth per-scrape egress provenance, sourced from the relay's
+ * session-keyed `/v1/whoami` (see relay-whoami.ts) and threaded onto the R2
+ * result payload so the downstream workflow / Postgres row can carry the exact
+ * phone + cellular IP + carrier the scrape egressed from. Each field is `null`
+ * when the whoami read failed or had no live pin.
+ */
+export interface ScrapeProvenance {
+  scrape_phone_id: string | null;
+  scrape_cellular_ip: string | null;
+  scrape_carrier: string | null;
+}
+
+/** Normalize an optional provenance into the three always-present JSON fields. */
+function provenanceFields(provenance: ScrapeProvenance | undefined): ScrapeProvenance {
+  return {
+    scrape_phone_id: provenance?.scrape_phone_id ?? null,
+    scrape_cellular_ip: provenance?.scrape_cellular_ip ?? null,
+    scrape_carrier: provenance?.scrape_carrier ?? null,
+  };
+}
+
 /** The three credential env vars an R2 write needs. Order = error-report order. */
 const R2_CREDENTIAL_VARS = ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"] as const;
 
@@ -152,6 +174,7 @@ export const writeResult = (
   domain: string,
   scrapeType: string,
   result: AhrefsScrapeResult,
+  provenance?: ScrapeProvenance,
 ) =>
   Effect.fn("r2.writeResult")(function* () {
     const s3 = getS3Client();
@@ -170,6 +193,7 @@ export const writeResult = (
       instance_id: instanceId,
       stored_at: Date.now() / 1000,
       error: result.error ?? null,
+      ...provenanceFields(provenance),
       result,
     });
 
@@ -202,6 +226,7 @@ export const writeFailure = (
   domain: string,
   scrapeType: string,
   error: string,
+  provenance?: ScrapeProvenance,
 ) =>
   Effect.fn("r2.writeFailure")(function* () {
     const s3 = getS3Client();
@@ -220,6 +245,7 @@ export const writeFailure = (
       instance_id: instanceId,
       stored_at: Date.now() / 1000,
       error,
+      ...provenanceFields(provenance),
     });
 
     yield* Effect.promise(() =>
