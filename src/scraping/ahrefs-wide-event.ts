@@ -174,14 +174,18 @@ const ATTR_API_CALL_STATUS = "api_call_status";
 // `session.browser.acquired` log so it's joinable by trace_id without costing
 // a slot here.
 const ATTR_PROXY_IP_ADDRESS = "proxy_ip_address";
-// Ground-truth per-scrape egress provenance from the relay's session-keyed
-// /v1/whoami (relay-whoami.ts). `proxy_phone` = the backend phone that carried
-// this scrape; `proxy_carrier` = its reported carrier. `proxy_ip_address` now
-// PREFERS the relay's cellular_ip and only falls back to the acquire-time ipify
-// probe when whoami had no live pin. Two extra always-on labels — success base
-// 94→96, worst case 99→101, still well under the 113 hard cap (see below).
+// Ground-truth per-scrape egress provenance, captured AT the connection by the
+// local CONNECT shim from the relay's CONNECT-200 headers (egress-proxy-shim.ts).
+// `proxy_phone` = the backend phone that carried this scrape; `proxy_carrier` =
+// its carrier; `proxy_model`/`proxy_tech` = the device model + cellular tech.
+// `proxy_ip_address` PREFERS the shim's captured cellular_ip and only falls back
+// to the acquire-time ipify probe when the shim had no capture. Four extra
+// always-on labels — success base 94→98, worst case 99→103, still well under the
+// 113 hard cap (see below).
 const ATTR_PROXY_PHONE = "proxy_phone";
 const ATTR_PROXY_CARRIER = "proxy_carrier";
+const ATTR_PROXY_MODEL = "proxy_model";
+const ATTR_PROXY_TECH = "proxy_tech";
 
 // ── Builder ─────────────────────────────────────────────────────────
 
@@ -202,14 +206,16 @@ export interface SessionContext {
    */
   proxy_ip_address?: string;
   /**
-   * GROUND-TRUTH per-scrape egress provenance, read from the relay's
-   * session-keyed `/v1/whoami` at page-close time (see relay-whoami.ts).
-   * `null` when the whoami read failed / had no live pin (e.g. a Hetzner
-   * failover) — the wide event then falls back to the ipify `proxy_ip_address`.
+   * GROUND-TRUTH per-scrape egress provenance, captured AT the connection by the
+   * local CONNECT shim from the relay's CONNECT-200 headers (egress-proxy-shim.ts).
+   * `null` when the scrape never connected / the shim had no capture for the
+   * session — the wide event then falls back to the ipify `proxy_ip_address`.
    */
   scrape_phone_id?: string | null;
   scrape_cellular_ip?: string | null;
   scrape_carrier?: string | null;
+  scrape_model?: string | null;
+  scrape_tech?: string | null;
 }
 
 export interface WideEventInput {
@@ -533,8 +539,9 @@ function shellTimingLabels(st?: import("./ahrefs-cdp.js").ShellTimings): Record<
  *   - 5 unqueried high-cardinality CF geometry/debug labels (widget_x/y,
  *     click_x/y, widget_find_debug) — the coords still ride on the cf.solved
  *     replay/span marker.
- * New counts: success base = 94, worst case = 99 (94 + 3 intercept + 1
- * fetch_decision_chain + 1 turnstile_error_code). That is a ~14-label buffer
+ * New counts: success base = 98 (+2 for proxy_phone/proxy_carrier, #3312; +2 for
+ * proxy_model/proxy_tech, this change), worst case = 103 (98 + 3 intercept + 1
+ * fetch_decision_chain + 1 turnstile_error_code). That is a ~10-label buffer
  * under the 113 hard cap. The unit guard in ahrefs-terminal-outcome.test.ts
  * asserts a TIGHTER safe ceiling (<=105) so a future addition that eats the
  * headroom fails loudly at dev time, long before it can trip the 128 ingest cap.
@@ -553,8 +560,8 @@ export function buildWideEvent(input: WideEventInput): Record<string, string> {
 
   // Conditional labels — only emitted when their value is non-empty so the
   // common-case wide event stays well under Loki's 113 always-on cap. Worst-case
-  // attribute count is now 99 (94 base + 3 intercept counts + 1
-  // fetch_decision_chain + 1 turnstile_error_code), a ~14-label buffer under the
+  // attribute count is now 103 (98 base + 3 intercept counts + 1
+  // fetch_decision_chain + 1 turnstile_error_code), a ~10-label buffer under the
   // hard cap. (turnstile_error_code + interception don't co-occur — turnstile
   // failure precedes interception in the pipeline — so the realistic worst case
   // is even lower; we count them together as a conservative upper bound.)
@@ -750,15 +757,18 @@ function buildWideEventInner(input: WideEventInput): Record<string, string> {
     // `chrome_proxy_server` is emitted on `session.browser.acquired` instead;
     // dropping here to stay under Loki's 128-label cap on log records.
     //
-    // GROUND-TRUTH provenance (relay /v1/whoami, see relay-whoami.ts). The IP now
-    // PREFERS the relay's per-scrape `scrape_cellular_ip`; it only falls back to
-    // the acquire-time ipify probe (`proxy_ip_address`, often null/pool-stale at
-    // the LAN relay) when whoami had no live pin. `||` (not `??`) so an empty
-    // cellular_ip (phone hasn't reported an IP yet) also falls through to ipify.
+    // GROUND-TRUTH provenance (CONNECT shim capture, see egress-proxy-shim.ts).
+    // The IP PREFERS the shim's per-scrape `scrape_cellular_ip`; it only falls
+    // back to the acquire-time ipify probe (`proxy_ip_address`, often
+    // null/pool-stale at the LAN relay) when the shim had no capture. `||` (not
+    // `??`) so an empty cellular_ip (phone hasn't reported an IP yet) also falls
+    // through to ipify.
     [ATTR_PROXY_IP_ADDRESS]:
       input.sessionContext?.scrape_cellular_ip || input.sessionContext?.proxy_ip_address || "",
     [ATTR_PROXY_PHONE]: input.sessionContext?.scrape_phone_id ?? "",
     [ATTR_PROXY_CARRIER]: input.sessionContext?.scrape_carrier ?? "",
+    [ATTR_PROXY_MODEL]: input.sessionContext?.scrape_model ?? "",
+    [ATTR_PROXY_TECH]: input.sessionContext?.scrape_tech ?? "",
   };
 }
 

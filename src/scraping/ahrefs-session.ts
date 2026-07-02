@@ -11,7 +11,7 @@
  * - TTL: 120s max browser age, invalidation on failure or CF solve TTL
  */
 import { cpus } from "os";
-import { Cause, Effect, Exit, Fiber, Metric, Pool, Scope } from "effect";
+import { Cause, Effect, Exit, Metric, Pool, Scope } from "effect";
 import puppeteer from "puppeteer-core";
 import type { Browser } from "puppeteer-core";
 
@@ -28,7 +28,7 @@ import { SessionTokenHolder } from "./session-token-holder.js";
 import { isBlockTrigger } from "./block-detection.js";
 import { authUsernameWithSession, requireProxyUrl } from "./proxy-config.js";
 import { writeFailure, writeResult, type ScrapeProvenance } from "./r2-writer.js";
-import { relayWhoami } from "./relay-whoami.js";
+import { getCapturedIdentity, shimProxyServer } from "./egress-proxy-shim.js";
 import {
   ahrefsScrapeTotal,
   ahrefsDocFulfillDuration,
@@ -91,13 +91,18 @@ const BROWSER_COUNT = Math.min(Math.ceil(MAX_CONCURRENT_TABS / TABS_PER_BROWSER)
 // ── Internal WS URL ─────────────────────────────────────────────────
 
 /**
- * Returns the value passed as Chrome's `--proxy-server` flag (origin only,
- * no credentials). Throws loudly if OEILI_PROXY_URL is missing — this is
- * the exact string Chrome sees, useful for diagnosing rotation bugs where
- * we want to know precisely which proxy URL the renderer was told to use.
+ * Returns the value passed as Chrome's `--proxy-server` flag.
+ *
+ * PREFERS the local egress-capture shim (`http://127.0.0.1:<port>`) so Chrome's
+ * CONNECTs flow through it and we capture each scrape's egress identity from the
+ * relay's CONNECT-200 headers (see egress-proxy-shim.ts). FAILS OPEN to the
+ * relay origin directly when the shim isn't healthy (never started / listener
+ * errored) — scrapes keep proxying, they just lose provenance for that window
+ * rather than failing. Throws loudly (via `requireProxyUrl`) only when NO relay
+ * is configured at all, the genuine "browserless can't scrape" misconfig.
  */
 function getProxyServerFlag(): string {
-  return new URL(requireProxyUrl()).origin;
+  return shimProxyServer() ?? new URL(requireProxyUrl()).origin;
 }
 
 function buildInternalWsUrl(): string {
@@ -1129,22 +1134,6 @@ export class AhrefsSessionManager {
           // time-bounded AND no longer gate the outcome record. The worst case
           // is a scrape with `replay_url=""`, never a vanished scrape.
 
-          // Ground-truth per-scrape egress provenance (relay-whoami.ts). FORK it
-          // here so the session-keyed `/v1/whoami` read runs CONCURRENTLY with
-          // page.close + the ≥2s replay-flush wait below — it completes inside a
-          // window that already exists, so it adds ZERO scrape latency. Query with
-          // `scrapeSessionId` — the token THIS attempt's CONNECTs carried, so the
-          // relay pinned THAT key to a phone — NOT a fresh
-          // `sessionTokenHolder.current()`, which may have rotated (this scrape's
-          // own block, OR any concurrent scrape's) to a token the relay never
-          // pinned for this scrape → a wrong-key read that returns null. Keyed on
-          // the captured serving token the pin is LIVE (the last CONNECT was
-          // seconds ago; sticky TTI is 10 min), so the read returns the phone that
-          // ACTUALLY carried this scrape. `relayWhoami` never fails (1.5s abort +
-          // fail-to-null), so joining below always yields the value or null (→
-          // ipify fallback).
-          const whoamiFiber = yield* Effect.forkChild(relayWhoami(scrapeSessionId));
-
           // Close page (triggers replay flush) — bounded best-effort.
           yield* Effect.fn("ahrefs.page.close")(function* () {
             const closeStart = Date.now();
@@ -1163,15 +1152,18 @@ export class AhrefsSessionManager {
           yield* Effect.sleep(REPLAY_FLUSH_WAIT);
           const replayMeta = yield* resolveReplayUrl(scrapeOutput, pageTargetId);
 
-          // AWAIT the forked whoami read. It ran concurrently with page.close +
-          // the ≥2s replay-flush above, so by now it is already resolved — this
-          // join returns immediately with the ground-truth provenance or null.
-          // Bounded + fail-to-null defensively so a wedged relay can never make
-          // the join the thing that hangs the terminal path.
-          const whoami = yield* Fiber.join(whoamiFiber).pipe(
-            Effect.timeout("2 seconds"),
-            Effect.orElseSucceed(() => null),
-          );
+          // GROUND-TRUTH per-scrape egress provenance — read from the local
+          // CONNECT shim's in-process capture map (egress-proxy-shim.ts), keyed
+          // by `scrapeSessionId` (the token THIS attempt's CONNECTs carried, so
+          // the SAME key the shim stored the identity under). The shim captured
+          // it AT the connection from the relay's own CONNECT-200 headers, so a
+          // scrape that CONNECTED is attributed ~100% (warm or cold — the session
+          // key rides every CONNECT). `null` only when no CONNECT for this session
+          // was seen (a scrape that never connected → legitimately no egress
+          // identity), or during a fail-open window where Chrome bypassed the
+          // shim; provenance is then simply ABSENT (no whoami backfill). Sync
+          // in-process read — zero latency, no fork/join.
+          const captured = getCapturedIdentity(scrapeSessionId);
 
           // Build the session context the terminal wide event needs. We do NOT
           // emit the wide event here — the guaranteed terminal path owns the
@@ -1187,10 +1179,13 @@ export class AhrefsSessionManager {
             browser_acquire_ms: browserAcquireMs,
             page_create_ms: pageCreateMs,
             proxy_ip_address: managed.proxyIpAddress,
-            // Ground-truth per-scrape provenance (null when whoami had no live pin).
-            scrape_phone_id: whoami?.phone_id ?? null,
-            scrape_cellular_ip: whoami?.cellular_ip ?? null,
-            scrape_carrier: whoami?.carrier ?? null,
+            // Ground-truth per-scrape provenance (null when the scrape never
+            // connected / the shim had no capture for this session).
+            scrape_phone_id: captured?.phoneId ?? null,
+            scrape_cellular_ip: captured?.ip ?? null,
+            scrape_carrier: captured?.carrier ?? null,
+            scrape_model: captured?.model ?? null,
+            scrape_tech: captured?.tech ?? null,
           };
 
           // Patch replay with scrape context (domain, error_type, success) for
@@ -1439,13 +1434,16 @@ const writeR2Outcome = (
   output: ScrapeOutput,
 ): Effect.Effect<void> =>
   Effect.fn("dispatch.writeR2")(function* () {
-    // Ground-truth per-scrape egress provenance (relay-whoami.ts), stamped onto
-    // the R2 payload so the downstream workflow/Postgres row carries the exact
-    // phone + cellular IP + carrier the scrape egressed from.
+    // Ground-truth per-scrape egress provenance (captured by the CONNECT shim,
+    // egress-proxy-shim.ts), stamped onto the R2 payload so the downstream
+    // workflow/Postgres row carries the exact phone + cellular IP + carrier +
+    // model + tech the scrape egressed from.
     const provenance: ScrapeProvenance = {
       scrape_phone_id: output.sessionContext?.scrape_phone_id ?? null,
       scrape_cellular_ip: output.sessionContext?.scrape_cellular_ip ?? null,
       scrape_carrier: output.sessionContext?.scrape_carrier ?? null,
+      scrape_model: output.sessionContext?.scrape_model ?? null,
+      scrape_tech: output.sessionContext?.scrape_tech ?? null,
     };
     const write = output.result.success
       ? writeResult(instanceId, domain, scrapeType, output.result, provenance)

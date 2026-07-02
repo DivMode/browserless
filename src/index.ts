@@ -1,6 +1,7 @@
 import Pyroscope from "@pyroscope/nodejs";
 import { Browserless } from "@browserless.io/browserless";
 import { Effect } from "effect";
+import { startEgressShim } from "./scraping/egress-proxy-shim.js";
 import { validateR2Config } from "./scraping/r2-writer.js";
 
 // ── Continuous profiling (Pyroscope) ─────────────────────────────────
@@ -56,6 +57,21 @@ try {
 
 const program = Effect.fn("browserless.main")(function* () {
   const browserless = new Browserless();
+
+  // ── Egress-capture CONNECT shim (per-scrape provenance) ──────────────
+  // Start the thin local proxy that captures each scrape's egress identity from
+  // the relay's CONNECT-200 headers (see egress-proxy-shim.ts). FAIL-OPEN: a
+  // start failure only means `getProxyServerFlag()` falls back to the relay
+  // directly (scrapes keep proxying, provenance is just absent for that window),
+  // so a shim fault can NEVER stop scraping — we log and continue, never exit.
+  yield* Effect.tryPromise({
+    try: () => startEgressShim(),
+    catch: (e: unknown) => (e instanceof Error ? e : new Error(String(e))),
+  }).pipe(
+    Effect.catch((err) =>
+      Effect.logError("egress_shim.start_failed").pipe(Effect.annotateLogs({ error: err.message })),
+    ),
+  );
 
   yield* Effect.promise(() => browserless.start());
 

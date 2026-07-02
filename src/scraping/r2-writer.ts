@@ -36,24 +36,29 @@ import type { AhrefsScrapeResult } from "./ahrefs-types.js";
 const KEY_PREFIX = "ahrefs-results";
 
 /**
- * Ground-truth per-scrape egress provenance, sourced from the relay's
- * session-keyed `/v1/whoami` (see relay-whoami.ts) and threaded onto the R2
- * result payload so the downstream workflow / Postgres row can carry the exact
- * phone + cellular IP + carrier the scrape egressed from. Each field is `null`
- * when the whoami read failed or had no live pin.
+ * Ground-truth per-scrape egress provenance, captured AT the connection by the
+ * local CONNECT shim from the relay's CONNECT-200 headers (see
+ * egress-proxy-shim.ts) and threaded onto the R2 result payload so the
+ * downstream workflow / Postgres row can carry the exact phone + cellular IP +
+ * carrier + model + tech the scrape egressed from. Each field is `null` when the
+ * scrape never connected (no egress identity) or the shim had no capture.
  */
 export interface ScrapeProvenance {
   scrape_phone_id: string | null;
   scrape_cellular_ip: string | null;
   scrape_carrier: string | null;
+  scrape_model: string | null;
+  scrape_tech: string | null;
 }
 
-/** Normalize an optional provenance into the three always-present JSON fields. */
+/** Normalize an optional provenance into the always-present JSON fields. */
 function provenanceFields(provenance: ScrapeProvenance | undefined): ScrapeProvenance {
   return {
     scrape_phone_id: provenance?.scrape_phone_id ?? null,
     scrape_cellular_ip: provenance?.scrape_cellular_ip ?? null,
     scrape_carrier: provenance?.scrape_carrier ?? null,
+    scrape_model: provenance?.scrape_model ?? null,
+    scrape_tech: provenance?.scrape_tech ?? null,
   };
 }
 
