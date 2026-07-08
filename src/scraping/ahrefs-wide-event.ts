@@ -757,14 +757,13 @@ function buildWideEventInner(input: WideEventInput): Record<string, string> {
     // `chrome_proxy_server` is emitted on `session.browser.acquired` instead;
     // dropping here to stay under Loki's 128-label cap on log records.
     //
-    // GROUND-TRUTH provenance (CONNECT shim capture, see egress-proxy-shim.ts).
-    // The IP PREFERS the shim's per-scrape `scrape_cellular_ip`; it only falls
-    // back to the acquire-time ipify probe (`proxy_ip_address`, often
-    // null/pool-stale at the LAN relay) when the shim had no capture. `||` (not
-    // `??`) so an empty cellular_ip (phone hasn't reported an IP yet) also falls
-    // through to ipify.
-    [ATTR_PROXY_IP_ADDRESS]:
-      input.sessionContext?.scrape_cellular_ip || input.sessionContext?.proxy_ip_address || "",
+    // GROUND-TRUTH provenance ONLY: the CONNECT shim's capture of the relay's
+    // `x-oeili-egress-ip` (egress-proxy-shim.ts). NO third-party IP-echo fallback
+    // — ipify/icanhazip are BANNED as the IP source (owner directive: no third
+    // party anywhere). A blank here is the HONEST signal that the relay didn't
+    // stamp the egress IP (e.g. it doesn't yet know the cellular IP on the LAN
+    // path); the fix belongs at the relay, never masked by a third-party probe.
+    [ATTR_PROXY_IP_ADDRESS]: input.sessionContext?.scrape_cellular_ip ?? "",
     [ATTR_PROXY_PHONE]: input.sessionContext?.scrape_phone_id ?? "",
     [ATTR_PROXY_CARRIER]: input.sessionContext?.scrape_carrier ?? "",
     [ATTR_PROXY_MODEL]: input.sessionContext?.scrape_model ?? "",
