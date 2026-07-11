@@ -50,18 +50,18 @@ function makeMockCdp(): { cdp: CDPSession; sent: SentCommand[]; emitter: EventEm
 
 describe("authUsernameWithSession", () => {
   const originalLocal = process.env.OEILI_PROXY_LOCAL;
-  const originalHetzner = process.env.OEILI_PROXY_HETZNER;
+  const originalHetzner = process.env.OEILI_PROXY_URL;
 
   beforeEach(() => {
     delete process.env.OEILI_PROXY_LOCAL;
-    delete process.env.OEILI_PROXY_HETZNER;
+    delete process.env.OEILI_PROXY_URL;
   });
 
   afterEach(() => {
     if (originalLocal === undefined) delete process.env.OEILI_PROXY_LOCAL;
     else process.env.OEILI_PROXY_LOCAL = originalLocal;
-    if (originalHetzner === undefined) delete process.env.OEILI_PROXY_HETZNER;
-    else process.env.OEILI_PROXY_HETZNER = originalHetzner;
+    if (originalHetzner === undefined) delete process.env.OEILI_PROXY_URL;
+    else process.env.OEILI_PROXY_URL = originalHetzner;
   });
 
   it("injects -session-<id> into the username and preserves the password", () => {

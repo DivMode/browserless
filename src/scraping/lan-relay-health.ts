@@ -3,8 +3,8 @@
  *
  * THE PROBLEM THIS SOLVES. Browserless scrapes ahrefs.com through the oeili
  * mobile-proxy phone via one of two paths (`proxy-config.ts`):
- *   - `OEILI_PROXY_LOCAL`   — VM 200 LAN relay (primary, low-latency)
- *   - `OEILI_PROXY_HETZNER` — Hetzner edge relay (fallback)
+ *   - `OEILI_PROXY_LOCAL` — VM 200 LAN relay (primary, low-latency)
+ *   - `OEILI_PROXY_URL`   — public customer relay endpoint (fallback)
  * `resolveProxy()` STATICALLY prefers LOCAL and never re-evaluates. On
  * 2026-06-09 the LAN relay went dead (roster = 0 phones; the phone's WiFi was
  * off) while the Hetzner edge stayed healthy — browserless stayed pinned to the

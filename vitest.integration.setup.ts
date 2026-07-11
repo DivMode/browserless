@@ -189,17 +189,16 @@ export async function setup() {
   writeFileSync(RESULTS_FILE, "");
 
   // Check proxy — fail fast before any build/spawn work.
-  // ADR-0045 introduced path-specific names (OEILI_PROXY_LOCAL for the
-  // VM 200 LAN relay, OEILI_PROXY_HETZNER for the legacy public relay).
-  // Local-dev .zshenv still uses the historical OEILI_PROXY_URL; accept
-  // any of the three so the test gate works on every developer setup.
-  const proxyUrl =
-    process.env.OEILI_PROXY_LOCAL || process.env.OEILI_PROXY_HETZNER || process.env.OEILI_PROXY_URL;
+  // Two accepted names: OEILI_PROXY_LOCAL (VM 200 LAN relay) and
+  // OEILI_PROXY_URL (public customer relay, proxy.oeili.com:8443). The
+  // latter is also the historical local-dev .zshenv name, so a single
+  // check covers the runtime env and every developer setup.
+  const proxyUrl = process.env.OEILI_PROXY_LOCAL || process.env.OEILI_PROXY_URL;
   if (!proxyUrl) {
     throw new Error(
-      "Proxy env var required (OEILI_PROXY_LOCAL, OEILI_PROXY_HETZNER, or legacy OEILI_PROXY_URL).\n" +
+      "Proxy env var required (OEILI_PROXY_LOCAL or OEILI_PROXY_URL).\n" +
         "Run with:\n" +
-        "  OEILI_PROXY_HETZNER=https://user:pass@proxy.oeili.com:8443 npx vitest run --config vitest.integration.config.ts",
+        "  OEILI_PROXY_URL=https://user:pass@proxy.oeili.com:8443 npx vitest run --config vitest.integration.config.ts",
     );
   }
 

@@ -121,7 +121,7 @@ describe("end-to-end tunnel + capture", () => {
   let mockRelay: net.Server;
   let mockRelayPort = 0;
   const prevLocal = process.env.OEILI_PROXY_LOCAL;
-  const prevHetzner = process.env.OEILI_PROXY_HETZNER;
+  const prevHetzner = process.env.OEILI_PROXY_URL;
 
   beforeAll(async () => {
     // Mock relay: read the CONNECT head, require the forwarded Proxy-Authorization,
@@ -156,15 +156,15 @@ describe("end-to-end tunnel + capture", () => {
     const addr = mockRelay.address();
     mockRelayPort = addr && typeof addr === "object" ? addr.port : 0;
     process.env.OEILI_PROXY_LOCAL = `http://oeiliproxy:secret@127.0.0.1:${mockRelayPort}`;
-    delete process.env.OEILI_PROXY_HETZNER;
+    delete process.env.OEILI_PROXY_URL;
     await startEgressShim();
   });
 
   afterAll(async () => {
     if (prevLocal === undefined) delete process.env.OEILI_PROXY_LOCAL;
     else process.env.OEILI_PROXY_LOCAL = prevLocal;
-    if (prevHetzner === undefined) delete process.env.OEILI_PROXY_HETZNER;
-    else process.env.OEILI_PROXY_HETZNER = prevHetzner;
+    if (prevHetzner === undefined) delete process.env.OEILI_PROXY_URL;
+    else process.env.OEILI_PROXY_URL = prevHetzner;
     await new Promise<void>((resolve) => mockRelay.close(() => resolve()));
   });
 

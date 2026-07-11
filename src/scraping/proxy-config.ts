@@ -12,12 +12,18 @@
  * browserless. To avoid silent ambiguity between the two paths, env var
  * names are path-specific:
  *
- *   - `OEILI_PROXY_LOCAL`   — VM 200 LAN relay (Talos path, primary)
- *   - `OEILI_PROXY_HETZNER` — Hetzner relay (external customers, fallback)
+ *   - `OEILI_PROXY_LOCAL` — VM 200 LAN relay (Talos path, primary)
+ *   - `OEILI_PROXY_URL`   — public customer relay endpoint
+ *     (proxy.oeili.com:8443, now the OKE NLB relay; fallback). Same value +
+ *     env var name the queue-worker uses. Carried a path-specific
+ *     "hetzner" name until 2026-07-11, when the Hetzner box was destroyed
+ *     and the endpoint stayed on proxy.oeili.com via the OKE NLB.
  *
- * Resolution order: LOCAL wins if set AND healthy, else HETZNER, else throw.
- * We stamp `relay.path = 'lan' | 'hetzner'` on every scrape wide event so
- * dashboards can split p50/p95 by path and prove the +3.4s recovery.
+ * Resolution order: LOCAL wins if set AND healthy, else the remote URL, else
+ * throw. We stamp `relay.path = 'lan' | 'hetzner'` on every scrape wide event
+ * so dashboards can split p50/p95 by path and prove the +3.4s recovery. (The
+ * `'hetzner'` telemetry label is retained for query/dashboard continuity —
+ * it names the non-LAN path, not the destroyed box.)
  *
  * AUTOMATIC HEALTH FAILOVER (2026-06-09). LOCAL was previously preferred
  * STATICALLY with no health check, so when the LAN relay went dead (roster =
@@ -111,7 +117,7 @@ interface ResolvedProxy {
 
 function resolveProxy(): ResolvedProxy | undefined {
   const local = process.env.OEILI_PROXY_LOCAL?.trim();
-  const hetzner = process.env.OEILI_PROXY_HETZNER?.trim();
+  const hetzner = process.env.OEILI_PROXY_URL?.trim();
   // Health-based path decision (see "AUTOMATIC HEALTH FAILOVER" above). When
   // the LAN relay is confirmed dead the background monitor flips
   // getLanRelayHealthy() to false; with Hetzner configured we then return the
@@ -137,9 +143,9 @@ export function requireProxyUrl(): string {
   const resolved = resolveProxy();
   if (!resolved) {
     throw new Error(
-      "OEILI_PROXY_LOCAL or OEILI_PROXY_HETZNER is required — browserless will NOT scrape unproxied. " +
+      "OEILI_PROXY_LOCAL or OEILI_PROXY_URL is required — browserless will NOT scrape unproxied. " +
         "Check infra/kubernetes-browserless.ts (env var name) and the 1Password " +
-        "Oeili Proxy Auth credentials (LAN) or oeili_proxy_credentials (Hetzner).",
+        "Oeili Proxy Auth credentials (LAN + public relay).",
     );
   }
   try {
