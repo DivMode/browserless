@@ -10,6 +10,15 @@
  * CONNECT-200 headers at its socket layer — CDP surfaces NONE of them — so
  * browserless can't read them when Chrome talks to the relay directly.
  *
+ * EXACT vs BEST-EFFORT egress IP. `x-oeili-egress-ip` is the relay's BEST-EFFORT
+ * stamp (its per-phone last-known / rotation-verdict IP — real, but not provably
+ * this scrape's). The h2c/LAN relay ALSO emits `x-oeili-egress-ip-exact`: the
+ * phone's post-dial getsockname for THIS connection's stream — the PROVABLY
+ * per-scrape egress. The shim prefers the exact value and falls back to the
+ * best-effort one whenever it is absent (the QUIC fallback relay can't produce it
+ * synchronously; a non-global clat source omits it), so `ip` is upgraded to the
+ * exact egress wherever the relay can prove it, and never regresses to blank.
+ *
  * THE FIX. Chrome's `--proxy-server` points at THIS shim on `127.0.0.1:<port>`
  * instead of the relay. For each `CONNECT host:port` Chrome makes, the shim
  * dials the real relay (plaintext for `http://`, TLS for `https://`, mirroring
@@ -63,7 +72,21 @@ import { requireProxyUrl } from "./proxy-config.js";
 
 /** Ground-truth per-connection egress identity, parsed from the relay's CONNECT-200. */
 export interface CapturedIdentity {
-  /** Customer-facing cellular egress IP (`x-oeili-egress-ip`). */
+  /**
+   * Customer-facing cellular egress IP. The PROVABLY per-scrape exact source
+   * (`x-oeili-egress-ip-exact` — this connection's post-dial getsockname, stamped
+   * by the h2c/LAN relay) when present, else the best-effort `x-oeili-egress-ip`
+   * (the relay's per-phone last-known / verdict IP). Exact is preferred but the
+   * best-effort value is NEVER dropped when exact is absent (the QUIC fallback
+   * relay, or a non-global clat source, omits the exact header) — so a populated
+   * value never regresses to blank. `null` only when the relay emitted neither.
+   *
+   * A warm-reused CONNECT tunnel getsocknames ONCE (at open); every scrape riding
+   * it egresses that same socket, so the value captured at the tunnel's CONNECT is
+   * the exact egress for ALL of that tunnel's scrapes (a mid-tunnel rotation
+   * zombies the socket → the scrape FAILS, never succeeds on a stale IP). The
+   * capture is therefore correct per-tunnel, warm or cold.
+   */
   readonly ip: string | null;
   /** Backend phone id (`x-oeili-phone-id`, e.g. `pixel-10-1189`). */
   readonly phoneId: string | null;
@@ -222,6 +245,11 @@ export function parseBrowserIdFromProxyAuth(header: string | undefined): string 
  * status code + the `x-oeili-*` egress identity. Tolerant: a missing header
  * yields `null` for that field; an unparseable status yields `0` (treated as a
  * non-2xx failure by the caller).
+ *
+ * `ip` prefers the PROVABLY per-scrape exact source (`x-oeili-egress-ip-exact`)
+ * over the best-effort `x-oeili-egress-ip`, falling back to the latter whenever
+ * the exact header is absent — so the captured value is upgraded to the exact
+ * per-scrape egress wherever the relay can prove it, yet never regresses to blank.
  */
 export function parseConnectResponseHead(head: string): {
   status: number;
@@ -247,7 +275,10 @@ export function parseConnectResponseHead(head: string): {
   return {
     status: Number.isNaN(statusNum) ? 0 : statusNum,
     identity: {
-      ip: get("x-oeili-egress-ip"),
+      // Exact per-scrape source preferred, best-effort stamp as the fallback —
+      // `??` keeps a populated best-effort value whenever the exact one is absent,
+      // so this never blanks an IP the relay actually reported.
+      ip: get("x-oeili-egress-ip-exact") ?? get("x-oeili-egress-ip"),
       phoneId: get("x-oeili-phone-id"),
       model: get("x-oeili-model"),
       carrier: get("x-oeili-carrier"),
