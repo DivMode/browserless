@@ -16,7 +16,7 @@ import puppeteer from "puppeteer-core";
 import type { Browser } from "puppeteer-core";
 
 import { executeAhrefsScrape, type ScrapeOutput } from "./ahrefs-service.js";
-import { buildWideEvent } from "./ahrefs-wide-event.js";
+import { buildWideEvent, egressProvenanceMissing } from "./ahrefs-wide-event.js";
 import { MAX_CF_SOLVES_PER_SESSION } from "./ahrefs-types.js";
 import type { AhrefsScrapeResult, ScrapeTimings, ScrapeType } from "./ahrefs-types.js";
 import { ProxyEgressDeadError, ScrapeInfraError, isScrapeError } from "./ahrefs-errors.js";
@@ -28,7 +28,11 @@ import { SessionTokenHolder } from "./session-token-holder.js";
 import { isBlockTrigger } from "./block-detection.js";
 import { authUsernameWithSession, requireProxyUrl } from "./proxy-config.js";
 import { writeFailure, writeResult, type ScrapeProvenance } from "./r2-writer.js";
-import { getCapturedIdentity, shimProxyServer } from "./egress-proxy-shim.js";
+import {
+  getCapturedIdentity,
+  getCapturedIdentityByBrowser,
+  shimProxyServer,
+} from "./egress-proxy-shim.js";
 import {
   ahrefsScrapeTotal,
   ahrefsDocFulfillDuration,
@@ -502,8 +506,9 @@ const acquireBrowser: Effect.Effect<ManagedBrowser, Error> = Effect.fn("session.
 
     // Proxy auth on initial pages — inject session_id into the username so the
     // relay's SessionManager can pin this browser's traffic to a backend phone.
-    // See ADR-0037.
-    const auth = authUsernameWithSession(sessionId);
+    // See ADR-0037. Also stamp the STABLE `-browser-<id>` handle so the egress
+    // shim dual-keys this browser's captures (survives a token rotation).
+    const auth = authUsernameWithSession(sessionId, String(id));
     if (auth) {
       const pages = yield* Effect.tryPromise({
         try: () => browser.pages(),
@@ -941,8 +946,14 @@ export class AhrefsSessionManager {
           // the exact key the relay pins to a phone for every CONNECT this
           // attempt makes. Reuse it for the whoami read below (~line 1130).
           const scrapeSessionId = sessionTokenHolder.current();
+          // Stamp the STABLE per-browser id ALONGSIDE the rotating session token
+          // so the egress shim stores this scrape's captured identity under both
+          // keys — a warm tunnel stranded on a rotated-out token is still resolved
+          // by `managed.id` at the read below (~line 1166).
+          const browserId = String(managed.id);
           const proxyAuth = authUsernameWithSession(
             scrapeSessionId,
+            browserId,
             scrapeSpan?.traceId,
             scrapeSpan?.spanId,
           );
@@ -1153,17 +1164,45 @@ export class AhrefsSessionManager {
           const replayMeta = yield* resolveReplayUrl(scrapeOutput, pageTargetId);
 
           // GROUND-TRUTH per-scrape egress provenance — read from the local
-          // CONNECT shim's in-process capture map (egress-proxy-shim.ts), keyed
-          // by `scrapeSessionId` (the token THIS attempt's CONNECTs carried, so
-          // the SAME key the shim stored the identity under). The shim captured
-          // it AT the connection from the relay's own CONNECT-200 headers, so a
-          // scrape that CONNECTED is attributed ~100% (warm or cold — the session
-          // key rides every CONNECT). `null` only when no CONNECT for this session
-          // was seen (a scrape that never connected → legitimately no egress
-          // identity), or during a fail-open window where Chrome bypassed the
-          // shim; provenance is then simply ABSENT (no whoami backfill). Sync
-          // in-process read — zero latency, no fork/join.
-          const captured = getCapturedIdentity(scrapeSessionId);
+          // CONNECT shim's in-process capture map (egress-proxy-shim.ts). Prefer
+          // the rotating session key (`scrapeSessionId` — the token THIS attempt's
+          // CONNECTs carried, the SAME key the shim stored under). FALL BACK to the
+          // STABLE per-browser key (`browserId`) so a warm keep-alive tunnel
+          // stranded on a rotated-out token — a block minted a fresh token mid-life
+          // but Chrome kept the CONNECT opened under the OLD one — is STILL
+          // attributed to its egress IP (the dual-key fix; a bare session read here
+          // key-missed → BLANK IP, storm-amplified). The shim captured it AT the
+          // connection from the relay's own CONNECT-200 headers, so a scrape that
+          // CONNECTED is attributed ~100% (warm or cold). `null` only when NEITHER
+          // key was seen (a scrape that never connected → legitimately no egress
+          // identity), or during a fail-open window where Chrome bypassed the shim.
+          // Sync in-process read — zero latency, no fork/join.
+          const captured =
+            getCapturedIdentity(scrapeSessionId) ?? getCapturedIdentityByBrowser(browserId);
+
+          // INVARIANT: a scrape that REACHED THE NETWORK must carry its egress IP.
+          // If this scrape egressed — a request left Chrome / the CF widget loaded /
+          // it succeeded (`reachedNetwork`) — yet BOTH capture keys missed, the true
+          // egress IP was SILENTLY lost. Emit the EXACT `egress_provenance_missing`
+          // string the paging alert keys on (config/alerts/ahrefs.ts §9b), for BOTH
+          // successful AND failed scrapes — the failure case is the dominant blank
+          // and was previously uncovered. We deliberately do NOT fail the scrape
+          // (that risks a fail-storm): the loud error log + the wide event's
+          // `reached_network` label ARE the signal. A never-egressed scrape (proxy
+          // dead at acquire, new_page failure, a fresh token that never connected)
+          // has no IP to lose → `reachedNetwork` is false → this stays silent.
+          if (egressProvenanceMissing(captured?.ip, scrapeOutput.result, scrapeOutput.cfMetrics)) {
+            yield* Effect.logError("egress_provenance_missing").pipe(
+              Effect.annotateLogs({
+                domain,
+                session_id: scrapeSessionId,
+                browser_id: browserId,
+                reached_network: "true",
+                ahrefs_success: String(scrapeOutput.result.success),
+                api_diagnosis: scrapeOutput.apiCallStatus ?? "unknown",
+              }),
+            );
+          }
 
           // Build the session context the terminal wide event needs. We do NOT
           // emit the wide event here — the guaranteed terminal path owns the

@@ -81,9 +81,19 @@ export interface ProxyAuth {
  * of truth shared by `page.authenticate()` (ahrefs-session.ts) and the
  * `Fetch.authRequired` handler (ahrefs-cdp.ts), so both apply byte-identical
  * credentials. Throws (via `requireProxyUrl`) if no proxy env var is set.
+ *
+ * `browserId` is a STABLE per-Chrome-instance handle (ManagedBrowser.id). It is
+ * stamped as a `-browser-<id>` username segment on EVERY CONNECT alongside the
+ * rotating `-session-` token, so the egress-capture shim can key the captured
+ * identity under both (egress-proxy-shim.ts). This lets a warm keep-alive tunnel
+ * whose `-session-` token was rotated out from under it still be attributed to
+ * its egress IP by the invariant browser id — closing the rotation-race that
+ * silently blanks `proxy_ip_address`. Omitted → no `-browser-` segment (the
+ * legacy single-key form, used by the no-browser acquire-time auth in tests).
  */
 export function authUsernameWithSession(
   sessionId: string,
+  browserId?: string,
   traceId?: string,
   spanId?: string,
 ): ProxyAuth | null {
@@ -91,21 +101,24 @@ export function authUsernameWithSession(
   if (!proxyUrl.username) return null;
   const baseUser = decodeURIComponent(proxyUrl.username);
   const password = decodeURIComponent(proxyUrl.password);
-  // Append the scrape's W3C trace-id (`-trace-`, 32 hex) AND parent span-id
-  // (`-pspan-`, 16 hex) so the relay can BOTH parent its serve/splice spans
-  // into THIS trace and NEST them under the right browserless span = one
-  // end-to-end trace (browserless → relay → phone). Both are dash-free hex, so
-  // they round-trip through the relay's `-key-value` username grammar (a real
-  // W3C `traceparent` can't — its dashes would break the split). We only emit
-  // `pspan` when we also have `trace` (the relay needs both or neither). The
-  // SAME ProxyAuth object is applied to page.authenticate() AND the
-  // Fetch.continueWithAuth re-auth handler, so the username stays byte-identical
-  // (no 407/ERR_INVALID_AUTH_CREDENTIALS risk). Backward-compatible: the relay
-  // silently ignores unknown keys until it reads `trace`/`pspan`.
+  // Append the STABLE `-browser-<id>` handle (see the browserId doc above) then
+  // the scrape's W3C trace-id (`-trace-`, 32 hex) AND parent span-id (`-pspan-`,
+  // 16 hex) so the relay can BOTH parent its serve/splice spans into THIS trace
+  // and NEST them under the right browserless span = one end-to-end trace
+  // (browserless → relay → phone). All segment values are dash-free (the browser
+  // id is an integer; trace/span are hex), so they round-trip through the relay's
+  // `-key-value` username grammar (a real W3C `traceparent` can't — its dashes
+  // would break the split). We only emit `pspan` when we also have `trace` (the
+  // relay needs both or neither). The SAME ProxyAuth object is applied to
+  // page.authenticate() AND the Fetch.continueWithAuth re-auth handler, so the
+  // username stays byte-identical (no 407/ERR_INVALID_AUTH_CREDENTIALS risk).
+  // Backward-compatible: the relay silently ignores unknown keys (`browser`,
+  // `trace`, `pspan`).
+  const browserSuffix = browserId ? `-browser-${browserId}` : "";
   const traceSuffix = traceId ? `-trace-${traceId}` : "";
   const spanSuffix = traceId && spanId ? `-pspan-${spanId}` : "";
   return {
-    username: `${baseUser}-session-${sessionId}${traceSuffix}${spanSuffix}`,
+    username: `${baseUser}-session-${sessionId}${browserSuffix}${traceSuffix}${spanSuffix}`,
     password,
   };
 }

@@ -164,6 +164,12 @@ const ATTR_SESSION_WARM = "session_warm";
 const ATTR_CF_CLEARANCE_PRESENT = "cf_clearance_present";
 // API call lifecycle — registered in registry/ahrefs.yaml (ahrefs.session group)
 const ATTR_API_CALL_STATUS = "api_call_status";
+// Did this scrape REACH THE NETWORK (egress traffic actually left Chrome)? Lets
+// the egress-provenance alert scope "blank IP" to scrapes that DID egress — a
+// blank on a never-egressed scrape (proxy dead at acquire, new_page failure) is
+// legitimate, a blank on a networked scrape is silent provenance loss. See
+// `reachedNetwork` + the `egress_provenance_missing` emit (ahrefs-session.ts).
+const ATTR_REACHED_NETWORK = "reached_network";
 
 // Proxy observability — flat underscore names. Grafana Cloud's OTLP gateway
 // promotes log-record attributes to Loki structured-metadata labels and rejects
@@ -178,10 +184,10 @@ const ATTR_PROXY_IP_ADDRESS = "proxy_ip_address";
 // local CONNECT shim from the relay's CONNECT-200 headers (egress-proxy-shim.ts).
 // `proxy_phone` = the backend phone that carried this scrape; `proxy_carrier` =
 // its carrier; `proxy_model`/`proxy_tech` = the device model + cellular tech.
-// `proxy_ip_address` PREFERS the shim's captured cellular_ip and only falls back
-// to the acquire-time ipify probe when the shim had no capture. Four extra
-// always-on labels — success base 94→98, worst case 99→103, still well under the
-// 113 hard cap (see below).
+// `proxy_ip_address` is the shim's captured cellular_ip (blank when uncaptured —
+// no third-party fallback). Four extra always-on labels here (+1 more for
+// reached_network below) — success base 94→99, worst case 99→104, still well
+// under the 113 hard cap (see below).
 const ATTR_PROXY_PHONE = "proxy_phone";
 const ATTR_PROXY_CARRIER = "proxy_carrier";
 const ATTR_PROXY_MODEL = "proxy_model";
@@ -539,12 +545,13 @@ function shellTimingLabels(st?: import("./ahrefs-cdp.js").ShellTimings): Record<
  *   - 5 unqueried high-cardinality CF geometry/debug labels (widget_x/y,
  *     click_x/y, widget_find_debug) — the coords still ride on the cf.solved
  *     replay/span marker.
- * New counts: success base = 98 (+2 for proxy_phone/proxy_carrier, #3312; +2 for
- * proxy_model/proxy_tech, this change), worst case = 103 (98 + 3 intercept + 1
- * fetch_decision_chain + 1 turnstile_error_code). That is a ~10-label buffer
- * under the 113 hard cap. The unit guard in ahrefs-terminal-outcome.test.ts
- * asserts a TIGHTER safe ceiling (<=105) so a future addition that eats the
- * headroom fails loudly at dev time, long before it can trip the 128 ingest cap.
+ * New counts: success base = 99 (+2 for proxy_phone/proxy_carrier, #3312; +2 for
+ * proxy_model/proxy_tech; +1 for reached_network, this change), worst case = 104
+ * (99 + 3 intercept + 1 fetch_decision_chain + 1 turnstile_error_code). That is a
+ * ~9-label buffer under the 113 hard cap. The unit guard in
+ * ahrefs-terminal-outcome.test.ts asserts a TIGHTER safe ceiling (<=105) so a
+ * future addition that eats the headroom fails loudly at dev time, long before it
+ * can trip the 128 ingest cap.
  *
  * ADR-0068 deliberately does NOT add reconciliation labels (`instance_id`) to
  * this record — the `instance_id` reconciliation rides on SEPARATE, cheap
@@ -555,13 +562,59 @@ function shellTimingLabels(st?: import("./ahrefs-cdp.js").ShellTimings): Record<
  */
 const WIDE_EVENT_MAX_ATTRS = 113;
 
+/**
+ * Did this scrape REACH THE NETWORK — did egress traffic actually leave Chrome
+ * and round-trip? This scopes the egress-provenance invariant: a BLANK captured
+ * egress IP is a real fault ONLY for a scrape that egressed. A scrape that never
+ * reached the network (proxy dead at acquire, new_page failure, a fresh session
+ * token that never opened a CONNECT, a hard-deadline trip before any request) has
+ * NO egress identity to lose, so its blank is legitimate and must NOT alert.
+ *
+ * TRUE when ANY independent "traffic happened" signal is present:
+ *   - the scrape SUCCEEDED (it obviously egressed),
+ *   - the CF Turnstile widget was solved / produced events (the widget only loads
+ *     once the network is up — the exact inverse of the `isEgressDeathCandidate`
+ *     `cf_events === 0` "network never came up" gate in ahrefs-session.ts),
+ *   - an InterceptionTimeoutError with requestCount>0 (a request LEFT Chrome),
+ *   - a RateLimitedError (a 429/403 Document response came BACK), or
+ *   - the ahrefs /v4 data API returned an error envelope (a request round-tripped).
+ *
+ * All signals are already on the ScrapeOutput — no new probe, no extra call.
+ */
+export function reachedNetwork(result: AhrefsScrapeResult, cfMetrics: CfSolveMetrics): boolean {
+  if (result.success) return true;
+  if (cfMetrics.cf_solved) return true;
+  if (cfMetrics.cf_events > 0) return true;
+  const e = result.scrapeError;
+  if (e?._tag === "InterceptionTimeoutError" && e.requestCount > 0) return true;
+  if (e?._tag === "RateLimitedError") return true;
+  if ((result.apiErrors?.length ?? 0) > 0) return true;
+  return false;
+}
+
+/**
+ * Did this scrape BREAK the egress-provenance invariant — reach the network yet
+ * carry NO captured egress IP? TRUE iff the scrape egressed (`reachedNetwork`)
+ * AND the CONNECT-shim capture resolved no cellular IP under EITHER key (a blank
+ * `capturedIp` — null/undefined/""). The single source of truth for the
+ * `egress_provenance_missing` emit (ahrefs-session.ts): a never-egressed scrape
+ * has no IP to lose, so its blank is legitimate and returns false.
+ */
+export function egressProvenanceMissing(
+  capturedIp: string | null | undefined,
+  result: AhrefsScrapeResult,
+  cfMetrics: CfSolveMetrics,
+): boolean {
+  return !capturedIp && reachedNetwork(result, cfMetrics);
+}
+
 export function buildWideEvent(input: WideEventInput): Record<string, string> {
   const event = buildWideEventInner(input);
 
   // Conditional labels — only emitted when their value is non-empty so the
   // common-case wide event stays well under Loki's 113 always-on cap. Worst-case
-  // attribute count is now 103 (98 base + 3 intercept counts + 1
-  // fetch_decision_chain + 1 turnstile_error_code), a ~10-label buffer under the
+  // attribute count is now 104 (99 base + 3 intercept counts + 1
+  // fetch_decision_chain + 1 turnstile_error_code), a ~9-label buffer under the
   // hard cap. (turnstile_error_code + interception don't co-occur — turnstile
   // failure precedes interception in the pipeline — so the realistic worst case
   // is even lower; we count them together as a conservative upper bound.)
@@ -752,6 +805,9 @@ function buildWideEventInner(input: WideEventInput): Record<string, string> {
     [ATTR_SESSION_WARM]: String(input.sessionContext?.session_warm ?? false),
     [ATTR_CF_CLEARANCE_PRESENT]: String(input.cfClearancePresent ?? false),
     [ATTR_API_CALL_STATUS]: input.apiCallStatus ?? "unknown",
+    // Did egress traffic actually leave Chrome? Scopes the egress-provenance
+    // alert to networked scrapes (a blank IP on a never-egressed scrape is legit).
+    [ATTR_REACHED_NETWORK]: String(reachedNetwork(result, cfMetrics)),
 
     // Proxy observability — fixes the "Scrapes by IP" panel.
     // `chrome_proxy_server` is emitted on `session.browser.acquired` instead;

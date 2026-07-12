@@ -15,10 +15,11 @@
  * dials the real relay (plaintext for `http://`, TLS for `https://`, mirroring
  * the scraper's `proxy_chain.rs`), forwards the CONNECT + Chrome's session'd
  * `Proxy-Authorization` verbatim (so the relay still pins the session → phone),
- * READS the relay's `HTTP/1.1 200` status line + `x-oeili-*` headers, stores
- * `{ session_id -> identity }` (latest-wins), writes the 200 back to Chrome, and
- * splices the two sockets for the tunnel's life. Browserless later reads the
- * identity by the scrape's captured `session_id` (see ahrefs-session.ts).
+ * READS the relay's `HTTP/1.1 200` status line + `x-oeili-*` headers, stores the
+ * identity under BOTH the `session_id` AND the stable `browser_id` (latest-wins),
+ * writes the 200 back to Chrome, and splices the two sockets for the tunnel's
+ * life. Browserless later reads the identity by the scrape's captured
+ * `session_id`, falling back to `browser_id` (see ahrefs-session.ts).
  *
  * WHY KEY BY session_id (not trace_id). ahrefs reuses warm browsers and Chrome
  * pools keep-alive CONNECT tunnels per origin, so scrape #2..N ride the tunnel
@@ -27,6 +28,14 @@
  * stable across a session's scrapes; a TCP tunnel's egress IP is fixed for its
  * life (session ≈ one tunnel ≈ one IP), so `{ session_id -> identity }` captured
  * at the CONNECT is correct for ALL scrapes on that session, warm or cold.
+ *
+ * WHY ALSO KEY BY browser_id (dual-key). The `session_id` is the ROTATING
+ * `-session-<token>` handle: a block mints a fresh token (session-token-holder.ts),
+ * but a warm keep-alive tunnel keeps carrying the OLD token, so the wide event's
+ * read of the NEW `.current()` token misses → BLANK egress IP. The `browser_id`
+ * is minted once per Chrome instance and NEVER rotates, so the stranded warm
+ * tunnel is still found by it. Storing under both keys keeps the no-rotation path
+ * unchanged (session hits first) while closing the rotation-race provenance loss.
  *
  * FAIL-OPEN (availability). The shim is now IN the CONNECT data path, so it must
  * NEVER become a new single point of failure for scraping:
@@ -75,9 +84,27 @@ const RELAY_CONNECT_TIMEOUT_MS = 10_000;
 /** Bounded capture map — sessions rotate on block; cap keeps a long-lived pod from growing forever. */
 const MAX_CAPTURED = 2048;
 
-// ── Capture store (session_id → identity, latest-wins, bounded) ──────
+// ── Capture store (dual-keyed, latest-wins, bounded) ─────────────────
+//
+// The capture is stored under TWO keys so a warm CONNECT tunnel is findable by
+// EITHER:
+//   1. `session_id`  — the rotating `-session-<token>` handle. Stable across a
+//      session's scrapes UNTIL a block rotates the token (session-token-holder.ts).
+//   2. `browser_id`  — a STABLE per-Chrome-instance handle (ManagedBrowser.id),
+//      minted once at browser creation and INVARIANT across token rotations.
+//
+// The session key alone is warm-blind across a rotation: a block mints a fresh
+// token, but Chrome keeps its keep-alive CONNECT tunnel (opened under the OLD
+// token) for scrape #2..N — no new CONNECT — so the identity stays stored under
+// the OLD token while the wide event reads the NEW `.current()` token → key miss
+// → BLANK egress IP (the storm-amplified silent-provenance-loss bug this fixes).
+// The browser key does NOT rotate, so a tunnel stranded on a rotated-out token is
+// still resolved by its browser_id. Readers use `getCapturedIdentity(token) ??
+// getCapturedIdentityByBrowser(browserId)` (see ahrefs-session.ts). Single-key
+// behaviour (no rotation) is unchanged: the session lookup still hits first.
 
 const captured = new Map<string, CapturedIdentity>();
+const capturedByBrowser = new Map<string, CapturedIdentity>();
 
 function hasAnyField(id: CapturedIdentity): boolean {
   return (
@@ -89,14 +116,29 @@ function hasAnyField(id: CapturedIdentity): boolean {
   );
 }
 
-function storeIdentity(sessionId: string, id: CapturedIdentity): void {
+/** Bounded, latest-wins insert into a capture map (shared by both key spaces). */
+function storeInto(map: Map<string, CapturedIdentity>, key: string, id: CapturedIdentity): void {
   // Move-to-end (insertion order = recency) so the size cap evicts the oldest.
-  if (captured.has(sessionId)) captured.delete(sessionId);
-  captured.set(sessionId, id);
-  if (captured.size > MAX_CAPTURED) {
-    const oldest = captured.keys().next().value;
-    if (oldest !== undefined) captured.delete(oldest);
+  if (map.has(key)) map.delete(key);
+  map.set(key, id);
+  if (map.size > MAX_CAPTURED) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
   }
+}
+
+function storeIdentity(sessionId: string, id: CapturedIdentity): void {
+  storeInto(captured, sessionId, id);
+}
+
+/**
+ * Store the CONNECT-captured identity under the stable per-browser key. A given
+ * `browser_id` maps 1:1 to a Chrome instance whose tunnels all egress the SAME
+ * relay-pinned phone (one process-wide session token → one phone), so this key
+ * is a stable handle to that browser's egress identity across a token rotation.
+ */
+function storeIdentityByBrowser(browserId: string, id: CapturedIdentity): void {
+  storeInto(capturedByBrowser, browserId, id);
 }
 
 /**
@@ -108,34 +150,70 @@ export function getCapturedIdentity(sessionId: string): CapturedIdentity | null 
   return captured.get(sessionId) ?? null;
 }
 
+/**
+ * The egress identity captured under the STABLE per-browser key — the fallback
+ * for a warm tunnel whose `-session-` token was rotated out from under it (the
+ * session lookup then misses, but the browser key persists). `null` when no
+ * CONNECT for this browser was ever captured. Synchronous in-process read.
+ */
+export function getCapturedIdentityByBrowser(browserId: string): CapturedIdentity | null {
+  return capturedByBrowser.get(browserId) ?? null;
+}
+
 // ── Parsers (pure, unit-tested) ─────────────────────────────────────
 
-/**
- * Extract the scrape `session_id` from Chrome's `Proxy-Authorization: Basic …`
- * header. The username is `${baseUser}-session-${sessionId}[-trace-…][-pspan-…]`
- * (see proxy-config.ts `authUsernameWithSession`); the session id is 32-hex and
- * hyphen-free, so we cut at the first `-trace-`/`-pspan-`. Returns `null` when
- * there is no auth / no `-session-` segment.
- */
-export function parseSessionIdFromProxyAuth(header: string | undefined): string | null {
-  if (!header) return null;
+/** Decode a `Basic <base64>` header to its `user` segment, or "" when unparseable. */
+function decodeBasicUser(header: string | undefined): string {
+  if (!header) return "";
   const m = /^Basic\s+(.+)$/i.exec(header.trim());
-  if (!m) return null;
+  if (!m) return "";
   let decoded: string;
   try {
     decoded = Buffer.from(m[1], "base64").toString("utf8");
   } catch {
-    return null;
+    return "";
   }
-  const user = decoded.split(":", 1)[0] ?? "";
-  const marker = "-session-";
-  const start = user.indexOf(marker);
-  if (start === -1) return null;
-  let rest = user.slice(start + marker.length);
-  for (const tail of ["-trace-", "-pspan-"]) {
+  return decoded.split(":", 1)[0] ?? "";
+}
+
+/** Cut the value of a `-key-` username segment at the first following segment marker. */
+function segmentValue(rest: string): string {
+  for (const tail of ["-browser-", "-trace-", "-pspan-"]) {
     const cut = rest.indexOf(tail);
     if (cut !== -1) rest = rest.slice(0, cut);
   }
+  return rest;
+}
+
+/**
+ * Extract the scrape `session_id` from Chrome's `Proxy-Authorization: Basic …`
+ * header. The username is
+ * `${baseUser}-session-${sessionId}[-browser-…][-trace-…][-pspan-…]` (see
+ * proxy-config.ts `authUsernameWithSession`); the session id is 32-hex and
+ * hyphen-free, so we cut at the first `-browser-`/`-trace-`/`-pspan-`. Returns
+ * `null` when there is no auth / no `-session-` segment.
+ */
+export function parseSessionIdFromProxyAuth(header: string | undefined): string | null {
+  const user = decodeBasicUser(header);
+  const marker = "-session-";
+  const start = user.indexOf(marker);
+  if (start === -1) return null;
+  const rest = segmentValue(user.slice(start + marker.length));
+  return rest.length > 0 ? rest : null;
+}
+
+/**
+ * Extract the STABLE `browser_id` from the proxy-auth username's `-browser-<id>`
+ * segment (present alongside `-session-` on every scrape CONNECT, absent only on
+ * a bare no-browser auth). The id is a hyphen-free integer, so we cut at the next
+ * `-trace-`/`-pspan-`. Returns `null` when there is no `-browser-` segment.
+ */
+export function parseBrowserIdFromProxyAuth(header: string | undefined): string | null {
+  const user = decodeBasicUser(header);
+  const marker = "-browser-";
+  const start = user.indexOf(marker);
+  if (start === -1) return null;
+  const rest = segmentValue(user.slice(start + marker.length));
   return rest.length > 0 ? rest : null;
 }
 
@@ -233,6 +311,7 @@ function onConnect(req: http.IncomingMessage, clientSocket: Duplex, head: Buffer
   const rawAuth = req.headers["proxy-authorization"];
   const proxyAuth = Array.isArray(rawAuth) ? rawAuth[0] : rawAuth;
   const sessionId = parseSessionIdFromProxyAuth(proxyAuth);
+  const browserId = parseBrowserIdFromProxyAuth(proxyAuth);
 
   // Resolve the CURRENT relay per-connection so LAN↔Hetzner health failover
   // (proxy-config.ts) is respected transparently. A throw (no relay configured)
@@ -287,8 +366,13 @@ function onConnect(req: http.IncomingMessage, clientSocket: Duplex, head: Buffer
         const { status, identity } = parseConnectResponseHead(headerBytes.toString("latin1"));
         if (status >= 200 && status < 300) {
           // Capture AT the connection — the whole point. latest-wins; skip an
-          // all-null parse so a hiccup can't clobber a good prior capture.
-          if (sessionId && hasAnyField(identity)) storeIdentity(sessionId, identity);
+          // all-null parse so a hiccup can't clobber a good prior capture. Store
+          // under BOTH keys so a warm tunnel is findable by the rotating session
+          // token OR the stable browser id (dual-key, see the capture store note).
+          if (hasAnyField(identity)) {
+            if (sessionId) storeIdentity(sessionId, identity);
+            if (browserId) storeIdentityByBrowser(browserId, identity);
+          }
           clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
           if (head.length > 0) relaySocket.write(head);
           if (leftover.length > 0) clientSocket.write(leftover);
@@ -363,8 +447,13 @@ export function shimProxyServer(): string | null {
 /** Exposed for unit tests. */
 export const _internal = {
   storeIdentity,
+  storeIdentityByBrowser,
   hasAnyField,
-  clear: (): void => captured.clear(),
+  clear: (): void => {
+    captured.clear();
+    capturedByBrowser.clear();
+  },
   size: (): number => captured.size,
+  sizeByBrowser: (): number => capturedByBrowser.size,
   MAX_CAPTURED,
 };
