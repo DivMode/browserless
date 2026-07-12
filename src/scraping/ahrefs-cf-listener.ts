@@ -168,11 +168,105 @@ const emptyPhase = (): PhaseMetrics => ({
   clicked: false,
 });
 
+// ── Terminal-failure fail-fast (result-wait abort) ──────────────────
+//
+// A doomed embedded solve (burned egress IP) renders the Turnstile widget but
+// never mints a token and never fires its error-callback — the CF solver
+// declares failure at its budget (EMBEDDED_RESOLUTION_TIMEOUT), yet the ahrefs
+// result-wait (WAIT_FOR_RESULT_JS, ahrefs-cdp.ts) has no idea and idles to its
+// 90s wall. This detects the solver's DEFINITIVE terminal failure so the
+// result-wait can abort early (see `waitForResultOrTerminalFailure`).
+//
+// SAFETY — allowlist, not denylist. We abort ONLY on reasons where the solver
+// has genuinely given up and will NOT retry within this scrape. Recoverable
+// failures the solver reloads+re-detects on are EXCLUDED, so a real solve that
+// is merely slow is never killed:
+//   - "widget_reload"          → cloudflare-detector reloads the page + re-detects
+//                                (a token can still arrive after the reload).
+//   - "rechallenge"            → solver re-detects a fresh challenge; can still solve.
+//   - "verified_session_close" → cf_verified=true; CF WAS verified (a success),
+//                                aborting would misclassify it.
+// An unknown/new reason returns false (no abort → falls back to the 90s ceiling),
+// so a false abort of a real solve is impossible by construction. Interstitial-
+// phase failures are also excluded (ahrefs is embedded-only; a multi-phase
+// Int→Emb flow could still solve the embedded stage).
+
+/** CF `Browserless.cloudflareFailed` reasons that are DEFINITIVELY terminal for
+ * an EMBEDDED Turnstile solve — solver gave up, no token will arrive. */
+export const TERMINAL_EMBEDDED_CF_FAIL_REASONS: ReadonlySet<string> = new Set([
+  "resolution_timeout", // embedded resolution budget elapsed with no settle — zombie caught
+  "widget_not_found", // Turnstile widget never rendered (NoClick, or all reloads exhausted)
+  "oopif_empty", // Turnstile OOPIF script never loaded (bodyLen<=1) — reload won't help
+]);
+
+/** Shape of the relevant fields on a `Browserless.cloudflareFailed` event. */
+export interface CfFailedParams {
+  readonly targetId?: string;
+  readonly reason?: string;
+  readonly phase_role?: string;
+  readonly cf_verified?: boolean;
+}
+
+/**
+ * Is this `Browserless.cloudflareFailed` event a DEFINITIVE terminal failure of
+ * an embedded solve for OUR tab — safe to abort the result-wait on? Allowlist-
+ * based (see the safety note above): our tab only, not cf_verified, embedded
+ * phase (or unspecified), and a reason in TERMINAL_EMBEDDED_CF_FAIL_REASONS.
+ */
+export function isTerminalEmbeddedCfFailure(params: CfFailedParams, ourTargetId: string): boolean {
+  if (!params.targetId || params.targetId !== ourTargetId) return false; // our tab only
+  if (params.cf_verified === true) return false; // verified ⇒ a success, never abort
+  if (params.phase_role !== undefined && params.phase_role !== "embedded") return false; // embedded only
+  return typeof params.reason === "string" && TERMINAL_EMBEDDED_CF_FAIL_REASONS.has(params.reason);
+}
+
+/**
+ * A one-shot terminal-failure signal: `promise` resolves on the FIRST terminal
+ * embedded CF failure fed to `offer`, and stays pending forever otherwise.
+ * Extracted from the CDP wiring so the terminal-vs-recoverable discrimination is
+ * unit-testable without a browser connection.
+ */
+export interface CfTerminalFailureSignal {
+  /** Resolves once, on the first DEFINITIVE terminal embedded failure. */
+  readonly promise: Promise<void>;
+  /** The reason of the observed terminal failure, or null if none yet. */
+  reason(): string | null;
+  /** Feed a raw `cloudflareFailed` params object; resolves `promise` iff terminal. */
+  offer(params: CfFailedParams): void;
+}
+
+export function makeCfTerminalFailureSignal(ourTargetId: string): CfTerminalFailureSignal {
+  let observedReason: string | null = null;
+  let resolveSignal!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    resolveSignal = resolve;
+  });
+  return {
+    promise,
+    reason: () => observedReason,
+    offer: (params) => {
+      if (observedReason !== null) return; // first terminal failure wins
+      if (!isTerminalEmbeddedCfFailure(params, ourTargetId)) return;
+      observedReason = String(params.reason);
+      resolveSignal();
+    },
+  };
+}
+
 // ── Listener ────────────────────────────────────────────────────────
 
 export interface CfListener {
   collect(): CfSolveMetrics;
   getReplayMetadata(): ReplayMetadata | null;
+  /**
+   * Resolves on the FIRST DEFINITIVE terminal embedded CF failure for this tab.
+   * Stays pending on recoverable failures (widget_reload/rechallenge) and on
+   * success. Race the ahrefs result-wait against this to fail fast on doomed
+   * solves instead of idling to the 90s ceiling. See `isTerminalEmbeddedCfFailure`.
+   */
+  readonly terminalFailure: Promise<void>;
+  /** Reason of the observed terminal failure, or null if none observed. */
+  terminalFailureReason(): string | null;
   cleanup(): void;
 }
 
@@ -198,6 +292,10 @@ export function setupCfListener(cdp: CDPSession, pageTargetId: string): CfListen
   let cfVerified = false;
   let failureReason = "";
   let errorDetected = false;
+
+  // One-shot terminal-failure signal for the result-wait fail-fast (fed in
+  // onFailed). Recoverable failures (widget_reload/rechallenge) leave it pending.
+  const terminalSignal = makeCfTerminalFailureSignal(pageTargetId);
 
   // Filter: only accept events for OUR tab (strict targetId match).
   // Events without targetId are REJECTED — passing them causes cross-tab bleeding.
@@ -253,6 +351,10 @@ export function setupCfListener(cdp: CDPSession, pageTargetId: string): CfListen
       phase.widget_found = !!lastSnapshot.widget_found;
       phase.clicked = !!lastSnapshot.clicked;
     }
+
+    // Fail-fast the result-wait ONLY on a definitive terminal embedded failure
+    // (allowlist — recoverable widget_reload/rechallenge stay pending here).
+    terminalSignal.offer(params);
   };
 
   const onTabReplayComplete = (params: any) => {
@@ -353,6 +455,12 @@ export function setupCfListener(cdp: CDPSession, pageTargetId: string): CfListen
 
     getReplayMetadata(): ReplayMetadata | null {
       return replayMeta;
+    },
+
+    terminalFailure: terminalSignal.promise,
+
+    terminalFailureReason(): string | null {
+      return terminalSignal.reason();
     },
 
     cleanup() {

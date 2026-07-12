@@ -581,6 +581,45 @@ export const waitForResult = (page: Page, domain: string) =>
     catch: () => new ResultTimeoutError({ domain }),
   });
 
+/**
+ * Race a "wait for result" Effect against a DEFINITIVE terminal-CF-failure signal.
+ *
+ * Whichever settles first wins (the loser is interrupted). If the terminal signal
+ * wins, resolves to `undefined` — the SAME outcome the result-wait produces on its
+ * own 90s ceiling — so downstream classification is byte-identical (parseResult
+ * still yields a TurnstileTimeoutError carrying the live apiCallStatus). The
+ * `resultEffect` is injected so this is unit-testable without a Page.
+ *
+ * The terminal signal (CfListener.terminalFailure) fires ONLY when the CF solver
+ * has definitively given up — never on a recoverable widget_reload/rechallenge or
+ * a verified solve — so a legit-but-slow solve is NEVER aborted. See
+ * `isTerminalEmbeddedCfFailure` in ahrefs-cf-listener.ts.
+ */
+export const raceResultAgainstTerminalFailure = <A>(
+  resultEffect: Effect.Effect<A | undefined>,
+  terminalFailure: Promise<void>,
+): Effect.Effect<A | undefined> =>
+  Effect.raceFirst(resultEffect, Effect.promise(() => terminalFailure).pipe(Effect.as(undefined)));
+
+/**
+ * Wait for the ahrefs API result, aborting early on a DEFINITIVE CF solver
+ * terminal failure. Drop-in for `waitForResult(...).pipe(catchTag ResultTimeout →
+ * undefined)`: returns the parsed result, or `undefined` when EITHER the in-page
+ * 90s ceiling elapses OR the solver terminally failed. On the doomed-solve path
+ * this reclaims the idle tail between the solver's failure and the 90s wall.
+ */
+export const waitForResultOrTerminalFailure = (
+  page: Page,
+  domain: string,
+  terminalFailure: Promise<void>,
+) =>
+  raceResultAgainstTerminalFailure(
+    waitForResult(page, domain).pipe(
+      Effect.catchTag("ResultTimeoutError", () => Effect.succeed(undefined)),
+    ),
+    terminalFailure,
+  );
+
 /** Read the API call status from the page — tells you if the API was never called, pending, or got a response. */
 export const getApiCallStatus = (page: Page) =>
   Effect.tryPromise({

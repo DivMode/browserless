@@ -25,7 +25,7 @@ import {
   setupFetchInterception,
   setupProxyFailureWatch,
   waitForDocumentInterception,
-  waitForResult,
+  waitForResultOrTerminalFailure,
 } from "./ahrefs-cdp.js";
 import { setupCfListener } from "./ahrefs-cf-listener.js";
 import type { CfSolveMetrics } from "./ahrefs-cf-listener.js";
@@ -428,16 +428,32 @@ export const executeAhrefsScrape = (
         // Phase 4: Wait for Turnstile solve + API result — THE CRITICAL SPAN
         // This is where CF solve time + API response time live. Without this span,
         // slow scrapes are a black box.
+        //
+        // Fail-fast: race the in-page result-wait against the CF solver's
+        // DEFINITIVE terminal-failure signal (cfListener.terminalFailure). On a
+        // doomed solve (widget renders, no token, no error-callback) the solver
+        // declares failure at EMBEDDED_RESOLUTION_TIMEOUT but the in-page poll
+        // would otherwise idle to its 90s wall — this aborts there instead,
+        // returning the SAME `undefined` outcome (→ TurnstileTimeoutError with the
+        // live apiCallStatus), so classification/telemetry are unchanged. The
+        // signal NEVER fires on a recoverable widget_reload/rechallenge or a
+        // verified solve, so a legit-but-slow solve still completes normally.
         const apiResult = yield* Effect.fn("ahrefs.phase.waitForResult")(function* () {
           const resStart = Date.now();
-          const result = yield* waitForResult(page, domain).pipe(
-            Effect.catchTag("ResultTimeoutError", () => Effect.succeed(undefined)),
+          const result = yield* waitForResultOrTerminalFailure(
+            page,
+            domain,
+            cfListener.terminalFailure,
           );
           timings.resultMs = Date.now() - resStart;
           timings.totalMs = Date.now() - t0;
+          const terminalReason = cfListener.terminalFailureReason();
+          const abortedEarly = result === undefined && terminalReason !== null;
           yield* Effect.annotateCurrentSpan({
             result_ms: timings.resultMs,
             has_result: String(result !== undefined),
+            cf_terminal_abort: String(abortedEarly),
+            cf_terminal_reason: terminalReason ?? "",
           });
           return result;
         })();

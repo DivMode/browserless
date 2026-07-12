@@ -40,9 +40,32 @@ export const AUTO_SOLVE_POLL_DELAY = "500 millis" as const;
 export const INTERSTITIAL_RESOLUTION_TIMEOUT = "30 seconds" as const;
 
 /** Embedded turnstile resolution timeout — max time to wait for push signal.
- * Most solves complete in 5-15s via bridge push. 60s gives generous margin
- * while eliminating the 200-1200s zombie tail from lost push signals. */
-export const EMBEDDED_RESOLUTION_TIMEOUT = "60 seconds" as const;
+ *
+ * Successful solves are fast (p95 ≈ 6.4s via bridge push). A burned-IP challenge,
+ * by contrast, renders but never mints a token and never fires its error-callback,
+ * so the solver used to sit the FULL budget before declaring failure — pure idle
+ * that (with the result-wait fail-fast, ahrefs-cdp.ts) now aborts the scrape early.
+ * Cut 60s→40s (2026-07-12) to shrink that doomed-solve tail.
+ *
+ * 40s clears the budgets a genuine FAST solve depends on — checkbox-find
+ * (PHASE3_TIMEOUT_MS = 30s under V8 contention) and the stuck-spinner reload
+ * (VERIFICATION_STUCK_TIMEOUT_MS = 30s, which MUST stay strictly below this
+ * timeout to fire — see verification-stuck.test.ts). Empirically it also clears
+ * the whole SUCCESSFUL-solve distribution: max observed successful solve ≈ 39s
+ * (p95 ≈ 6.4s, a ~1% cluster at 30–39s, zero mass ≥40s over 22k samples), so no
+ * real solve is cut short.
+ *
+ * The one budget 40s does NOT fully clear is the late-click-rejection monitor,
+ * whose detection window runs ~50s from monitor start (≈10s pre-sleep + 40s
+ * poll, cloudflare-detector.ts). At 40s the embedded resolution deadline settles
+ * `resolution_timeout` first, so a click-rejection that lands ≳38s — which used
+ * to trigger a recoverable reload — instead resolves terminal and the result-wait
+ * fail-fast aborts it. Accepted: documented rejections cluster at 20–40s, and a
+ * reload+re-solve after a ~40s rejection would run past the doomed-tail budget
+ * we're deliberately trimming anyway. Cutting to 30s is NOT allowed — it collides
+ * with the 30s verification-stuck timer (defeats that recovery + breaks its
+ * `< EMBEDDED` invariant test). Do NOT cut below 40s without moving those floors. */
+export const EMBEDDED_RESOLUTION_TIMEOUT = "40 seconds" as const;
 
 /** Navigation wait — how long to wait for page navigation after click (ms). */
 export const NAV_WAIT_MS = 3_000;
